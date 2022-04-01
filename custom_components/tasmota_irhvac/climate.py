@@ -876,117 +876,107 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                     self._econo = "off"
                     self._turbo = "off"
                     self._clean = "off"
-            else:
-                payload = json_payload["IRHVAC"]
+                else:
+                    payload = json_payload["IRHVAC"]
 
-                if payload["Vendor"] == self._vendor:
-                    # All values in the payload are Optional
-                    prev_power = self.power_mode
-                    if "Power" in payload:
-                        self.power_mode = payload["Power"].lower()
-                        if self.power_mode == "off":
-                            self._min_heat = False
-                    if "Mode" in payload:
-                        self._attr_hvac_mode = payload["Mode"].lower()
-                        # Some vendors send/receive mode as fan instead of fan_only
-                        if self._attr_hvac_mode == HVACAction.FAN:
-                            self._attr_hvac_mode = HVACMode.FAN_ONLY
-                    if "Temp" in payload:
-                        if payload["Temp"] > 0:
-                            if self.power_mode == STATE_OFF and self._ignore_off_temp:
-                                self._attr_target_temperature = (
-                                    self._attr_target_temperature
-                                )
+                    if payload["Vendor"] == self._vendor:
+                        # All values in the payload are Optional
+                        prev_power = self.power_mode
+                        if "Power" in payload:
+                            self.power_mode = payload["Power"].lower()
+                            if self.power_mode == "off":
+                                self._min_heat = False
+                        if "Mode" in payload:
+                            self._hvac_mode = payload["Mode"].lower()
+                        if "Temp" in payload:
+                            if payload["Temp"] > 0:
+                                self._target_temp = self._celsius_to_fahrenheit(payload["Temp"])
+                        if "Celsius" in payload:
+                            self._celsius = payload["Celsius"].lower()
+                        if "Quiet" in payload:
+                            self._quiet = payload["Quiet"].lower()
+                        if "Turbo" in payload:
+                            self._turbo = payload["Turbo"].lower()
+                            if payload["Turbo"].lower() == "on":
+                                self._preset_mode = PRESET_POWERFUL
+                                self._powerful = True
+                        if "Econo" in payload:
+                            self._econo = payload["Econo"].lower()
+                            if payload["Econo"].lower() == "on":
+                                self._preset_mode = PRESET_ECONO
+                                self._economy = True
+                        if "Light" in payload:
+                            self._light = payload["Light"].lower()
+                        if "Filter" in payload:
+                            self._filters = payload["Filter"].lower()
+                        if "Clean" in payload:
+                            self._clean = payload["Clean"].lower()
+                            if payload["Clean"].lower() == "on":
+                                self._preset_mode = PRESET_MIN_HEAT #MIN_HEAT has the same code as CLEAN on another model, so no differentiating in IRRemoteESP8266 codebase
+                                self._min_heat = True
+                        if "Beep" in payload:
+                            self._beep = payload["Beep"].lower()
+                        if "Sleep" in payload:
+                            self._sleep = payload["Sleep"]
+                        if  "SwingV" in payload:
+                            self._swingv = payload["SwingV"].lower()
+                        if  "SwingH" in payload:
+                            self._swingh = payload["SwingH"].lower()
+                        if (
+                            "SwingV" in payload
+                            and payload["SwingV"].lower() == STATE_AUTO
+                            and "SwingH" in payload
+                            and payload["SwingH"].lower() == STATE_AUTO
+                        ):
+                            if SWING_BOTH in self._swing_list:
+                                self._swing_mode = SWING_BOTH
+                            elif SWING_VERTICAL in self._swing_list:
+                                self._swing_mode = SWING_VERTICAL
+                            elif SWING_HORIZONTAL in self._swing_list:
+                                self._swing_mode = SWING_HORIZONTAL
                             else:
-                                self._attr_target_temperature = self._celsius_to_fahrenheit(payload["Temp"])
-                    if "Celsius" in payload:
-                        self._celsius = payload["Celsius"].lower()
-                    if "Quiet" in payload:
-                        self._quiet = payload["Quiet"].lower()
-                    if "Turbo" in payload:
-                        self._turbo = payload["Turbo"].lower()
-                        if payload["Turbo"].lower() == "on":
-                            self._preset_mode = PRESET_POWERFUL
-                            self._powerful = True
-                    if "Econo" in payload:
-                        self._econo = payload["Econo"].lower()
-                        if payload["Econo"].lower() == "on":
-                            self._preset_mode = PRESET_ECONO
-                            self._economy = True
-                    if "Light" in payload:
-                        self._light = payload["Light"].lower()
-                    if "Filter" in payload:
-                        self._filter = payload["Filter"].lower()
-                    if "Clean" in payload:
-                        self._clean = payload["Clean"].lower()
-                        if payload["Clean"].lower() == "on":
-                            self._preset_mode = PRESET_MIN_HEAT #MIN_HEAT has the same code as CLEAN on another model, so no differentiating in IRRemoteESP8266 codebase
-                            self._min_heat = True
-                    if "Beep" in payload:
-                        self._beep = payload["Beep"].lower()
-                    if "Sleep" in payload:
-                        self._sleep = payload["Sleep"]
-                    if "SwingV" in payload:
-                        self._swingv = payload["SwingV"].lower()
-                        if self._swingv != "auto":
-                            self._fix_swingv = self._swingv
-                if "SwingH" in payload:
-                        self._swingh = payload["SwingH"].lower()
-                        if self._swingh != "auto":
-                            self._fix_swingh = self._swingh
-                if (
-                        "SwingV" in payload
-                        and payload["SwingV"].lower() == STATE_AUTO
-                        and "SwingH" in payload
-                        and payload["SwingH"].lower() == STATE_AUTO
-                    ):
-                        if SWING_BOTH in (self._attr_swing_modes or []):
-                            self._attr_swing_mode = SWING_BOTH
-                        elif SWING_VERTICAL in (self._attr_swing_modes or []):
-                            self._attr_swing_mode = SWING_VERTICAL
-                        elif SWING_HORIZONTAL in (self._attr_swing_modes or []):
-                            self._attr_swing_mode = SWING_HORIZONTAL
+                                self._swing_mode = SWING_OFF
+                        elif (
+                            "SwingV" in payload
+                            and payload["SwingV"].lower() == STATE_AUTO
+                            and SWING_VERTICAL in self._swing_list
+                        ):
+                            self._swing_mode = SWING_VERTICAL
+                        elif (
+                            "SwingH" in payload
+                            and payload["SwingH"].lower() == STATE_AUTO
+                            and SWING_HORIZONTAL in self._swing_list
+                        ):
+                            self._swing_mode = SWING_HORIZONTAL
                         else:
-                            self._attr_swing_mode = SWING_OFF
-                    elif (
-                        "SwingV" in payload
-                        and payload["SwingV"].lower() == STATE_AUTO
-                        and SWING_VERTICAL in (self._attr_swing_modes or [])
-                    ):
-                        self._attr_swing_mode = SWING_VERTICAL
-                    elif (
-                        "SwingH" in payload
-                        and payload["SwingH"].lower() == STATE_AUTO
-                        and SWING_HORIZONTAL in (self._attr_swing_modes or [])
-                    ):
-                        self._attr_swing_mode = SWING_HORIZONTAL
-                    else:
-                        self._attr_swing_mode = SWING_OFF
+                            self._swing_mode = SWING_OFF
 
-                    if "FanSpeed" in payload:
-                        fan_mode = payload["FanSpeed"].lower()
-                        # ELECTRA_AC fan modes fix
-                        if HVAC_FAN_MAX_HIGH in (
-                            self._attr_fan_modes or []
-                        ) and HVAC_FAN_AUTO_MAX in (self._attr_fan_modes or []):
-                            if fan_mode == HVAC_FAN_MAX:
-                                self._attr_fan_mode = FAN_HIGH
-                            elif fan_mode == HVAC_FAN_AUTO:
-                                self._attr_fan_mode = HVAC_FAN_MAX
+                        if "FanSpeed" in payload:
+                            fan_mode = payload["FanSpeed"].lower()
+                            # ELECTRA_AC fan modes fix
+                            if (
+                                HVAC_FAN_MAX_HIGH in self._fan_list
+                                and HVAC_FAN_AUTO_MAX in self._fan_list
+                            ):
+                                if fan_mode == HVAC_FAN_MAX:
+                                    self._fan_mode = FAN_HIGH
+                                elif fan_mode == HVAC_FAN_AUTO:
+                                    self._fan_mode = HVAC_FAN_MAX
+                                else:
+                                    self._fan_mode = fan_mode
                             else:
-                                self._attr_fan_mode = fan_mode
-                        else:
-                            self._attr_fan_mode = fan_mode
-                        _LOGGER.debug(self._attr_fan_mode)
+                                self._fan_mode = fan_mode
+                            _LOGGER.debug(self._fan_mode)
 
-                if self._attr_hvac_mode is not HVACMode.OFF:
-                    self._last_on_mode = self._attr_hvac_mode
+                if self._hvac_mode is not HVAC_MODE_OFF:
+                        self._last_on_mode = self._hvac_mode
 
                 # Set default state to off
                 if self.power_mode == STATE_OFF:
                     self._attr_hvac_mode = HVACMode.OFF
                     self._enabled = False
                 else:
+                    self._last_on_mode = self._attr_hvac_mode
                     self._enabled = True
 
                 # Set toggles to 'off'
