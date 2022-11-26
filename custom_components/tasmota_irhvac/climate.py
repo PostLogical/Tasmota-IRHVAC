@@ -920,8 +920,12 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                             self._sleep = payload["Sleep"]
                         if  "SwingV" in payload:
                             self._swingv = payload["SwingV"].lower()
+                            if self._swingv != "auto":
+                                self._fix_swingv = self._swingv
                         if  "SwingH" in payload:
                             self._swingh = payload["SwingH"].lower()
+                            if self._swingh != "auto":
+                                self._fix_swingh = self._swingh
                         if (
                             "SwingV" in payload
                             and payload["SwingV"].lower() == STATE_AUTO
