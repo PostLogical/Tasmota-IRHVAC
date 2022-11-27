@@ -705,6 +705,8 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         old_state = await self.async_get_last_state()
         if old_state is not None:
             _LOGGER.warning("There was an old state, so trying to restore.")
+            _LOGGER.warning(old_state)
+            _LOGGER.warning("ATTR_TEMPERATURE is ",ATTR_TEMPERATURE)
             # If we have no initial temperature, restore
             if old_state.attributes.get(ATTR_TEMPERATURE) is not None:
                 self._attr_target_temperature = float(
