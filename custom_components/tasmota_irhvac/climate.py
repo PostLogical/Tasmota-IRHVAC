@@ -704,6 +704,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         # Check If we have an old state
         old_state = await self.async_get_last_state()
         if old_state is not None:
+            _Logger.warning("There was an old state, so trying to restore.")
             # If we have no initial temperature, restore
             if old_state.attributes.get(ATTR_TEMPERATURE) is not None:
                 self._attr_target_temperature = float(
@@ -741,10 +742,10 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                 self._fix_swingv = self._swingv
             if self._swingh != "auto":
                 self._fix_swingh = self._swingh
-
-        # No previous target temperature, try and restore defaults
-        if self._attr_target_temperature is None or self._attr_target_temperature < 1:
-            self._attr_target_temperature = self._def_target_temp
+        else:
+            # No previous state, try and restore defaults
+            if self._attr_target_temperature is None:
+                self._attr_target_temperature = self._def_target_temp
             _LOGGER.warning(
                 "No previously saved target temperature, setting to default value %s",
                 self._attr_target_temperature,
