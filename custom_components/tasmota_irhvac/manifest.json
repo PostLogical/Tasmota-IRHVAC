@@ -1,7 +1,7 @@
 {
   "domain": "tasmota_irhvac",
   "name": "Tasmota IRhvac",
-  "version": "2024.5.1",
+  "version": "2024.7.1",
   "documentation": "https://github.com/PostLogical/Tasmota-IRHVAC",
   "issue_tracker": "https://github.com/PostLogical/Tasmota-IRHVAC/issues",
   "requirements": [],
