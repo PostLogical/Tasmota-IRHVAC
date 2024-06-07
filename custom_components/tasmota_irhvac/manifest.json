@@ -4,6 +4,7 @@
   "version": "2024.7.5",
   "documentation": "https://github.com/PostLogical/Tasmota-IRHVAC",
   "issue_tracker": "https://github.com/PostLogical/Tasmota-IRHVAC/issues",
+  "homeassistant": "2022.5.0",
   "requirements": [],
   "dependencies": ["mqtt", "sensor"],
   "codeowners": ["@hristo-atanasov", "@nao-pon", "@PostLogical"]
