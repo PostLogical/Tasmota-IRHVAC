@@ -951,8 +951,6 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
 
         return unsubscribe
 
-        return unsubscribe
-
     async def async_will_remove_from_hass(self):
         """Unsubscribe when removed."""
         for unsubscribe in self._unsubscribes:
