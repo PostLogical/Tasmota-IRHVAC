@@ -63,7 +63,7 @@ from homeassistant.const import (
     STATE_OFF,
     STATE_UNKNOWN,
     STATE_UNAVAILABLE,
-    TEMP_FAHRENHEIT,
+    UnitOfTemperature,
 )
 
 from .const import (
@@ -588,6 +588,13 @@ class TasmotaIrhvac(ClimateEntity, RestoreEntity):
         if (self.availability_topic) is None:
             path = self.topic.split("/")
             self.availability_topic = "tele/" + path[1] + "/LWT"
+
+        # Set _attr_*
+        self._attr_temperature_unit = (
+            UnitOfTemperature.CELSIUS
+            if self._celsius.lower() == "on"
+            else UnitOfTemperature.FAHRENHEIT
+        )
 
     async def async_added_to_hass(self):
         # Replacing `async_track_state_change` with `async_track_state_change_event`
