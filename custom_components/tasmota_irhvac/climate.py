@@ -509,11 +509,11 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         self._away_temp = config.get(CONF_AWAY_TEMP)
         self._saved_target_temp = config[CONF_TARGET_TEMP] or self._away_temp
         self._temp_precision = config[CONF_PRECISION]
-        # self._attr_hvac_modes = config[CONF_MODES_LIST]
-        # self._attr_fan_modes = config[CONF_FAN_LIST]
-        # self._attr_fan_mode = self._attr_fan_modes[0]
-        # self._attr_swing_modes = config[CONF_SWING_LIST]
-        # self._attr_swing_mode = self._attr_swing_modes[0] if len(self._attr_swing_modes) > 0 else None
+        self._attr_hvac_modes = config[CONF_MODES_LIST]
+        self._attr_fan_modes = config[CONF_FAN_LIST]
+        self._attr_fan_mode = self._attr_fan_modes[0]
+        self._attr_swing_modes = config[CONF_SWING_LIST]
+        self._attr_swing_mode = self._attr_swing_modes[0] if len(self._attr_swing_modes) > 0 else None
         self._enabled = False
         self.power_mode = None
         self._active = False
@@ -535,10 +535,10 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         # self._support_flags = SUPPORT_FLAGS
         # if self._away_temp is not None:
         #     self._support_flags = self._support_flags | ClimateEntityFeature.PRESET_MODE
-        # if self._attr_swing_mode is not None:
-        #     self._support_flags = self._support_flags | ClimateEntityFeature.SWING_MODE
-        # self._attr_preset_mode = None
-        # self._attr_preset_modes = config[CONF_PRESET_MODES_LIST]
+        if self._attr_swing_mode is not None:
+            self._support_flags = self._support_flags | ClimateEntityFeature.SWING_MODE
+        self._attr_preset_mode = None
+        self._attr_preset_modes = config[CONF_PRESET_MODES_LIST]
         self._min_heat = False
         self._economy = False
         self._powerful = False
@@ -814,16 +814,14 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                         if "Mode" in payload:
                             self._attr_hvac_mode = payload["Mode"].lower()
                             # Some vendors send/receive mode as fan instead of fan_only
-                        if self._attr_hvac_mode == HVACAction.FAN:
-                            self._attr_hvac_mode = HVACMode.FAN_ONLY
+                            if self._attr_hvac_mode == HVACAction.FAN:
+                                self._attr_hvac_mode = HVACMode.FAN_ONLY
                         if "Temp" in payload:
                             if payload["Temp"] > 0:
                                 if self.power_mode == STATE_OFF and self._ignore_off_temp:
-                                self._attr_target_temperature = (
-                                    self._attr_target_temperature
-                                )
-                            else:
-                                self._attr_target_temperature = self._celsius_to_fahrenheit(payload["Temp"])
+                                    self._attr_target_temperature = self._attr_target_temperature
+                                else:
+                                    self._attr_target_temperature = self._celsius_to_fahrenheit(payload["Temp"])
                         if "Celsius" in payload:
                             self._celsius = payload["Celsius"].lower()
                         if "Quiet" in payload:
@@ -831,12 +829,12 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                         if "Turbo" in payload:
                             self._turbo = payload["Turbo"].lower()
                             if payload["Turbo"].lower() == "on":
-                                self._preset_mode = PRESET_POWERFUL
+                                self._attr_preset_mode = PRESET_POWERFUL
                                 self._powerful = True
                         if "Econo" in payload:
                             self._econo = payload["Econo"].lower()
                             if payload["Econo"].lower() == "on":
-                                self._preset_mode = PRESET_ECONO
+                                self._attr_preset_mode = PRESET_ECONO
                                 self._economy = True
                         if "Light" in payload:
                             self._light = payload["Light"].lower()
@@ -845,7 +843,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                         if "Clean" in payload:
                             self._clean = payload["Clean"].lower()
                             if payload["Clean"].lower() == "on":
-                                self._preset_mode = PRESET_MIN_HEAT #MIN_HEAT has the same code as CLEAN on another model, so no differentiating in IRRemoteESP8266 codebase
+                                self._attr_preset_mode = PRESET_MIN_HEAT #MIN_HEAT has the same code as CLEAN on another model, so no differentiating in IRRemoteESP8266 codebase
                                 self._min_heat = True
                         if "Beep" in payload:
                             self._beep = payload["Beep"].lower()
@@ -1393,12 +1391,12 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                     self._economy = True
             elif self._attr_preset_mode == PRESET_MIN_HEAT:
                 if not self._min_heat:
-                    self._saved_target_temp = self._target_temp
+                    self._saved_target_temp = self._attr_target_temperature
                     payload_data = "raw,0,3324,1574,448,390,1182,00101000110001100000000000001000000010000111111110010000000011001000110011010000010000000000000000000000000000000000010001001110"
                     self.power_mode = "on"
                     self._min_heat = True
-                    self._hvac_mode = "heat"
-                    self._target_temp = 50
+                    self._attr_hvac_mode = "heat"
+                    self._attr_target_temperature = 50
                     self._econo = "off"
                     self._economy = False
                     self._powerful = False
