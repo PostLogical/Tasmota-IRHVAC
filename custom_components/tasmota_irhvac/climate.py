@@ -849,24 +849,24 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                     and "SwingH" in payload
                     and payload["SwingH"].lower() == STATE_AUTO
                 ):
-                    if SWING_BOTH in self._attr_swing_modes:
+                    if SWING_BOTH in (self._attr_swing_modes or []):
                         self._attr_swing_mode = SWING_BOTH
-                    elif SWING_VERTICAL in self._attr_swing_modes:
+                    elif SWING_VERTICAL in (self._attr_swing_modes or []):
                         self._attr_swing_mode = SWING_VERTICAL
-                    elif SWING_HORIZONTAL in self._attr_swing_modes:
+                    elif SWING_HORIZONTAL in (self._attr_swing_modes or []):
                         self._attr_swing_mode = SWING_HORIZONTAL
                     else:
                         self._attr_swing_mode = SWING_OFF
                 elif (
                     "SwingV" in payload
                     and payload["SwingV"].lower() == STATE_AUTO
-                    and SWING_VERTICAL in self._attr_swing_modes
+                    and SWING_VERTICAL in (self._attr_swing_modes or [])
                 ):
                     self._attr_swing_mode = SWING_VERTICAL
                 elif (
                     "SwingH" in payload
                     and payload["SwingH"].lower() == STATE_AUTO
-                    and SWING_HORIZONTAL in self._attr_swing_modes
+                    and SWING_HORIZONTAL in (self._attr_swing_modes or [])
                 ):
                     self._attr_swing_mode = SWING_HORIZONTAL
                 else:
