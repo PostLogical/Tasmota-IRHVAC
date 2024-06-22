@@ -15,7 +15,7 @@ try:
 except ImportError:
     from homeassistant.components.mqtt.mixins import MQTT_AVAILABILITY_SCHEMA
 
-from homeassistant.components.climate import PLATFORM_SCHEMA
+from homeassistant.components.climate import PLATFORM_SCHEMA as CLIMATE_PLATFORM_SCHEMA
 
 # try:
 #     from homeassistant.components.climate import ClimateEntity
@@ -205,7 +205,7 @@ SUPPORT_FLAGS = (
 if hasattr(ClimateEntityFeature, "TURN_ON"):
     SUPPORT_FLAGS |= ClimateEntityFeature.TURN_ON | ClimateEntityFeature.TURN_OFF
 
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
+PLATFORM_SCHEMA = CLIMATE_PLATFORM_SCHEMA.extend(
     {
         vol.Required(CONF_NAME, default=DEFAULT_NAME): cv.string,
         vol.Optional(CONF_UNIQUE_ID): cv.string,
@@ -602,9 +602,10 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         self._attr_hvac_mode = config.get(CONF_INITIAL_OPERATION_MODE)
         self._attr_target_temperature_step = config[CONF_TEMP_STEP]
         self._attr_hvac_modes = config[CONF_MODES_LIST]
-        self._attr_fan_modes: list[str] = config.get(CONF_FAN_LIST, [])
+        self._attr_fan_modes = config.get(CONF_FAN_LIST)
         if (
-            HVAC_FAN_MAX_HIGH in self._attr_fan_modes
+            isinstance(self._attr_fan_modes, list)
+            and HVAC_FAN_MAX_HIGH in self._attr_fan_modes
             and HVAC_FAN_AUTO_MAX in self._attr_fan_modes
         ):
             new_fan_list = []
@@ -615,13 +616,15 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                     new_fan_list.append(HVAC_FAN_MAX)
                 else:
                     new_fan_list.append(val)
-            self._attr_fan_modes = new_fan_list
+            self._attr_fan_modes = new_fan_list if len(new_fan_list) else None
         self._attr_fan_mode = (
-            self._attr_fan_modes[0] if len(self._attr_fan_modes) > 0 else None
+            self._attr_fan_modes[0] if isinstance(self._attr_fan_modes, list) else None
         )
-        self._attr_swing_modes: list[str] = config.get(CONF_SWING_LIST, [])
+        self._attr_swing_modes = config.get(CONF_SWING_LIST)
         self._attr_swing_mode = (
-            self._attr_swing_modes[0] if len(self._attr_swing_modes) > 0 else None
+            self._attr_swing_modes[0]
+            if isinstance(self._attr_swing_modes, list)
+            else None
         )
         self._attr_preset_modes = (
             [PRESET_NONE, PRESET_AWAY] if self._away_temp else None
@@ -693,7 +696,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                 self._attr_hvac_mode = (
                     HVACMode.OFF
                     if old_state.state in [STATE_UNKNOWN, STATE_UNAVAILABLE]
-                    else old_state.state
+                    else HVACMode.OFF  # old_state.state
                 )
                 self._enabled = self._attr_hvac_mode != HVACMode.OFF
                 if self._enabled:
@@ -702,12 +705,12 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                 self._fix_swingv = self._swingv
             if self._swingh != "auto":
                 self._fix_swingh = self._swingh
-        else:
-            # No previous state, try and restore defaults
-            if self._attr_target_temperature is None:
-                self._attr_target_temperature = self._def_target_temp
+
+        # No previous target temperature, try and restore defaults
+        if self._attr_target_temperature is None or self._attr_target_temperature < 1:
+            self._attr_target_temperature = self._def_target_temp
             _LOGGER.warning(
-                "No previously saved temperature, setting to %s",
+                "No previously saved target temperature, setting to default value %s",
                 self._attr_target_temperature,
             )
 
@@ -897,10 +900,9 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                 if "FanSpeed" in payload:
                     fan_mode = payload["FanSpeed"].lower()
                     # ELECTRA_AC fan modes fix
-                    if (
-                        HVAC_FAN_MAX_HIGH in self._attr_fan_modes
-                        and HVAC_FAN_AUTO_MAX in self._attr_fan_modes
-                    ):
+                    if HVAC_FAN_MAX_HIGH in (
+                        self._attr_fan_modes or []
+                    ) and HVAC_FAN_AUTO_MAX in (self._attr_fan_modes or []):
                         if fan_mode == HVAC_FAN_MAX:
                             self._attr_fan_mode = FAN_HIGH
                         elif fan_mode == HVAC_FAN_AUTO:
@@ -1119,12 +1121,11 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
 
     async def async_set_fan_mode(self, fan_mode):
         """Set new target fan mode."""
-        if fan_mode not in (self._attr_fan_modes):
+        if fan_mode not in (self._attr_fan_modes or []):
             # tweak for some ELECTRA_AC devices
-            if (
-                HVAC_FAN_MAX_HIGH in self._attr_fan_modes
-                and HVAC_FAN_AUTO_MAX in self._attr_fan_modes
-            ):
+            if HVAC_FAN_MAX_HIGH in (
+                self._attr_fan_modes or []
+            ) and HVAC_FAN_AUTO_MAX in (self._attr_fan_modes or []):
                 if fan_mode != FAN_HIGH and fan_mode != HVAC_FAN_MAX:
                     _LOGGER.error(
                         "Invalid swing mode selected. Got '%s'. Allowed modes are:",
@@ -1146,7 +1147,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
 
     async def async_set_swing_mode(self, swing_mode):
         """Set new target swing operation."""
-        if swing_mode not in self._attr_swing_modes:
+        if swing_mode not in (self._attr_swing_modes or []):
             _LOGGER.error(
                 "Invalid swing mode selected. Got '%s'. Allowed modes are:", swing_mode
             )
@@ -1226,16 +1227,16 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         if self._swingv != "auto":
             self._fix_swingv = self._swingv
             if self._attr_swing_mode == SWING_BOTH:
-                if SWING_HORIZONTAL in self._attr_swing_modes:
+                if SWING_HORIZONTAL in (self._attr_swing_modes or []):
                     self._attr_swing_mode = SWING_HORIZONTAL
             elif self._attr_swing_mode == SWING_VERTICAL:
                 self._attr_swing_mode = SWING_OFF
         else:
             if self._attr_swing_mode == SWING_HORIZONTAL:
-                if SWING_BOTH in self._attr_swing_modes:
+                if SWING_BOTH in (self._attr_swing_modes or []):
                     self._attr_swing_mode = SWING_BOTH
             else:
-                if SWING_VERTICAL in self._attr_swing_modes:
+                if SWING_VERTICAL in (self._attr_swing_modes or []):
                     self._attr_swing_mode = SWING_VERTICAL
         self._state_mode = state_mode
         await self.async_send_cmd()
@@ -1246,16 +1247,16 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         if self._swingh != "auto":
             self._fix_swingh = self._swingh
             if self._attr_swing_mode == SWING_BOTH:
-                if SWING_VERTICAL in self._attr_swing_modes:
+                if SWING_VERTICAL in (self._attr_swing_modes or []):
                     self._attr_swing_mode = SWING_VERTICAL
             elif self._attr_swing_mode == SWING_HORIZONTAL:
                 self._attr_swing_mode = SWING_OFF
         else:
             if self._attr_swing_mode == SWING_VERTICAL:
-                if SWING_BOTH in self._attr_swing_modes:
+                if SWING_BOTH in (self._attr_swing_modes or []):
                     self._attr_swing_mode = SWING_BOTH
             else:
-                if SWING_HORIZONTAL in self._attr_swing_modes:
+                if SWING_HORIZONTAL in (self._attr_swing_modes or []):
                     self._attr_swing_mode = SWING_HORIZONTAL
         self._state_mode = state_mode
         await self.async_send_cmd()
@@ -1448,9 +1449,8 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         """Send the payload to tasmota mqtt topic."""
         fan_speed = self.fan_mode
         # tweak for some ELECTRA_AC devices
-        if (
-            HVAC_FAN_MAX_HIGH in self._attr_fan_modes
-            and HVAC_FAN_AUTO_MAX in self._attr_fan_modes
+        if HVAC_FAN_MAX_HIGH in (self._attr_fan_modes or []) and HVAC_FAN_AUTO_MAX in (
+            self._attr_fan_modes or []
         ):
             if self.fan_mode == FAN_HIGH:
                 fan_speed = HVAC_FAN_MAX
@@ -1461,9 +1461,8 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         self._swingv = STATE_OFF if self._fix_swingv is None else self._fix_swingv
         self._swingh = STATE_OFF if self._fix_swingh is None else self._fix_swingh
 
-        if (
-            SWING_BOTH in self._attr_swing_modes
-            or SWING_VERTICAL in self._attr_swing_modes
+        if SWING_BOTH in (self._attr_swing_modes or []) or SWING_VERTICAL in (
+            self._attr_swing_modes or []
         ):
             if (
                 self._attr_swing_mode == SWING_BOTH
@@ -1471,9 +1470,8 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             ):
                 self._swingv = STATE_AUTO
 
-        if (
-            SWING_BOTH in self._attr_swing_modes
-            or SWING_HORIZONTAL in self._attr_swing_modes
+        if SWING_BOTH in (self._attr_swing_modes or []) or SWING_HORIZONTAL in (
+            self._attr_swing_modes or []
         ):
             if (
                 self._attr_swing_mode == SWING_BOTH
