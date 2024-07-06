@@ -1,4 +1,5 @@
 """Adds support for generic thermostat units."""
+
 import json
 import logging
 import uuid
@@ -175,15 +176,27 @@ DEFAULT_MODES_LIST = [
 ]
 
 DEFAULT_PRESET_MODES_LIST = [PRESET_NONE, PRESET_AWAY]
-AVAILABLE_PRESET_MODES_LIST = [PRESET_NONE, PRESET_AWAY, PRESET_POWERFUL, PRESET_MIN_HEAT,
-                                PRESET_ECONO, PRESET_SET_V, PRESET_SET_H]
+AVAILABLE_PRESET_MODES_LIST = [
+    PRESET_NONE,
+    PRESET_AWAY,
+    PRESET_POWERFUL,
+    PRESET_MIN_HEAT,
+    PRESET_ECONO,
+    PRESET_SET_V,
+    PRESET_SET_H,
+]
 
 DEFAULT_SWING_LIST = [SWING_OFF, SWING_VERTICAL]
 DEFAULT_INITIAL_OPERATION_MODE = HVACMode.OFF
 
 _LOGGER = logging.getLogger(__name__)
 
-SUPPORT_FLAGS = ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.FAN_MODE | ClimateEntityFeature.PRESET_MODE
+SUPPORT_FLAGS = (
+    ClimateEntityFeature.TARGET_TEMPERATURE
+    | ClimateEntityFeature.FAN_MODE
+    | ClimateEntityFeature.PRESET_MODE
+    | ClimateEntityFeature.SWING_MODE
+)
 
 if hasattr(ClimateEntityFeature, "TURN_ON"):
     SUPPORT_FLAGS |= ClimateEntityFeature.TURN_ON | ClimateEntityFeature.TURN_OFF
@@ -262,8 +275,11 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
         vol.Optional(CONF_KEEP_MODE, default=DEFAULT_CONF_KEEP_MODE): cv.boolean,
         vol.Optional(CONF_SWINGV): cv.string,
         vol.Optional(CONF_SWINGH): cv.string,
-        vol.Optional(CONF_PRESET_MODES_LIST, default=DEFAULT_PRESET_MODES_LIST): vol.All(
-            cv.ensure_list, [vol.In(AVAILABLE_PRESET_MODES_LIST)],
+        vol.Optional(
+            CONF_PRESET_MODES_LIST, default=DEFAULT_PRESET_MODES_LIST
+        ): vol.All(
+            cv.ensure_list,
+            [vol.In(AVAILABLE_PRESET_MODES_LIST)],
         ),
         vol.Optional(CONF_TOGGLE_LIST, default=[]): vol.All(
             cv.ensure_list,
@@ -510,7 +526,9 @@ class TasmotaIrhvac(ClimateEntity, RestoreEntity, MqttAvailability):
         if self._unit == TEMP_FAHRENHEIT:
             self._min_temp = self._celsius_to_fahrenheit(config[CONF_MIN_TEMP])
             self._max_temp = self._celsius_to_fahrenheit(config[CONF_MAX_TEMP])
-            self._def_target_temp = self._celsius_to_fahrenheit(config[CONF_TARGET_TEMP])
+            self._def_target_temp = self._celsius_to_fahrenheit(
+                config[CONF_TARGET_TEMP]
+            )
             # self._temp_step = 2
         else:
             self._min_temp = config[CONF_MIN_TEMP]
@@ -688,27 +706,27 @@ class TasmotaIrhvac(ClimateEntity, RestoreEntity, MqttAvailability):
             if "Data" in json_payload:
                 data = json_payload["Data"]
                 if json_payload["Bits"] == 56:
-                    if data == "0x146300101039C6": #Powerful
+                    if data == "0x146300101039C6":  # Powerful
                         self._powerful = True
                         self._preset_mode = PRESET_POWERFUL
-                    elif data == "0x146300101009F6": #Economy
+                    elif data == "0x146300101009F6":  # Economy
                         self._economy = True
                         self._preset_mode = PRESET_ECONO
-                    elif data == "0x14630010106C93": #Set Vertical
+                    elif data == "0x14630010106C93":  # Set Vertical
                         self._preset_mode = PRESET_SET_V
                         self._swingv = None
                         if self._swing_mode == SWING_BOTH:
                             self._swing_mode = SWING_HORIZONTAL
                         elif self._swing_mode == SWING_VERTICAL:
                             self._swing_mode = SWING_OFF
-                    elif data == "0x14630010107986": #Set Horizontal
+                    elif data == "0x14630010107986":  # Set Horizontal
                         self._preset_mode = PRESET_SET_H
                         self._swingh = None
                         if self._swing_mode == SWING_BOTH:
                             self._swing_mode = SWING_VERTICAL
                         elif self._swing_mode == SWING_HORIZONTAL:
                             self._swing_mode = SWING_OFF
-                elif data == "0x1463001010FE0930800B000000002025": #Min Heat
+                elif data == "0x1463001010FE0930800B000000002025":  # Min Heat
                     self._min_heat = True
                     self._preset_mode = PRESET_MIN_HEAT
                     self.power_mode = "on"
@@ -734,10 +752,15 @@ class TasmotaIrhvac(ClimateEntity, RestoreEntity, MqttAvailability):
                                 self._hvac_mode = HVACMode.FAN_ONLY
                         if "Temp" in payload:
                             if payload["Temp"] > 0:
-                                if self.power_mode == STATE_OFF and self._ignore_off_temp:
+                                if (
+                                    self.power_mode == STATE_OFF
+                                    and self._ignore_off_temp
+                                ):
                                     self._target_temp = self._target_temp
                                 else:
-                                    self._target_temp = self._celsius_to_fahrenheit(payload["Temp"])
+                                    self._target_temp = self._celsius_to_fahrenheit(
+                                        payload["Temp"]
+                                    )
                         if "Celsius" in payload:
                             self._celsius = payload["Celsius"].lower()
                         if "Quiet" in payload:
@@ -759,7 +782,7 @@ class TasmotaIrhvac(ClimateEntity, RestoreEntity, MqttAvailability):
                         if "Clean" in payload:
                             self._clean = payload["Clean"].lower()
                             if payload["Clean"].lower() == "on":
-                                self._preset_mode = PRESET_MIN_HEAT #MIN_HEAT has the same code as CLEAN on another model, so no differentiating in IRRemoteESP8266 codebase
+                                self._preset_mode = PRESET_MIN_HEAT  # MIN_HEAT has the same code as CLEAN on another model, so no differentiating in IRRemoteESP8266 codebase
                                 self._min_heat = True
                         if "Beep" in payload:
                             self._beep = payload["Beep"].lower()
@@ -985,7 +1008,7 @@ class TasmotaIrhvac(ClimateEntity, RestoreEntity, MqttAvailability):
     def preset_modes(self):
         """Return a list of available preset modes or PRESET_NONE if _away_temp is undefined."""
         # return [PRESET_NONE, PRESET_AWAY] if self._away_temp else PRESET_NONE
-        return self._preset_modes_list # Fix these if they do appear
+        return self._preset_modes_list  # Fix these if they do appear
 
     @property
     def fan_mode(self):
@@ -1056,12 +1079,14 @@ class TasmotaIrhvac(ClimateEntity, RestoreEntity, MqttAvailability):
         await self.async_send_cmd()
 
     """Code adapted from https://github.com/smartHomeHub/SmartIR/pull/795/commits/084f7061befd1a491b22fdd4fab725e25062d66b"""
+
     def _celsius_to_fahrenheit(self, temperature):
         if temperature is not None:
-            return (temperature * 2 + 28)
+            return temperature * 2 + 28
+
     def _fahrenheit_to_celsius(self, temperature):
         if temperature is not None:
-            return ((temperature - 28) / 2)
+            return (temperature - 28) / 2
 
     async def async_set_temperature(self, **kwargs):
         """Set new target temperature."""
@@ -1316,13 +1341,18 @@ class TasmotaIrhvac(ClimateEntity, RestoreEntity, MqttAvailability):
         """
         if preset_mode != PRESET_MIN_HEAT and self._min_heat:
             stop_cmd = "raw,0,3324,1574,448,390,1182,00101000110001100000000000001000000010000100000010111111"
-            path = self.topic.split('/')
+            path = self.topic.split("/")
             irsend = "cmnd/" + path[1] + "/irsend"
             await mqtt.async_publish(self.hass, irsend, stop_cmd)
             self._target_temp = self._saved_target_temp
-        if preset_mode != PRESET_ECONO and preset_mode != PRESET_SET_V and preset_mode != PRESET_SET_H and self._economy:
+        if (
+            preset_mode != PRESET_ECONO
+            and preset_mode != PRESET_SET_V
+            and preset_mode != PRESET_SET_H
+            and self._economy
+        ):
             econo_toggle = "raw,0,3324,1574,448,390,1182,00101000110001100000000000001000000010001001000001101111"
-            path = self.topic.split('/')
+            path = self.topic.split("/")
             irsend = "cmnd/" + path[1] + "/irsend"
             await mqtt.async_publish(self.hass, irsend, econo_toggle)
         if preset_mode == PRESET_AWAY and not self._is_away:
@@ -1375,7 +1405,7 @@ class TasmotaIrhvac(ClimateEntity, RestoreEntity, MqttAvailability):
                     self._swing_mode = SWING_VERTICAL
                 elif self._swing_mode == SWING_HORIZONTAL:
                     self._swing_mode = SWING_OFF
-            path = self.topic.split('/')
+            path = self.topic.split("/")
             irsend = "cmnd/" + path[1] + "/irsend"
             await mqtt.async_publish(self.hass, irsend, payload_data)
             return await self.async_update_ha_state()
