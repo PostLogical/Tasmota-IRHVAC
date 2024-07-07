@@ -594,7 +594,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             )
             # self._temp_step = 2
         else:
-            self._cur_temp = None
+            self._attr_current_temperature = None
         self._unit = hass.config.units.temperature_unit
         if self._unit == UnitOfTemperature.FAHRENHEIT:
             self._min_temp = self._celsius_to_fahrenheit(config[CONF_MIN_TEMP])
@@ -620,7 +620,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         self._economy = False
         self._powerful = False
         self._temp_step = config[CONF_TEMP_STEP]
-        self._target_temp = None
+        self._attr_target_temperature = None
         self._support_flags = SUPPORT_FLAGS
         # if self._away_temp is not None:
         #     self._support_flags = self._support_flags | ClimateEntityFeature.PRESET_MODE
@@ -884,7 +884,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                     self._preset_mode = PRESET_MIN_HEAT
                     self.power_mode = "on"
                     self._hvac_mode = "heat"
-                    self._target_temp = 50
+                    self._attr_target_temp = 50
                     self._econo = "off"
                     self._turbo = "off"
                     self._clean = "off"
@@ -917,7 +917,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                     self._preset_mode = PRESET_MIN_HEAT
                     self.power_mode = "on"
                     self._hvac_mode = "heat"
-                    self._target_temp = 50
+                    self._attr_target_temperature = 50
                     self._econo = "off"
                     self._turbo = "off"
                     self._clean = "off"
@@ -950,7 +950,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                     self._preset_mode = PRESET_MIN_HEAT
                     self.power_mode = "on"
                     self._attr_hvac_mode = "heat"
-                    self._target_temp = 50
+                    self._attr_target_temperature = 50
                     self._econo = "off"
                     self._turbo = "off"
                     self._clean = "off"
@@ -1134,7 +1134,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
     @property
     def target_temperature(self):
         """Return the temperature we try to reach."""
-        return self._target_temp
+        return self._attr_target_temperature
 
     @property
     def hvac_modes(self):
@@ -1208,7 +1208,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
     @property
     def target_temperature(self):
         """Return the temperature we try to reach."""
-        return self._target_temp
+        return self._attr_target_temperature
 
     @property
     def hvac_modes(self):
@@ -1613,12 +1613,12 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                     self._economy = True
             elif preset_mode == PRESET_MIN_HEAT:
                 if not self._min_heat:
-                    self._saved_target_temp = self._target_temp
+                    self._saved_target_temp = self._attr_target_temperature
                     payload_data = "raw,0,3324,1574,448,390,1182,00101000110001100000000000001000000010000111111110010000000011001000110011010000010000000000000000000000000000000000010001001110"
                     self.power_mode = "on"
                     self._min_heat = True
                     self._hvac_mode = "heat"
-                    self._target_temp = 50
+                    self._attr_target_temperature = 50
                     self._econo = "off"
                     self._economy = False
                     self._powerful = False
