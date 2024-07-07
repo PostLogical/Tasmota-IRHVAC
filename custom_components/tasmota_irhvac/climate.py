@@ -576,7 +576,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         self._attr_current_temperature = None
         self._attr_current_humidity = None
         self._unit = hass.config.units.temperature_unit
-        if self._unit == UnitOfTemperature.Fahrenheit:
+        if self._unit == UnitOfTemperature.FAHRENHEIT:
             self._min_temp = self._celsius_to_fahrenheit(config[CONF_MIN_TEMP])
             self._max_temp = self._celsius_to_fahrenheit(config[CONF_MAX_TEMP])
             self._def_target_temp = self._celsius_to_fahrenheit(
