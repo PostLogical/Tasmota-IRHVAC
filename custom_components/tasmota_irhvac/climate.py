@@ -852,11 +852,11 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                         if "SwingV" in payload:
                             self._swingv = payload["SwingV"].lower()
                             if self._swingv != "auto":
-                            self._fix_swingv = self._swingv
+                                self._fix_swingv = self._swingv
                     if "SwingH" in payload:
                             self._swingh = payload["SwingH"].lower()
                             if self._swingh != "auto":
-                            self._fix_swingh = self._swingh
+                                self._fix_swingh = self._swingh
                     if (
                             "SwingV" in payload
                             and payload["SwingV"].lower() == STATE_AUTO
@@ -871,63 +871,63 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                                 self._attr_swing_mode = SWING_HORIZONTAL
                             else:
                                 self._attr_swing_mode = SWING_OFF
-                        elif (
-                            "SwingV" in payload
-                            and payload["SwingV"].lower() == STATE_AUTO
-                            and SWING_VERTICAL in (self._attr_swing_modes or [])
-                        ):
-                            self._attr_swing_mode = SWING_VERTICAL
-                        elif (
-                            "SwingH" in payload
-                            and payload["SwingH"].lower() == STATE_AUTO
-                            and SWING_HORIZONTAL in (self._attr_swing_modes or [])
-                        ):
-                            self._attr_swing_mode = SWING_HORIZONTAL
-                        else:
-                            self._attr_swing_mode = SWING_OFF
+                    elif (
+                        "SwingV" in payload
+                        and payload["SwingV"].lower() == STATE_AUTO
+                        and SWING_VERTICAL in (self._attr_swing_modes or [])
+                    ):
+                        self._attr_swing_mode = SWING_VERTICAL
+                    elif (
+                        "SwingH" in payload
+                        and payload["SwingH"].lower() == STATE_AUTO
+                        and SWING_HORIZONTAL in (self._attr_swing_modes or [])
+                    ):
+                        self._attr_swing_mode = SWING_HORIZONTAL
+                    else:
+                        self._attr_swing_mode = SWING_OFF
 
-                        if "FanSpeed" in payload:
-                            fan_mode = payload["FanSpeed"].lower()
-                            # ELECTRA_AC fan modes fix
-                            if HVAC_FAN_MAX_HIGH in (
-                                self._attr_fan_modes or []
-                            ) and HVAC_FAN_AUTO_MAX in (self._attr_fan_modes or []):
-                                if fan_mode == HVAC_FAN_MAX:
-                                    self._attr_fan_mode = FAN_HIGH
-                                elif fan_mode == HVAC_FAN_AUTO:
-                                    self._attr_fan_mode = HVAC_FAN_MAX
-                                else:
-                                    self._attr_fan_mode = fan_mode
+                    if "FanSpeed" in payload:
+                        fan_mode = payload["FanSpeed"].lower()
+                        # ELECTRA_AC fan modes fix
+                        if HVAC_FAN_MAX_HIGH in (
+                            self._attr_fan_modes or []
+                        ) and HVAC_FAN_AUTO_MAX in (self._attr_fan_modes or []):
+                            if fan_mode == HVAC_FAN_MAX:
+                                self._attr_fan_mode = FAN_HIGH
+                            elif fan_mode == HVAC_FAN_AUTO:
+                                self._attr_fan_mode = HVAC_FAN_MAX
                             else:
                                 self._attr_fan_mode = fan_mode
-                            _LOGGER.debug(self._attr_fan_mode)
-
-                        if self._attr_hvac_mode is not HVACMode.OFF:
-                            self._last_on_mode = self._attr_hvac_mode
-
-                        # Set default state to off
-                        if self.power_mode == STATE_OFF:
-                            self._attr_hvac_mode = HVACMode.OFF
-                            self._enabled = False
                         else:
-                            self._enabled = True
+                            self._attr_fan_mode = fan_mode
+                        _LOGGER.debug(self._attr_fan_mode)
 
-                        # Set toggles to 'off'
-                        for key in self._toggle_list:
-                            setattr(self, "_" + key.lower(), "off")
+                    if self._attr_hvac_mode is not HVACMode.OFF:
+                        self._last_on_mode = self._attr_hvac_mode
 
-                        # Update HA UI and State
-                        self.async_schedule_update_ha_state()
+                    # Set default state to off
+                    if self.power_mode == STATE_OFF:
+                        self._attr_hvac_mode = HVACMode.OFF
+                        self._enabled = False
+                    else:
+                        self._enabled = True
 
-                        # Check power sensor state
-                        if (
-                            self._power_sensor
-                            and prev_power is not None
-                            and prev_power != self.power_mode
-                        ):
-                            await asyncio.sleep(3)
-                            state = self.hass.states.get(self._power_sensor)
-                            await self._async_power_sensor_changed(None, state)
+                    # Set toggles to 'off'
+                    for key in self._toggle_list:
+                        setattr(self, "_" + key.lower(), "off")
+
+                    # Update HA UI and State
+                    self.async_schedule_update_ha_state()
+
+                    # Check power sensor state
+                    if (
+                        self._power_sensor
+                        and prev_power is not None
+                        and prev_power != self.power_mode
+                    ):
+                        await asyncio.sleep(3)
+                        state = self.hass.states.get(self._power_sensor)
+                        await self._async_power_sensor_changed(None, state)
 
         unsubscribe = []
         unsubscribe.append(
