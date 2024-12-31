@@ -774,19 +774,19 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                 if json_payload["Bits"] == 56:
                     if data == "0x146300101039C6": #Powerful
                         self._powerful = True
-                        self._preset_mode = PRESET_POWERFUL
+                        self._attr_preset_mode = PRESET_POWERFUL
                     elif data == "0x146300101009F6": #Economy
                         self._economy = True
-                        self._preset_mode = PRESET_ECONO
+                        self._attr_preset_mode = PRESET_ECONO
                     elif data == "0x14630010106C93": #Set Vertical
-                        self._preset_mode = PRESET_SET_V
+                        self._attr_preset_mode = PRESET_SET_V
                         self._swingv = None
                         if self._swing_mode == SWING_BOTH:
                             self._swing_mode = SWING_HORIZONTAL
                         elif self._swing_mode == SWING_VERTICAL:
                             self._swing_mode = SWING_OFF
                     elif data == "0x14630010107986": #Set Horizontal
-                        self._preset_mode = PRESET_SET_H
+                        self._attr_preset_mode = PRESET_SET_H
                         self._swingh = None
                         if self._swing_mode == SWING_BOTH:
                             self._swing_mode = SWING_VERTICAL
@@ -794,7 +794,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                             self._swing_mode = SWING_OFF
                 elif data == "0x1463001010FE0930800B000000002025": #Min Heat
                     self._min_heat = True
-                    self._preset_mode = PRESET_MIN_HEAT
+                    self._attr_preset_mode = PRESET_MIN_HEAT
                     self.power_mode = "on"
                     self._hvac_mode = "heat"
                     self._target_temp = 50
