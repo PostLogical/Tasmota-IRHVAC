@@ -114,7 +114,7 @@ from .const import (
     CONF_TURBO,
     CONF_ECONO,
     CONF_MODEL,
-    CONF_CELSIUS,
+    CONF_CELSIUS, # TODO PostLogical Consider: CONF_CELSIUS_MODE,
     CONF_LIGHT,
     CONF_FILTER,
     CONF_CLEAN,
@@ -123,6 +123,7 @@ from .const import (
     CONF_KEEP_MODE,
     CONF_SWINGV,
     CONF_SWINGH,
+    CONF_PRESET_MODES_LIST, # PostLogical
     CONF_TOGGLE_LIST,
     CONF_IGNORE_OFF_TEMP,
     DATA_KEY,
@@ -140,7 +141,7 @@ from .const import (
     DEFAULT_CONF_TURBO,
     DEFAULT_CONF_ECONO,
     DEFAULT_CONF_MODEL,
-    DEFAULT_CONF_CELSIUS,
+    DEFAULT_CONF_CELSIUS, # TODO PostLogical Consider: DEFAULT_CONF_CELSIUS_MODE,
     DEFAULT_CONF_LIGHT,
     DEFAULT_CONF_FILTER,
     DEFAULT_CONF_CLEAN,
@@ -149,6 +150,11 @@ from .const import (
     DEFAULT_CONF_KEEP_MODE,
     DEFAULT_STATE_MODE,
     DEFAULT_IGNORE_OFF_TEMP,
+    PRESET_POWERFUL, # PostLogical
+    PRESET_MIN_HEAT, # PostLogical
+    PRESET_ECONO, # PostLogical
+    PRESET_SET_V, # PostLogical
+    PRESET_SET_H, # PostLogical
     ON_OFF_LIST,
     STATE_MODE_LIST,
     SERVICE_ECONO_MODE,
@@ -172,12 +178,17 @@ DEFAULT_MODES_LIST = [
     HVAC_MODE_FAN_AUTO,
 ]
 
+# PostLogical Updates
+DEFAULT_PRESET_MODES_LIST = [PRESET_NONE, PRESET_AWAY]
+AVAILABLE_PRESET_MODES_LIST = [PRESET_NONE, PRESET_AWAY, PRESET_POWERFUL, PRESET_MIN_HEAT,
+                                PRESET_ECONO, PRESET_SET_V, PRESET_SET_H]
+
 DEFAULT_SWING_LIST = [SWING_OFF, SWING_VERTICAL]
 DEFAULT_INITIAL_OPERATION_MODE = HVACMode.OFF
 
 _LOGGER = logging.getLogger(__name__)
 
-SUPPORT_FLAGS = ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.FAN_MODE
+SUPPORT_FLAGS = ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.FAN_MODE | ClimateEntityFeature.PRESET_MODE
 
 if hasattr(ClimateEntityFeature, "TURN_ON"):
     SUPPORT_FLAGS |= ClimateEntityFeature.TURN_ON | ClimateEntityFeature.TURN_OFF
@@ -211,7 +222,7 @@ PLATFORM_SCHEMA = CLIMATE_PLATFORM_SCHEMA.extend(
             [PRECISION_TENTHS, PRECISION_HALVES, PRECISION_WHOLE]
         ),
         vol.Optional(CONF_TEMP_STEP, default=PRECISION_WHOLE): vol.In(
-            [PRECISION_HALVES, PRECISION_WHOLE]
+            [PRECISION_HALVES, PRECISION_WHOLE, 2]
         ),
         vol.Optional(CONF_MODES_LIST, default=DEFAULT_MODES_LIST): vol.All(
             cv.ensure_list, [vol.In(HVAC_MODES)]
@@ -248,7 +259,7 @@ PLATFORM_SCHEMA = CLIMATE_PLATFORM_SCHEMA.extend(
         vol.Optional(CONF_TURBO, default=DEFAULT_CONF_TURBO): cv.string,
         vol.Optional(CONF_ECONO, default=DEFAULT_CONF_ECONO): cv.string,
         vol.Optional(CONF_MODEL, default=DEFAULT_CONF_MODEL): cv.string,
-        vol.Optional(CONF_CELSIUS, default=DEFAULT_CONF_CELSIUS): cv.string,
+        vol.Optional(CONF_CELSIUS, default=DEFAULT_CONF_CELSIUS): cv.string, # TODO PostLogical Consider: vol.Optional(CONF_CELSIUS_MODE, default=DEFAULT_CONF_CELSIUS_MODE): cv.string,
         vol.Optional(CONF_LIGHT, default=DEFAULT_CONF_LIGHT): cv.string,
         vol.Optional(CONF_FILTER, default=DEFAULT_CONF_FILTER): cv.string,
         vol.Optional(CONF_CLEAN, default=DEFAULT_CONF_CLEAN): cv.string,
@@ -257,6 +268,9 @@ PLATFORM_SCHEMA = CLIMATE_PLATFORM_SCHEMA.extend(
         vol.Optional(CONF_KEEP_MODE, default=DEFAULT_CONF_KEEP_MODE): cv.boolean,
         vol.Optional(CONF_SWINGV): cv.string,
         vol.Optional(CONF_SWINGH): cv.string,
+        vol.Optional(CONF_PRESET_MODES_LIST, default=DEFAULT_PRESET_MODES_LIST): vol.All(
+            cv.ensure_list, [vol.In(AVAILABLE_PRESET_MODES_LIST)],
+        ),
         vol.Optional(CONF_TOGGLE_LIST, default=[]): vol.All(
             cv.ensure_list,
             [vol.In(TOGGLE_ALL_LIST)],
@@ -492,16 +506,25 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         self.power_mode = None
         self._active = False
         self._mqtt_delay = config[CONF_MQTT_DELAY]
-        self._min_temp = config[CONF_MIN_TEMP]
-        self._max_temp = config[CONF_MAX_TEMP]
-        self._def_target_temp = config[CONF_TARGET_TEMP]
+        self._unit = hass.config.units.temperature_unit
+        if self._unit == UnitOfTemperature.FAHRENHEIT:
+            self._min_temp = self._celsius_to_fahrenheit(config[CONF_MIN_TEMP])
+            self._max_temp = self._celsius_to_fahrenheit(config[CONF_MAX_TEMP])
+            self._def_target_temp = self._celsius_to_fahrenheit(config[CONF_TARGET_TEMP])
+        else:
+            self._min_temp = config[CONF_MIN_TEMP]
+            self._max_temp = config[CONF_MAX_TEMP]
+            self._def_target_temp = config[CONF_TARGET_TEMP]
+        self._min_heat = False
+        self._economy = False
+        self._powerful = False
         self._is_away = False
         self._modes_list = config[CONF_MODES_LIST]
         self._quiet = config[CONF_QUIET].lower()
         self._turbo = config[CONF_TURBO].lower()
         self._econo = config[CONF_ECONO].lower()
         self._model = config[CONF_MODEL]
-        self._celsius = config[CONF_CELSIUS]
+        self._celsius = config[CONF_CELSIUS] # TODO PostLogical Consider: self._celsius_mode = config[CONF_CELSIUS_MODE]
         self._light = config[CONF_LIGHT].lower()
         self._filter = config[CONF_FILTER].lower()
         self._clean = config[CONF_CLEAN].lower()
@@ -571,17 +594,13 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             if isinstance(self._attr_swing_modes, list) and len(self._attr_swing_modes)
             else None
         )
-        self._attr_preset_modes = (
-            [PRESET_NONE, PRESET_AWAY] if self._away_temp else None
-        )
+        self._attr_preset_modes = config[CONF_PRESET_MODES_LIST] # PostLogical Update
         self._attr_preset_mode = None
         self._attr_current_temperature = None
         self._attr_current_humidity = None
         self._attr_target_temperature = None
 
         self._support_flags = SUPPORT_FLAGS
-        if self._away_temp is not None:
-            self._support_flags = self._support_flags | ClimateEntityFeature.PRESET_MODE
         if self._attr_swing_mode is not None:
             self._support_flags = self._support_flags | ClimateEntityFeature.SWING_MODE
 
@@ -620,6 +639,14 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                 )
             if old_state.attributes.get(ATTR_PRESET_MODE) == PRESET_AWAY:
                 self._is_away = True
+            #PostLogical Updates
+            elif old_state.attributes.get(ATTR_PRESET_MODE) == PRESET_MIN_HEAT:
+                self._min_heat = True
+            elif old_state.attributes.get(ATTR_PRESET_MODE) == PRESET_ECONO:
+                self._economy = True
+            elif old_state.attributes.get(ATTR_PRESET_MODE) == PRESET_POWERFUL:
+                self._powerful = True
+
             if old_state.attributes.get(ATTR_FAN_MODE) is not None:
                 self._attr_fan_mode = old_state.attributes.get(ATTR_FAN_MODE)
             if old_state.attributes.get(ATTR_SWING_MODE) is not None:
@@ -635,7 +662,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                 self._attr_hvac_mode = (
                     HVACMode.OFF
                     if old_state.state in [STATE_UNKNOWN, STATE_UNAVAILABLE]
-                    else old_state.state
+                    else old_state.state # TODO PostLogical check why I made this HVACMode.OFF before
                 )
                 self._enabled = self._attr_hvac_mode != HVACMode.OFF
                 if self._enabled:
@@ -733,9 +760,9 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                                 self._attr_target_temperature
                             )
                         else:
-                            self._attr_target_temperature = payload["Temp"]
+                            self._attr_target_temperature = self._celsius_to_fahrenheit(payload["Temp"]) # PostLogical adjustment
                 if "Celsius" in payload:
-                    self._celsius = payload["Celsius"].lower()
+                    self._celsius = payload["Celsius"].lower() # PostLogical consider update to celsius mode: self._celsius_mode = payload["Celsius"].lower()
                 if "Quiet" in payload:
                     self._quiet = payload["Quiet"].lower()
                 if "Turbo" in payload:
@@ -804,6 +831,53 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                     else:
                         self._attr_fan_mode = fan_mode
                     _LOGGER.debug(self._attr_fan_mode)
+
+                # PostLogical Updates
+                if self.power_mode == "off":
+                    self._min_heat = False
+                if self._turbo == "on":
+                    self._attr_preset_mode = PRESET_POWERFUL
+                    self._powerful = True
+                if self._econo == "on":
+                    self._attr_preset_mode = PRESET_ECONO
+                    self._economy = True
+                if self._clean == "on":
+                    self._attr_preset_mode = PRESET_MIN_HEAT #MIN_HEAT has the same code as CLEAN on another model, so no differentiating in IRRemoteESP8266 codebase
+                    self._min_heat = True
+
+                # PostLogical Updates
+                if "Data" in json_payload:
+                    data = json_payload["Data"]
+                    if json_payload["Bits"] == 56:
+                        if data == "0x146300101039C6": #Powerful
+                            self._powerful = True
+                            self._preset_mode = PRESET_POWERFUL
+                        elif data == "0x146300101009F6": #Economy
+                            self._economy = True
+                            self._preset_mode = PRESET_ECONO
+                        elif data == "0x14630010106C93": #Set Vertical
+                            self._preset_mode = PRESET_SET_V
+                            self._swingv = None
+                            if self._swing_mode == SWING_BOTH:
+                                self._swing_mode = SWING_HORIZONTAL
+                            elif self._swing_mode == SWING_VERTICAL:
+                                self._swing_mode = SWING_OFF
+                        elif data == "0x14630010107986": #Set Horizontal
+                            self._preset_mode = PRESET_SET_H
+                            self._swingh = None
+                            if self._swing_mode == SWING_BOTH:
+                                self._swing_mode = SWING_VERTICAL
+                            elif self._swing_mode == SWING_HORIZONTAL:
+                                self._swing_mode = SWING_OFF
+                    elif data == "0x1463001010FE0930800B000000002025": #Min Heat
+                        self._min_heat = True
+                        self._preset_mode = PRESET_MIN_HEAT
+                        self.power_mode = "on"
+                        self._hvac_mode = "heat"
+                        self._target_temp = 50
+                        self._econo = "off"
+                        self._turbo = "off"
+                        self._clean = "off"
 
                 if self._attr_hvac_mode is not HVACMode.OFF:
                     self._last_on_mode = self._attr_hvac_mode
@@ -914,6 +988,14 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         self._attr_hvac_mode = HVACMode.OFF
         self.power_mode = STATE_OFF
         await self.async_send_cmd()
+
+    # PostLogical Functions """Code adapted from https://github.com/smartHomeHub/SmartIR/pull/795/commits/084f7061befd1a491b22fdd4fab725e25062d66b"""
+    def _celsius_to_fahrenheit(self, temperature):
+        if temperature is not None:
+            return (temperature * 2 + 28)
+    def _fahrenheit_to_celsius(self, temperature):
+        if temperature is not None:
+            return ((temperature - 28) / 2)
 
     async def async_set_temperature(self, **kwargs):
         """Set new target temperature."""
@@ -1169,6 +1251,17 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
 
         This method must be run in the event loop and returns a coroutine.
         """
+        if preset_mode != PRESET_MIN_HEAT and self._min_heat:
+            stop_cmd = "raw,0,3324,1574,448,390,1182,00101000110001100000000000001000000010000100000010111111"
+            path = self.topic.split('/')
+            irsend = "cmnd/" + path[1] + "/irsend"
+            await mqtt.async_publish(self.hass, irsend, stop_cmd)
+            self._target_temp = self._saved_target_temp
+        if preset_mode != PRESET_ECONO and preset_mode != PRESET_SET_V and preset_mode != PRESET_SET_H and self._economy:
+            econo_toggle = "raw,0,3324,1574,448,390,1182,00101000110001100000000000001000000010001001000001101111"
+            path = self.topic.split('/')
+            irsend = "cmnd/" + path[1] + "/irsend"
+            await mqtt.async_publish(self.hass, irsend, econo_toggle)
         if preset_mode == PRESET_AWAY and not self._is_away:
             self._is_away = True
             self._saved_target_temp = self._attr_target_temperature
@@ -1176,7 +1269,54 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         elif preset_mode == PRESET_NONE and self._is_away:
             self._is_away = False
             self._attr_target_temperature = self._saved_target_temp
-        self._attr_preset_mode = PRESET_AWAY if self._is_away else PRESET_NONE
+        if preset_mode == PRESET_NONE:
+            self._turbo = "off"
+            self._econo = "off"
+            self._clean = "off"
+            self._economy = False
+            self._min_heat = False
+            self._powerful = False
+        elif preset_mode != PRESET_AWAY:
+            if preset_mode == PRESET_POWERFUL:
+                if not self._powerful:
+                    payload_data = "raw,0,3324,1574,448,390,1182,00101000110001100000000000001000000010001001110001100011"
+                    self._powerful = True
+            elif preset_mode == PRESET_ECONO:
+                if not self._economy:
+                    payload_data = "raw,0,3324,1574,448,390,1182,00101000110001100000000000001000000010001001000001101111"
+                    self._economy = True
+            elif preset_mode == PRESET_MIN_HEAT:
+                if not self._min_heat:
+                    self._saved_target_temp = self._attr_target_temperature
+                    payload_data = "raw,0,3324,1574,448,390,1182,00101000110001100000000000001000000010000111111110010000000011001000110011010000010000000000000000000000000000000000010001001110"
+                    self.power_mode = "on"
+                    self._min_heat = True
+                    self._attr_hvac_mode = "heat"
+                    self._attr_target_temperature = 50
+                    self._econo = "off"
+                    self._economy = False
+                    self._powerful = False
+                    self._turbo = "off"
+                    self._clean = "off"
+            elif preset_mode == PRESET_SET_V:
+                payload_data = "raw,0,3324,1574,448,390,1182,00101000110001100000000000001000000010000011011011001001"
+                self._swingv = None
+                if self._swing_mode == SWING_BOTH:
+                    self._swing_mode = SWING_HORIZONTAL
+                elif self._swing_mode == SWING_VERTICAL:
+                    self._swing_mode = SWING_OFF
+            elif preset_mode == PRESET_SET_H:
+                payload_data = "raw,0,3324,1574,448,390,1182,00101000110001100000000000001000000010001001111001100001"
+                self._swingh = None
+                if self._swing_mode == SWING_BOTH:
+                    self._swing_mode = SWING_VERTICAL
+                elif self._swing_mode == SWING_HORIZONTAL:
+                    self._swing_mode = SWING_OFF
+            path = self.topic.split('/')
+            irsend = "cmnd/" + path[1] + "/irsend"
+            await mqtt.async_publish(self.hass, irsend, payload_data)
+            return await self.async_schedule_update_ha_state()
+            """Test this above section and finish the rest if it works"""
         await self.send_ir()
 
     async def set_mode(self, hvac_mode):
@@ -1235,8 +1375,8 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             "Model": self._model,
             "Power": self.power_mode,
             "Mode": self._last_on_mode if self._keep_mode else self._attr_hvac_mode,
-            "Celsius": self._celsius,
-            "Temp": self._attr_target_temperature,
+            "Celsius": self._celsius, # TODO PostLogical Consider: "Celsius": self._celsius_mode,
+            "Temp": self._fahrenheit_to_celsius(self._attr_target_temperature), # PostLogical Update
             "FanSpeed": fan_speed,
             "SwingV": self._swingv,
             "SwingH": self._swingh,
