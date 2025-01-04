@@ -1388,7 +1388,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             "Model": self._model,
             "Power": self.power_mode,
             "Mode": self._last_on_mode if self._keep_mode else self._attr_hvac_mode,
-            "Celsius": self._celsius, # TODO PostLogical Consider: "Celsius": self._celsius_mode,
+            "Celsius": "on", # TODO PostLogical Consider: "Celsius": self._celsius_mode, currently manually set to On
             "Temp": self._fahrenheit_to_celsius(self._attr_target_temperature), # PostLogical Update
             "FanSpeed": fan_speed,
             "SwingV": self._swingv,
