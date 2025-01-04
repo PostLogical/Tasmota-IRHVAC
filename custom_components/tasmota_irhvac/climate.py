@@ -767,6 +767,13 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
 
             if payload["Vendor"] == self._vendor:
                 # All values in the payload are Optional
+                if "Model" in payload:
+                    if payload["Model"] == 3:
+                        prev_mode = self._attr_hvac_mode
+                        prev_temp = self._attr_target_temperature
+                        prev_fanspeed = self._attr_fan_mode
+                        prev_swingh = self._swingh
+                        prev_swingv = self._swingv
                 prev_power = self.power_mode
                 if "Power" in payload:
                     self.power_mode = payload["Power"].lower()
@@ -868,6 +875,11 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                 # PostLogical Updates
                 if "Data" in json_payload:
                     data = json_payload["Data"]
+                    self._attr_hvac_mode = prev_mode
+                    self._attr_target_temperature = prev_temp
+                    self._attr_fan_mode = prev_fanspeed
+                    self._swingh = prev_swingh
+                    self._swingv = prev_swingv
                     if json_payload["Bits"] == 56:
                         if data == "0x146300101039C6": #Powerful
                             self._powerful = True
