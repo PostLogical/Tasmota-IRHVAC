@@ -1274,6 +1274,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             self._is_away = True
             self._saved_target_temp = self._attr_target_temperature
             self._attr_target_temperature = self._away_temp
+            self._attr_preset_mode = PRESET_AWAY
         elif preset_mode == PRESET_NONE and self._is_away:
             self._is_away = False
             self._attr_target_temperature = self._saved_target_temp
@@ -1284,15 +1285,18 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             self._economy = False
             self._min_heat = False
             self._powerful = False
+            self._attr_preset_mode = PRESET_NONE
         elif preset_mode != PRESET_AWAY:
             if preset_mode == PRESET_POWERFUL:
                 if not self._powerful:
                     payload_data = "raw,0,3324,1574,448,390,1182,00101000110001100000000000001000000010001001110001100011"
                     self._powerful = True
+                    self._attr_preset_mode = PRESET_POWERFUL
             elif preset_mode == PRESET_ECONO:
                 if not self._economy:
                     payload_data = "raw,0,3324,1574,448,390,1182,00101000110001100000000000001000000010001001000001101111"
                     self._economy = True
+                    self._attr_preset_mode = PRESET_ECONO
             elif preset_mode == PRESET_MIN_HEAT:
                 if not self._min_heat:
                     self._saved_target_temp = self._attr_target_temperature
@@ -1306,6 +1310,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                     self._powerful = False
                     self._turbo = "off"
                     self._clean = "off"
+                    self._attr_preset_mode = PRESET_MIN_HEAT
             elif preset_mode == PRESET_SET_V:
                 payload_data = "raw,0,3324,1574,448,390,1182,00101000110001100000000000001000000010000011011011001001"
                 self._swingv = None
