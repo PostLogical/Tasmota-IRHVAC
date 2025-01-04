@@ -1309,17 +1309,17 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             elif preset_mode == PRESET_SET_V:
                 payload_data = "raw,0,3324,1574,448,390,1182,00101000110001100000000000001000000010000011011011001001"
                 self._swingv = None
-                if self._swing_mode == SWING_BOTH:
-                    self._swing_mode = SWING_HORIZONTAL
-                elif self._swing_mode == SWING_VERTICAL:
-                    self._swing_mode = SWING_OFF
+                if self._attr_swing_mode == SWING_BOTH:
+                    self._attr_swing_mode = SWING_HORIZONTAL
+                elif self._attr_swing_mode == SWING_VERTICAL:
+                    self._attr_swing_mode = SWING_OFF
             elif preset_mode == PRESET_SET_H:
                 payload_data = "raw,0,3324,1574,448,390,1182,00101000110001100000000000001000000010001001111001100001"
                 self._swingh = None
-                if self._swing_mode == SWING_BOTH:
-                    self._swing_mode = SWING_VERTICAL
-                elif self._swing_mode == SWING_HORIZONTAL:
-                    self._swing_mode = SWING_OFF
+                if self._attr_swing_mode == SWING_BOTH:
+                    self._attr_swing_mode = SWING_VERTICAL
+                elif self._attr_swing_mode == SWING_HORIZONTAL:
+                    self._attr_swing_mode = SWING_OFF
             path = self.topic.split('/')
             irsend = "cmnd/" + path[1] + "/irsend"
             await mqtt.async_publish(self.hass, irsend, payload_data)
