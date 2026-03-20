@@ -165,3 +165,42 @@ TOGGLE_ALL_LIST = [
 ]
 
 STATE_MODE_LIST = ["StoreOnly", "SendStore"]
+
+# Fujitsu preset modes
+PRESET_POWERFUL = "Powerful"
+PRESET_MIN_HEAT = "Min Heat"
+PRESET_ECONO = "Economy"
+PRESET_SET_V = "Set Vertical"
+PRESET_SET_H = "Set Horizontal"
+CONF_PRESET_MODES_LIST = "supported_preset_modes"
+
+# PI controller config keys
+CONF_PI_ENABLED = "pi_enabled"
+CONF_PI_KP = "pi_kp"
+CONF_PI_KI = "pi_ki"
+CONF_PI_MIN_INTERVAL = "pi_min_interval"
+CONF_PI_DEADBAND = "pi_deadband"
+CONF_OUTDOOR_TEMP_SENSOR = "outdoor_temp_sensor"
+CONF_PI_FF_HEAT_REFERENCE = "pi_ff_heat_reference"
+CONF_PI_FF_HEAT_SLOPE = "pi_ff_heat_slope"
+CONF_PI_FF_COOL_REFERENCE = "pi_ff_cool_reference"
+CONF_PI_FF_COOL_SLOPE = "pi_ff_cool_slope"
+
+# PI controller defaults
+DEFAULT_PI_ENABLED = False
+DEFAULT_PI_KP = 1.5
+DEFAULT_PI_KI = 0.05
+DEFAULT_PI_MIN_INTERVAL = 900
+DEFAULT_PI_DEADBAND = 0.5
+DEFAULT_PI_FF_HEAT_REFERENCE = 15.0
+DEFAULT_PI_FF_HEAT_SLOPE = 0.3
+DEFAULT_PI_FF_COOL_REFERENCE = 25.0
+DEFAULT_PI_FF_COOL_SLOPE = 0.3
+
+# PI controller extra state attributes
+ATTR_HP_SETPOINT = "hp_setpoint"
+ATTR_PI_INTEGRAL = "pi_integral"
+ATTR_DESIRED_TEMP = "desired_temp"
+ATTR_FF_OFFSET = "ff_offset"
+ATTR_FF_HEAT_BUCKETS = "ff_heat_buckets"
+ATTR_FF_COOL_BUCKETS = "ff_cool_buckets"

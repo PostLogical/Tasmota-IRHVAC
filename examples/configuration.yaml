@@ -90,3 +90,53 @@ climate:
     # mode after operation. This mode detects and sets this.
     # "auto", "cool", "dry", "fan_only", "heat" or "off"
     special_mode: "" #optional - default "" is current mode string value
+
+  # ── Fujitsu Example with PI Controller ──
+  - platform: tasmota_irhvac
+    name: "Living Room Fujitsu"
+    command_topic: "cmnd/ir_living/irhvac"
+    state_topic: "tele/ir_living/RESULT"
+    state_topic_2: "stat/ir_living/RESULT"
+    temperature_sensor: sensor.living_room_temperature
+    vendor: "FUJITSU_AC"
+    celsius_mode: "On"
+    min_temp: 16
+    max_temp: 32
+    target_temp: 22
+    temp_step: 1
+    precision: 1
+    supported_modes:
+      - "heat"
+      - "cool"
+      - "dry"
+      - "fan_only"
+      - "auto"
+      - "off"
+    supported_fan_speeds:
+      - "auto"
+      - "low"
+      - "medium"
+      - "high"
+    supported_swing_list:
+      - "off"
+      - "vertical"
+      - "horizontal"
+      - "both"
+    supported_preset_modes:
+      - "Powerful"
+      - "Min Heat"
+      - "Economy"
+      - "Set Vertical"
+      - "Set Horizontal"
+    # PI Controller (closed-loop temperature control)
+    pi_enabled: true
+    pi_kp: 1.5                    # proportional gain (conservative)
+    pi_ki: 0.05                   # integral gain (very low, builds slowly)
+    pi_min_interval: 900          # seconds between IR sends (15 min)
+    pi_deadband: 0.5              # °C - don't act if error is within this
+    outdoor_temp_sensor: sensor.outdoor_temperature
+    # Feedforward seeds (auto-learning refines these over time)
+    pi_ff_heat_reference: 15.0    # °C (59°F) - outdoor temp above which no heating offset needed
+    pi_ff_heat_slope: 0.30        # °C offset per °C below reference
+    pi_ff_cool_reference: 25.0    # °C (77°F) - outdoor temp below which no cooling offset needed
+    pi_ff_cool_slope: 0.30        # °C offset per °C above reference
