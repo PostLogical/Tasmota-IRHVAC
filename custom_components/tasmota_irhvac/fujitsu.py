@@ -14,9 +14,14 @@ from homeassistant.components.climate.const import (
     SWING_OFF,
     SWING_VERTICAL,
 )
-from homeassistant.const import ATTR_TEMPERATURE, STATE_ON
+from homeassistant.const import ATTR_TEMPERATURE, STATE_ON, UnitOfTemperature
 from homeassistant.core import callback
-from homeassistant.helpers.event import async_call_later, async_track_time_interval
+from homeassistant.helpers.event import (
+    async_call_later,
+    async_track_state_change_event,
+    async_track_time_interval,
+)
+from homeassistant.util.unit_conversion import TemperatureConverter
 
 from .climate import TasmotaIrhvac
 from .const import (
@@ -164,8 +169,13 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
             elif preset == PRESET_POWERFUL:
                 self._powerful = True
 
-        # Register outdoor temp sensor
+        # Register outdoor temp sensor with state change listener
         if self._outdoor_temp_sensor:
+            async_track_state_change_event(
+                self.hass,
+                self._outdoor_temp_sensor,
+                self._async_outdoor_temp_changed,
+            )
             outdoor_state = self.hass.states.get(self._outdoor_temp_sensor)
             if outdoor_state is not None:
                 self._update_outdoor_temp(outdoor_state)
@@ -191,11 +201,22 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
 
     @callback
     def _update_outdoor_temp(self, state):
-        """Update outdoor temperature from sensor state."""
+        """Update outdoor temperature from sensor state, converting to °C."""
         try:
-            self._outdoor_temp = float(state.state)
+            temp = float(state.state)
+            unit = state.attributes.get("unit_of_measurement", UnitOfTemperature.CELSIUS)
+            self._outdoor_temp = TemperatureConverter.convert(
+                temp, unit, UnitOfTemperature.CELSIUS
+            )
         except (ValueError, TypeError):
             pass
+
+    @callback
+    def _async_outdoor_temp_changed(self, event):
+        """Handle outdoor temperature sensor state changes."""
+        new_state = event.data.get("new_state")
+        if new_state is not None:
+            self._update_outdoor_temp(new_state)
 
     async def _pi_tick(self, now=None):
         """Periodic PI + feedforward controller tick."""
