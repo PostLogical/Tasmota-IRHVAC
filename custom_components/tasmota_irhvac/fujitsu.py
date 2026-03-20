@@ -170,10 +170,15 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
                 self._powerful = True
 
         # Fallback: sync with restored _attr_target_temperature from super()
+        # desired_temp stays in the entity's display unit (e.g. °F); PI converts internally
         if self._desired_temp is None and self._attr_target_temperature is not None:
-            self._desired_temp = round(self._attr_target_temperature)
+            self._desired_temp = self._attr_target_temperature
         if self._hp_setpoint is None and self._attr_target_temperature is not None:
-            self._hp_setpoint = round(self._attr_target_temperature)
+            self._hp_setpoint = TemperatureConverter.convert(
+                self._attr_target_temperature,
+                self.temperature_unit,
+                UnitOfTemperature.CELSIUS,
+            )
 
         # Register outdoor temp sensor with state change listener
         if self._outdoor_temp_sensor:
@@ -245,7 +250,18 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
         if self._min_heat or self._powerful or self._economy:
             return
 
-        error = self._desired_temp - self._attr_current_temperature
+        # Convert both to °C for PI math (HP operates in °C)
+        current_c = TemperatureConverter.convert(
+            self._attr_current_temperature,
+            self.temperature_unit,
+            UnitOfTemperature.CELSIUS,
+        )
+        desired_c = TemperatureConverter.convert(
+            self._desired_temp,
+            self.temperature_unit,
+            UnitOfTemperature.CELSIUS,
+        )
+        error = desired_c - current_c
 
         # Select bucket set based on HVAC mode
         is_heating = self._attr_hvac_mode in (HVACMode.HEAT, HVACMode.HEAT_COOL)
@@ -263,7 +279,7 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
             self._ff_settled_ticks += 1
             # Auto-learn: record offset when settled for 2+ ticks
             if self._ff_settled_ticks >= 2 and self._outdoor_temp is not None:
-                observed_offset = self._hp_setpoint - self._desired_temp
+                observed_offset = self._hp_setpoint - desired_c
                 bucket_key = round(self._outdoor_temp / 3) * 3
                 old = buckets.get(bucket_key, 0.0)
                 buckets[bucket_key] = 0.8 * old + 0.2 * observed_offset
@@ -278,14 +294,14 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
 
         # Anti-windup: clamp integral so setpoint stays in valid range
         if self._pi_ki != 0:
-            max_integral = (self._max_temp - self._desired_temp - p_term - self._ff_offset) / self._pi_ki
-            min_integral = (self._min_temp - self._desired_temp - p_term - self._ff_offset) / self._pi_ki
+            max_integral = (self._max_temp - desired_c - p_term - self._ff_offset) / self._pi_ki
+            min_integral = (self._min_temp - desired_c - p_term - self._ff_offset) / self._pi_ki
             if min_integral > max_integral:
                 min_integral, max_integral = max_integral, min_integral
             self._pi_integral = max(min_integral, min(max_integral, self._pi_integral))
 
         i_term = self._pi_ki * self._pi_integral
-        raw_setpoint = self._desired_temp + p_term + i_term + self._ff_offset
+        raw_setpoint = desired_c + p_term + i_term + self._ff_offset
         new_setpoint = round(max(self._min_temp, min(self._max_temp, raw_setpoint)))
 
         if new_setpoint != self._hp_setpoint:
@@ -318,8 +334,8 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
             await self.set_mode(hvac_mode)
 
         if self._pi_enabled:
-            self._desired_temp = round(temperature)
-            self._attr_target_temperature = round(temperature)
+            self._desired_temp = temperature
+            self._attr_target_temperature = temperature
             if self._attr_hvac_mode != HVACMode.OFF:
                 self.power_mode = STATE_ON
             await self._pi_tick()
@@ -410,7 +426,7 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
         # PI: if temp received from physical remote, treat as new desired room temp
         if self._pi_enabled and "Temp" in payload and payload["Temp"] > 0:
             if not (prev_model3 and "Data" in json_payload):
-                self._desired_temp = round(self._attr_target_temperature)
+                self._desired_temp = self._attr_target_temperature
                 await self._pi_tick()
 
         self.async_schedule_update_ha_state()
