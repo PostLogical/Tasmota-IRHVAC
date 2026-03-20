@@ -169,6 +169,12 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
             elif preset == PRESET_POWERFUL:
                 self._powerful = True
 
+        # Fallback: sync with restored _attr_target_temperature from super()
+        if self._desired_temp is None:
+            self._desired_temp = self._attr_target_temperature
+        if self._hp_setpoint is None:
+            self._hp_setpoint = self._attr_target_temperature
+
         # Register outdoor temp sensor with state change listener
         if self._outdoor_temp_sensor:
             async_track_state_change_event(
