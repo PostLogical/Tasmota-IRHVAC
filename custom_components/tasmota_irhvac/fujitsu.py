@@ -170,10 +170,10 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
                 self._powerful = True
 
         # Fallback: sync with restored _attr_target_temperature from super()
-        if self._desired_temp is None:
-            self._desired_temp = self._attr_target_temperature
-        if self._hp_setpoint is None:
-            self._hp_setpoint = self._attr_target_temperature
+        if self._desired_temp is None and self._attr_target_temperature is not None:
+            self._desired_temp = round(self._attr_target_temperature)
+        if self._hp_setpoint is None and self._attr_target_temperature is not None:
+            self._hp_setpoint = round(self._attr_target_temperature)
 
         # Register outdoor temp sensor with state change listener
         if self._outdoor_temp_sensor:
@@ -185,6 +185,13 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
             outdoor_state = self.hass.states.get(self._outdoor_temp_sensor)
             if outdoor_state is not None:
                 self._update_outdoor_temp(outdoor_state)
+
+        # Compute initial feedforward offset for display
+        if self._outdoor_temp is not None and self._pi_enabled:
+            is_heating = self._attr_hvac_mode in (HVACMode.HEAT, HVACMode.HEAT_COOL, None)
+            buckets = self._ff_heat_buckets if is_heating else self._ff_cool_buckets
+            bucket_key = round(self._outdoor_temp / 3) * 3
+            self._ff_offset = buckets.get(bucket_key, 0.0)
 
         # Start PI timer
         if self._pi_enabled and self._temp_sensor:
@@ -310,8 +317,8 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
             await self.set_mode(hvac_mode)
 
         if self._pi_enabled:
-            self._desired_temp = temperature
-            self._attr_target_temperature = temperature
+            self._desired_temp = round(temperature)
+            self._attr_target_temperature = round(temperature)
             if self._attr_hvac_mode != HVACMode.OFF:
                 self.power_mode = STATE_ON
             await self._pi_tick()
@@ -402,7 +409,7 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
         # PI: if temp received from physical remote, treat as new desired room temp
         if self._pi_enabled and "Temp" in payload and payload["Temp"] > 0:
             if not (prev_model3 and "Data" in json_payload):
-                self._desired_temp = self._attr_target_temperature
+                self._desired_temp = round(self._attr_target_temperature)
                 await self._pi_tick()
 
         self.async_schedule_update_ha_state()
