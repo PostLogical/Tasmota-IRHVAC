@@ -193,13 +193,14 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
             bucket_key = round(self._outdoor_temp / 3) * 3
             self._ff_offset = buckets.get(bucket_key, 0.0)
 
-        # Start PI timer
+        # Start PI timer and run first tick immediately
         if self._pi_enabled and self._temp_sensor:
             self._pi_timer_unsub = async_track_time_interval(
                 self.hass,
                 self._pi_tick,
                 timedelta(seconds=self._pi_min_interval),
             )
+            await self._pi_tick()
 
     async def async_will_remove_from_hass(self):
         if self._pi_timer_unsub:
