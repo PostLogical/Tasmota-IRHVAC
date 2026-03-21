@@ -328,6 +328,13 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
             p_term = self._pi_kp * error
             self._pi_integral += error
 
+        # Discard stale integral early — clamp once room enters deadband range
+        # from the overshoot side, so FF can ramp in without the old integral fighting it.
+        if is_heating and self._pi_integral < 0 and error >= -self._pi_deadband:
+            self._pi_integral = 0.0
+        elif is_cooling and self._pi_integral > 0 and error <= self._pi_deadband:
+            self._pi_integral = 0.0
+
         # Anti-windup: clamp integral so setpoint stays in valid range
         if self._pi_ki != 0:
             max_integral = (self._max_temp - desired_c - p_term - self._ff_offset) / self._pi_ki
