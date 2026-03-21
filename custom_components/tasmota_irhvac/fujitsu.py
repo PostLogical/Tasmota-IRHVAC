@@ -237,6 +237,15 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
         if new_state is not None:
             self._update_outdoor_temp(new_state)
 
+    async def _async_sensor_changed(self, entity_id_or_event, old_state=None, new_state=None):
+        """Override to trigger PI tick when temp sensor first becomes available."""
+        was_none = self._attr_current_temperature is None
+        await super()._async_sensor_changed(entity_id_or_event, old_state, new_state)
+        # If current temp just became available, run PI immediately
+        if was_none and self._attr_current_temperature is not None and self._pi_enabled:
+            _LOGGER.debug("PI: temp sensor just became available, running immediate tick")
+            await self._pi_tick()
+
     async def _pi_tick(self, now=None):
         """Periodic PI + feedforward controller tick."""
         _LOGGER.debug(
