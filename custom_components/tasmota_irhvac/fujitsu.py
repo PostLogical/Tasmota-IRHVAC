@@ -123,6 +123,7 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
         self._pi_integral = 0.0
         self._pi_timer_unsub = None
         self._ff_offset = 0.0
+        self._pi_command_pending = False  # True while waiting for IR echo
         self._ff_settled_ticks = 0
 
         # Feedforward buckets (seeded from linear config, refined by auto-learning)
@@ -334,6 +335,7 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
                 self._hp_setpoint, new_setpoint,
             )
             self._hp_setpoint = new_setpoint
+            self._pi_command_pending = True
             await self.send_ir()
         else:
             _LOGGER.debug("PI: error=%.1f, setpoint unchanged at %s", error, self._hp_setpoint)
@@ -455,9 +457,13 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
                 self._turbo = "off"
                 self._clean = "off"
 
-        # PI: if temp received from physical remote, treat as new desired room temp
+        # PI: handle temp from MQTT payload
         if self._pi_enabled and "Temp" in payload and payload["Temp"] > 0:
-            if not (prev_model3 and "Data" in json_payload):
+            if self._pi_command_pending:
+                # This is an echo of our own IR command — ignore it
+                self._pi_command_pending = False
+            elif not (prev_model3 and "Data" in json_payload):
+                # Physical remote set a new temp — treat as new desired room temp
                 self._desired_temp = self._attr_target_temperature
                 await self._pi_tick()
 
