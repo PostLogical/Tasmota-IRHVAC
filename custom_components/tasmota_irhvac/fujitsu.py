@@ -291,10 +291,18 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
         buckets = self._ff_heat_buckets if is_heating else self._ff_cool_buckets
 
         # Feedforward: lookup learned offset for current outdoor temp
+        # Scale FF based on error direction — full FF when HP needs to work,
+        # ramps to zero when room overshoots desired to avoid oscillation.
         self._ff_offset = 0.0
         if self._outdoor_temp is not None:
             bucket_key = round(self._outdoor_temp / 3) * 3
-            self._ff_offset = buckets.get(bucket_key, 0.0)
+            raw_ff = buckets.get(bucket_key, 0.0)
+            # Graduated ramp: FF scales from 0→1 over the deadband range
+            if is_heating:
+                ff_scale = max(0.0, min(1.0, error / self._pi_deadband))
+            else:
+                ff_scale = max(0.0, min(1.0, -error / self._pi_deadband))
+            self._ff_offset = raw_ff * ff_scale
 
         # Deadband: if error is small, skip P term and decay integral
         in_deadband = abs(error) < self._pi_deadband
