@@ -286,22 +286,27 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
         )
         error = desired_c - current_c
 
-        # Select bucket set based on HVAC mode
-        is_heating = self._attr_hvac_mode in (HVACMode.HEAT, HVACMode.HEAT_COOL)
-        buckets = self._ff_heat_buckets if is_heating else self._ff_cool_buckets
+        # PI only operates in explicit HEAT, COOL, or DRY modes.
+        # Auto/heat_cool are not supported — mode selection stays in HA automations.
+        is_heating = self._attr_hvac_mode == HVACMode.HEAT
+        is_cooling = self._attr_hvac_mode in (HVACMode.COOL, HVACMode.DRY)
+        if not is_heating and not is_cooling:
+            _LOGGER.debug("PI: skipping, mode %s not supported for PI", self._attr_hvac_mode)
+            return
 
-        # Feedforward: lookup learned offset for current outdoor temp
-        # Scale FF based on error direction — full FF when HP needs to work,
-        # ramps to zero when room overshoots desired to avoid oscillation.
         self._ff_offset = 0.0
         if self._outdoor_temp is not None:
             bucket_key = round(self._outdoor_temp / 3) * 3
-            raw_ff = buckets.get(bucket_key, 0.0)
-            # Graduated ramp: FF scales from 0→1 over the deadband range
+
             if is_heating:
-                ff_scale = max(0.0, min(1.0, error / self._pi_deadband))
+                raw_ff = self._ff_heat_buckets.get(bucket_key, 0.0)
+                # Full FF when room at or below desired, ramps to zero over
+                # one deadband width when room overshoots
+                ff_scale = max(0.0, min(1.0, 1.0 + error / self._pi_deadband))
             else:
-                ff_scale = max(0.0, min(1.0, -error / self._pi_deadband))
+                raw_ff = self._ff_cool_buckets.get(bucket_key, 0.0)
+                ff_scale = max(0.0, min(1.0, 1.0 - error / self._pi_deadband))
+
             self._ff_offset = raw_ff * ff_scale
 
         # Deadband: if error is small, skip P term and decay integral
@@ -313,8 +318,10 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
             if self._ff_settled_ticks >= 2 and self._outdoor_temp is not None:
                 observed_offset = self._hp_setpoint - desired_c
                 bucket_key = round(self._outdoor_temp / 3) * 3
-                old = buckets.get(bucket_key, 0.0)
-                buckets[bucket_key] = 0.8 * old + 0.2 * observed_offset
+                # Learn into the bucket set matching the current mode
+                learn_buckets = self._ff_heat_buckets if is_heating else self._ff_cool_buckets
+                old = learn_buckets.get(bucket_key, 0.0)
+                learn_buckets[bucket_key] = 0.8 * old + 0.2 * observed_offset
             p_term = 0.0  # no proportional action in deadband
         else:
             self._ff_settled_ticks = 0
@@ -355,6 +362,23 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
         if self._pi_enabled and self._attr_hvac_mode != HVACMode.OFF:
             return round(self._hp_setpoint)
         return super()._get_ir_temp()
+
+    @property
+    def hvac_modes(self):
+        """Filter out auto/heat_cool when PI is enabled."""
+        modes = self._attr_hvac_modes
+        if self._pi_enabled and modes:
+            return [m for m in modes if m not in (HVACMode.AUTO, HVACMode.HEAT_COOL)]
+        return modes
+
+    async def async_set_hvac_mode(self, hvac_mode):
+        """Reject auto/heat_cool when PI is enabled (service call guard)."""
+        if self._pi_enabled and hvac_mode in (HVACMode.AUTO, HVACMode.HEAT_COOL):
+            _LOGGER.warning(
+                "PI mode does not support %s — use HEAT or COOL explicitly", hvac_mode,
+            )
+            return
+        await super().async_set_hvac_mode(hvac_mode)
 
     async def async_set_temperature(self, **kwargs):
         """Set new desired room temperature. PI computes HP setpoint."""
