@@ -322,6 +322,9 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
                 min_integral, max_integral = max_integral, min_integral
             self._pi_integral = max(min_integral, min(max_integral, self._pi_integral))
 
+        # Hard safety cap regardless of anti-windup math
+        self._pi_integral = max(-50.0, min(50.0, self._pi_integral))
+
         i_term = self._pi_ki * self._pi_integral
         raw_setpoint = desired_c + p_term + i_term + self._ff_offset
         new_setpoint = round(max(self._min_temp, min(self._max_temp, raw_setpoint)))
