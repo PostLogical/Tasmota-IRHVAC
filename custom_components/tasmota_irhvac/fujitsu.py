@@ -147,7 +147,9 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
         if old_state is not None:
             attrs = old_state.attributes
             if attrs.get(ATTR_PI_INTEGRAL) is not None:
-                self._pi_integral = float(attrs[ATTR_PI_INTEGRAL])
+                restored_integral = float(attrs[ATTR_PI_INTEGRAL])
+                # Clamp restored integral to reasonable range (±50)
+                self._pi_integral = max(-50, min(50, restored_integral))
             if attrs.get(ATTR_DESIRED_TEMP) is not None:
                 self._desired_temp = float(attrs[ATTR_DESIRED_TEMP])
             if attrs.get(ATTR_HP_SETPOINT) is not None:
@@ -356,6 +358,7 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
         if self._pi_enabled:
             self._desired_temp = temperature
             self._attr_target_temperature = temperature
+            self._pi_integral = 0.0  # fresh start on user input
             if self._attr_hvac_mode != HVACMode.OFF:
                 self.power_mode = STATE_ON
             await self._pi_tick()
