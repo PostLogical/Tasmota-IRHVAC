@@ -382,8 +382,16 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
                 "swingh": self._swingh,
             }
 
-        # Standard IRHVAC processing
+        # Standard IRHVAC processing (this sets _attr_target_temperature from payload Temp)
         await super()._handle_state_payload(json_payload, payload)
+
+        # PI fix: super() overwrites _attr_target_temperature with the IR setpoint
+        # from the payload. Restore it to the user's desired room temp, and capture
+        # the payload temp as the confirmed hp_setpoint instead.
+        if self._pi_enabled and self._desired_temp is not None:
+            if "Temp" in payload and payload["Temp"] > 0:
+                self._hp_setpoint = payload["Temp"]
+            self._attr_target_temperature = self._desired_temp
 
         # Map turbo/econo/clean flags to Fujitsu presets
         if self.power_mode == "off":
