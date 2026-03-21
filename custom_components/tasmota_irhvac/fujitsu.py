@@ -239,15 +239,26 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
 
     async def _pi_tick(self, now=None):
         """Periodic PI + feedforward controller tick."""
+        _LOGGER.debug(
+            "PI tick: enabled=%s mode=%s current=%s desired=%s presets=(mh=%s pw=%s ec=%s)",
+            self._pi_enabled, self._attr_hvac_mode,
+            self._attr_current_temperature, self._desired_temp,
+            self._min_heat, self._powerful, self._economy,
+        )
         if not self._pi_enabled:
+            _LOGGER.debug("PI tick: skipping, not enabled")
             return
         if self._attr_hvac_mode == HVACMode.OFF:
+            _LOGGER.debug("PI tick: skipping, HVAC OFF")
             self._pi_integral = 0.0
             return
         if self._attr_current_temperature is None or self._desired_temp is None:
+            _LOGGER.debug("PI tick: skipping, current_temp=%s desired=%s",
+                          self._attr_current_temperature, self._desired_temp)
             return
         # Don't send IR while a Fujitsu preset is active (would cancel it)
         if self._min_heat or self._powerful or self._economy:
+            _LOGGER.debug("PI tick: skipping, preset active")
             return
 
         # Convert both to °C for PI math (HP operates in °C)
