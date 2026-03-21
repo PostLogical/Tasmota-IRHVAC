@@ -295,8 +295,9 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
             bucket_key = round(self._outdoor_temp / 3) * 3
             self._ff_offset = buckets.get(bucket_key, 0.0)
 
-        # Deadband: if error is small, decay integral and optionally learn
-        if abs(error) < self._pi_deadband:
+        # Deadband: if error is small, skip P term and decay integral
+        in_deadband = abs(error) < self._pi_deadband
+        if in_deadband:
             self._pi_integral *= 0.9
             self._ff_settled_ticks += 1
             # Auto-learn: record offset when settled for 2+ ticks
@@ -305,14 +306,11 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
                 bucket_key = round(self._outdoor_temp / 3) * 3
                 old = buckets.get(bucket_key, 0.0)
                 buckets[bucket_key] = 0.8 * old + 0.2 * observed_offset
-            self.async_schedule_update_ha_state()
-            return
-
-        self._ff_settled_ticks = 0
-
-        # PI computation
-        p_term = self._pi_kp * error
-        self._pi_integral += error
+            p_term = 0.0  # no proportional action in deadband
+        else:
+            self._ff_settled_ticks = 0
+            p_term = self._pi_kp * error
+            self._pi_integral += error
 
         # Anti-windup: clamp integral so setpoint stays in valid range
         if self._pi_ki != 0:
