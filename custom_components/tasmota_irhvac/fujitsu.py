@@ -520,7 +520,8 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
                 self._attr_preset_mode = PRESET_MIN_HEAT
                 self.power_mode = "on"
                 self._attr_hvac_mode = HVACMode.HEAT
-                self._attr_target_temperature = 50
+                self._attr_target_temperature = 10  # 10°C / 50°F
+                self._pi_integral = 0.0
                 self._econo = "off"
                 self._turbo = "off"
                 self._clean = "off"
@@ -544,6 +545,7 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
         # Exit active presets first
         if preset_mode != PRESET_MIN_HEAT and self._min_heat:
             await self._send_raw_ir(FUJITSU_IR_STOP)
+            await asyncio.sleep(1)  # let HP process STOP before next command
             if hasattr(self, "_saved_target_temp") and self._saved_target_temp:
                 self._attr_target_temperature = self._saved_target_temp
             self._min_heat = False
@@ -584,7 +586,8 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
                 self.power_mode = "on"
                 self._min_heat = True
                 self._attr_hvac_mode = HVACMode.HEAT
-                self._attr_target_temperature = 50
+                self._attr_target_temperature = 10  # 10°C / 50°F
+                self._pi_integral = 0.0  # conditions will be different on exit
                 self._econo = "off"
                 self._economy = False
                 self._powerful = False
