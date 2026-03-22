@@ -1,7 +1,8 @@
 {
   "domain": "tasmota_irhvac",
-  "name": "Tasmota Irhvac",
-  "version": "2026.3.0",
+  "name": "Tasmota IRHVAC",
+  "version": "0.3.0-fujitsu-config-flow-beta",
+  "config_flow": true,
   "documentation": "https://github.com/PostLogical/Tasmota-IRHVAC",
   "issue_tracker": "https://github.com/PostLogical/Tasmota-IRHVAC/issues",
   "homeassistant": "2026.1.0",
