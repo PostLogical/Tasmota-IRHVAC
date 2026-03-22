@@ -20,6 +20,7 @@ from homeassistant.components.climate.const import (
     SWING_OFF,
     SWING_VERTICAL,
 )
+from homeassistant.config_entries import OptionsFlowWithReload
 from homeassistant.const import (
     CONF_NAME,
     PRECISION_HALVES,
@@ -142,6 +143,168 @@ DEFAULT_MODES_LIST = [
 
 DEFAULT_SWING_LIST = [SWING_OFF, SWING_VERTICAL]
 
+# Keys whose SelectSelector values need coercion from str to float
+_FLOAT_KEYS = (CONF_PRECISION, CONF_TEMP_STEP)
+
+# Reusable selector configs
+_ON_OFF_SELECTOR = SelectSelectorConfig(
+    options=["off", "on"], mode=SelectSelectorMode.DROPDOWN
+)
+
+_PRECISION_SELECTOR = SelectSelector(
+    SelectSelectorConfig(
+        options=[
+            {"value": str(PRECISION_TENTHS), "label": "0.1"},
+            {"value": str(PRECISION_HALVES), "label": "0.5"},
+            {"value": str(PRECISION_WHOLE), "label": "1"},
+        ],
+        mode=SelectSelectorMode.DROPDOWN,
+    )
+)
+
+_TEMP_STEP_SELECTOR = SelectSelector(
+    SelectSelectorConfig(
+        options=[
+            {"value": str(PRECISION_HALVES), "label": "0.5"},
+            {"value": str(PRECISION_WHOLE), "label": "1"},
+            {"value": "2.0", "label": "2"},
+        ],
+        mode=SelectSelectorMode.DROPDOWN,
+    )
+)
+
+
+def _coerce_floats(data: dict) -> dict:
+    """Coerce SelectSelector string values to float for numeric keys."""
+    for key in _FLOAT_KEYS:
+        if key in data and isinstance(data[key], str):
+            data[key] = float(data[key])
+    return data
+
+
+# ---------------------------------------------------------------------------
+# Options flow schemas (defined once, populated via add_suggested_values_to_schema)
+# ---------------------------------------------------------------------------
+
+OPTIONS_MQTT_SCHEMA = vol.Schema(
+    {
+        vol.Optional(CONF_MQTT_DELAY): NumberSelector(
+            NumberSelectorConfig(min=0, max=30, step=0.1, mode=NumberSelectorMode.BOX)
+        ),
+    }
+)
+
+OPTIONS_TEMPERATURE_SCHEMA = vol.Schema(
+    {
+        vol.Optional(CONF_MIN_TEMP): NumberSelector(
+            NumberSelectorConfig(min=0, max=50, step=1, mode=NumberSelectorMode.BOX)
+        ),
+        vol.Optional(CONF_MAX_TEMP): NumberSelector(
+            NumberSelectorConfig(min=0, max=50, step=1, mode=NumberSelectorMode.BOX)
+        ),
+        vol.Optional(CONF_TARGET_TEMP): NumberSelector(
+            NumberSelectorConfig(min=0, max=50, step=1, mode=NumberSelectorMode.BOX)
+        ),
+        vol.Optional(CONF_PRECISION): _PRECISION_SELECTOR,
+        vol.Optional(CONF_TEMP_STEP): _TEMP_STEP_SELECTOR,
+        vol.Optional(CONF_CELSIUS): SelectSelector(_ON_OFF_SELECTOR),
+        vol.Optional(CONF_AWAY_TEMP): NumberSelector(
+            NumberSelectorConfig(min=0, max=50, step=1, mode=NumberSelectorMode.BOX)
+        ),
+        vol.Optional(CONF_IGNORE_OFF_TEMP): BooleanSelector(),
+    }
+)
+
+OPTIONS_MODES_SCHEMA = vol.Schema(
+    {
+        vol.Optional(CONF_MODES_LIST): SelectSelector(
+            SelectSelectorConfig(
+                options=HVAC_MODES, multiple=True, mode=SelectSelectorMode.DROPDOWN
+            )
+        ),
+        vol.Optional(CONF_FAN_LIST): SelectSelector(
+            SelectSelectorConfig(
+                options=ALL_FAN_SPEEDS, multiple=True, mode=SelectSelectorMode.DROPDOWN
+            )
+        ),
+        vol.Optional(CONF_SWING_LIST): SelectSelector(
+            SelectSelectorConfig(
+                options=[SWING_OFF, SWING_VERTICAL, SWING_HORIZONTAL, SWING_BOTH],
+                multiple=True,
+                mode=SelectSelectorMode.DROPDOWN,
+            )
+        ),
+        vol.Optional(CONF_INITIAL_OPERATION_MODE): SelectSelector(
+            SelectSelectorConfig(
+                options=HVAC_MODES, mode=SelectSelectorMode.DROPDOWN
+            )
+        ),
+        vol.Optional(CONF_KEEP_MODE): BooleanSelector(),
+    }
+)
+
+OPTIONS_DEFAULTS_SCHEMA = vol.Schema(
+    {
+        vol.Optional(CONF_QUIET): SelectSelector(_ON_OFF_SELECTOR),
+        vol.Optional(CONF_TURBO): SelectSelector(_ON_OFF_SELECTOR),
+        vol.Optional(CONF_ECONO): SelectSelector(_ON_OFF_SELECTOR),
+        vol.Optional(CONF_MODEL): TextSelector(),
+        vol.Optional(CONF_LIGHT): SelectSelector(_ON_OFF_SELECTOR),
+        vol.Optional(CONF_FILTER): SelectSelector(_ON_OFF_SELECTOR),
+        vol.Optional(CONF_CLEAN): SelectSelector(_ON_OFF_SELECTOR),
+        vol.Optional(CONF_BEEP): SelectSelector(_ON_OFF_SELECTOR),
+        vol.Optional(CONF_SLEEP): TextSelector(),
+        vol.Optional(CONF_SWINGV): SelectSelector(
+            SelectSelectorConfig(
+                options=["off", "auto", "highest", "high", "middle", "low", "lowest"],
+                mode=SelectSelectorMode.DROPDOWN,
+            )
+        ),
+        vol.Optional(CONF_SWINGH): SelectSelector(
+            SelectSelectorConfig(
+                options=["off", "auto", "left max", "left", "middle", "right", "right max", "wide"],
+                mode=SelectSelectorMode.DROPDOWN,
+            )
+        ),
+    }
+)
+
+OPTIONS_SENSORS_SCHEMA = vol.Schema(
+    {
+        vol.Optional(CONF_TEMP_SENSOR): EntitySelector(
+            EntitySelectorConfig(domain="sensor")
+        ),
+        vol.Optional(CONF_HUMIDITY_SENSOR): EntitySelector(
+            EntitySelectorConfig(domain="sensor")
+        ),
+        vol.Optional(CONF_POWER_SENSOR): EntitySelector(
+            EntitySelectorConfig(domain=["binary_sensor", "sensor"])
+        ),
+    }
+)
+
+OPTIONS_ADVANCED_SCHEMA = vol.Schema(
+    {
+        vol.Optional(CONF_TOGGLE_LIST): SelectSelector(
+            SelectSelectorConfig(
+                options=TOGGLE_ALL_LIST,
+                multiple=True,
+                mode=SelectSelectorMode.DROPDOWN,
+            )
+        ),
+        vol.Optional(CONF_SPECIAL_MODE): SelectSelector(
+            SelectSelectorConfig(
+                options=["", "auto", "cool", "dry", "fan_only", "heat", "off"],
+                mode=SelectSelectorMode.DROPDOWN,
+            )
+        ),
+    }
+)
+
+
+# ---------------------------------------------------------------------------
+# Config flow
+# ---------------------------------------------------------------------------
 
 class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Tasmota IRHVAC."""
@@ -157,7 +320,6 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors = {}
 
         if user_input is not None:
-            # Normalize protocol -> vendor
             vendor = user_input.get(CONF_VENDOR, "")
             if not vendor:
                 errors[CONF_VENDOR] = "vendor_required"
@@ -224,35 +386,13 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ),
                     vol.Optional(
                         CONF_PRECISION, default=DEFAULT_PRECISION
-                    ): SelectSelector(
-                        SelectSelectorConfig(
-                            options=[
-                                {"value": str(PRECISION_TENTHS), "label": "0.1"},
-                                {"value": str(PRECISION_HALVES), "label": "0.5"},
-                                {"value": str(PRECISION_WHOLE), "label": "1"},
-                            ],
-                            mode=SelectSelectorMode.DROPDOWN,
-                        )
-                    ),
+                    ): _PRECISION_SELECTOR,
                     vol.Optional(
                         CONF_TEMP_STEP, default=PRECISION_WHOLE
-                    ): SelectSelector(
-                        SelectSelectorConfig(
-                            options=[
-                                {"value": str(PRECISION_HALVES), "label": "0.5"},
-                                {"value": str(PRECISION_WHOLE), "label": "1"},
-                            ],
-                            mode=SelectSelectorMode.DROPDOWN,
-                        )
-                    ),
+                    ): _TEMP_STEP_SELECTOR,
                     vol.Optional(
                         CONF_CELSIUS, default=DEFAULT_CONF_CELSIUS
-                    ): SelectSelector(
-                        SelectSelectorConfig(
-                            options=["on", "off"],
-                            mode=SelectSelectorMode.DROPDOWN,
-                        )
-                    ),
+                    ): SelectSelector(_ON_OFF_SELECTOR),
                     vol.Optional(CONF_AWAY_TEMP): NumberSelector(
                         NumberSelectorConfig(
                             min=0, max=50, step=1, mode=NumberSelectorMode.BOX
@@ -315,63 +455,28 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 {
                     vol.Optional(
                         CONF_QUIET, default=DEFAULT_CONF_QUIET
-                    ): SelectSelector(
-                        SelectSelectorConfig(
-                            options=["off", "on"],
-                            mode=SelectSelectorMode.DROPDOWN,
-                        )
-                    ),
+                    ): SelectSelector(_ON_OFF_SELECTOR),
                     vol.Optional(
                         CONF_TURBO, default=DEFAULT_CONF_TURBO
-                    ): SelectSelector(
-                        SelectSelectorConfig(
-                            options=["off", "on"],
-                            mode=SelectSelectorMode.DROPDOWN,
-                        )
-                    ),
+                    ): SelectSelector(_ON_OFF_SELECTOR),
                     vol.Optional(
                         CONF_ECONO, default=DEFAULT_CONF_ECONO
-                    ): SelectSelector(
-                        SelectSelectorConfig(
-                            options=["off", "on"],
-                            mode=SelectSelectorMode.DROPDOWN,
-                        )
-                    ),
+                    ): SelectSelector(_ON_OFF_SELECTOR),
                     vol.Optional(
                         CONF_MODEL, default=DEFAULT_CONF_MODEL
                     ): TextSelector(),
                     vol.Optional(
                         CONF_LIGHT, default=DEFAULT_CONF_LIGHT
-                    ): SelectSelector(
-                        SelectSelectorConfig(
-                            options=["off", "on"],
-                            mode=SelectSelectorMode.DROPDOWN,
-                        )
-                    ),
+                    ): SelectSelector(_ON_OFF_SELECTOR),
                     vol.Optional(
                         CONF_FILTER, default=DEFAULT_CONF_FILTER
-                    ): SelectSelector(
-                        SelectSelectorConfig(
-                            options=["off", "on"],
-                            mode=SelectSelectorMode.DROPDOWN,
-                        )
-                    ),
+                    ): SelectSelector(_ON_OFF_SELECTOR),
                     vol.Optional(
                         CONF_CLEAN, default=DEFAULT_CONF_CLEAN
-                    ): SelectSelector(
-                        SelectSelectorConfig(
-                            options=["off", "on"],
-                            mode=SelectSelectorMode.DROPDOWN,
-                        )
-                    ),
+                    ): SelectSelector(_ON_OFF_SELECTOR),
                     vol.Optional(
                         CONF_BEEP, default=DEFAULT_CONF_BEEP
-                    ): SelectSelector(
-                        SelectSelectorConfig(
-                            options=["off", "on"],
-                            mode=SelectSelectorMode.DROPDOWN,
-                        )
-                    ),
+                    ): SelectSelector(_ON_OFF_SELECTOR),
                     vol.Optional(
                         CONF_SLEEP, default=DEFAULT_CONF_SLEEP
                     ): TextSelector(),
@@ -426,7 +531,9 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._abort_if_unique_id_configured()
 
         data = {k: v for k, v in self._user_input.items() if k in DATA_KEYS}
-        options = {k: v for k, v in self._user_input.items() if k not in DATA_KEYS}
+        options = _coerce_floats(
+            {k: v for k, v in self._user_input.items() if k not in DATA_KEYS}
+        )
 
         return self.async_create_entry(
             title=data.get(CONF_NAME, DEFAULT_NAME),
@@ -451,7 +558,9 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._abort_if_unique_id_configured()
 
         data = {k: v for k, v in import_data.items() if k in DATA_KEYS}
-        options = {k: v for k, v in import_data.items() if k not in DATA_KEYS}
+        options = _coerce_floats(
+            {k: v for k, v in import_data.items() if k not in DATA_KEYS}
+        )
 
         return self.async_create_entry(
             title=data.get(CONF_NAME, DEFAULT_NAME),
@@ -476,31 +585,18 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="reconfigure",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(
-                        CONF_NAME, default=entry.data.get(CONF_NAME, DEFAULT_NAME)
-                    ): TextSelector(),
-                    vol.Required(
-                        CONF_VENDOR, default=entry.data.get(CONF_VENDOR, "")
-                    ): TextSelector(),
-                    vol.Required(
-                        CONF_COMMAND_TOPIC,
-                        default=entry.data.get(CONF_COMMAND_TOPIC, ""),
-                    ): TextSelector(),
-                    vol.Required(
-                        CONF_STATE_TOPIC,
-                        default=entry.data.get(CONF_STATE_TOPIC, ""),
-                    ): TextSelector(),
-                    vol.Optional(
-                        CONF_STATE_TOPIC_2,
-                        description={"suggested_value": entry.data.get(CONF_STATE_TOPIC_2)},
-                    ): TextSelector(),
-                    vol.Optional(
-                        CONF_AVAILABILITY_TOPIC,
-                        description={"suggested_value": entry.data.get(CONF_AVAILABILITY_TOPIC)},
-                    ): TextSelector(),
-                }
+            data_schema=self.add_suggested_values_to_schema(
+                vol.Schema(
+                    {
+                        vol.Required(CONF_NAME): TextSelector(),
+                        vol.Required(CONF_VENDOR): TextSelector(),
+                        vol.Required(CONF_COMMAND_TOPIC): TextSelector(),
+                        vol.Required(CONF_STATE_TOPIC): TextSelector(),
+                        vol.Optional(CONF_STATE_TOPIC_2): TextSelector(),
+                        vol.Optional(CONF_AVAILABILITY_TOPIC): TextSelector(),
+                    }
+                ),
+                entry.data,
             ),
             errors=errors,
         )
@@ -509,15 +605,15 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @callback
     def async_get_options_flow(config_entry):
         """Get the options flow handler."""
-        return TasmotaIrhvacOptionsFlow(config_entry)
+        return TasmotaIrhvacOptionsFlow()
 
 
-class TasmotaIrhvacOptionsFlow(config_entries.OptionsFlow):
+# ---------------------------------------------------------------------------
+# Options flow
+# ---------------------------------------------------------------------------
+
+class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
     """Handle options flow for Tasmota IRHVAC."""
-
-    def __init__(self, config_entry):
-        """Initialize options flow."""
-        self._config_entry = config_entry
 
     async def async_step_init(self, user_input=None):
         """Show the options menu."""
@@ -537,23 +633,13 @@ class TasmotaIrhvacOptionsFlow(config_entries.OptionsFlow):
         """MQTT options."""
         if user_input is not None:
             return self.async_create_entry(
-                data={**self._config_entry.options, **user_input}
+                data={**self.config_entry.options, **user_input}
             )
 
-        opts = self._config_entry.options
         return self.async_show_form(
             step_id="mqtt",
-            data_schema=vol.Schema(
-                {
-                    vol.Optional(
-                        CONF_MQTT_DELAY,
-                        default=opts.get(CONF_MQTT_DELAY, DEFAULT_MQTT_DELAY),
-                    ): NumberSelector(
-                        NumberSelectorConfig(
-                            min=0, max=30, step=0.1, mode=NumberSelectorMode.BOX
-                        )
-                    ),
-                }
+            data_schema=self.add_suggested_values_to_schema(
+                OPTIONS_MQTT_SCHEMA, self.config_entry.options
             ),
         )
 
@@ -561,68 +647,13 @@ class TasmotaIrhvacOptionsFlow(config_entries.OptionsFlow):
         """Temperature options."""
         if user_input is not None:
             return self.async_create_entry(
-                data={**self._config_entry.options, **user_input}
+                data=_coerce_floats({**self.config_entry.options, **user_input})
             )
 
-        opts = self._config_entry.options
         return self.async_show_form(
             step_id="temperature",
-            data_schema=vol.Schema(
-                {
-                    vol.Optional(
-                        CONF_MIN_TEMP, default=opts.get(CONF_MIN_TEMP, DEFAULT_MIN_TEMP)
-                    ): NumberSelector(
-                        NumberSelectorConfig(min=0, max=50, step=1, mode=NumberSelectorMode.BOX)
-                    ),
-                    vol.Optional(
-                        CONF_MAX_TEMP, default=opts.get(CONF_MAX_TEMP, DEFAULT_MAX_TEMP)
-                    ): NumberSelector(
-                        NumberSelectorConfig(min=0, max=50, step=1, mode=NumberSelectorMode.BOX)
-                    ),
-                    vol.Optional(
-                        CONF_TARGET_TEMP, default=opts.get(CONF_TARGET_TEMP, DEFAULT_TARGET_TEMP)
-                    ): NumberSelector(
-                        NumberSelectorConfig(min=0, max=50, step=1, mode=NumberSelectorMode.BOX)
-                    ),
-                    vol.Optional(
-                        CONF_PRECISION, default=opts.get(CONF_PRECISION, DEFAULT_PRECISION)
-                    ): SelectSelector(
-                        SelectSelectorConfig(
-                            options=[
-                                {"value": str(PRECISION_TENTHS), "label": "0.1"},
-                                {"value": str(PRECISION_HALVES), "label": "0.5"},
-                                {"value": str(PRECISION_WHOLE), "label": "1"},
-                            ],
-                            mode=SelectSelectorMode.DROPDOWN,
-                        )
-                    ),
-                    vol.Optional(
-                        CONF_TEMP_STEP, default=opts.get(CONF_TEMP_STEP, PRECISION_WHOLE)
-                    ): SelectSelector(
-                        SelectSelectorConfig(
-                            options=[
-                                {"value": str(PRECISION_HALVES), "label": "0.5"},
-                                {"value": str(PRECISION_WHOLE), "label": "1"},
-                            ],
-                            mode=SelectSelectorMode.DROPDOWN,
-                        )
-                    ),
-                    vol.Optional(
-                        CONF_CELSIUS, default=opts.get(CONF_CELSIUS, DEFAULT_CONF_CELSIUS)
-                    ): SelectSelector(
-                        SelectSelectorConfig(options=["on", "off"], mode=SelectSelectorMode.DROPDOWN)
-                    ),
-                    vol.Optional(
-                        CONF_AWAY_TEMP,
-                        description={"suggested_value": opts.get(CONF_AWAY_TEMP)},
-                    ): NumberSelector(
-                        NumberSelectorConfig(min=0, max=50, step=1, mode=NumberSelectorMode.BOX)
-                    ),
-                    vol.Optional(
-                        CONF_IGNORE_OFF_TEMP,
-                        default=opts.get(CONF_IGNORE_OFF_TEMP, DEFAULT_IGNORE_OFF_TEMP),
-                    ): BooleanSelector(),
-                }
+            data_schema=self.add_suggested_values_to_schema(
+                OPTIONS_TEMPERATURE_SCHEMA, self.config_entry.options
             ),
         )
 
@@ -630,43 +661,13 @@ class TasmotaIrhvacOptionsFlow(config_entries.OptionsFlow):
         """Mode options."""
         if user_input is not None:
             return self.async_create_entry(
-                data={**self._config_entry.options, **user_input}
+                data={**self.config_entry.options, **user_input}
             )
 
-        opts = self._config_entry.options
         return self.async_show_form(
             step_id="modes",
-            data_schema=vol.Schema(
-                {
-                    vol.Optional(
-                        CONF_MODES_LIST, default=opts.get(CONF_MODES_LIST, DEFAULT_MODES_LIST)
-                    ): SelectSelector(
-                        SelectSelectorConfig(options=HVAC_MODES, multiple=True, mode=SelectSelectorMode.DROPDOWN)
-                    ),
-                    vol.Optional(
-                        CONF_FAN_LIST, default=opts.get(CONF_FAN_LIST, DEFAULT_FAN_LIST)
-                    ): SelectSelector(
-                        SelectSelectorConfig(options=ALL_FAN_SPEEDS, multiple=True, mode=SelectSelectorMode.DROPDOWN)
-                    ),
-                    vol.Optional(
-                        CONF_SWING_LIST, default=opts.get(CONF_SWING_LIST, DEFAULT_SWING_LIST)
-                    ): SelectSelector(
-                        SelectSelectorConfig(
-                            options=[SWING_OFF, SWING_VERTICAL, SWING_HORIZONTAL, SWING_BOTH],
-                            multiple=True, mode=SelectSelectorMode.DROPDOWN,
-                        )
-                    ),
-                    vol.Optional(
-                        CONF_INITIAL_OPERATION_MODE,
-                        default=opts.get(CONF_INITIAL_OPERATION_MODE, HVACMode.OFF),
-                    ): SelectSelector(
-                        SelectSelectorConfig(options=HVAC_MODES, mode=SelectSelectorMode.DROPDOWN)
-                    ),
-                    vol.Optional(
-                        CONF_KEEP_MODE,
-                        default=opts.get(CONF_KEEP_MODE, DEFAULT_CONF_KEEP_MODE),
-                    ): BooleanSelector(),
-                }
+            data_schema=self.add_suggested_values_to_schema(
+                OPTIONS_MODES_SCHEMA, self.config_entry.options
             ),
         )
 
@@ -674,43 +675,13 @@ class TasmotaIrhvacOptionsFlow(config_entries.OptionsFlow):
         """Default values options."""
         if user_input is not None:
             return self.async_create_entry(
-                data={**self._config_entry.options, **user_input}
+                data={**self.config_entry.options, **user_input}
             )
 
-        opts = self._config_entry.options
-        on_off = SelectSelectorConfig(options=["off", "on"], mode=SelectSelectorMode.DROPDOWN)
         return self.async_show_form(
             step_id="defaults",
-            data_schema=vol.Schema(
-                {
-                    vol.Optional(CONF_QUIET, default=opts.get(CONF_QUIET, DEFAULT_CONF_QUIET)): SelectSelector(on_off),
-                    vol.Optional(CONF_TURBO, default=opts.get(CONF_TURBO, DEFAULT_CONF_TURBO)): SelectSelector(on_off),
-                    vol.Optional(CONF_ECONO, default=opts.get(CONF_ECONO, DEFAULT_CONF_ECONO)): SelectSelector(on_off),
-                    vol.Optional(CONF_MODEL, default=opts.get(CONF_MODEL, DEFAULT_CONF_MODEL)): TextSelector(),
-                    vol.Optional(CONF_LIGHT, default=opts.get(CONF_LIGHT, DEFAULT_CONF_LIGHT)): SelectSelector(on_off),
-                    vol.Optional(CONF_FILTER, default=opts.get(CONF_FILTER, DEFAULT_CONF_FILTER)): SelectSelector(on_off),
-                    vol.Optional(CONF_CLEAN, default=opts.get(CONF_CLEAN, DEFAULT_CONF_CLEAN)): SelectSelector(on_off),
-                    vol.Optional(CONF_BEEP, default=opts.get(CONF_BEEP, DEFAULT_CONF_BEEP)): SelectSelector(on_off),
-                    vol.Optional(CONF_SLEEP, default=opts.get(CONF_SLEEP, DEFAULT_CONF_SLEEP)): TextSelector(),
-                    vol.Optional(
-                        CONF_SWINGV,
-                        description={"suggested_value": opts.get(CONF_SWINGV)},
-                    ): SelectSelector(
-                        SelectSelectorConfig(
-                            options=["off", "auto", "highest", "high", "middle", "low", "lowest"],
-                            mode=SelectSelectorMode.DROPDOWN,
-                        )
-                    ),
-                    vol.Optional(
-                        CONF_SWINGH,
-                        description={"suggested_value": opts.get(CONF_SWINGH)},
-                    ): SelectSelector(
-                        SelectSelectorConfig(
-                            options=["off", "auto", "left max", "left", "middle", "right", "right max", "wide"],
-                            mode=SelectSelectorMode.DROPDOWN,
-                        )
-                    ),
-                }
+            data_schema=self.add_suggested_values_to_schema(
+                OPTIONS_DEFAULTS_SCHEMA, self.config_entry.options
             ),
         )
 
@@ -718,29 +689,13 @@ class TasmotaIrhvacOptionsFlow(config_entries.OptionsFlow):
         """Sensor entity options."""
         if user_input is not None:
             return self.async_create_entry(
-                data={**self._config_entry.options, **user_input}
+                data={**self.config_entry.options, **user_input}
             )
 
-        opts = self._config_entry.options
         return self.async_show_form(
             step_id="sensors",
-            data_schema=vol.Schema(
-                {
-                    vol.Optional(
-                        CONF_TEMP_SENSOR,
-                        description={"suggested_value": opts.get(CONF_TEMP_SENSOR)},
-                    ): EntitySelector(EntitySelectorConfig(domain="sensor")),
-                    vol.Optional(
-                        CONF_HUMIDITY_SENSOR,
-                        description={"suggested_value": opts.get(CONF_HUMIDITY_SENSOR)},
-                    ): EntitySelector(EntitySelectorConfig(domain="sensor")),
-                    vol.Optional(
-                        CONF_POWER_SENSOR,
-                        description={"suggested_value": opts.get(CONF_POWER_SENSOR)},
-                    ): EntitySelector(
-                        EntitySelectorConfig(domain=["binary_sensor", "sensor"])
-                    ),
-                }
+            data_schema=self.add_suggested_values_to_schema(
+                OPTIONS_SENSORS_SCHEMA, self.config_entry.options
             ),
         )
 
@@ -748,31 +703,12 @@ class TasmotaIrhvacOptionsFlow(config_entries.OptionsFlow):
         """Advanced options."""
         if user_input is not None:
             return self.async_create_entry(
-                data={**self._config_entry.options, **user_input}
+                data={**self.config_entry.options, **user_input}
             )
 
-        opts = self._config_entry.options
         return self.async_show_form(
             step_id="advanced_options",
-            data_schema=vol.Schema(
-                {
-                    vol.Optional(
-                        CONF_TOGGLE_LIST, default=opts.get(CONF_TOGGLE_LIST, [])
-                    ): SelectSelector(
-                        SelectSelectorConfig(
-                            options=TOGGLE_ALL_LIST,
-                            multiple=True,
-                            mode=SelectSelectorMode.DROPDOWN,
-                        )
-                    ),
-                    vol.Optional(
-                        CONF_SPECIAL_MODE, default=opts.get(CONF_SPECIAL_MODE, "")
-                    ): SelectSelector(
-                        SelectSelectorConfig(
-                            options=["", "auto", "cool", "dry", "fan_only", "heat", "off"],
-                            mode=SelectSelectorMode.DROPDOWN,
-                        )
-                    ),
-                }
+            data_schema=self.add_suggested_values_to_schema(
+                OPTIONS_ADVANCED_SCHEMA, self.config_entry.options
             ),
         )

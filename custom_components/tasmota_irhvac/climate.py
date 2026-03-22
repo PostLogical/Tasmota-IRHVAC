@@ -213,7 +213,7 @@ PLATFORM_SCHEMA = CLIMATE_PLATFORM_SCHEMA.extend(
             [PRECISION_TENTHS, PRECISION_HALVES, PRECISION_WHOLE]
         ),
         vol.Optional(CONF_TEMP_STEP, default=PRECISION_WHOLE): vol.In(
-            [PRECISION_HALVES, PRECISION_WHOLE]
+            [PRECISION_HALVES, PRECISION_WHOLE, 2.0]
         ),
         vol.Optional(CONF_MODES_LIST, default=DEFAULT_MODES_LIST): vol.All(
             cv.ensure_list, [vol.In(HVAC_MODES)]
