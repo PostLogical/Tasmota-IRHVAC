@@ -1,7 +1,7 @@
 {
   "domain": "tasmota_irhvac",
   "name": "Tasmota IRHVAC",
-  "version": "0.2.2-config-flow-beta",
+  "version": "0.2.3-config-flow-beta",
   "config_flow": true,
   "documentation": "https://github.com/hristo-atanasov/Tasmota-IRHVAC",
   "issue_tracker": "https://github.com/hristo-atanasov/Tasmota-IRHVAC/issues",
