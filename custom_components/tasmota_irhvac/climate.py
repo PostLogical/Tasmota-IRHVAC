@@ -412,7 +412,9 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
         "Your configuration has been imported. Please remove the YAML "
         "configuration and restart Home Assistant."
     )
-    hass.components.persistent_notification.async_create(
+    from homeassistant.components.persistent_notification import async_create
+    async_create(
+        hass,
         "Your Tasmota IRHVAC YAML configuration has been imported into the UI. "
         "Please remove the `platform: tasmota_irhvac` entry from your "
         "configuration.yaml and restart Home Assistant.",
