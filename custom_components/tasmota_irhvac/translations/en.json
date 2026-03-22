@@ -95,7 +95,8 @@
       "vendor_required": "Vendor is required."
     },
     "abort": {
-      "already_configured": "This device is already configured."
+      "already_configured": "This device is already configured.",
+      "reconfigure_successful": "Device reconfigured successfully."
     }
   },
   "options": {
