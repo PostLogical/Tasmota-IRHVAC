@@ -194,11 +194,11 @@ _TEMP_STEP_SELECTOR = SelectSelector(
 )
 
 
-def _coerce_floats(data: dict) -> dict:
-    """Coerce SelectSelector string values to float for numeric keys."""
+def _stringify_floats(data: dict) -> dict:
+    """Ensure SelectSelector numeric keys are stored as strings for UI consistency."""
     for key in _FLOAT_KEYS:
-        if key in data and isinstance(data[key], str):
-            data[key] = float(data[key])
+        if key in data and not isinstance(data[key], str):
+            data[key] = str(data[key])
     return data
 
 
@@ -441,10 +441,10 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         )
                     ),
                     vol.Optional(
-                        CONF_PRECISION, default=DEFAULT_PRECISION
+                        CONF_PRECISION, default=str(DEFAULT_PRECISION)
                     ): _PRECISION_SELECTOR,
                     vol.Optional(
-                        CONF_TEMP_STEP, default=PRECISION_WHOLE
+                        CONF_TEMP_STEP, default=str(PRECISION_WHOLE)
                     ): _TEMP_STEP_SELECTOR,
                     vol.Optional(
                         CONF_CELSIUS, default=DEFAULT_CONF_CELSIUS
@@ -657,7 +657,7 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._abort_if_unique_id_configured()
 
         data = {k: v for k, v in self._user_input.items() if k in DATA_KEYS}
-        options = _coerce_floats(
+        options = _stringify_floats(
             {k: v for k, v in self._user_input.items() if k not in DATA_KEYS}
         )
 
@@ -684,7 +684,7 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._abort_if_unique_id_configured()
 
         data = {k: v for k, v in import_data.items() if k in DATA_KEYS}
-        options = _coerce_floats(
+        options = _stringify_floats(
             {k: v for k, v in import_data.items() if k not in DATA_KEYS}
         )
 
@@ -781,7 +781,7 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
         """Temperature options."""
         if user_input is not None:
             return self.async_create_entry(
-                data=_coerce_floats({**self.config_entry.options, **user_input})
+                data=_stringify_floats({**self.config_entry.options, **user_input})
             )
 
         return self.async_show_form(
