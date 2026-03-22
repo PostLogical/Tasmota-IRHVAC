@@ -85,6 +85,7 @@ from .const import (
     CONF_PI_ENABLED,
     CONF_PI_FF_COOL_REFERENCE,
     CONF_PI_FF_COOL_SLOPE,
+    CONF_PI_FF_SUPPRESS_LEARNING_ENTITY,
     CONF_PI_FF_HEAT_REFERENCE,
     CONF_PI_FF_HEAT_SLOPE,
     CONF_PI_KI,
@@ -296,6 +297,7 @@ PLATFORM_SCHEMA = CLIMATE_PLATFORM_SCHEMA.extend(
         vol.Optional(CONF_PI_FF_HEAT_SLOPE, default=DEFAULT_PI_FF_HEAT_SLOPE): vol.Coerce(float),
         vol.Optional(CONF_PI_FF_COOL_REFERENCE, default=DEFAULT_PI_FF_COOL_REFERENCE): vol.Coerce(float),
         vol.Optional(CONF_PI_FF_COOL_SLOPE, default=DEFAULT_PI_FF_COOL_SLOPE): vol.Coerce(float),
+        vol.Optional(CONF_PI_FF_SUPPRESS_LEARNING_ENTITY): cv.entity_id,
     }
 )
 
