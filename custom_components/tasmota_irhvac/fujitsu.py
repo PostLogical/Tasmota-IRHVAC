@@ -264,10 +264,39 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
             _LOGGER.debug("PI tick: skipping, HVAC OFF")
             self._pi_integral = 0.0
             return
-        if self._attr_current_temperature is None or self._desired_temp is None:
-            _LOGGER.debug("PI tick: skipping, current_temp=%s desired=%s",
-                          self._attr_current_temperature, self._desired_temp)
+        if self._desired_temp is None:
+            _LOGGER.debug("PI tick: skipping, desired_temp is None")
             return
+        if self._attr_current_temperature is None:
+            # Sensor unavailable — wait 60s for recovery (handles brief blips)
+            _LOGGER.info("PI: temp sensor unavailable, waiting 60s for recovery")
+            await asyncio.sleep(60)
+            if self._attr_current_temperature is not None:
+                _LOGGER.info("PI: temp sensor recovered after wait")
+            else:
+                # Still unavailable — fall back to feedforward-only setpoint
+                _LOGGER.warning("PI: temp sensor still unavailable, using feedforward-only fallback")
+                desired_c = TemperatureConverter.convert(
+                    self._desired_temp, self.temperature_unit, UnitOfTemperature.CELSIUS,
+                )
+                is_heating = self._attr_hvac_mode == HVACMode.HEAT
+                if not is_heating and self._attr_hvac_mode not in (HVACMode.COOL, HVACMode.DRY):
+                    return
+                ff_offset = 0.0
+                if self._outdoor_temp is not None:
+                    bucket_key = round(self._outdoor_temp / 3) * 3
+                    buckets = self._ff_heat_buckets if is_heating else self._ff_cool_buckets
+                    ff_offset = buckets.get(bucket_key, 0.0)
+                self._ff_offset = ff_offset
+                self._pi_integral = 0.0
+                new_setpoint = round(max(self._min_temp, min(self._max_temp, desired_c + ff_offset)))
+                if new_setpoint != self._hp_setpoint:
+                    _LOGGER.info("PI fallback: setpoint %s -> %s (FF only)", self._hp_setpoint, new_setpoint)
+                    self._hp_setpoint = new_setpoint
+                    self._pi_command_pending = True
+                    await self.send_ir()
+                self.async_schedule_update_ha_state()
+                return
         # Don't send IR while a Fujitsu preset is active (would cancel it)
         if self._min_heat or self._powerful or self._economy:
             _LOGGER.debug("PI tick: skipping, preset active")
