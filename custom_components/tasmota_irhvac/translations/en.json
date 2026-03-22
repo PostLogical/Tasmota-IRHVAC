@@ -116,6 +116,9 @@
         "title": "MQTT Settings",
         "data": {
           "mqtt_delay": "MQTT Delay (seconds)"
+        },
+        "data_description": {
+          "mqtt_delay": "Delay in seconds between MQTT commands. Use when operating multiple devices to stagger high-current peaks."
         }
       },
       "temperature": {
@@ -131,7 +134,9 @@
           "ignore_off_temp": "Ignore Off Temperature"
         },
         "data_description": {
-          "celsius_mode": "Temperature unit for IR commands sent to the AC. Most AC units use Celsius internally ('on') even if your HA or remote displays Fahrenheit."
+          "celsius_mode": "Temperature unit for IR commands sent to the AC. Most AC units use Celsius internally ('on') even if your HA or remote displays Fahrenheit.",
+          "ignore_off_temp": "When the AC is turned off via remote, some devices report the lowest temperature. Enable to keep showing the last target temperature instead.",
+          "away_temp": "Temperature to use when Away preset is active. Leave blank to disable the Away preset."
         }
       },
       "modes": {
@@ -142,6 +147,10 @@
           "supported_swing_list": "Supported Swing Modes",
           "initial_operation_mode": "Initial Operation Mode",
           "keep_mode_when_off": "Keep Mode When Off"
+        },
+        "data_description": {
+          "supported_fan_speeds": "Note: auto_max/max_high are for devices where the remote shows max but Tasmota reports high, and auto which is actually max.",
+          "keep_mode_when_off": "Keep the last HVAC mode when turning off. Required for MITSUBISHI_AC, ECOCLIM, and similar devices."
         }
       },
       "defaults": {
@@ -158,6 +167,9 @@
           "default_sleep_mode": "Sleep Mode",
           "default_swingv": "Default Vertical Swing",
           "default_swingh": "Default Horizontal Swing"
+        },
+        "data_description": {
+          "hvac_model": "AC model identifier. Use -1 for auto-detection."
         }
       },
       "sensors": {
@@ -166,6 +178,11 @@
           "temperature_sensor": "Temperature Sensor",
           "humidity_sensor": "Humidity Sensor",
           "power_sensor": "Power Sensor"
+        },
+        "data_description": {
+          "temperature_sensor": "External temperature sensor entity for more accurate room temperature readings.",
+          "humidity_sensor": "External humidity sensor entity.",
+          "power_sensor": "Binary sensor or sensor that indicates whether the AC unit is powered on."
         }
       },
       "advanced_options": {
@@ -173,6 +190,10 @@
         "data": {
           "toggle_list": "Toggle Properties",
           "special_mode": "Special Mode"
+        },
+        "data_description": {
+          "toggle_list": "Properties that don't retain the On state. Set this if your AC has toggle-only controls (pressing the button toggles between on and off rather than setting a specific state).",
+          "special_mode": "Mode to enter for special functions like automatic cleaning after operation. Leave blank to disable."
         }
       },
       "pi_controller": {
