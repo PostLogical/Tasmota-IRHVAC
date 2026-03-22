@@ -15,10 +15,10 @@
         },
         "data_description": {
           "vendor": "The IR protocol vendor (e.g., SAMSUNG_AC, ELECTRA_AC, FUJITSU_AC, MITSUBISHI_AC).",
-          "command_topic": "MQTT topic for sending IR commands. Usually cmnd/{device}/irhvac.",
-          "state_topic": "Primary MQTT topic for receiving AC state updates. Use tele/{device}/RESULT to capture all IR signals (including physical remote).",
-          "state_topic_2": "Optional secondary MQTT state topic. Use stat/{device}/RESULT to also capture IR transmission confirmations. Subscribes to both topics if set.",
-          "availability_topic": "MQTT topic for device online/offline status. Leave blank to auto-derive from command topic (tele/{device}/LWT).",
+          "command_topic": "MQTT topic for sending IR commands. Usually cmnd/'{device}'/irhvac.",
+          "state_topic": "Primary MQTT topic for receiving AC state updates. Use tele/'{device}'/RESULT to capture all IR signals (including physical remote).",
+          "state_topic_2": "Optional secondary MQTT state topic. Use stat/'{device}'/RESULT to also capture IR transmission confirmations. Subscribes to both topics if set.",
+          "availability_topic": "MQTT topic for device online/offline status. Leave blank to auto-derive from command topic (tele/'{device}'/LWT).",
           "mqtt_delay": "Delay in seconds between MQTT commands. Use when operating multiple devices to stagger high-current peaks."
         }
       },
