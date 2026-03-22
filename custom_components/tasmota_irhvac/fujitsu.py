@@ -649,6 +649,16 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
             await asyncio.sleep(float(self._mqtt_delay))
         await mqtt.async_publish(self.hass, irsend_topic, raw_code)
 
+    # ── Service Calls ───────────────────────────────────────────────────
+
+    async def async_reset_ff_buckets(self):
+        """Reset feedforward buckets to seed values from config."""
+        self._ff_heat_buckets = _seed_buckets(self._ff_heat_reference, self._ff_heat_slope)
+        self._ff_cool_buckets = _seed_buckets(self._ff_cool_reference, self._ff_cool_slope, is_cooling=True)
+        self._pi_integral = 0.0
+        _LOGGER.info("FF buckets reset to seed values, integral zeroed")
+        self.async_schedule_update_ha_state()
+
     # ── Extra State Attributes ─────────────────────────────────────────
 
     @property

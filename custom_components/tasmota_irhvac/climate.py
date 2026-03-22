@@ -433,6 +433,10 @@ SERVICE_TO_METHOD = {
         "method": "async_set_swingh",
         "schema": SERVICE_SCHEMA_SET_SWINGH,
     },
+    "reset_ff_buckets": {
+        "method": "async_reset_ff_buckets",
+        "schema": IRHVAC_SERVICE_SCHEMA,
+    },
 }
 
 
