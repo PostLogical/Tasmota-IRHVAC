@@ -14,7 +14,7 @@ from homeassistant.components.climate.const import (
     SWING_OFF,
     SWING_VERTICAL,
 )
-from homeassistant.const import ATTR_TEMPERATURE, STATE_ON, UnitOfTemperature
+from homeassistant.const import ATTR_TEMPERATURE, STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN, UnitOfTemperature
 from homeassistant.core import callback
 from homeassistant.helpers.event import (
     async_call_later,
@@ -39,6 +39,7 @@ from .const import (
     CONF_PI_FF_HEAT_REFERENCE,
     CONF_PI_FF_HEAT_SLOPE,
     CONF_PI_KI,
+    CONF_PI_FF_SUPPRESS_LEARNING_ENTITY,
     CONF_PI_KP,
     CONF_PI_MIN_INTERVAL,
     DEFAULT_PI_DEADBAND,
@@ -129,6 +130,9 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
         # Feedforward buckets (seeded from linear config, refined by auto-learning)
         self._ff_heat_buckets = _seed_buckets(self._ff_heat_reference, self._ff_heat_slope)
         self._ff_cool_buckets = _seed_buckets(self._ff_cool_reference, self._ff_cool_slope, is_cooling=True)
+
+        # Supplemental heat learning suppression
+        self._ff_suppress_learning_entity = config.get(CONF_PI_FF_SUPPRESS_LEARNING_ENTITY)
 
         # Outdoor temp state
         self._outdoor_temp = None
@@ -344,13 +348,22 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
             self._pi_integral *= 0.9
             self._ff_settled_ticks += 1
             # Auto-learn: record offset when settled for 2+ ticks
-            if self._ff_settled_ticks >= 2 and self._outdoor_temp is not None:
+            learning_suppressed = False
+            if self._ff_suppress_learning_entity:
+                suppress_state = self.hass.states.get(self._ff_suppress_learning_entity)
+                if suppress_state and suppress_state.state not in (
+                    STATE_UNAVAILABLE, STATE_UNKNOWN, "off",
+                ):
+                    learning_suppressed = True
+            if self._ff_settled_ticks >= 2 and self._outdoor_temp is not None and not learning_suppressed:
                 observed_offset = self._hp_setpoint - desired_c
                 bucket_key = round(self._outdoor_temp / 3) * 3
                 # Learn into the bucket set matching the current mode
                 learn_buckets = self._ff_heat_buckets if is_heating else self._ff_cool_buckets
                 old = learn_buckets.get(bucket_key, 0.0)
                 learn_buckets[bucket_key] = 0.8 * old + 0.2 * observed_offset
+            elif learning_suppressed and self._ff_settled_ticks >= 2:
+                _LOGGER.debug("PI: FF learning suppressed by %s", self._ff_suppress_learning_entity)
             p_term = 0.0  # no proportional action in deadband
         else:
             self._ff_settled_ticks = 0

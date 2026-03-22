@@ -185,6 +185,7 @@ CONF_PI_FF_HEAT_REFERENCE = "pi_ff_heat_reference"
 CONF_PI_FF_HEAT_SLOPE = "pi_ff_heat_slope"
 CONF_PI_FF_COOL_REFERENCE = "pi_ff_cool_reference"
 CONF_PI_FF_COOL_SLOPE = "pi_ff_cool_slope"
+CONF_PI_FF_SUPPRESS_LEARNING_ENTITY = "pi_ff_suppress_learning_entity"
 
 # PI controller defaults
 DEFAULT_PI_ENABLED = False
