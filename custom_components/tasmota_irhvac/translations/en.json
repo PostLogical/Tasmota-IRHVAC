@@ -78,6 +78,36 @@
           "power_sensor": "Binary sensor or sensor that indicates whether the AC unit is powered on."
         }
       },
+      "pi_controller": {
+        "title": "PI Controller",
+        "description": "Configure the PI+feedforward controller for automatic temperature regulation.",
+        "data": {
+          "pi_enabled": "Enable PI Controller",
+          "pi_kp": "Proportional Gain (Kp)",
+          "pi_ki": "Integral Gain (Ki)",
+          "pi_min_interval": "Minimum Interval (seconds)",
+          "pi_deadband": "Deadband (\u00b0C)",
+          "outdoor_temp_sensor": "Outdoor Temperature Sensor",
+          "pi_ff_heat_reference": "FF Heat Reference Temp (\u00b0C)",
+          "pi_ff_heat_slope": "FF Heat Slope",
+          "pi_ff_cool_reference": "FF Cool Reference Temp (\u00b0C)",
+          "pi_ff_cool_slope": "FF Cool Slope",
+          "pi_ff_suppress_learning_entity": "FF Suppress Learning Entity"
+        },
+        "data_description": {
+          "pi_enabled": "Enable the PI+feedforward controller for automatic temperature regulation.",
+          "pi_kp": "Proportional gain. Higher values react faster to temperature errors but may overshoot.",
+          "pi_ki": "Integral gain. Eliminates steady-state error over time.",
+          "pi_min_interval": "Minimum seconds between PI adjustments.",
+          "pi_deadband": "Temperature range around setpoint where no adjustments are made.",
+          "outdoor_temp_sensor": "Outdoor temperature sensor for feedforward compensation.",
+          "pi_ff_heat_reference": "Outdoor temperature at which no feedforward heating offset is needed.",
+          "pi_ff_heat_slope": "Degrees of heating offset per degree below the heat reference.",
+          "pi_ff_cool_reference": "Outdoor temperature at which no feedforward cooling offset is needed.",
+          "pi_ff_cool_slope": "Degrees of cooling offset per degree above the cool reference.",
+          "pi_ff_suppress_learning_entity": "Entity that suppresses FF auto-learning when on (e.g., during window-open events)."
+        }
+      },
       "reconfigure": {
         "title": "Reconfigure Device",
         "description": "Update the device connection settings.",

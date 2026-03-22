@@ -499,10 +499,17 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             ),
         )
 
+    def _vendor_is_fujitsu(self):
+        """Check if the configured vendor is a Fujitsu model."""
+        vendor = self._user_input.get(CONF_VENDOR, "")
+        return vendor.upper().startswith("FUJITSU")
+
     async def async_step_advanced(self, user_input=None):
         """Step 3: Advanced & Sensors."""
         if user_input is not None:
             self._user_input.update(user_input)
+            if self._vendor_is_fujitsu():
+                return await self.async_step_pi_controller()
             return await self._create_entry()
 
         return self.async_show_form(
@@ -573,6 +580,69 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ),
                     vol.Optional(CONF_POWER_SENSOR): EntitySelector(
                         EntitySelectorConfig(domain=["binary_sensor", "sensor"])
+                    ),
+                }
+            ),
+        )
+
+    async def async_step_pi_controller(self, user_input=None):
+        """Step 4: PI Controller (Fujitsu only)."""
+        if user_input is not None:
+            self._user_input.update(user_input)
+            return await self._create_entry()
+
+        return self.async_show_form(
+            step_id="pi_controller",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(
+                        CONF_PI_ENABLED, default=DEFAULT_PI_ENABLED
+                    ): BooleanSelector(),
+                    vol.Optional(
+                        CONF_PI_KP, default=DEFAULT_PI_KP
+                    ): NumberSelector(
+                        NumberSelectorConfig(min=0, max=20, step=0.1, mode=NumberSelectorMode.BOX)
+                    ),
+                    vol.Optional(
+                        CONF_PI_KI, default=DEFAULT_PI_KI
+                    ): NumberSelector(
+                        NumberSelectorConfig(min=0, max=5, step=0.01, mode=NumberSelectorMode.BOX)
+                    ),
+                    vol.Optional(
+                        CONF_PI_MIN_INTERVAL, default=DEFAULT_PI_MIN_INTERVAL
+                    ): NumberSelector(
+                        NumberSelectorConfig(min=60, max=3600, step=60, mode=NumberSelectorMode.BOX)
+                    ),
+                    vol.Optional(
+                        CONF_PI_DEADBAND, default=DEFAULT_PI_DEADBAND
+                    ): NumberSelector(
+                        NumberSelectorConfig(min=0, max=5, step=0.1, mode=NumberSelectorMode.BOX)
+                    ),
+                    vol.Optional(CONF_OUTDOOR_TEMP_SENSOR): EntitySelector(
+                        EntitySelectorConfig(domain="sensor")
+                    ),
+                    vol.Optional(
+                        CONF_PI_FF_HEAT_REFERENCE, default=DEFAULT_PI_FF_HEAT_REFERENCE
+                    ): NumberSelector(
+                        NumberSelectorConfig(min=-20, max=50, step=0.5, mode=NumberSelectorMode.BOX)
+                    ),
+                    vol.Optional(
+                        CONF_PI_FF_HEAT_SLOPE, default=DEFAULT_PI_FF_HEAT_SLOPE
+                    ): NumberSelector(
+                        NumberSelectorConfig(min=0, max=5, step=0.05, mode=NumberSelectorMode.BOX)
+                    ),
+                    vol.Optional(
+                        CONF_PI_FF_COOL_REFERENCE, default=DEFAULT_PI_FF_COOL_REFERENCE
+                    ): NumberSelector(
+                        NumberSelectorConfig(min=0, max=60, step=0.5, mode=NumberSelectorMode.BOX)
+                    ),
+                    vol.Optional(
+                        CONF_PI_FF_COOL_SLOPE, default=DEFAULT_PI_FF_COOL_SLOPE
+                    ): NumberSelector(
+                        NumberSelectorConfig(min=0, max=5, step=0.05, mode=NumberSelectorMode.BOX)
+                    ),
+                    vol.Optional(CONF_PI_FF_SUPPRESS_LEARNING_ENTITY): EntitySelector(
+                        EntitySelectorConfig(domain=["input_boolean", "binary_sensor"])
                     ),
                 }
             ),
@@ -671,19 +741,26 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
     """Handle options flow for Tasmota IRHVAC."""
 
+    def _vendor_is_fujitsu(self):
+        """Check if the configured vendor is a Fujitsu model."""
+        vendor = self.config_entry.data.get(CONF_VENDOR, "")
+        return vendor.upper().startswith("FUJITSU")
+
     async def async_step_init(self, user_input=None):
         """Show the options menu."""
+        menu = [
+            "mqtt",
+            "temperature",
+            "modes",
+            "defaults",
+            "sensors",
+            "advanced_options",
+        ]
+        if self._vendor_is_fujitsu():
+            menu.append("pi_controller")
         return self.async_show_menu(
             step_id="init",
-            menu_options=[
-                "mqtt",
-                "temperature",
-                "modes",
-                "defaults",
-                "sensors",
-                "advanced_options",
-                "pi_controller",
-            ],
+            menu_options=menu,
         )
 
     async def async_step_mqtt(self, user_input=None):
