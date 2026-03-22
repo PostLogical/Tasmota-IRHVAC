@@ -126,6 +126,7 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
         self._ff_offset = 0.0
         self._pi_command_pending = False  # True while waiting for IR echo
         self._ff_settled_ticks = 0
+        self._sensor_unavailable = False  # True after confirmed sensor loss (skip repeated 60s waits)
 
         # Feedforward buckets (seeded from linear config, refined by auto-learning)
         self._ff_heat_buckets = _seed_buckets(self._ff_heat_reference, self._ff_heat_slope)
@@ -205,14 +206,18 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
             bucket_key = round(self._outdoor_temp / 3) * 3
             self._ff_offset = buckets.get(bucket_key, 0.0)
 
-        # Start PI timer and run first tick immediately
+        # Start PI timer; only run first tick if sensor is already available
+        # (zigbee sensors may take minutes — _async_sensor_changed handles that)
         if self._pi_enabled and self._temp_sensor:
             self._pi_timer_unsub = async_track_time_interval(
                 self.hass,
                 self._pi_tick,
                 timedelta(seconds=self._pi_min_interval),
             )
-            await self._pi_tick()
+            if self._attr_current_temperature is not None:
+                await self._pi_tick()
+            else:
+                _LOGGER.debug("PI: skipping initial tick, waiting for sensor")
 
     async def async_will_remove_from_hass(self):
         if self._pi_timer_unsub:
@@ -248,9 +253,13 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
         """Override to trigger PI tick when temp sensor first becomes available."""
         was_none = self._attr_current_temperature is None
         await super()._async_sensor_changed(entity_id_or_event, old_state, new_state)
-        # If current temp just became available, run PI immediately
+        # If current temp just became available (startup or recovery), run PI immediately
         if was_none and self._attr_current_temperature is not None and self._pi_enabled:
-            _LOGGER.debug("PI: temp sensor just became available, running immediate tick")
+            if self._sensor_unavailable:
+                _LOGGER.info("PI: temp sensor recovered, resuming full PI control")
+                self._sensor_unavailable = False
+            else:
+                _LOGGER.debug("PI: temp sensor just became available, running immediate tick")
             await self._pi_tick()
 
     async def _pi_tick(self, now=None):
@@ -272,14 +281,19 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
             _LOGGER.debug("PI tick: skipping, desired_temp is None")
             return
         if self._attr_current_temperature is None:
-            # Sensor unavailable — wait 60s for recovery (handles brief blips)
+            if self._sensor_unavailable:
+                # Already confirmed unavailable — skip wait, hold current setpoint
+                _LOGGER.debug("PI tick: sensor still unavailable, holding setpoint")
+                return
+            # Sensor just went unavailable — wait 60s for recovery (handles brief blips)
             _LOGGER.info("PI: temp sensor unavailable, waiting 60s for recovery")
             await asyncio.sleep(60)
             if self._attr_current_temperature is not None:
                 _LOGGER.info("PI: temp sensor recovered after wait")
             else:
-                # Still unavailable — fall back to feedforward-only setpoint
-                _LOGGER.warning("PI: temp sensor still unavailable, using feedforward-only fallback")
+                # Confirmed unavailable — set flag, fall back to FF-only setpoint
+                self._sensor_unavailable = True
+                _LOGGER.warning("PI: temp sensor confirmed unavailable, using feedforward-only fallback")
                 desired_c = TemperatureConverter.convert(
                     self._desired_temp, self.temperature_unit, UnitOfTemperature.CELSIUS,
                 )
