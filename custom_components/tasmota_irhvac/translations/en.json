@@ -70,6 +70,9 @@
           "power_sensor": "Power Sensor"
         },
         "data_description": {
+          "default_quiet_mode": "Quiet mode via IRHVAC JSON command. Note: Fujitsu units ignore this — use Fujitsu presets instead.",
+          "default_turbo_mode": "Turbo mode via IRHVAC JSON command. Note: Fujitsu units ignore this — use the Powerful preset instead.",
+          "default_econo_mode": "Economy mode via IRHVAC JSON command. Note: Fujitsu units ignore this — use the Economy preset instead.",
           "hvac_model": "AC model identifier. Use -1 for auto-detection.",
           "toggle_list": "Properties that don't retain the On state. Set this if your AC has toggle-only controls (pressing the button toggles between on and off rather than setting a specific state).",
           "special_mode": "Mode to enter for special functions like automatic cleaning after operation. Leave blank to disable.",
@@ -199,6 +202,9 @@
           "default_swingh": "Default Horizontal Swing"
         },
         "data_description": {
+          "default_quiet_mode": "Quiet mode via IRHVAC JSON command. Note: Fujitsu units ignore this — use Fujitsu presets instead.",
+          "default_turbo_mode": "Turbo mode via IRHVAC JSON command. Note: Fujitsu units ignore this — use the Powerful preset instead.",
+          "default_econo_mode": "Economy mode via IRHVAC JSON command. Note: Fujitsu units ignore this — use the Economy preset instead.",
           "hvac_model": "AC model identifier. Use -1 for auto-detection."
         }
       },
