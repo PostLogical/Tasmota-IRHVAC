@@ -88,11 +88,13 @@ from .const import (
     CONF_PI_FF_COOL_REFERENCE,
     CONF_PI_FF_COOL_SLOPE,
     CONF_PI_FF_SUPPRESS_LEARNING_ENTITY,
+    CONF_PI_FF_BIAS_ENTITY,
     CONF_PI_FF_HEAT_REFERENCE,
     CONF_PI_FF_HEAT_SLOPE,
     CONF_PI_KI,
     CONF_PI_KP,
     CONF_PI_MIN_INTERVAL,
+    CONF_PI_SETPOINT_WEIGHT,
     CONF_PRESET_MODES_LIST,
     CONF_AWAY_TEMP,
     CONF_BEEP,
@@ -155,6 +157,7 @@ from .const import (
     DEFAULT_PI_KI,
     DEFAULT_PI_KP,
     DEFAULT_PI_MIN_INTERVAL,
+    DEFAULT_PI_SETPOINT_WEIGHT,
     DEFAULT_MIN_TEMP,
     DEFAULT_MQTT_DELAY,
     DEFAULT_NAME,
@@ -301,6 +304,10 @@ PLATFORM_SCHEMA = CLIMATE_PLATFORM_SCHEMA.extend(
         vol.Optional(CONF_PI_FF_COOL_REFERENCE, default=DEFAULT_PI_FF_COOL_REFERENCE): vol.Coerce(float),
         vol.Optional(CONF_PI_FF_COOL_SLOPE, default=DEFAULT_PI_FF_COOL_SLOPE): vol.Coerce(float),
         vol.Optional(CONF_PI_FF_SUPPRESS_LEARNING_ENTITY): cv.entity_id,
+        vol.Optional(CONF_PI_FF_BIAS_ENTITY): cv.entity_id,
+        vol.Optional(CONF_PI_SETPOINT_WEIGHT, default=DEFAULT_PI_SETPOINT_WEIGHT): vol.All(
+            vol.Coerce(float), vol.Range(min=0.0, max=1.0)
+        ),
     }
 )
 

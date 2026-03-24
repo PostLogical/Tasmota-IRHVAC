@@ -41,8 +41,10 @@ from .const import (
     CONF_PI_FF_HEAT_SLOPE,
     CONF_PI_KI,
     CONF_PI_FF_SUPPRESS_LEARNING_ENTITY,
+    CONF_PI_FF_BIAS_ENTITY,
     CONF_PI_KP,
     CONF_PI_MIN_INTERVAL,
+    CONF_PI_SETPOINT_WEIGHT,
     DEFAULT_PI_DEADBAND,
     DEFAULT_PI_ENABLED,
     DEFAULT_PI_FF_COOL_REFERENCE,
@@ -52,6 +54,7 @@ from .const import (
     DEFAULT_PI_KI,
     DEFAULT_PI_KP,
     DEFAULT_PI_MIN_INTERVAL,
+    DEFAULT_PI_SETPOINT_WEIGHT,
     PRESET_ECONO,
     PRESET_MIN_HEAT,
     PRESET_POWERFUL,
@@ -128,14 +131,20 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
         self._ff_offset = 0.0
         self._pi_command_pending = False  # True while waiting for IR echo
         self._ff_settled_ticks = 0
-        self._sensor_unavailable = False  # True after confirmed sensor loss (skip repeated 60s waits)
+        self._sensor_unavailable = False  # True after confirmed sensor loss
+        self._sensor_recovery_pending = False  # True while 60s grace period is active
+        self._sensor_recovery_unsub = None  # Cancel handle for 60s recovery callback
 
         # Feedforward buckets (seeded from linear config, refined by auto-learning)
         self._ff_heat_buckets = _seed_buckets(self._ff_heat_reference, self._ff_heat_slope)
         self._ff_cool_buckets = _seed_buckets(self._ff_cool_reference, self._ff_cool_slope, is_cooling=True)
 
-        # Supplemental heat learning suppression
+        # Setpoint weighting for 2-DOF PI (0=P ignores setpoint changes, 1=standard PI)
+        self._pi_setpoint_weight = config.get(CONF_PI_SETPOINT_WEIGHT, DEFAULT_PI_SETPOINT_WEIGHT)
+
+        # External input entities
         self._ff_suppress_learning_entity = config.get(CONF_PI_FF_SUPPRESS_LEARNING_ENTITY)
+        self._ff_bias_entity = config.get(CONF_PI_FF_BIAS_ENTITY)
 
         # Outdoor temp state
         self._outdoor_temp = None
@@ -225,6 +234,9 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
         if self._pi_timer_unsub:
             self._pi_timer_unsub()
             self._pi_timer_unsub = None
+        if self._sensor_recovery_unsub:
+            self._sensor_recovery_unsub()
+            self._sensor_recovery_unsub = None
         if self._powerful_timer_unsub:
             self._powerful_timer_unsub()
             self._powerful_timer_unsub = None
@@ -257,12 +269,51 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
         await super()._async_sensor_changed(entity_id_or_event, old_state, new_state)
         # If current temp just became available (startup or recovery), run PI immediately
         if was_none and self._attr_current_temperature is not None and self._pi_enabled:
+            # Cancel pending recovery callback if sensor came back early
+            if self._sensor_recovery_unsub:
+                self._sensor_recovery_unsub()
+                self._sensor_recovery_unsub = None
+            self._sensor_recovery_pending = False
             if self._sensor_unavailable:
                 _LOGGER.info("PI: temp sensor recovered, resuming full PI control")
                 self._sensor_unavailable = False
             else:
                 _LOGGER.debug("PI: temp sensor just became available, running immediate tick")
             await self._pi_tick()
+
+    async def _check_sensor_recovery(self, _now=None):
+        """Called 60s after sensor went unavailable. Fall back to FF-only if still gone."""
+        self._sensor_recovery_pending = False
+        self._sensor_recovery_unsub = None
+        if self._attr_current_temperature is not None:
+            _LOGGER.info("PI: temp sensor recovered during grace period")
+            await self._pi_tick()
+            return
+        # Confirmed unavailable — set flag, fall back to feedforward-only setpoint
+        self._sensor_unavailable = True
+        _LOGGER.warning("PI: temp sensor confirmed unavailable, using feedforward-only fallback")
+        if self._desired_temp is None:
+            return
+        desired_c = TemperatureConverter.convert(
+            self._desired_temp, self.temperature_unit, UnitOfTemperature.CELSIUS,
+        )
+        is_heating = self._attr_hvac_mode == HVACMode.HEAT
+        if not is_heating and self._attr_hvac_mode not in (HVACMode.COOL, HVACMode.DRY):
+            return
+        ff_offset = 0.0
+        if self._outdoor_temp is not None:
+            bucket_key = round(self._outdoor_temp / 3) * 3
+            buckets = self._ff_heat_buckets if is_heating else self._ff_cool_buckets
+            ff_offset = buckets.get(bucket_key, 0.0)
+        self._ff_offset = ff_offset
+        self._pi_integral = 0.0
+        new_setpoint = round(max(self._min_temp, min(self._max_temp, desired_c + ff_offset)))
+        if new_setpoint != self._hp_setpoint:
+            _LOGGER.info("PI fallback: setpoint %s -> %s (FF only)", self._hp_setpoint, new_setpoint)
+            self._hp_setpoint = new_setpoint
+            self._pi_command_pending = True
+            await self.send_ir()
+        self.async_schedule_update_ha_state()
 
     async def _pi_tick(self, now=None):
         """Periodic PI + feedforward controller tick."""
@@ -283,40 +334,17 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
             _LOGGER.debug("PI tick: skipping, desired_temp is None")
             return
         if self._attr_current_temperature is None:
-            if self._sensor_unavailable:
-                # Already confirmed unavailable — skip wait, hold current setpoint
-                _LOGGER.debug("PI tick: sensor still unavailable, holding setpoint")
+            if self._sensor_unavailable or self._sensor_recovery_pending:
+                # Already handling unavailability — hold current setpoint
+                _LOGGER.debug("PI tick: sensor unavailable, holding setpoint")
                 return
-            # Sensor just went unavailable — wait 60s for recovery (handles brief blips)
-            _LOGGER.info("PI: temp sensor unavailable, waiting 60s for recovery")
-            await asyncio.sleep(60)
-            if self._attr_current_temperature is not None:
-                _LOGGER.info("PI: temp sensor recovered after wait")
-            else:
-                # Confirmed unavailable — set flag, fall back to FF-only setpoint
-                self._sensor_unavailable = True
-                _LOGGER.warning("PI: temp sensor confirmed unavailable, using feedforward-only fallback")
-                desired_c = TemperatureConverter.convert(
-                    self._desired_temp, self.temperature_unit, UnitOfTemperature.CELSIUS,
-                )
-                is_heating = self._attr_hvac_mode == HVACMode.HEAT
-                if not is_heating and self._attr_hvac_mode not in (HVACMode.COOL, HVACMode.DRY):
-                    return
-                ff_offset = 0.0
-                if self._outdoor_temp is not None:
-                    bucket_key = round(self._outdoor_temp / 3) * 3
-                    buckets = self._ff_heat_buckets if is_heating else self._ff_cool_buckets
-                    ff_offset = buckets.get(bucket_key, 0.0)
-                self._ff_offset = ff_offset
-                self._pi_integral = 0.0
-                new_setpoint = round(max(self._min_temp, min(self._max_temp, desired_c + ff_offset)))
-                if new_setpoint != self._hp_setpoint:
-                    _LOGGER.info("PI fallback: setpoint %s -> %s (FF only)", self._hp_setpoint, new_setpoint)
-                    self._hp_setpoint = new_setpoint
-                    self._pi_command_pending = True
-                    await self.send_ir()
-                self.async_schedule_update_ha_state()
-                return
+            # Sensor just went unavailable — schedule 60s grace period check
+            _LOGGER.info("PI: temp sensor unavailable, scheduling 60s recovery check")
+            self._sensor_recovery_pending = True
+            self._sensor_recovery_unsub = async_call_later(
+                self.hass, 60, self._check_sensor_recovery
+            )
+            return
         # Don't send IR while a Fujitsu preset is active (would cancel it)
         if self._min_heat or self._powerful or self._economy:
             _LOGGER.debug("PI tick: skipping, preset active")
@@ -358,6 +386,15 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
 
             self._ff_offset = raw_ff * ff_scale
 
+        # External feedforward bias (from automations via input_number)
+        if self._ff_bias_entity:
+            bias_state = self.hass.states.get(self._ff_bias_entity)
+            if bias_state and bias_state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+                try:
+                    self._ff_offset += float(bias_state.state)
+                except (ValueError, TypeError):
+                    pass
+
         # Deadband: if error is small, skip P term and decay integral
         in_deadband = abs(error) < self._pi_deadband
         if in_deadband:
@@ -383,8 +420,11 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
             p_term = 0.0  # no proportional action in deadband
         else:
             self._ff_settled_ticks = 0
-            p_term = self._pi_kp * error
-            self._pi_integral += error
+            # 2-DOF setpoint weighting: P sees weighted error, I sees true error
+            # b=1.0: standard PI, b=0.0: P only responds to disturbances
+            p_error = self._pi_setpoint_weight * desired_c - current_c
+            p_term = self._pi_kp * p_error
+            self._pi_integral += error  # integral always tracks true error
 
         # Discard stale integral early — clamp once room enters deadband range
         # from the overshoot side, so FF can ramp in without the old integral fighting it.

@@ -189,6 +189,8 @@ CONF_PI_FF_HEAT_SLOPE = "pi_ff_heat_slope"
 CONF_PI_FF_COOL_REFERENCE = "pi_ff_cool_reference"
 CONF_PI_FF_COOL_SLOPE = "pi_ff_cool_slope"
 CONF_PI_FF_SUPPRESS_LEARNING_ENTITY = "pi_ff_suppress_learning_entity"
+CONF_PI_FF_BIAS_ENTITY = "pi_ff_bias_entity"
+CONF_PI_SETPOINT_WEIGHT = "pi_setpoint_weight"
 
 # PI controller defaults
 DEFAULT_PI_ENABLED = False
@@ -200,6 +202,7 @@ DEFAULT_PI_FF_HEAT_REFERENCE = 15.0
 DEFAULT_PI_FF_HEAT_SLOPE = 0.3
 DEFAULT_PI_FF_COOL_REFERENCE = 25.0
 DEFAULT_PI_FF_COOL_SLOPE = 0.3
+DEFAULT_PI_SETPOINT_WEIGHT = 1.0  # 1.0 = standard PI, 0.0 = P ignores setpoint changes
 
 # PI controller extra state attributes
 ATTR_HP_SETPOINT = "hp_setpoint"
