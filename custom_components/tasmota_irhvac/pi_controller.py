@@ -453,7 +453,7 @@ class PIControllerMixin:
             return True
         return False
 
-    def pi_handle_mqtt_temp(self, payload_temp, is_echo):
+    def pi_handle_mqtt_temp(self, is_echo):
         """Handle temperature from MQTT payload. Returns True if PI should tick."""
         if not self._pi_enabled:
             return False

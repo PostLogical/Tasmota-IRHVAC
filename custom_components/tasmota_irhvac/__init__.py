@@ -7,6 +7,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_ENTITY_ID
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.typing import ConfigType
 
 from .const import (
@@ -40,8 +41,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await hass.config_entries.async_forward_entry_setups(entry, ["climate"])
     await hass.config_entries.async_forward_entry_setups(entry, ["sensor"])
 
-    # Check for config issues and surface via Repairs panel
-    _check_config_issues(hass, entry)
+    # Defer config issue checks to give other integrations time to load entities
+    async_call_later(hass, 120, lambda _now: _check_config_issues(hass, entry))
 
     return True
 

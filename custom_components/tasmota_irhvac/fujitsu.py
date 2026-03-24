@@ -242,7 +242,7 @@ class FujitsuTasmotaIrhvac(PIControllerMixin, TasmotaIrhvac):
         # PI: handle temp from MQTT payload
         if self._pi_enabled and "Temp" in payload and payload["Temp"] > 0:
             is_echo = self._pi_command_pending
-            if self.pi_handle_mqtt_temp(payload["Temp"], is_echo):
+            if self.pi_handle_mqtt_temp(is_echo):
                 if not (prev_model3 and "Data" in json_payload):
                     await self._pi_tick()
 
