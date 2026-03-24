@@ -16,6 +16,7 @@ from homeassistant.components.climate.const import (
 )
 from homeassistant.const import ATTR_TEMPERATURE, STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN, UnitOfTemperature
 from homeassistant.core import callback
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import (
     async_call_later,
     async_track_state_change_event,
@@ -56,6 +57,7 @@ from .const import (
     PRESET_POWERFUL,
     PRESET_SET_H,
     PRESET_SET_V,
+    SIGNAL_PI_UPDATE,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -425,6 +427,15 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
         if self._pi_enabled and self._attr_hvac_mode != HVACMode.OFF:
             return round(self._hp_setpoint)
         return super()._get_ir_temp()
+
+    def async_write_ha_state(self):
+        """Write state and notify companion PI sensors."""
+        super().async_write_ha_state()
+        if self._pi_enabled and hasattr(self, "_config_entry_id"):
+            async_dispatcher_send(
+                self.hass,
+                SIGNAL_PI_UPDATE.format(self._config_entry_id),
+            )
 
     @property
     def hvac_modes(self):

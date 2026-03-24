@@ -107,7 +107,7 @@ CONF_STATE_TOPIC_2 = "state_topic_2"
 
 DATA_KEY = "tasmota_irhvac.climate"
 DOMAIN = "tasmota_irhvac"
-PLATFORMS = ["climate"]
+PLATFORMS = ["climate", "sensor"]
 
 ATTR_ECONO = "econo"
 ATTR_TURBO = "turbo"
@@ -208,3 +208,6 @@ ATTR_DESIRED_TEMP = "desired_temp"
 ATTR_FF_OFFSET = "ff_offset"
 ATTR_FF_HEAT_BUCKETS = "ff_heat_buckets"
 ATTR_FF_COOL_BUCKETS = "ff_cool_buckets"
+
+# Dispatcher signal for PI sensor updates (format with entry_id)
+SIGNAL_PI_UPDATE = "tasmota_irhvac_pi_update_{}"

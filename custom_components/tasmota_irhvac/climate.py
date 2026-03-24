@@ -63,6 +63,7 @@ from homeassistant.const import (
 )
 from homeassistant.core import cached_property, callback
 from homeassistant.helpers import event as ha_event
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.util.unit_conversion import TemperatureConverter
 
@@ -495,6 +496,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
     if entity.unique_id is None:
         entity._attr_unique_id = entry.entry_id
+    entity._config_entry_id = entry.entry_id
 
     hass.data[DATA_KEY][entry.entry_id] = entity
     async_add_entities([entity])
@@ -910,6 +912,15 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         """Unsubscribe when removed."""
         for unsubscribe in self._unsubscribes:
             unsubscribe()
+
+    @property
+    def device_info(self):
+        """Return device info to register this entity in the device registry."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, self.unique_id)},
+            name=self._attr_name,
+            manufacturer=self._vendor,
+        )
 
     @property
     def precision(self):

@@ -27,7 +27,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     _register_services(hass)
 
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    # Forward climate first so entity is in hass.data before sensor setup
+    await hass.config_entries.async_forward_entry_setups(entry, ["climate"])
+    await hass.config_entries.async_forward_entry_setups(entry, ["sensor"])
 
     return True
 
