@@ -366,6 +366,7 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Tasmota IRHVAC."""
 
     VERSION = 1
+    MINOR_VERSION = 2  # Added pi_ff_bias_entity, pi_setpoint_weight
 
     def __init__(self):
         """Initialize the config flow."""

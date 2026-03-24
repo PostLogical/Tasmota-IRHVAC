@@ -206,6 +206,37 @@ class TestPIMath:
         assert pi_entity._hp_setpoint >= pi_entity._min_temp
 
     @pytest.mark.asyncio
+    async def test_back_calculation_antiwindup(self, pi_entity):
+        """Back-calculation should unwind integral when output saturates."""
+        # Force saturation: huge error + huge integral → raw setpoint > max_temp
+        pi_entity._attr_current_temperature = 50.0  # Very cold
+        pi_entity._desired_temp = 72.0
+        pi_entity._hp_setpoint = 22.0
+        pi_entity._pi_integral = 40.0  # Large positive integral
+
+        await pi_entity._pi_tick()
+
+        # Setpoint should be clamped at max
+        assert pi_entity._hp_setpoint == pi_entity._max_temp
+        # Integral should have been unwound (back-calculation reduces it)
+        assert pi_entity._pi_integral < 40.0
+
+    @pytest.mark.asyncio
+    async def test_antiwindup_no_effect_when_not_saturated(self, pi_entity):
+        """Anti-windup should not affect integral when output is in range."""
+        pi_entity._attr_current_temperature = 70.0  # Small error
+        pi_entity._desired_temp = 72.0
+        pi_entity._hp_setpoint = 22.0
+        pi_entity._pi_integral = 2.0
+
+        await pi_entity._pi_tick()
+        integral_after = pi_entity._pi_integral
+
+        # Integral should have grown (error accumulated), not been unwound
+        # The small error (~1.1°C) + small integral should not saturate
+        assert integral_after > 2.0  # accumulated error
+
+    @pytest.mark.asyncio
     async def test_off_mode_zeros_integral(self, pi_entity):
         """HVAC OFF should zero the integral."""
         pi_entity._pi_integral = 10.0

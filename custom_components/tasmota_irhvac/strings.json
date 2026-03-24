@@ -1,4 +1,17 @@
 {
+  "entity": {
+    "sensor": {
+      "hp_setpoint": {
+        "name": "HP Setpoint"
+      },
+      "pi_integral": {
+        "name": "PI Integral"
+      },
+      "ff_offset": {
+        "name": "FF Offset"
+      }
+    }
+  },
   "config": {
     "step": {
       "user": {

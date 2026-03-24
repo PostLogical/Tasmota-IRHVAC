@@ -32,7 +32,7 @@ class TasmotaIrhvacPISensorDescription(SensorEntityDescription):
 PI_SENSOR_DESCRIPTIONS: tuple[TasmotaIrhvacPISensorDescription, ...] = (
     TasmotaIrhvacPISensorDescription(
         key="hp_setpoint",
-        name="HP Setpoint",
+        translation_key="hp_setpoint",
         climate_attr="_hp_setpoint",
         device_class=SensorDeviceClass.TEMPERATURE,
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
@@ -42,7 +42,7 @@ PI_SENSOR_DESCRIPTIONS: tuple[TasmotaIrhvacPISensorDescription, ...] = (
     ),
     TasmotaIrhvacPISensorDescription(
         key="pi_integral",
-        name="PI Integral",
+        translation_key="pi_integral",
         climate_attr="_pi_integral",
         device_class=None,
         native_unit_of_measurement=None,
@@ -52,7 +52,7 @@ PI_SENSOR_DESCRIPTIONS: tuple[TasmotaIrhvacPISensorDescription, ...] = (
     ),
     TasmotaIrhvacPISensorDescription(
         key="ff_offset",
-        name="FF Offset",
+        translation_key="ff_offset",
         climate_attr="_ff_offset",
         device_class=SensorDeviceClass.TEMPERATURE,
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,

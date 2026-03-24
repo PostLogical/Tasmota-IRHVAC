@@ -47,6 +47,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Migrate config entry to current version."""
+    _LOGGER.debug("Migrating config entry from version %s.%s", entry.version, entry.minor_version)
+
+    if entry.version == 1:
+        new_data = {**entry.data}
+        new_options = {**entry.options}
+
+        if entry.minor_version < 2:
+            # v1.2: Added pi_ff_bias_entity and pi_setpoint_weight
+            new_data.setdefault("pi_ff_bias_entity", "")
+            new_data.setdefault("pi_setpoint_weight", 1.0)
+            new_options.setdefault("pi_ff_bias_entity", "")
+            new_options.setdefault("pi_setpoint_weight", 1.0)
+
+        hass.config_entries.async_update_entry(
+            entry, data=new_data, options=new_options, minor_version=2, version=1,
+        )
+        _LOGGER.info("Migrated config entry to version %s.%s", entry.version, entry.minor_version)
+
+    return True
+
+
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)

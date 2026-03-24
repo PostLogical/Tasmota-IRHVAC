@@ -388,20 +388,21 @@ class PIControllerMixin:
         elif is_cooling and self._pi_integral > 0 and error <= self._pi_deadband:
             self._pi_integral = 0.0
 
-        # Anti-windup: clamp integral so setpoint stays in valid range
-        if self._pi_ki != 0:
-            max_integral = (self._max_temp - desired_c - p_term - self._ff_offset) / self._pi_ki
-            min_integral = (self._min_temp - desired_c - p_term - self._ff_offset) / self._pi_ki
-            if min_integral > max_integral:
-                min_integral, max_integral = max_integral, min_integral
-            self._pi_integral = max(min_integral, min(max_integral, self._pi_integral))
-
-        # Hard safety cap
+        # Hard safety cap on integral
         self._pi_integral = max(-50.0, min(50.0, self._pi_integral))
 
         i_term = self._pi_ki * self._pi_integral
         raw_setpoint = desired_c + p_term + i_term + self._ff_offset
         new_setpoint = round(max(self._min_temp, min(self._max_temp, raw_setpoint)))
+
+        # Back-calculation anti-windup: if output saturated, unwind integral
+        # proportionally to the saturation amount (Kb = 1/Ki)
+        if self._pi_ki != 0:
+            saturation_error = new_setpoint - raw_setpoint
+            if abs(saturation_error) > 0.01:
+                kb = 1.0 / self._pi_ki  # tracking gain
+                self._pi_integral += kb * saturation_error
+                self._pi_integral = max(-50.0, min(50.0, self._pi_integral))
 
         if new_setpoint != self._hp_setpoint:
             _LOGGER.info(
