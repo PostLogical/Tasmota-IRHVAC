@@ -73,9 +73,9 @@ async def async_setup_entry(
     if climate_entity is None:
         return
 
-    from .fujitsu import FujitsuTasmotaIrhvac
+    from .pi_controller import PIControllerMixin
 
-    if not isinstance(climate_entity, FujitsuTasmotaIrhvac):
+    if not isinstance(climate_entity, PIControllerMixin):
         return
     if not climate_entity._pi_enabled:
         return

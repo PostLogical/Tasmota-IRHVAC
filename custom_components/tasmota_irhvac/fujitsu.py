@@ -1,8 +1,7 @@
-"""Fujitsu-specific IRHVAC with PI closed-loop temperature control and auto-learned feedforward."""
+"""Fujitsu-specific IRHVAC with preset modes and PI controller integration."""
 
 import asyncio
 import logging
-from datetime import timedelta
 
 from homeassistant.components import mqtt
 from homeassistant.components.climate.const import (
@@ -14,54 +13,19 @@ from homeassistant.components.climate.const import (
     SWING_OFF,
     SWING_VERTICAL,
 )
-from homeassistant.const import ATTR_TEMPERATURE, STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN, UnitOfTemperature
+from homeassistant.const import ATTR_TEMPERATURE, STATE_ON
 from homeassistant.core import callback
-from homeassistant.helpers.dispatcher import async_dispatcher_send
-from homeassistant.helpers.event import (
-    async_call_later,
-    async_track_state_change_event,
-    async_track_time_interval,
-)
-from homeassistant.util.unit_conversion import TemperatureConverter
+from homeassistant.helpers.event import async_call_later
 
 from .climate import TasmotaIrhvac
 from .const import (
-    ATTR_DESIRED_TEMP,
-    ATTR_FF_COOL_BUCKETS,
-    ATTR_FF_HEAT_BUCKETS,
-    ATTR_FF_OFFSET,
-    ATTR_HP_SETPOINT,
-    ATTR_PI_INTEGRAL,
-    CONF_OUTDOOR_TEMP_SENSOR,
-    CONF_PI_DEADBAND,
-    CONF_PI_ENABLED,
-    CONF_PI_FF_COOL_REFERENCE,
-    CONF_PI_FF_COOL_SLOPE,
-    CONF_PI_FF_HEAT_REFERENCE,
-    CONF_PI_FF_HEAT_SLOPE,
-    CONF_PI_KI,
-    CONF_PI_FF_SUPPRESS_LEARNING_ENTITY,
-    CONF_PI_FF_BIAS_ENTITY,
-    CONF_PI_KP,
-    CONF_PI_MIN_INTERVAL,
-    CONF_PI_SETPOINT_WEIGHT,
-    DEFAULT_PI_DEADBAND,
-    DEFAULT_PI_ENABLED,
-    DEFAULT_PI_FF_COOL_REFERENCE,
-    DEFAULT_PI_FF_COOL_SLOPE,
-    DEFAULT_PI_FF_HEAT_REFERENCE,
-    DEFAULT_PI_FF_HEAT_SLOPE,
-    DEFAULT_PI_KI,
-    DEFAULT_PI_KP,
-    DEFAULT_PI_MIN_INTERVAL,
-    DEFAULT_PI_SETPOINT_WEIGHT,
     PRESET_ECONO,
     PRESET_MIN_HEAT,
     PRESET_POWERFUL,
     PRESET_SET_H,
     PRESET_SET_V,
-    SIGNAL_PI_UPDATE,
 )
+from .pi_controller import PIControllerMixin
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -89,65 +53,14 @@ POWERFUL_TIMEOUT_SECONDS = 1200  # 20 minutes
 FUJITSU_MODEL_3 = 3
 
 
-def _seed_buckets(reference, slope, is_cooling=False):
-    """Seed feedforward buckets from a linear approximation."""
-    buckets = {}
-    # Cover outdoor temps from -30°C to 45°C in 3°C steps
-    for bucket_temp in range(-30, 48, 3):
-        if is_cooling:
-            delta = max(0, bucket_temp - reference)
-            buckets[bucket_temp] = -slope * delta
-        else:
-            delta = max(0, reference - bucket_temp)
-            buckets[bucket_temp] = slope * delta
-    return buckets
-
-
-class FujitsuTasmotaIrhvac(TasmotaIrhvac):
+class FujitsuTasmotaIrhvac(PIControllerMixin, TasmotaIrhvac):
     """Fujitsu IRHVAC with PI + feedforward temperature control and preset modes."""
 
     def __init__(self, hass, vendor, config):
         super().__init__(hass, vendor, config)
 
-        # PI controller config
-        self._pi_enabled = config.get(CONF_PI_ENABLED, DEFAULT_PI_ENABLED)
-        self._pi_kp = config.get(CONF_PI_KP, DEFAULT_PI_KP)
-        self._pi_ki = config.get(CONF_PI_KI, DEFAULT_PI_KI)
-        self._pi_min_interval = config.get(CONF_PI_MIN_INTERVAL, DEFAULT_PI_MIN_INTERVAL)
-        self._pi_deadband = config.get(CONF_PI_DEADBAND, DEFAULT_PI_DEADBAND)
-
-        # Feedforward config
-        self._outdoor_temp_sensor = config.get(CONF_OUTDOOR_TEMP_SENSOR)
-        self._ff_heat_reference = config.get(CONF_PI_FF_HEAT_REFERENCE, DEFAULT_PI_FF_HEAT_REFERENCE)
-        self._ff_heat_slope = config.get(CONF_PI_FF_HEAT_SLOPE, DEFAULT_PI_FF_HEAT_SLOPE)
-        self._ff_cool_reference = config.get(CONF_PI_FF_COOL_REFERENCE, DEFAULT_PI_FF_COOL_REFERENCE)
-        self._ff_cool_slope = config.get(CONF_PI_FF_COOL_SLOPE, DEFAULT_PI_FF_COOL_SLOPE)
-
-        # PI controller state
-        self._desired_temp = self._attr_target_temperature
-        self._hp_setpoint = self._attr_target_temperature
-        self._pi_integral = 0.0
-        self._pi_timer_unsub = None
-        self._ff_offset = 0.0
-        self._pi_command_pending = False  # True while waiting for IR echo
-        self._ff_settled_ticks = 0
-        self._sensor_unavailable = False  # True after confirmed sensor loss
-        self._sensor_recovery_pending = False  # True while 60s grace period is active
-        self._sensor_recovery_unsub = None  # Cancel handle for 60s recovery callback
-
-        # Feedforward buckets (seeded from linear config, refined by auto-learning)
-        self._ff_heat_buckets = _seed_buckets(self._ff_heat_reference, self._ff_heat_slope)
-        self._ff_cool_buckets = _seed_buckets(self._ff_cool_reference, self._ff_cool_slope, is_cooling=True)
-
-        # Setpoint weighting for 2-DOF PI (0=P ignores setpoint changes, 1=standard PI)
-        self._pi_setpoint_weight = config.get(CONF_PI_SETPOINT_WEIGHT, DEFAULT_PI_SETPOINT_WEIGHT)
-
-        # External input entities
-        self._ff_suppress_learning_entity = config.get(CONF_PI_FF_SUPPRESS_LEARNING_ENTITY)
-        self._ff_bias_entity = config.get(CONF_PI_FF_BIAS_ENTITY)
-
-        # Outdoor temp state
-        self._outdoor_temp = None
+        # Initialize PI controller (vendor-agnostic)
+        self.pi_init(config)
 
         # Fujitsu preset state
         self._min_heat = False
@@ -159,338 +72,59 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
     async def async_added_to_hass(self):
         await super().async_added_to_hass()
 
-        # Restore PI and feedforward state from previous session
+        # Restore Fujitsu preset flags from previous session
         old_state = await self.async_get_last_state()
         if old_state is not None:
-            attrs = old_state.attributes
-            if attrs.get(ATTR_PI_INTEGRAL) is not None:
-                restored_integral = float(attrs[ATTR_PI_INTEGRAL])
-                # Clamp restored integral to reasonable range (±50)
-                self._pi_integral = max(-50, min(50, restored_integral))
-            if attrs.get(ATTR_DESIRED_TEMP) is not None:
-                self._desired_temp = float(attrs[ATTR_DESIRED_TEMP])
-            if attrs.get(ATTR_HP_SETPOINT) is not None:
-                self._hp_setpoint = float(attrs[ATTR_HP_SETPOINT])
-            if attrs.get(ATTR_FF_HEAT_BUCKETS) is not None:
-                self._ff_heat_buckets = {
-                    int(k): float(v) for k, v in attrs[ATTR_FF_HEAT_BUCKETS].items()
-                }
-            if attrs.get(ATTR_FF_COOL_BUCKETS) is not None:
-                self._ff_cool_buckets = {
-                    int(k): float(v) for k, v in attrs[ATTR_FF_COOL_BUCKETS].items()
-                }
-            # Restore Fujitsu preset flags
-            preset = attrs.get(ATTR_PRESET_MODE)
+            preset = old_state.attributes.get(ATTR_PRESET_MODE)
             if preset == PRESET_MIN_HEAT:
                 self._min_heat = True
+                self.pi_pause()
             elif preset == PRESET_ECONO:
                 self._economy = True
+                self.pi_pause()
             elif preset == PRESET_POWERFUL:
                 self._powerful = True
+                self.pi_pause()
 
-        # Fallback: sync with restored _attr_target_temperature from super()
-        # desired_temp stays in the entity's display unit (e.g. °F); PI converts internally
-        if self._desired_temp is None and self._attr_target_temperature is not None:
-            self._desired_temp = self._attr_target_temperature
-        if self._hp_setpoint is None and self._attr_target_temperature is not None:
-            self._hp_setpoint = TemperatureConverter.convert(
-                self._attr_target_temperature,
-                self.temperature_unit,
-                UnitOfTemperature.CELSIUS,
-            )
-
-        # Register outdoor temp sensor with state change listener
-        if self._outdoor_temp_sensor:
-            async_track_state_change_event(
-                self.hass,
-                self._outdoor_temp_sensor,
-                self._async_outdoor_temp_changed,
-            )
-            outdoor_state = self.hass.states.get(self._outdoor_temp_sensor)
-            if outdoor_state is not None:
-                self._update_outdoor_temp(outdoor_state)
-
-        # Compute initial feedforward offset for display
-        if self._outdoor_temp is not None and self._pi_enabled:
-            is_heating = self._attr_hvac_mode in (HVACMode.HEAT, HVACMode.HEAT_COOL, None)
-            buckets = self._ff_heat_buckets if is_heating else self._ff_cool_buckets
-            bucket_key = round(self._outdoor_temp / 3) * 3
-            self._ff_offset = buckets.get(bucket_key, 0.0)
-
-        # Start PI timer; only run first tick if sensor is already available
-        # (zigbee sensors may take minutes — _async_sensor_changed handles that)
-        if self._pi_enabled and self._temp_sensor:
-            self._pi_timer_unsub = async_track_time_interval(
-                self.hass,
-                self._pi_tick,
-                timedelta(seconds=self._pi_min_interval),
-            )
-            if self._attr_current_temperature is not None:
-                await self._pi_tick()
-            else:
-                _LOGGER.debug("PI: skipping initial tick, waiting for sensor")
+        # Initialize PI controller (sets up timers, restores state, etc.)
+        await self.pi_async_added_to_hass(old_state=old_state)
 
     async def async_will_remove_from_hass(self):
-        if self._pi_timer_unsub:
-            self._pi_timer_unsub()
-            self._pi_timer_unsub = None
-        if self._sensor_recovery_unsub:
-            self._sensor_recovery_unsub()
-            self._sensor_recovery_unsub = None
+        self.pi_async_will_remove_from_hass()
         if self._powerful_timer_unsub:
             self._powerful_timer_unsub()
             self._powerful_timer_unsub = None
         await super().async_will_remove_from_hass()
 
-    # ── PI Controller ──────────────────────────────────────────────────
-
-    @callback
-    def _update_outdoor_temp(self, state):
-        """Update outdoor temperature from sensor state, converting to °C."""
-        try:
-            temp = float(state.state)
-            unit = state.attributes.get("unit_of_measurement", UnitOfTemperature.CELSIUS)
-            self._outdoor_temp = TemperatureConverter.convert(
-                temp, unit, UnitOfTemperature.CELSIUS
-            )
-        except (ValueError, TypeError):
-            pass
-
-    @callback
-    def _async_outdoor_temp_changed(self, event):
-        """Handle outdoor temperature sensor state changes."""
-        new_state = event.data.get("new_state")
-        if new_state is not None:
-            self._update_outdoor_temp(new_state)
+    # ── PI Integration Overrides ──────────────────────────────────────
 
     async def _async_sensor_changed(self, entity_id_or_event, old_state=None, new_state=None):
         """Override to trigger PI tick when temp sensor first becomes available."""
         was_none = self._attr_current_temperature is None
         await super()._async_sensor_changed(entity_id_or_event, old_state, new_state)
-        # If current temp just became available (startup or recovery), run PI immediately
-        if was_none and self._attr_current_temperature is not None and self._pi_enabled:
-            # Cancel pending recovery callback if sensor came back early
-            if self._sensor_recovery_unsub:
-                self._sensor_recovery_unsub()
-                self._sensor_recovery_unsub = None
-            self._sensor_recovery_pending = False
-            if self._sensor_unavailable:
-                _LOGGER.info("PI: temp sensor recovered, resuming full PI control")
-                self._sensor_unavailable = False
-            else:
-                _LOGGER.debug("PI: temp sensor just became available, running immediate tick")
-            await self._pi_tick()
-
-    async def _check_sensor_recovery(self, _now=None):
-        """Called 60s after sensor went unavailable. Fall back to FF-only if still gone."""
-        self._sensor_recovery_pending = False
-        self._sensor_recovery_unsub = None
-        if self._attr_current_temperature is not None:
-            _LOGGER.info("PI: temp sensor recovered during grace period")
-            await self._pi_tick()
-            return
-        # Confirmed unavailable — set flag, fall back to feedforward-only setpoint
-        self._sensor_unavailable = True
-        _LOGGER.warning("PI: temp sensor confirmed unavailable, using feedforward-only fallback")
-        if self._desired_temp is None:
-            return
-        desired_c = TemperatureConverter.convert(
-            self._desired_temp, self.temperature_unit, UnitOfTemperature.CELSIUS,
-        )
-        is_heating = self._attr_hvac_mode == HVACMode.HEAT
-        if not is_heating and self._attr_hvac_mode not in (HVACMode.COOL, HVACMode.DRY):
-            return
-        ff_offset = 0.0
-        if self._outdoor_temp is not None:
-            bucket_key = round(self._outdoor_temp / 3) * 3
-            buckets = self._ff_heat_buckets if is_heating else self._ff_cool_buckets
-            ff_offset = buckets.get(bucket_key, 0.0)
-        self._ff_offset = ff_offset
-        self._pi_integral = 0.0
-        new_setpoint = round(max(self._min_temp, min(self._max_temp, desired_c + ff_offset)))
-        if new_setpoint != self._hp_setpoint:
-            _LOGGER.info("PI fallback: setpoint %s -> %s (FF only)", self._hp_setpoint, new_setpoint)
-            self._hp_setpoint = new_setpoint
-            self._pi_command_pending = True
-            await self.send_ir()
-        self.async_schedule_update_ha_state()
-
-    async def _pi_tick(self, now=None):
-        """Periodic PI + feedforward controller tick."""
-        _LOGGER.debug(
-            "PI tick: enabled=%s mode=%s current=%s desired=%s presets=(mh=%s pw=%s ec=%s)",
-            self._pi_enabled, self._attr_hvac_mode,
-            self._attr_current_temperature, self._desired_temp,
-            self._min_heat, self._powerful, self._economy,
-        )
-        if not self._pi_enabled:
-            _LOGGER.debug("PI tick: skipping, not enabled")
-            return
-        if self._attr_hvac_mode == HVACMode.OFF:
-            _LOGGER.debug("PI tick: skipping, HVAC OFF")
-            self._pi_integral = 0.0
-            return
-        if self._desired_temp is None:
-            _LOGGER.debug("PI tick: skipping, desired_temp is None")
-            return
-        if self._attr_current_temperature is None:
-            if self._sensor_unavailable or self._sensor_recovery_pending:
-                # Already handling unavailability — hold current setpoint
-                _LOGGER.debug("PI tick: sensor unavailable, holding setpoint")
-                return
-            # Sensor just went unavailable — schedule 60s grace period check
-            _LOGGER.info("PI: temp sensor unavailable, scheduling 60s recovery check")
-            self._sensor_recovery_pending = True
-            self._sensor_recovery_unsub = async_call_later(
-                self.hass, 60, self._check_sensor_recovery
-            )
-            return
-        # Don't send IR while a Fujitsu preset is active (would cancel it)
-        if self._min_heat or self._powerful or self._economy:
-            _LOGGER.debug("PI tick: skipping, preset active")
-            return
-
-        # Convert both to °C for PI math (HP operates in °C)
-        current_c = TemperatureConverter.convert(
-            self._attr_current_temperature,
-            self.temperature_unit,
-            UnitOfTemperature.CELSIUS,
-        )
-        desired_c = TemperatureConverter.convert(
-            self._desired_temp,
-            self.temperature_unit,
-            UnitOfTemperature.CELSIUS,
-        )
-        error = desired_c - current_c
-
-        # PI only operates in explicit HEAT, COOL, or DRY modes.
-        # Auto/heat_cool are not supported — mode selection stays in HA automations.
-        is_heating = self._attr_hvac_mode == HVACMode.HEAT
-        is_cooling = self._attr_hvac_mode in (HVACMode.COOL, HVACMode.DRY)
-        if not is_heating and not is_cooling:
-            _LOGGER.debug("PI: skipping, mode %s not supported for PI", self._attr_hvac_mode)
-            return
-
-        self._ff_offset = 0.0
-        if self._outdoor_temp is not None:
-            bucket_key = round(self._outdoor_temp / 3) * 3
-
-            if is_heating:
-                raw_ff = self._ff_heat_buckets.get(bucket_key, 0.0)
-                # Full FF when room at or below desired, ramps to zero over
-                # one deadband width when room overshoots
-                ff_scale = max(0.0, min(1.0, 1.0 + error / self._pi_deadband))
-            else:
-                raw_ff = self._ff_cool_buckets.get(bucket_key, 0.0)
-                ff_scale = max(0.0, min(1.0, 1.0 - error / self._pi_deadband))
-
-            self._ff_offset = raw_ff * ff_scale
-
-        # External feedforward bias (from automations via input_number)
-        if self._ff_bias_entity:
-            bias_state = self.hass.states.get(self._ff_bias_entity)
-            if bias_state and bias_state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN):
-                try:
-                    self._ff_offset += float(bias_state.state)
-                except (ValueError, TypeError):
-                    pass
-
-        # Deadband: if error is small, skip P term and decay integral
-        in_deadband = abs(error) < self._pi_deadband
-        if in_deadband:
-            self._pi_integral *= 0.9
-            self._ff_settled_ticks += 1
-            # Auto-learn: record offset when settled for 2+ ticks
-            learning_suppressed = False
-            if self._ff_suppress_learning_entity:
-                suppress_state = self.hass.states.get(self._ff_suppress_learning_entity)
-                if suppress_state and suppress_state.state not in (
-                    STATE_UNAVAILABLE, STATE_UNKNOWN, "off",
-                ):
-                    learning_suppressed = True
-            if self._ff_settled_ticks >= 2 and self._outdoor_temp is not None and not learning_suppressed:
-                observed_offset = self._hp_setpoint - desired_c
-                bucket_key = round(self._outdoor_temp / 3) * 3
-                # Learn into the bucket set matching the current mode
-                learn_buckets = self._ff_heat_buckets if is_heating else self._ff_cool_buckets
-                old = learn_buckets.get(bucket_key, 0.0)
-                learn_buckets[bucket_key] = 0.8 * old + 0.2 * observed_offset
-            elif learning_suppressed and self._ff_settled_ticks >= 2:
-                _LOGGER.debug("PI: FF learning suppressed by %s", self._ff_suppress_learning_entity)
-            p_term = 0.0  # no proportional action in deadband
-        else:
-            self._ff_settled_ticks = 0
-            # 2-DOF setpoint weighting: P sees weighted error, I sees true error
-            # b=1.0: standard PI, b=0.0: P only responds to disturbances
-            p_error = self._pi_setpoint_weight * desired_c - current_c
-            p_term = self._pi_kp * p_error
-            self._pi_integral += error  # integral always tracks true error
-
-        # Discard stale integral early — clamp once room enters deadband range
-        # from the overshoot side, so FF can ramp in without the old integral fighting it.
-        if is_heating and self._pi_integral < 0 and error >= -self._pi_deadband:
-            self._pi_integral = 0.0
-        elif is_cooling and self._pi_integral > 0 and error <= self._pi_deadband:
-            self._pi_integral = 0.0
-
-        # Anti-windup: clamp integral so setpoint stays in valid range
-        if self._pi_ki != 0:
-            max_integral = (self._max_temp - desired_c - p_term - self._ff_offset) / self._pi_ki
-            min_integral = (self._min_temp - desired_c - p_term - self._ff_offset) / self._pi_ki
-            if min_integral > max_integral:
-                min_integral, max_integral = max_integral, min_integral
-            self._pi_integral = max(min_integral, min(max_integral, self._pi_integral))
-
-        # Hard safety cap regardless of anti-windup math
-        self._pi_integral = max(-50.0, min(50.0, self._pi_integral))
-
-        i_term = self._pi_ki * self._pi_integral
-        raw_setpoint = desired_c + p_term + i_term + self._ff_offset
-        new_setpoint = round(max(self._min_temp, min(self._max_temp, raw_setpoint)))
-
-        if new_setpoint != self._hp_setpoint:
-            _LOGGER.info(
-                "PI: error=%.1f P=%.1f I=%.1f FF=%.1f setpoint %s -> %s",
-                error, p_term, i_term, self._ff_offset,
-                self._hp_setpoint, new_setpoint,
-            )
-            self._hp_setpoint = new_setpoint
-            self._pi_command_pending = True
-            await self.send_ir()
-        else:
-            _LOGGER.debug("PI: error=%.1f, setpoint unchanged at %s", error, self._hp_setpoint)
-
-        self.async_schedule_update_ha_state()
+        if was_none and self._attr_current_temperature is not None:
+            await self._pi_async_sensor_changed()
 
     def _get_ir_temp(self):
         """Return PI-computed HP setpoint instead of user target temp."""
-        if self._pi_enabled and self._attr_hvac_mode != HVACMode.OFF:
-            return round(self._hp_setpoint)
+        pi_temp = self.pi_get_ir_temp()
+        if pi_temp is not None:
+            return pi_temp
         return super()._get_ir_temp()
 
     def async_write_ha_state(self):
         """Write state and notify companion PI sensors."""
         super().async_write_ha_state()
-        if self._pi_enabled and hasattr(self, "_config_entry_id"):
-            async_dispatcher_send(
-                self.hass,
-                SIGNAL_PI_UPDATE.format(self._config_entry_id),
-            )
+        self.pi_write_ha_state()
 
     @property
     def hvac_modes(self):
         """Filter out auto/heat_cool when PI is enabled."""
-        modes = self._attr_hvac_modes
-        if self._pi_enabled and modes:
-            return [m for m in modes if m not in (HVACMode.AUTO, HVACMode.HEAT_COOL)]
-        return modes
+        return self.pi_filter_hvac_modes(self._attr_hvac_modes)
 
     async def async_set_hvac_mode(self, hvac_mode):
-        """Reject auto/heat_cool when PI is enabled (service call guard)."""
-        if self._pi_enabled and hvac_mode in (HVACMode.AUTO, HVACMode.HEAT_COOL):
-            _LOGGER.warning(
-                "PI mode does not support %s — use HEAT or COOL explicitly", hvac_mode,
-            )
+        """Reject auto/heat_cool when PI is enabled."""
+        if self.pi_reject_hvac_mode(hvac_mode):
             return
         await super().async_set_hvac_mode(hvac_mode)
 
@@ -504,16 +138,15 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
         if hvac_mode is not None:
             await self.set_mode(hvac_mode)
 
-        if self._pi_enabled:
-            self._desired_temp = temperature
-            self._attr_target_temperature = temperature
-            self._pi_integral = 0.0  # fresh start on user input
-            if self._attr_hvac_mode != HVACMode.OFF:
-                self.power_mode = STATE_ON
-            await self._pi_tick()
-            self.async_schedule_update_ha_state()
-        else:
+        if not await self.pi_set_temperature(temperature):
             await super().async_set_temperature(**kwargs)
+
+    @property
+    def extra_state_attributes(self):
+        """Return state attributes including PI controller state."""
+        attrs = super().extra_state_attributes
+        attrs.update(self.pi_extra_state_attributes())
+        return attrs
 
     # ── State Payload Handling ─────────────────────────────────────────
 
@@ -534,31 +167,30 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
                 "swingh": self._swingh,
             }
 
-        # Standard IRHVAC processing (this sets _attr_target_temperature from payload Temp)
+        # Standard IRHVAC processing
         await super()._handle_state_payload(json_payload, payload)
 
-        # PI fix: super() overwrites _attr_target_temperature with the IR setpoint
-        # from the payload. Restore it to the user's desired room temp, and capture
-        # the payload temp as the confirmed hp_setpoint instead.
-        if self._pi_enabled and self._desired_temp is not None:
-            if "Temp" in payload and payload["Temp"] > 0:
-                self._hp_setpoint = payload["Temp"]
-            self._attr_target_temperature = self._desired_temp
+        # PI: restore desired_temp over payload temp
+        self.pi_restore_desired_temp(payload)
 
         # Map turbo/econo/clean flags to Fujitsu presets
         if self.power_mode == "off":
             self._min_heat = False
             self._powerful = False
             self._economy = False
+            self.pi_resume()
         if self._turbo == "on":
             self._attr_preset_mode = PRESET_POWERFUL
             self._powerful = True
+            self.pi_pause()
         if self._econo == "on":
             self._attr_preset_mode = PRESET_ECONO
             self._economy = True
+            self.pi_pause()
         if self._clean == "on":
             self._attr_preset_mode = PRESET_MIN_HEAT
             self._min_heat = True
+            self.pi_pause()
 
         # 56-bit / special data detection
         if "Data" in json_payload and prev_model3:
@@ -576,9 +208,11 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
                 if data == FUJITSU_DATA_POWERFUL:
                     self._powerful = True
                     self._attr_preset_mode = PRESET_POWERFUL
+                    self.pi_pause()
                 elif data == FUJITSU_DATA_ECONO:
                     self._economy = True
                     self._attr_preset_mode = PRESET_ECONO
+                    self.pi_pause()
                 elif data == FUJITSU_DATA_SET_V:
                     self._attr_preset_mode = PRESET_SET_V
                     self._swingv = None
@@ -599,20 +233,18 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
                 self.power_mode = "on"
                 self._attr_hvac_mode = HVACMode.HEAT
                 self._attr_target_temperature = 10  # 10°C / 50°F
-                self._pi_integral = 0.0
+                self.pi_pause()
+                self.pi_reset_integral()
                 self._econo = "off"
                 self._turbo = "off"
                 self._clean = "off"
 
         # PI: handle temp from MQTT payload
         if self._pi_enabled and "Temp" in payload and payload["Temp"] > 0:
-            if self._pi_command_pending:
-                # This is an echo of our own IR command — ignore it
-                self._pi_command_pending = False
-            elif not (prev_model3 and "Data" in json_payload):
-                # Physical remote set a new temp — treat as new desired room temp
-                self._desired_temp = self._attr_target_temperature
-                await self._pi_tick()
+            is_echo = self._pi_command_pending
+            if self.pi_handle_mqtt_temp(payload["Temp"], is_echo):
+                if not (prev_model3 and "Data" in json_payload):
+                    await self._pi_tick()
 
         self.async_schedule_update_ha_state()
 
@@ -627,6 +259,7 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
             if hasattr(self, "_saved_target_temp") and self._saved_target_temp:
                 self._attr_target_temperature = self._saved_target_temp
             self._min_heat = False
+            self.pi_resume()
 
         if (
             preset_mode not in (PRESET_ECONO, PRESET_SET_V, PRESET_SET_H)
@@ -640,7 +273,7 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
                 await self._send_raw_ir(FUJITSU_IR_POWERFUL)
                 self._powerful = True
                 self._attr_preset_mode = PRESET_POWERFUL
-                # Auto-clear after 20 minutes
+                self.pi_pause()
                 if self._powerful_timer_unsub:
                     self._powerful_timer_unsub()
                 self._powerful_timer_unsub = async_call_later(
@@ -654,6 +287,7 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
                 await self._send_raw_ir(FUJITSU_IR_ECONO)
                 self._economy = True
                 self._attr_preset_mode = PRESET_ECONO
+                self.pi_pause()
             self.async_schedule_update_ha_state()
             return
 
@@ -665,7 +299,8 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
                 self._min_heat = True
                 self._attr_hvac_mode = HVACMode.HEAT
                 self._attr_target_temperature = 10  # 10°C / 50°F
-                self._pi_integral = 0.0  # conditions will be different on exit
+                self.pi_pause()
+                self.pi_reset_integral()
                 self._econo = "off"
                 self._economy = False
                 self._powerful = False
@@ -682,7 +317,7 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
                 self._attr_swing_mode = SWING_HORIZONTAL
             elif self._attr_swing_mode == SWING_VERTICAL:
                 self._attr_swing_mode = SWING_OFF
-            self._attr_preset_mode = self._attr_preset_mode  # maintain current preset
+            self._attr_preset_mode = self._attr_preset_mode
             self.async_schedule_update_ha_state()
             return
 
@@ -693,7 +328,7 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
                 self._attr_swing_mode = SWING_VERTICAL
             elif self._attr_swing_mode == SWING_HORIZONTAL:
                 self._attr_swing_mode = SWING_OFF
-            self._attr_preset_mode = self._attr_preset_mode  # maintain current preset
+            self._attr_preset_mode = self._attr_preset_mode
             self.async_schedule_update_ha_state()
             return
 
@@ -705,6 +340,7 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
             self._min_heat = False
             self._powerful = False
             self._attr_preset_mode = PRESET_NONE
+            self.pi_resume()
             await self.send_ir()
             return
 
@@ -718,6 +354,7 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
         if self._attr_preset_mode == PRESET_POWERFUL:
             self._attr_preset_mode = PRESET_NONE
         self._powerful_timer_unsub = None
+        self.pi_resume()
         self.async_schedule_update_ha_state()
 
     # ── Raw IR Helper ──────────────────────────────────────────────────
@@ -729,32 +366,3 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
         if float(self._mqtt_delay) != 0.0:
             await asyncio.sleep(float(self._mqtt_delay))
         await mqtt.async_publish(self.hass, irsend_topic, raw_code)
-
-    # ── Service Calls ───────────────────────────────────────────────────
-
-    async def async_reset_ff_buckets(self):
-        """Reset feedforward buckets to seed values from config."""
-        self._ff_heat_buckets = _seed_buckets(self._ff_heat_reference, self._ff_heat_slope)
-        self._ff_cool_buckets = _seed_buckets(self._ff_cool_reference, self._ff_cool_slope, is_cooling=True)
-        self._pi_integral = 0.0
-        _LOGGER.info("FF buckets reset to seed values, integral zeroed")
-        self.async_schedule_update_ha_state()
-
-    # ── Extra State Attributes ─────────────────────────────────────────
-
-    @property
-    def extra_state_attributes(self):
-        """Return state attributes including PI controller state."""
-        attrs = super().extra_state_attributes
-        if self._pi_enabled:
-            attrs[ATTR_HP_SETPOINT] = self._hp_setpoint
-            attrs[ATTR_PI_INTEGRAL] = round(self._pi_integral, 3)
-            attrs[ATTR_DESIRED_TEMP] = self._desired_temp
-            attrs[ATTR_FF_OFFSET] = round(self._ff_offset, 2)
-            attrs[ATTR_FF_HEAT_BUCKETS] = {
-                str(k): round(v, 2) for k, v in self._ff_heat_buckets.items()
-            }
-            attrs[ATTR_FF_COOL_BUCKETS] = {
-                str(k): round(v, 2) for k, v in self._ff_cool_buckets.items()
-            }
-        return attrs

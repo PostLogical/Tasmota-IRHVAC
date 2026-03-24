@@ -6,9 +6,18 @@ import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_ENTITY_ID
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.typing import ConfigType
 
-from .const import DATA_KEY, DOMAIN, PLATFORMS
+from .const import (
+    CONF_PI_ENABLED,
+    CONF_PI_FF_BIAS_ENTITY,
+    CONF_PI_FF_SUPPRESS_LEARNING_ENTITY,
+    CONF_OUTDOOR_TEMP_SENSOR,
+    DATA_KEY,
+    DOMAIN,
+    PLATFORMS,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -31,6 +40,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await hass.config_entries.async_forward_entry_setups(entry, ["climate"])
     await hass.config_entries.async_forward_entry_setups(entry, ["sensor"])
 
+    # Check for config issues and surface via Repairs panel
+    _check_config_issues(hass, entry)
+
     return True
 
 
@@ -40,6 +52,40 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id, None)
     return unload_ok
+
+
+def _check_config_issues(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Check for config issues and surface via HA Repairs panel."""
+    config = {**entry.data, **entry.options}
+
+    # Check entities referenced by PI controller config
+    checks = [
+        (CONF_OUTDOOR_TEMP_SENSOR, "outdoor_sensor_not_found"),
+        (CONF_PI_FF_SUPPRESS_LEARNING_ENTITY, "suppress_learning_entity_not_found"),
+        (CONF_PI_FF_BIAS_ENTITY, "bias_entity_not_found"),
+    ]
+
+    # Only check PI-related entities if PI is enabled
+    pi_enabled = config.get(CONF_PI_ENABLED, False)
+
+    for conf_key, issue_id in checks:
+        entity_id = config.get(conf_key)
+        full_issue_id = f"{issue_id}_{entry.entry_id}"
+        if entity_id and pi_enabled:
+            if hass.states.get(entity_id) is None:
+                ir.async_create_issue(
+                    hass,
+                    DOMAIN,
+                    full_issue_id,
+                    is_fixable=False,
+                    severity=ir.IssueSeverity.WARNING,
+                    translation_key=issue_id,
+                    translation_placeholders={"entity_id": entity_id},
+                )
+            else:
+                ir.async_delete_issue(hass, DOMAIN, full_issue_id)
+        else:
+            ir.async_delete_issue(hass, DOMAIN, full_issue_id)
 
 
 def _register_services(hass: HomeAssistant) -> None:

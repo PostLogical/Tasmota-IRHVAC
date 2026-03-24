@@ -95,7 +95,9 @@
           "pi_ff_heat_slope": "FF Heat Slope",
           "pi_ff_cool_reference": "FF Cool Reference Temp (\u00b0C)",
           "pi_ff_cool_slope": "FF Cool Slope",
-          "pi_ff_suppress_learning_entity": "FF Suppress Learning Entity"
+          "pi_ff_suppress_learning_entity": "FF Suppress Learning Entity",
+          "pi_ff_bias_entity": "FF Bias Entity",
+          "pi_setpoint_weight": "Setpoint Weight (0-1)"
         },
         "data_description": {
           "pi_enabled": "Enable the PI+feedforward controller for automatic temperature regulation.",
@@ -108,7 +110,9 @@
           "pi_ff_heat_slope": "Degrees of heating offset per degree below the heat reference.",
           "pi_ff_cool_reference": "Outdoor temperature at which no feedforward cooling offset is needed.",
           "pi_ff_cool_slope": "Degrees of cooling offset per degree above the cool reference.",
-          "pi_ff_suppress_learning_entity": "Entity that suppresses FF auto-learning when on. Use this to prevent the controller from learning bad offsets during atypical conditions (e.g., windows open, doors propped, unusual occupancy). The controller still applies existing learned offsets — it just won't update them."
+          "pi_ff_suppress_learning_entity": "Entity that suppresses FF auto-learning when on. Use this to prevent the controller from learning bad offsets during atypical conditions (e.g., windows open, doors propped, unusual occupancy). The controller still applies existing learned offsets — it just won't update them.",
+          "pi_ff_bias_entity": "Entity whose numeric value (in °C) is added to the feedforward offset. Use an input_number controlled by automations to adjust PI for solar gain, open doors, supplemental heat, etc.",
+          "pi_setpoint_weight": "2-DOF PI setpoint weighting. At 1.0 (default), P reacts fully to setpoint changes. At 0.0, P only reacts to disturbances. Try 0.5 for less overshoot on setpoint changes."
         }
       },
       "reconfigure": {
@@ -245,7 +249,9 @@
           "pi_ff_heat_slope": "FF Heat Slope",
           "pi_ff_cool_reference": "FF Cool Reference Temp (\u00b0C)",
           "pi_ff_cool_slope": "FF Cool Slope",
-          "pi_ff_suppress_learning_entity": "FF Suppress Learning Entity"
+          "pi_ff_suppress_learning_entity": "FF Suppress Learning Entity",
+          "pi_ff_bias_entity": "FF Bias Entity",
+          "pi_setpoint_weight": "Setpoint Weight (0-1)"
         },
         "data_description": {
           "pi_enabled": "Enable the PI+feedforward controller for automatic temperature regulation. Only works with Fujitsu vendor.",
@@ -258,9 +264,29 @@
           "pi_ff_heat_slope": "Degrees of heating offset per degree below the heat reference.",
           "pi_ff_cool_reference": "Outdoor temperature at which no feedforward cooling offset is needed.",
           "pi_ff_cool_slope": "Degrees of cooling offset per degree above the cool reference.",
-          "pi_ff_suppress_learning_entity": "Entity that suppresses FF auto-learning when on. Use this to prevent the controller from learning bad offsets during atypical conditions (e.g., windows open, doors propped, unusual occupancy). The controller still applies existing learned offsets — it just won't update them."
+          "pi_ff_suppress_learning_entity": "Entity that suppresses FF auto-learning when on. Use this to prevent the controller from learning bad offsets during atypical conditions (e.g., windows open, doors propped, unusual occupancy). The controller still applies existing learned offsets — it just won't update them.",
+          "pi_ff_bias_entity": "Entity whose numeric value (in °C) is added to the feedforward offset. Use an input_number controlled by automations to adjust PI for solar gain, open doors, supplemental heat, etc.",
+          "pi_setpoint_weight": "2-DOF PI setpoint weighting. At 1.0 (default), P reacts fully to setpoint changes. At 0.0, P only reacts to disturbances. Try 0.5 for less overshoot on setpoint changes."
         }
       }
+    }
+  },
+  "issues": {
+    "outdoor_sensor_not_found": {
+      "title": "Outdoor temperature sensor not found",
+      "description": "The PI controller is configured to use outdoor temperature sensor `{entity_id}`, but this entity does not exist in Home Assistant. Feedforward compensation will not work until this is resolved."
+    },
+    "suppress_learning_entity_not_found": {
+      "title": "FF suppress learning entity not found",
+      "description": "The PI controller is configured with suppress learning entity `{entity_id}`, but this entity does not exist. Learning suppression will not work."
+    },
+    "bias_entity_not_found": {
+      "title": "FF bias entity not found",
+      "description": "The PI controller is configured with bias entity `{entity_id}`, but this entity does not exist. External feedforward bias will not work."
+    },
+    "temp_sensor_not_found": {
+      "title": "Temperature sensor not found",
+      "description": "The climate entity is configured with temperature sensor `{entity_id}`, but this entity does not exist. PI control and accurate temperature display require this sensor."
     }
   }
 }
