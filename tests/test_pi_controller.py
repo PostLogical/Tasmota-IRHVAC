@@ -283,22 +283,20 @@ class TestPIMath:
         assert setpoint_weight_05 <= setpoint_weight_1
 
     @pytest.mark.asyncio
-    async def test_setpoint_weight_zero_only_disturbance(self, pi_entity):
-        """Weight=0 means P only responds to measured value, not setpoint."""
-        pi_entity._pi_setpoint_weight = 0.0
-        # Use a temp outside deadband so P term actually fires
-        pi_entity._attr_current_temperature = 66.0  # ~18.9°C, well below desired
-        pi_entity._desired_temp = 72.0  # ~22.2°C
+    async def test_adaptive_setpoint_weight(self, pi_entity):
+        """Adaptive weight should blend to b=1 for large errors, b=configured near deadband."""
+        pi_entity._pi_setpoint_weight = 0.0  # Configured weight
+        # Large error (>4x deadband): adaptive weight should be 1.0
+        pi_entity._attr_current_temperature = 66.0  # ~18.9°C, well below 22.2°C desired
+        pi_entity._desired_temp = 72.0
         pi_entity._hp_setpoint = 22.0
         pi_entity._pi_integral = 0.0
 
         await pi_entity._pi_tick()
 
-        # With b=0: p_error = 0*desired_c - current_c = -18.9
-        # With b=1: p_error = desired_c - current_c = 22.2 - 18.9 = +3.3
-        # So b=0 drives setpoint DOWN (negative P) while b=1 drives it UP
-        # The setpoint should be lower than with standard PI
-        assert pi_entity._hp_setpoint == pi_entity._min_temp
+        # With adaptive weight, large error → effective_weight=1.0
+        # So P = Kp * (1.0 * desired_c - current_c) = positive → setpoint goes UP
+        assert pi_entity._hp_setpoint > 22.0
 
 
 # ── Feedforward Tests ─────────────────────────────────────────────────
@@ -506,11 +504,99 @@ class TestSensorRecovery:
         pi_entity._desired_temp = 72.0
         pi_entity._hp_setpoint = 22.0
 
-        await pi_entity._pi_async_sensor_changed()
+        await pi_entity._pi_async_sensor_changed(was_none=True)
 
         assert pi_entity._sensor_recovery_pending is False
         assert pi_entity._sensor_unavailable is False
         mock_unsub.assert_called_once()
+
+
+# ── Event-Driven and Time Normalization Tests ─────────────────────────
+
+
+class TestEventDrivenTicking:
+    """Tests for event-driven PI ticking and time normalization."""
+
+    @pytest.mark.asyncio
+    async def test_sensor_update_triggers_tick(self, pi_entity):
+        """Sensor update should trigger PI tick if cooldown elapsed."""
+        pi_entity._attr_current_temperature = 68.0
+        pi_entity._desired_temp = 72.0
+        pi_entity._hp_setpoint = 22.0
+        pi_entity._pi_last_tick_time = 0.0  # No previous tick
+
+        await pi_entity._pi_async_sensor_changed(was_none=False)
+
+        # Should have ticked (cooldown elapsed since last_tick_time=0)
+        assert pi_entity.send_ir.called
+
+    @pytest.mark.asyncio
+    async def test_sensor_update_respects_cooldown(self, pi_entity):
+        """Sensor update should not tick if within cooldown."""
+        import time as _time
+        pi_entity._attr_current_temperature = 68.0
+        pi_entity._desired_temp = 72.0
+        pi_entity._hp_setpoint = 22.0
+        pi_entity._pi_last_tick_time = _time.monotonic()  # Just ticked
+
+        pi_entity.send_ir.reset_mock()
+        await pi_entity._pi_async_sensor_changed(was_none=False)
+
+        # Should NOT have ticked (within cooldown)
+        assert not pi_entity.send_ir.called
+
+    @pytest.mark.asyncio
+    async def test_time_normalized_integral(self, pi_entity):
+        """Integral accumulation should scale with time between ticks."""
+        import time as _time
+        pi_entity._attr_current_temperature = 68.0
+        pi_entity._desired_temp = 72.0
+        pi_entity._hp_setpoint = 22.0
+
+        # Simulate a tick at normal interval (dt_factor = 1.0)
+        pi_entity._pi_last_tick_time = _time.monotonic() - pi_entity._pi_min_interval
+        await pi_entity._pi_tick()
+        integral_normal = pi_entity._pi_integral
+
+        # Reset and simulate a tick at half interval (dt_factor = 0.5)
+        pi_entity._pi_integral = 0.0
+        pi_entity._pi_last_error = 0.0
+        pi_entity._pi_last_tick_time = _time.monotonic() - (pi_entity._pi_min_interval / 2)
+        pi_entity.send_ir.reset_mock()
+        await pi_entity._pi_tick()
+        integral_half = pi_entity._pi_integral
+
+        # Half-interval tick should accumulate roughly half the integral
+        # (not exactly half due to trapezoidal averaging, but close)
+        assert integral_half < integral_normal
+        assert integral_half > 0
+
+    @pytest.mark.asyncio
+    async def test_hysteresis_prevents_small_change(self, pi_entity):
+        """Midpoint hysteresis should prevent 1°C oscillation."""
+        pi_entity._attr_current_temperature = 71.5  # ~21.9°C
+        pi_entity._desired_temp = 72.0  # ~22.2°C
+        pi_entity._hp_setpoint = 22  # Current setpoint
+        pi_entity._pi_integral = 0.0
+
+        await pi_entity._pi_tick()
+
+        # Error is small (~0.3°C), raw setpoint should be near 22.3°C
+        # With hysteresis, 22.3 doesn't cross 22.5 (midpoint to 23), so stay at 22
+        assert pi_entity._hp_setpoint == 22
+
+    @pytest.mark.asyncio
+    async def test_hysteresis_allows_large_change(self, pi_entity):
+        """Midpoint hysteresis should allow change when crossing midpoint."""
+        pi_entity._attr_current_temperature = 68.0  # ~20°C
+        pi_entity._desired_temp = 72.0  # ~22.2°C
+        pi_entity._hp_setpoint = 22  # Current setpoint
+
+        await pi_entity._pi_tick()
+
+        # Error is large (~2.2°C), raw setpoint should be well above 22.5
+        # Hysteresis allows the change
+        assert pi_entity._hp_setpoint > 22
 
 
 # ── PI API Tests ──────────────────────────────────────────────────────

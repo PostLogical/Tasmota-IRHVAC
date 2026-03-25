@@ -99,11 +99,11 @@ class FujitsuTasmotaIrhvac(PIControllerMixin, TasmotaIrhvac):
     # ── PI Integration Overrides ──────────────────────────────────────
 
     async def _async_sensor_changed(self, entity_id_or_event, old_state=None, new_state=None):
-        """Override to trigger PI tick when temp sensor first becomes available."""
+        """Override to trigger PI on sensor updates (event-driven ticking)."""
         was_none = self._attr_current_temperature is None
         await super()._async_sensor_changed(entity_id_or_event, old_state, new_state)
-        if was_none and self._attr_current_temperature is not None:
-            await self._pi_async_sensor_changed()
+        if self._attr_current_temperature is not None:
+            await self._pi_async_sensor_changed(was_none=was_none)
 
     def _get_ir_temp(self):
         """Return PI-computed HP setpoint instead of user target temp."""

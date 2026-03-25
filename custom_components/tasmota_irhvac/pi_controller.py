@@ -1,6 +1,7 @@
 """Vendor-agnostic PI + feedforward controller mixin for IRHVAC climate entities."""
 
 import logging
+import time
 from datetime import timedelta
 
 from homeassistant.components.climate.const import HVACMode
@@ -109,6 +110,8 @@ class PIControllerMixin:
         self._sensor_recovery_pending = False
         self._sensor_recovery_unsub = None
         self._pi_paused = False
+        self._pi_last_tick_time = 0.0  # monotonic time of last tick
+        self._pi_last_error = 0.0  # previous error for trapezoidal integral
 
         # Feedforward buckets
         self._ff_heat_buckets = _seed_buckets(self._ff_heat_reference, self._ff_heat_slope)
@@ -177,7 +180,8 @@ class PIControllerMixin:
             bucket_key = round(self._outdoor_temp / 3) * 3
             self._ff_offset = buckets.get(bucket_key, 0.0)
 
-        # Start PI timer; only run first tick if sensor is already available
+        # Start fallback timer (catches outdoor temp changes when room sensor is stable)
+        # Primary ticking is event-driven via _pi_async_sensor_changed
         if self._temp_sensor:
             self._pi_timer_unsub = async_track_time_interval(
                 self.hass,
@@ -233,21 +237,33 @@ class PIControllerMixin:
         if new_state is not None:
             self._update_outdoor_temp(new_state)
 
-    async def _pi_async_sensor_changed(self):
-        """Handle temp sensor becoming available. Call from _async_sensor_changed override."""
+    async def _pi_async_sensor_changed(self, was_none=False):
+        """Handle temp sensor update. Call from _async_sensor_changed override.
+
+        Args:
+            was_none: True if sensor was previously unavailable (recovery case).
+        """
         if not self._pi_enabled:
             return
-        # Cancel pending recovery callback if sensor came back early
-        if self._sensor_recovery_unsub:
-            self._sensor_recovery_unsub()
-            self._sensor_recovery_unsub = None
-        self._sensor_recovery_pending = False
-        if self._sensor_unavailable:
-            _LOGGER.info("PI: temp sensor recovered, resuming full PI control")
-            self._sensor_unavailable = False
-        else:
-            _LOGGER.debug("PI: temp sensor just became available, running immediate tick")
-        await self._pi_tick()
+        if was_none:
+            # Sensor recovery — cancel pending recovery callback
+            if self._sensor_recovery_unsub:
+                self._sensor_recovery_unsub()
+                self._sensor_recovery_unsub = None
+            self._sensor_recovery_pending = False
+            if self._sensor_unavailable:
+                _LOGGER.info("PI: temp sensor recovered, resuming full PI control")
+                self._sensor_unavailable = False
+            else:
+                _LOGGER.debug("PI: temp sensor just became available, running immediate tick")
+            await self._pi_tick()
+            return
+
+        # Event-driven tick: run PI on every sensor update, respecting min cooldown
+        elapsed = time.monotonic() - self._pi_last_tick_time
+        min_cooldown = max(60.0, self._pi_min_interval / 3.0)  # At least 60s, at most interval/3
+        if elapsed >= min_cooldown:
+            await self._pi_tick()
 
     async def _check_sensor_recovery(self, _now=None):
         """Called 60s after sensor went unavailable. Fall back to FF-only if still gone."""
@@ -284,13 +300,7 @@ class PIControllerMixin:
         self.async_schedule_update_ha_state()
 
     async def _pi_tick(self, now=None):
-        """Periodic PI + feedforward controller tick."""
-        _LOGGER.debug(
-            "PI tick: enabled=%s mode=%s current=%s desired=%s paused=%s",
-            self._pi_enabled, self._attr_hvac_mode,
-            self._attr_current_temperature, self._desired_temp,
-            self._pi_paused,
-        )
+        """PI + feedforward controller tick. Called by timer and sensor events."""
         if not self._pi_enabled:
             return
         if self._attr_hvac_mode == HVACMode.OFF:
@@ -300,7 +310,6 @@ class PIControllerMixin:
             return
         if self._attr_current_temperature is None:
             if self._sensor_unavailable or self._sensor_recovery_pending:
-                _LOGGER.debug("PI tick: sensor unavailable, holding setpoint")
                 return
             _LOGGER.info("PI: temp sensor unavailable, scheduling 60s recovery check")
             self._sensor_recovery_pending = True
@@ -311,6 +320,15 @@ class PIControllerMixin:
         if self._pi_paused:
             _LOGGER.debug("PI tick: skipping, paused by vendor")
             return
+
+        # Time since last tick (for time-normalized integral)
+        now_mono = time.monotonic()
+        if self._pi_last_tick_time > 0:
+            dt_seconds = min(now_mono - self._pi_last_tick_time, self._pi_min_interval * 2)
+        else:
+            dt_seconds = float(self._pi_min_interval)  # First tick: assume one interval
+        self._pi_last_tick_time = now_mono
+        dt_factor = dt_seconds / float(self._pi_min_interval)  # Normalize to reference interval
 
         # Convert both to °C for PI math
         current_c = TemperatureConverter.convert(
@@ -329,7 +347,6 @@ class PIControllerMixin:
         is_heating = self._attr_hvac_mode == HVACMode.HEAT
         is_cooling = self._attr_hvac_mode in (HVACMode.COOL, HVACMode.DRY)
         if not is_heating and not is_cooling:
-            _LOGGER.debug("PI: skipping, mode %s not supported", self._attr_hvac_mode)
             return
 
         # Feedforward from outdoor temp buckets
@@ -353,8 +370,19 @@ class PIControllerMixin:
                 except (ValueError, TypeError):
                     pass
 
+        # Adaptive setpoint weight: full P (b=1) for large errors,
+        # blend to configured weight as error approaches deadband
+        abs_error = abs(error)
+        if abs_error > self._pi_deadband * 4:
+            effective_weight = 1.0
+        elif abs_error > self._pi_deadband:
+            blend = (abs_error - self._pi_deadband) / (self._pi_deadband * 3)
+            effective_weight = self._pi_setpoint_weight + blend * (1.0 - self._pi_setpoint_weight)
+        else:
+            effective_weight = self._pi_setpoint_weight
+
         # Deadband: if error is small, skip P term and decay integral
-        in_deadband = abs(error) < self._pi_deadband
+        in_deadband = abs_error < self._pi_deadband
         if in_deadband:
             self._pi_integral *= 0.9
             self._ff_settled_ticks += 1
@@ -377,10 +405,15 @@ class PIControllerMixin:
             p_term = 0.0
         else:
             self._ff_settled_ticks = 0
-            # 2-DOF setpoint weighting: P sees weighted error, I sees true error
-            p_error = self._pi_setpoint_weight * desired_c - current_c
+            # 2-DOF setpoint weighting with adaptive blend
+            p_error = effective_weight * desired_c - current_c
             p_term = self._pi_kp * p_error
-            self._pi_integral += error
+            # Time-normalized integral: trapezoidal (Tustin) method
+            # Accumulates (avg of current + previous error) * dt_factor
+            avg_error = (error + self._pi_last_error) / 2.0
+            self._pi_integral += avg_error * dt_factor
+
+        self._pi_last_error = error
 
         # Discard stale integral on overshoot recovery
         if is_heating and self._pi_integral < 0 and error >= -self._pi_deadband:
@@ -393,28 +426,39 @@ class PIControllerMixin:
 
         i_term = self._pi_ki * self._pi_integral
         raw_setpoint = desired_c + p_term + i_term + self._ff_offset
-        new_setpoint = round(max(self._min_temp, min(self._max_temp, raw_setpoint)))
+        clamped_setpoint = max(self._min_temp, min(self._max_temp, raw_setpoint))
 
-        # Back-calculation anti-windup: if output saturated, unwind integral
-        # proportionally to the saturation amount (Kb = 1/Ki)
+        # Back-calculation anti-windup
         if self._pi_ki != 0:
-            saturation_error = new_setpoint - raw_setpoint
+            saturation_error = clamped_setpoint - raw_setpoint
             if abs(saturation_error) > 0.01:
-                kb = 1.0 / self._pi_ki  # tracking gain
+                kb = 1.0 / self._pi_ki
                 self._pi_integral += kb * saturation_error
                 self._pi_integral = max(-50.0, min(50.0, self._pi_integral))
 
+        # Midpoint-crossing hysteresis: only change HP setpoint when the raw
+        # value crosses the midpoint between integers. Prevents 1°C limit cycles.
+        new_setpoint = self._hp_setpoint  # Default: keep current
+        if clamped_setpoint > self._hp_setpoint + 0.5:
+            new_setpoint = round(clamped_setpoint)
+        elif clamped_setpoint < self._hp_setpoint - 0.5:
+            new_setpoint = round(clamped_setpoint)
+        new_setpoint = int(max(self._min_temp, min(self._max_temp, new_setpoint)))
+
         if new_setpoint != self._hp_setpoint:
             _LOGGER.info(
-                "PI: error=%.1f P=%.1f I=%.1f FF=%.1f setpoint %s -> %s",
-                error, p_term, i_term, self._ff_offset,
+                "PI: error=%.1f P=%.1f I=%.1f FF=%.1f raw=%.1f setpoint %s -> %s",
+                error, p_term, i_term, self._ff_offset, clamped_setpoint,
                 self._hp_setpoint, new_setpoint,
             )
             self._hp_setpoint = new_setpoint
             self._pi_command_pending = True
             await self.send_ir()
         else:
-            _LOGGER.debug("PI: error=%.1f, setpoint unchanged at %s", error, self._hp_setpoint)
+            _LOGGER.debug(
+                "PI: error=%.1f raw=%.1f setpoint=%s (held)",
+                error, clamped_setpoint, self._hp_setpoint,
+            )
 
         self.async_schedule_update_ha_state()
 

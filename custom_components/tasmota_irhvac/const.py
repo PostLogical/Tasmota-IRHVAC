@@ -194,15 +194,15 @@ CONF_PI_SETPOINT_WEIGHT = "pi_setpoint_weight"
 
 # PI controller defaults
 DEFAULT_PI_ENABLED = False
-DEFAULT_PI_KP = 1.5
-DEFAULT_PI_KI = 0.05
+DEFAULT_PI_KP = 1.0
+DEFAULT_PI_KI = 0.02
 DEFAULT_PI_MIN_INTERVAL = 900
 DEFAULT_PI_DEADBAND = 0.5
 DEFAULT_PI_FF_HEAT_REFERENCE = 15.0
 DEFAULT_PI_FF_HEAT_SLOPE = 0.3
 DEFAULT_PI_FF_COOL_REFERENCE = 25.0
 DEFAULT_PI_FF_COOL_SLOPE = 0.3
-DEFAULT_PI_SETPOINT_WEIGHT = 1.0  # 1.0 = standard PI, 0.0 = P ignores setpoint changes
+DEFAULT_PI_SETPOINT_WEIGHT = 0.5  # Adaptive: full P for large errors, weighted near setpoint
 
 # PI controller extra state attributes
 ATTR_HP_SETPOINT = "hp_setpoint"
