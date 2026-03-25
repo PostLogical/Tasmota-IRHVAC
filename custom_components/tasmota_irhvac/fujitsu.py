@@ -1,4 +1,4 @@
-"""Fujitsu-specific IRHVAC with preset modes and PI controller integration."""
+"""Fujitsu-specific IRHVAC with preset modes."""
 
 import asyncio
 import logging
@@ -13,7 +13,6 @@ from homeassistant.components.climate.const import (
     SWING_OFF,
     SWING_VERTICAL,
 )
-from homeassistant.const import ATTR_TEMPERATURE, STATE_ON
 from homeassistant.core import callback
 from homeassistant.helpers.event import async_call_later
 
@@ -25,7 +24,6 @@ from .const import (
     PRESET_SET_H,
     PRESET_SET_V,
 )
-from .pi_controller import PIControllerMixin
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -53,14 +51,11 @@ POWERFUL_TIMEOUT_SECONDS = 1200  # 20 minutes
 FUJITSU_MODEL_3 = 3
 
 
-class FujitsuTasmotaIrhvac(PIControllerMixin, TasmotaIrhvac):
-    """Fujitsu IRHVAC with PI + feedforward temperature control and preset modes."""
+class FujitsuTasmotaIrhvac(TasmotaIrhvac):
+    """Fujitsu IRHVAC with vendor-specific preset modes."""
 
     def __init__(self, hass, vendor, config):
         super().__init__(hass, vendor, config)
-
-        # Initialize PI controller (vendor-agnostic)
-        self.pi_init(config)
 
         # Fujitsu preset state
         self._min_heat = False
@@ -86,72 +81,16 @@ class FujitsuTasmotaIrhvac(PIControllerMixin, TasmotaIrhvac):
                 self._powerful = True
                 self.pi_pause()
 
-        # Initialize PI controller (sets up timers, restores state, etc.)
-        await self.pi_async_added_to_hass(old_state=old_state)
-
     async def async_will_remove_from_hass(self):
-        self.pi_async_will_remove_from_hass()
         if self._powerful_timer_unsub:
             self._powerful_timer_unsub()
             self._powerful_timer_unsub = None
         await super().async_will_remove_from_hass()
 
-    # ── PI Integration Overrides ──────────────────────────────────────
-
-    async def _async_sensor_changed(self, entity_id_or_event, old_state=None, new_state=None):
-        """Override to trigger PI on sensor updates (event-driven ticking)."""
-        was_none = self._attr_current_temperature is None
-        await super()._async_sensor_changed(entity_id_or_event, old_state, new_state)
-        if self._attr_current_temperature is not None:
-            await self._pi_async_sensor_changed(was_none=was_none)
-
-    def _get_ir_temp(self):
-        """Return PI-computed HP setpoint instead of user target temp."""
-        pi_temp = self.pi_get_ir_temp()
-        if pi_temp is not None:
-            return pi_temp
-        return super()._get_ir_temp()
-
-    def async_write_ha_state(self):
-        """Write state and notify companion PI sensors."""
-        super().async_write_ha_state()
-        self.pi_write_ha_state()
-
-    @property
-    def hvac_modes(self):
-        """Filter out auto/heat_cool when PI is enabled."""
-        return self.pi_filter_hvac_modes(self._attr_hvac_modes)
-
-    async def async_set_hvac_mode(self, hvac_mode):
-        """Reject auto/heat_cool when PI is enabled."""
-        if self.pi_reject_hvac_mode(hvac_mode):
-            return
-        await super().async_set_hvac_mode(hvac_mode)
-
-    async def async_set_temperature(self, **kwargs):
-        """Set new desired room temperature. PI computes HP setpoint."""
-        temperature = kwargs.get(ATTR_TEMPERATURE)
-        if temperature is None:
-            return
-
-        hvac_mode = kwargs.get("hvac_mode")
-        if hvac_mode is not None:
-            await self.set_mode(hvac_mode)
-
-        if not await self.pi_set_temperature(temperature):
-            await super().async_set_temperature(**kwargs)
-
-    @property
-    def extra_state_attributes(self):
-        """Return state attributes including PI controller state."""
-        attrs = super().extra_state_attributes
-        attrs.update(self.pi_extra_state_attributes())
-        return attrs
-
     # ── State Payload Handling ─────────────────────────────────────────
 
     async def _handle_state_payload(self, json_payload, payload):
-        """Handle MQTT state with Fujitsu-specific preset detection and PI integration."""
+        """Handle MQTT state with Fujitsu-specific preset detection."""
         if payload.get("Vendor") != self._vendor:
             return
 
@@ -167,11 +106,8 @@ class FujitsuTasmotaIrhvac(PIControllerMixin, TasmotaIrhvac):
                 "swingh": self._swingh,
             }
 
-        # Standard IRHVAC processing
+        # Standard IRHVAC processing (includes PI hooks)
         await super()._handle_state_payload(json_payload, payload)
-
-        # PI: restore desired_temp over payload temp
-        self.pi_restore_desired_temp(payload)
 
         # Map turbo/econo/clean flags to Fujitsu presets
         if self.power_mode == "off":
@@ -238,13 +174,6 @@ class FujitsuTasmotaIrhvac(PIControllerMixin, TasmotaIrhvac):
                 self._econo = "off"
                 self._turbo = "off"
                 self._clean = "off"
-
-        # PI: handle temp from MQTT payload
-        if self._pi_enabled and "Temp" in payload and payload["Temp"] > 0:
-            is_echo = self._pi_command_pending
-            if self.pi_handle_mqtt_temp(is_echo):
-                if not (prev_model3 and "Data" in json_payload):
-                    await self._pi_tick()
 
         self.async_schedule_update_ha_state()
 

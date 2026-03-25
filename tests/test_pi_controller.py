@@ -84,7 +84,35 @@ class TestSeedBuckets:
 # These test the PI math in isolation using a mock entity
 
 
-class FakePIEntity(PIControllerMixin):
+class FakeBaseEntity:
+    """Simulates TasmotaIrhvac base class methods that super() calls need."""
+
+    _attr_hvac_modes = [HVACMode.HEAT, HVACMode.COOL, HVACMode.AUTO, HVACMode.OFF]
+    _temp_precision = 1.0
+
+    async def _async_sensor_changed(self, *args, **kwargs):
+        pass
+
+    def _get_ir_temp(self):
+        return round(self._attr_target_temperature)
+
+    async def async_set_hvac_mode(self, hvac_mode):
+        self._attr_hvac_mode = hvac_mode
+
+    async def async_set_temperature(self, **kwargs):
+        temp = kwargs.get("temperature")
+        if temp is not None:
+            self._attr_target_temperature = temp
+
+    @property
+    def extra_state_attributes(self):
+        return {"test": True}
+
+    async def _handle_state_payload(self, json_payload, payload):
+        pass
+
+
+class FakePIEntity(PIControllerMixin, FakeBaseEntity):
     """Minimal fake entity to test PI math without HA infrastructure."""
 
     def __init__(self, config):
@@ -602,89 +630,78 @@ class TestEventDrivenTicking:
 # ── PI API Tests ──────────────────────────────────────────────────────
 
 
-class TestPIAPI:
-    """Tests for PI mixin public API methods."""
+class TestPIOverrides:
+    """Tests for PI mixin method overrides."""
 
-    def test_pi_get_ir_temp_when_enabled(self, pi_entity):
-        """pi_get_ir_temp should return rounded hp_setpoint when PI active."""
+    def test_get_ir_temp_when_enabled(self, pi_entity):
+        """_get_ir_temp should return rounded hp_setpoint when PI active."""
         pi_entity._hp_setpoint = 23.7
-        result = pi_entity.pi_get_ir_temp()
+        result = pi_entity._get_ir_temp()
         assert result == 24
 
-    def test_pi_get_ir_temp_when_off(self, pi_entity):
-        """pi_get_ir_temp should return None when HVAC is OFF."""
+    def test_get_ir_temp_when_off(self, pi_entity):
+        """_get_ir_temp should fall back to base when HVAC is OFF."""
         pi_entity._attr_hvac_mode = HVACMode.OFF
-        result = pi_entity.pi_get_ir_temp()
-        assert result is None
+        pi_entity._attr_target_temperature = 72.0
+        result = pi_entity._get_ir_temp()
+        assert result == 72  # Falls through to base class
 
-    def test_pi_get_ir_temp_when_disabled(self, pi_entity):
-        """pi_get_ir_temp should return None when PI is disabled."""
+    def test_get_ir_temp_when_disabled(self, pi_entity):
+        """_get_ir_temp should fall back to base when PI disabled."""
         pi_entity._pi_enabled = False
-        result = pi_entity.pi_get_ir_temp()
-        assert result is None
+        pi_entity._attr_target_temperature = 72.0
+        result = pi_entity._get_ir_temp()
+        assert result == 72  # Falls through to base class
 
     @pytest.mark.asyncio
-    async def test_pi_set_temperature(self, pi_entity):
-        """pi_set_temperature should update desired temp and run PI tick."""
+    async def test_set_temperature_with_pi(self, pi_entity):
+        """async_set_temperature should route through PI when enabled."""
         pi_entity._pi_integral = 5.0
-        result = await pi_entity.pi_set_temperature(74.0)
-        assert result is True
+        await pi_entity.async_set_temperature(temperature=74.0)
         assert pi_entity._desired_temp == 74.0
         assert pi_entity._attr_target_temperature == 74.0
-        # Integral was zeroed then _pi_tick ran (accumulating new error)
-        # Verify the tick actually ran by checking send_ir was called
         assert pi_entity.send_ir.called
 
     @pytest.mark.asyncio
-    async def test_pi_set_temperature_disabled(self, pi_entity):
-        """pi_set_temperature should return False when PI disabled."""
+    async def test_set_temperature_without_pi(self, pi_entity):
+        """async_set_temperature should fall through when PI disabled."""
         pi_entity._pi_enabled = False
-        result = await pi_entity.pi_set_temperature(74.0)
-        assert result is False
+        await pi_entity.async_set_temperature(temperature=74.0)
+        # Falls to FakeBaseEntity.async_set_temperature
+        assert pi_entity._attr_target_temperature == 74.0
 
-    def test_pi_filter_hvac_modes(self, pi_entity):
-        """pi_filter_hvac_modes should remove auto/heat_cool."""
-        modes = [HVACMode.HEAT, HVACMode.COOL, HVACMode.AUTO, HVACMode.HEAT_COOL, HVACMode.OFF]
-        filtered = pi_entity.pi_filter_hvac_modes(modes)
-        assert HVACMode.AUTO not in filtered
-        assert HVACMode.HEAT_COOL not in filtered
-        assert HVACMode.HEAT in filtered
-        assert HVACMode.COOL in filtered
+    def test_hvac_modes_filters_auto(self, pi_entity):
+        """hvac_modes property should remove auto/heat_cool when PI enabled."""
+        pi_entity._attr_hvac_modes = [HVACMode.HEAT, HVACMode.COOL, HVACMode.AUTO, HVACMode.HEAT_COOL, HVACMode.OFF]
+        modes = pi_entity.hvac_modes
+        assert HVACMode.AUTO not in modes
+        assert HVACMode.HEAT_COOL not in modes
+        assert HVACMode.HEAT in modes
 
-    def test_pi_reject_auto_mode(self, pi_entity):
-        """PI should reject AUTO mode."""
-        assert pi_entity.pi_reject_hvac_mode(HVACMode.AUTO) is True
-        assert pi_entity.pi_reject_hvac_mode(HVACMode.HEAT) is False
+    @pytest.mark.asyncio
+    async def test_set_hvac_mode_rejects_auto(self, pi_entity):
+        """async_set_hvac_mode should reject AUTO when PI enabled."""
+        pi_entity._attr_hvac_mode = HVACMode.HEAT
+        await pi_entity.async_set_hvac_mode(HVACMode.AUTO)
+        assert pi_entity._attr_hvac_mode == HVACMode.HEAT  # Unchanged
 
-    def test_pi_extra_state_attributes(self, pi_entity):
-        """PI attributes should be returned when enabled."""
+    def test_extra_state_attributes_includes_pi(self, pi_entity):
+        """extra_state_attributes should include PI state when enabled."""
         pi_entity._hp_setpoint = 23.0
         pi_entity._pi_integral = 1.234
         pi_entity._desired_temp = 72.0
         pi_entity._ff_offset = 2.567
 
-        attrs = pi_entity.pi_extra_state_attributes()
+        attrs = pi_entity.extra_state_attributes
         assert attrs[ATTR_HP_SETPOINT] == 23.0
         assert attrs[ATTR_PI_INTEGRAL] == 1.234
         assert attrs[ATTR_DESIRED_TEMP] == 72.0
-        assert attrs[ATTR_FF_OFFSET] == 2.57  # Rounded to 2 decimals
+        assert attrs[ATTR_FF_OFFSET] == 2.57
+        assert "test" in attrs  # Base class attrs still present
 
-    def test_pi_extra_state_attributes_disabled(self, pi_entity):
-        """No attributes when PI disabled."""
+    def test_extra_state_attributes_no_pi(self, pi_entity):
+        """extra_state_attributes should only have base attrs when PI disabled."""
         pi_entity._pi_enabled = False
-        attrs = pi_entity.pi_extra_state_attributes()
-        assert attrs == {}
-
-    def test_pi_handle_mqtt_echo(self, pi_entity):
-        """Echo should clear command pending and return False."""
-        pi_entity._pi_command_pending = True
-        result = pi_entity.pi_handle_mqtt_temp(is_echo=True)
-        assert result is False
-        assert pi_entity._pi_command_pending is False
-
-    def test_pi_handle_mqtt_remote(self, pi_entity):
-        """Remote temp change should update desired and return True."""
-        pi_entity._attr_target_temperature = 74.0
-        result = pi_entity.pi_handle_mqtt_temp(is_echo=False)
-        assert result is True
-        assert pi_entity._desired_temp == 74.0
+        attrs = pi_entity.extra_state_attributes
+        assert ATTR_HP_SETPOINT not in attrs
+        assert "test" in attrs  # Base class attrs still present

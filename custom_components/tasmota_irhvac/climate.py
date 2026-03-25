@@ -509,7 +509,10 @@ async def async_setup_entry(hass, entry, async_add_entities):
     async_add_entities([entity])
 
 
-class TasmotaIrhvac(RestoreEntity, ClimateEntity):
+from .pi_controller import PIControllerMixin
+
+
+class TasmotaIrhvac(PIControllerMixin, RestoreEntity, ClimateEntity):
     """Representation of a Generic Thermostat device."""
 
     # It can remove from HA >= 2025.1
@@ -650,6 +653,9 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         else:
             self._attr_preset_modes = None
 
+        # Initialize PI controller (vendor-agnostic, gated by pi_enabled config)
+        self.pi_init(config)
+
     async def async_added_to_hass(self):
         # Replacing `async_track_state_change` with `async_track_state_change_event`
         # See, https://developers.home-assistant.io/blog/2024/04/13/deprecate_async_track_state_change/
@@ -754,6 +760,9 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
 
         if self._power_sensor:
             regist_track_state_change_event(self._power_sensor)
+
+        # Initialize PI controller (restores state, starts timers)
+        await self.pi_async_added_to_hass(old_state=old_state)
 
     async def _subscribe_topics(self):
         """(Re)Subscribe to topics."""
@@ -928,6 +937,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
 
     async def async_will_remove_from_hass(self):
         """Unsubscribe when removed."""
+        self.pi_async_will_remove_from_hass()
         for unsubscribe in self._unsubscribes:
             unsubscribe()
 
@@ -1285,7 +1295,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             self.power_mode = STATE_ON
 
     def _get_ir_temp(self):
-        """Return temperature for IR payload. Override for PI control."""
+        """Return temperature for IR payload."""
         return round(self._attr_target_temperature / self._temp_precision) * self._temp_precision
 
     async def send_ir(self):

@@ -462,67 +462,100 @@ class PIControllerMixin:
 
         self.async_schedule_update_ha_state()
 
-    # ── PI overrides for climate entity methods ───────────────────────
+    # ── Method overrides (MRO: Mixin → TasmotaIrhvac → ClimateEntity) ──
 
-    def pi_get_ir_temp(self):
-        """Return PI-computed HP setpoint. Call from _get_ir_temp override."""
+    async def _async_sensor_changed(self, entity_id_or_event, old_state=None, new_state=None):
+        """Override to add PI event-driven ticking on sensor updates."""
+        was_none = self._attr_current_temperature is None
+        await super()._async_sensor_changed(entity_id_or_event, old_state, new_state)
+        if self._attr_current_temperature is not None:
+            await self._pi_async_sensor_changed(was_none=was_none)
+
+    def _get_ir_temp(self):
+        """Override to return PI-computed setpoint when active."""
         if self._pi_enabled and self._attr_hvac_mode != HVACMode.OFF:
             return round(self._hp_setpoint)
-        return None  # caller should fall back to super()
+        return super()._get_ir_temp()
 
-    async def pi_set_temperature(self, temperature):
-        """Handle temperature set when PI is active. Returns True if handled."""
-        if not self._pi_enabled:
-            return False
-        self._desired_temp = temperature
-        self._attr_target_temperature = temperature
-        self._pi_integral = 0.0
-        if self._attr_hvac_mode != HVACMode.OFF:
-            self.power_mode = STATE_ON
-        await self._pi_tick()
-        self.async_schedule_update_ha_state()
-        return True
-
-    def pi_filter_hvac_modes(self, modes):
-        """Remove auto/heat_cool when PI is enabled."""
-        if self._pi_enabled and modes:
-            return [m for m in modes if m not in (HVACMode.AUTO, HVACMode.HEAT_COOL)]
-        return modes
-
-    def pi_reject_hvac_mode(self, hvac_mode):
-        """Return True if this mode should be rejected when PI is enabled."""
-        if self._pi_enabled and hvac_mode in (HVACMode.AUTO, HVACMode.HEAT_COOL):
-            _LOGGER.warning(
-                "PI mode does not support %s — use HEAT or COOL explicitly", hvac_mode,
-            )
-            return True
-        return False
-
-    def pi_handle_mqtt_temp(self, is_echo):
-        """Handle temperature from MQTT payload. Returns True if PI should tick."""
-        if not self._pi_enabled:
-            return False
-        if is_echo:
-            self._pi_command_pending = False
-            return False
-        # Physical remote set a new temp
-        self._desired_temp = self._attr_target_temperature
-        return True
-
-    def pi_restore_desired_temp(self, payload):
-        """After MQTT state processing, restore desired_temp over payload temp."""
-        if self._pi_enabled and self._desired_temp is not None:
-            if "Temp" in payload and payload["Temp"] > 0:
-                self._hp_setpoint = payload["Temp"]
-            self._attr_target_temperature = self._desired_temp
-
-    def pi_write_ha_state(self):
-        """Fire dispatcher signal for companion sensors. Call from async_write_ha_state."""
+    def async_write_ha_state(self):
+        """Override to fire dispatcher signal for companion PI sensors."""
+        super().async_write_ha_state()
         if self._pi_enabled and hasattr(self, "_config_entry_id"):
             async_dispatcher_send(
                 self.hass,
                 SIGNAL_PI_UPDATE.format(self._config_entry_id),
             )
+
+    @property
+    def hvac_modes(self):
+        """Override to filter auto/heat_cool when PI is enabled."""
+        modes = self._attr_hvac_modes
+        if self._pi_enabled and modes:
+            return [m for m in modes if m not in (HVACMode.AUTO, HVACMode.HEAT_COOL)]
+        return modes
+
+    async def async_set_hvac_mode(self, hvac_mode):
+        """Override to reject auto/heat_cool when PI is enabled."""
+        if self._pi_enabled and hvac_mode in (HVACMode.AUTO, HVACMode.HEAT_COOL):
+            _LOGGER.warning(
+                "PI mode does not support %s — use HEAT or COOL explicitly", hvac_mode,
+            )
+            return
+        await super().async_set_hvac_mode(hvac_mode)
+
+    async def async_set_temperature(self, **kwargs):
+        """Override to route through PI when active."""
+        temperature = kwargs.get("temperature")
+        if temperature is None:
+            return
+        hvac_mode = kwargs.get("hvac_mode")
+        if hvac_mode is not None:
+            await super().async_set_hvac_mode(hvac_mode)
+        if self._pi_enabled:
+            self._desired_temp = temperature
+            self._attr_target_temperature = temperature
+            self._pi_integral = 0.0
+            if self._attr_hvac_mode != HVACMode.OFF:
+                self.power_mode = STATE_ON
+            await self._pi_tick()
+            self.async_schedule_update_ha_state()
+            return
+        await super().async_set_temperature(**kwargs)
+
+    @property
+    def extra_state_attributes(self):
+        """Override to include PI controller state attributes."""
+        attrs = super().extra_state_attributes
+        if self._pi_enabled:
+            attrs.update({
+                ATTR_HP_SETPOINT: self._hp_setpoint,
+                ATTR_PI_INTEGRAL: round(self._pi_integral, 3),
+                ATTR_DESIRED_TEMP: self._desired_temp,
+                ATTR_FF_OFFSET: round(self._ff_offset, 2),
+                ATTR_FF_HEAT_BUCKETS: {
+                    str(k): round(v, 2) for k, v in self._ff_heat_buckets.items()
+                },
+                ATTR_FF_COOL_BUCKETS: {
+                    str(k): round(v, 2) for k, v in self._ff_cool_buckets.items()
+                },
+            })
+        return attrs
+
+    async def _handle_state_payload(self, json_payload, payload):
+        """Override to add PI MQTT hooks."""
+        await super()._handle_state_payload(json_payload, payload)
+        # Restore desired_temp over payload temp
+        if self._pi_enabled and self._desired_temp is not None:
+            if "Temp" in payload and payload["Temp"] > 0:
+                self._hp_setpoint = payload["Temp"]
+            self._attr_target_temperature = self._desired_temp
+        # Handle temp echo detection
+        if self._pi_enabled and "Temp" in payload and payload["Temp"] > 0:
+            if self._pi_command_pending:
+                self._pi_command_pending = False
+            else:
+                self._desired_temp = self._attr_target_temperature
+                await self._pi_tick()
 
     async def async_reset_ff_buckets(self):
         """Reset feedforward buckets to seed values from config."""
@@ -533,20 +566,3 @@ class PIControllerMixin:
         self._pi_integral = 0.0
         _LOGGER.info("FF buckets reset to seed values, integral zeroed")
         self.async_schedule_update_ha_state()
-
-    def pi_extra_state_attributes(self):
-        """Return PI state attributes dict. Merge into extra_state_attributes."""
-        if not self._pi_enabled:
-            return {}
-        return {
-            ATTR_HP_SETPOINT: self._hp_setpoint,
-            ATTR_PI_INTEGRAL: round(self._pi_integral, 3),
-            ATTR_DESIRED_TEMP: self._desired_temp,
-            ATTR_FF_OFFSET: round(self._ff_offset, 2),
-            ATTR_FF_HEAT_BUCKETS: {
-                str(k): round(v, 2) for k, v in self._ff_heat_buckets.items()
-            },
-            ATTR_FF_COOL_BUCKETS: {
-                str(k): round(v, 2) for k, v in self._ff_cool_buckets.items()
-            },
-        }
