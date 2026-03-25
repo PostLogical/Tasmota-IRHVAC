@@ -329,32 +329,32 @@ OPTIONS_ADVANCED_SCHEMA = vol.Schema(
 
 OPTIONS_PI_CONTROLLER_SCHEMA = vol.Schema(
     {
-        vol.Optional(CONF_PI_ENABLED): BooleanSelector(),
-        vol.Optional(CONF_PI_KP): NumberSelector(
+        vol.Optional(CONF_PI_ENABLED, default=DEFAULT_PI_ENABLED): BooleanSelector(),
+        vol.Optional(CONF_PI_KP, default=DEFAULT_PI_KP): NumberSelector(
             NumberSelectorConfig(min=0, max=20, step=0.1, mode=NumberSelectorMode.BOX)
         ),
-        vol.Optional(CONF_PI_KI): NumberSelector(
+        vol.Optional(CONF_PI_KI, default=DEFAULT_PI_KI): NumberSelector(
             NumberSelectorConfig(min=0, max=5, step=0.01, mode=NumberSelectorMode.BOX)
         ),
-        vol.Optional(CONF_PI_MIN_INTERVAL): NumberSelector(
+        vol.Optional(CONF_PI_MIN_INTERVAL, default=DEFAULT_PI_MIN_INTERVAL): NumberSelector(
             NumberSelectorConfig(min=60, max=3600, step=60, mode=NumberSelectorMode.BOX)
         ),
-        vol.Optional(CONF_PI_DEADBAND): NumberSelector(
+        vol.Optional(CONF_PI_DEADBAND, default=DEFAULT_PI_DEADBAND): NumberSelector(
             NumberSelectorConfig(min=0, max=5, step=0.1, mode=NumberSelectorMode.BOX)
         ),
         vol.Optional(CONF_OUTDOOR_TEMP_SENSOR): EntitySelector(
             EntitySelectorConfig(domain="sensor")
         ),
-        vol.Optional(CONF_PI_FF_HEAT_REFERENCE): NumberSelector(
+        vol.Optional(CONF_PI_FF_HEAT_REFERENCE, default=DEFAULT_PI_FF_HEAT_REFERENCE): NumberSelector(
             NumberSelectorConfig(min=-20, max=50, step=0.5, mode=NumberSelectorMode.BOX)
         ),
-        vol.Optional(CONF_PI_FF_HEAT_SLOPE): NumberSelector(
+        vol.Optional(CONF_PI_FF_HEAT_SLOPE, default=DEFAULT_PI_FF_HEAT_SLOPE): NumberSelector(
             NumberSelectorConfig(min=0, max=5, step=0.05, mode=NumberSelectorMode.BOX)
         ),
-        vol.Optional(CONF_PI_FF_COOL_REFERENCE): NumberSelector(
+        vol.Optional(CONF_PI_FF_COOL_REFERENCE, default=DEFAULT_PI_FF_COOL_REFERENCE): NumberSelector(
             NumberSelectorConfig(min=0, max=60, step=0.5, mode=NumberSelectorMode.BOX)
         ),
-        vol.Optional(CONF_PI_FF_COOL_SLOPE): NumberSelector(
+        vol.Optional(CONF_PI_FF_COOL_SLOPE, default=DEFAULT_PI_FF_COOL_SLOPE): NumberSelector(
             NumberSelectorConfig(min=0, max=5, step=0.05, mode=NumberSelectorMode.BOX)
         ),
         vol.Optional(CONF_PI_FF_SUPPRESS_LEARNING_ENTITY): EntitySelector(
@@ -546,7 +546,9 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Step 3: Advanced & Sensors."""
         if user_input is not None:
             self._user_input.update(user_input)
-            return await self.async_step_pi_controller()
+            if user_input.get(CONF_PI_ENABLED):
+                return await self.async_step_pi_controller()
+            return await self._create_entry()
 
         return self.async_show_form(
             step_id="advanced",
@@ -617,12 +619,15 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Optional(CONF_POWER_SENSOR): EntitySelector(
                         EntitySelectorConfig(domain=["binary_sensor", "sensor"])
                     ),
+                    vol.Optional(
+                        CONF_PI_ENABLED, default=DEFAULT_PI_ENABLED
+                    ): BooleanSelector(),
                 }
             ),
         )
 
     async def async_step_pi_controller(self, user_input=None):
-        """Step 4: PI Controller (Fujitsu only)."""
+        """Step 4: PI Controller settings (shown when PI is enabled)."""
         if user_input is not None:
             self._user_input.update(user_input)
             return await self._create_entry()
@@ -631,9 +636,6 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="pi_controller",
             data_schema=vol.Schema(
                 {
-                    vol.Optional(
-                        CONF_PI_ENABLED, default=DEFAULT_PI_ENABLED
-                    ): BooleanSelector(),
                     vol.Optional(
                         CONF_PI_KP, default=DEFAULT_PI_KP
                     ): NumberSelector(

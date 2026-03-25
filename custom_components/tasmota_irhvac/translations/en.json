@@ -82,9 +82,11 @@
           "special_mode": "Special Mode",
           "temperature_sensor": "Temperature Sensor",
           "humidity_sensor": "Humidity Sensor",
-          "power_sensor": "Power Sensor"
+          "power_sensor": "Power Sensor",
+          "pi_enabled": "Enable PI Controller"
         },
         "data_description": {
+          "pi_enabled": "Enable the PI+feedforward controller for automatic temperature regulation. When enabled, the next step will let you configure PI parameters.",
           "default_quiet_mode": "Quiet mode via IRHVAC JSON command. Note: Fujitsu units ignore this — use Fujitsu presets instead.",
           "default_turbo_mode": "Turbo mode via IRHVAC JSON command. Note: Fujitsu units ignore this — use the Powerful preset instead.",
           "default_econo_mode": "Economy mode via IRHVAC JSON command. Note: Fujitsu units ignore this — use the Economy preset instead.",
