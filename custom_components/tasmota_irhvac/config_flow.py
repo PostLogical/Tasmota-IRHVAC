@@ -546,9 +546,7 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Step 3: Advanced & Sensors."""
         if user_input is not None:
             self._user_input.update(user_input)
-            if self._vendor_is_fujitsu():
-                return await self.async_step_pi_controller()
-            return await self._create_entry()
+            return await self.async_step_pi_controller()
 
         return self.async_show_form(
             step_id="advanced",
@@ -793,9 +791,8 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
             "defaults",
             "sensors",
             "advanced_options",
+            "pi_controller",
         ]
-        if self._vendor_is_fujitsu():
-            menu.append("pi_controller")
         return self.async_show_menu(
             step_id="init",
             menu_options=menu,
