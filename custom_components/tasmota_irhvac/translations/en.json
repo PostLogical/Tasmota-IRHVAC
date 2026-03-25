@@ -60,7 +60,7 @@
           "keep_mode_when_off": "Keep the last HVAC mode when turning off. Required for MITSUBISHI_AC, ECOCLIM, and similar devices.",
           "away_temp": "Temperature to use when Away preset is active. Leave blank to disable the Away preset.",
           "supported_fan_speeds": "Note: auto_max/max_high are for devices where the remote shows max but Tasmota reports high, and auto which is actually max.",
-          "supported_preset_modes": "Vendor-specific preset modes. For Fujitsu: Powerful, Economy, Min Heat, Set Vertical, Set Horizontal. Leave empty if your unit has no special presets. Custom values can be typed in for other vendors."
+          "supported_preset_modes": "Vendor-specific preset modes. Select the presets your unit supports. Leave empty if your unit has no special presets. Custom values can be typed in."
         }
       },
       "advanced": {
@@ -87,9 +87,9 @@
         },
         "data_description": {
           "pi_enabled": "Enable the PI+feedforward controller for automatic temperature regulation. When enabled, the next step will let you configure PI parameters.",
-          "default_quiet_mode": "Quiet mode via IRHVAC JSON command. Note: Fujitsu units ignore this — use Fujitsu presets instead.",
-          "default_turbo_mode": "Turbo mode via IRHVAC JSON command. Note: Fujitsu units ignore this — use the Powerful preset instead.",
-          "default_econo_mode": "Economy mode via IRHVAC JSON command. Note: Fujitsu units ignore this — use the Economy preset instead.",
+          "default_quiet_mode": "Quiet mode via IRHVAC JSON command. Some vendors ignore this — use vendor-specific presets instead if available.",
+          "default_turbo_mode": "Turbo mode via IRHVAC JSON command. Some vendors ignore this — use vendor-specific presets instead if available.",
+          "default_econo_mode": "Economy mode via IRHVAC JSON command. Some vendors ignore this — use vendor-specific presets instead if available.",
           "hvac_model": "AC model identifier. Use -1 for auto-detection.",
           "toggle_list": "Properties that don't retain the On state. Set this if your AC has toggle-only controls (pressing the button toggles between on and off rather than setting a specific state).",
           "special_mode": "Mode to enter for special functions like automatic cleaning after operation. Leave blank to disable.",
@@ -223,9 +223,9 @@
           "default_swingh": "Default Horizontal Swing"
         },
         "data_description": {
-          "default_quiet_mode": "Quiet mode via IRHVAC JSON command. Note: Fujitsu units ignore this — use Fujitsu presets instead.",
-          "default_turbo_mode": "Turbo mode via IRHVAC JSON command. Note: Fujitsu units ignore this — use the Powerful preset instead.",
-          "default_econo_mode": "Economy mode via IRHVAC JSON command. Note: Fujitsu units ignore this — use the Economy preset instead.",
+          "default_quiet_mode": "Quiet mode via IRHVAC JSON command. Some vendors ignore this — use vendor-specific presets instead if available.",
+          "default_turbo_mode": "Turbo mode via IRHVAC JSON command. Some vendors ignore this — use vendor-specific presets instead if available.",
+          "default_econo_mode": "Economy mode via IRHVAC JSON command. Some vendors ignore this — use vendor-specific presets instead if available.",
           "hvac_model": "AC model identifier. Use -1 for auto-detection."
         }
       },
