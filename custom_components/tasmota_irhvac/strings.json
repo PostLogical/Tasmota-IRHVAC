@@ -161,7 +161,7 @@
           "defaults": "Default Values",
           "sensors": "Sensors",
           "advanced_options": "Advanced Settings",
-          "pi_controller": "PI Controller (Fujitsu)"
+          "pi_controller": "PI Controller"
         }
       },
       "mqtt": {
@@ -252,7 +252,7 @@
         }
       },
       "pi_controller": {
-        "title": "PI Controller (Fujitsu)",
+        "title": "PI Controller",
         "data": {
           "pi_enabled": "Enable PI Controller",
           "pi_kp": "Proportional Gain (Kp)",
@@ -269,7 +269,7 @@
           "pi_setpoint_weight": "Setpoint Weight (0-1)"
         },
         "data_description": {
-          "pi_enabled": "Enable the PI+feedforward controller for automatic temperature regulation. Only works with Fujitsu vendor.",
+          "pi_enabled": "Enable the PI+feedforward controller for automatic temperature regulation.",
           "pi_kp": "Proportional gain. Higher values react faster to temperature errors but may overshoot.",
           "pi_ki": "Integral gain. Eliminates steady-state error over time.",
           "pi_min_interval": "Minimum seconds between PI adjustments.",
