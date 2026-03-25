@@ -620,24 +620,35 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             if isinstance(self._attr_swing_modes, list) and len(self._attr_swing_modes)
             else None
         )
-        self._attr_preset_modes = (
-            [PRESET_NONE, PRESET_AWAY] if self._away_temp else None
-        )
         self._attr_preset_mode = None
         self._attr_current_temperature = None
         self._attr_current_humidity = None
         self._attr_target_temperature = None
 
         self._support_flags = SUPPORT_FLAGS
-        if self._away_temp is not None:
-            self._support_flags = self._support_flags | ClimateEntityFeature.PRESET_MODE
         if self._attr_swing_mode is not None:
             self._support_flags = self._support_flags | ClimateEntityFeature.SWING_MODE
+
+        # Build preset list from base (Away) + vendor config, deduplicated
         preset_modes_from_config = config.get(CONF_PRESET_MODES_LIST)
+        presets = [PRESET_NONE]
+        if self._away_temp:
+            presets.append(PRESET_AWAY)
         if preset_modes_from_config:
-            base = self._attr_preset_modes or [PRESET_NONE]
-            self._attr_preset_modes = base + preset_modes_from_config
+            presets.extend(preset_modes_from_config)
+        # Deduplicate while preserving order
+        seen = set()
+        unique_presets = []
+        for mode in presets:
+            if mode not in seen:
+                seen.add(mode)
+                unique_presets.append(mode)
+        if len(unique_presets) > 1 or self._away_temp:
+            # Enable presets if we have more than just "None", or if Away is configured
+            self._attr_preset_modes = unique_presets
             self._support_flags |= ClimateEntityFeature.PRESET_MODE
+        else:
+            self._attr_preset_modes = None
 
     async def async_added_to_hass(self):
         # Replacing `async_track_state_change` with `async_track_state_change_event`
