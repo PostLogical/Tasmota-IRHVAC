@@ -5,7 +5,7 @@ import logging
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_ENTITY_ID
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.typing import ConfigType
@@ -42,7 +42,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await hass.config_entries.async_forward_entry_setups(entry, ["sensor"])
 
     # Defer config issue checks to give other integrations time to load entities
-    async_call_later(hass, 120, lambda _now: _check_config_issues(hass, entry))
+    @callback
+    def _deferred_check(_now):
+        _check_config_issues(hass, entry)
+
+    async_call_later(hass, 120, _deferred_check)
 
     return True
 
