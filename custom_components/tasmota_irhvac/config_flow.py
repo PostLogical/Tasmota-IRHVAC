@@ -129,6 +129,8 @@ from .const import (
     HVAC_MODE_AUTO_FAN,
     HVAC_MODE_FAN_AUTO,
     HVAC_MODES,
+    CONF_HAS_SET_H,
+    CONF_HAS_SET_V,
     CONF_PRESET_MODES_LIST,
     PRESET_ECONO,
     PRESET_MIN_HEAT,
@@ -522,8 +524,6 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 PRESET_POWERFUL,
                                 PRESET_ECONO,
                                 PRESET_MIN_HEAT,
-                                PRESET_SET_V,
-                                PRESET_SET_H,
                             ],
                             multiple=True,
                             mode=SelectSelectorMode.DROPDOWN,
@@ -621,6 +621,12 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ),
                     vol.Optional(
                         CONF_PI_ENABLED, default=DEFAULT_PI_ENABLED
+                    ): BooleanSelector(),
+                    vol.Optional(
+                        CONF_HAS_SET_V, default=False
+                    ): BooleanSelector(),
+                    vol.Optional(
+                        CONF_HAS_SET_H, default=False
                     ): BooleanSelector(),
                 }
             ),

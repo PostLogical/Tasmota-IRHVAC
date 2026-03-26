@@ -21,8 +21,6 @@ from .const import (
     PRESET_ECONO,
     PRESET_MIN_HEAT,
     PRESET_POWERFUL,
-    PRESET_SET_H,
-    PRESET_SET_V,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -37,9 +35,6 @@ FUJITSU_IR_MIN_HEAT = (
     + "00101000110001100000000000001000000010000111111110010000"
     + "000011001000110011010000010000000000000000000000000000000000010001001110"
 )
-FUJITSU_IR_SET_V = FUJITSU_RAW_PREFIX + "001010001100011000000000000010000000100000110110110010011"
-FUJITSU_IR_SET_H = FUJITSU_RAW_PREFIX + "00101000110001100000000000001000000010001001111001100001"
-
 # Data field hex values for detecting received IR presets
 FUJITSU_DATA_POWERFUL = "0x146300101039C6"
 FUJITSU_DATA_ECONO = "0x146300101009F6"
@@ -150,14 +145,14 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
                     self._attr_preset_mode = PRESET_ECONO
                     self.pi_pause()
                 elif data == FUJITSU_DATA_SET_V:
-                    self._attr_preset_mode = PRESET_SET_V
+                    # Physical remote set vertical vane — update swing state
                     self._swingv = None
                     if self._attr_swing_mode == SWING_BOTH:
                         self._attr_swing_mode = SWING_HORIZONTAL
                     elif self._attr_swing_mode == SWING_VERTICAL:
                         self._attr_swing_mode = SWING_OFF
                 elif data == FUJITSU_DATA_SET_H:
-                    self._attr_preset_mode = PRESET_SET_H
+                    # Physical remote set horizontal vane — update swing state
                     self._swingh = None
                     if self._attr_swing_mode == SWING_BOTH:
                         self._attr_swing_mode = SWING_VERTICAL
@@ -191,7 +186,7 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
             self.pi_resume()
 
         if (
-            preset_mode not in (PRESET_ECONO, PRESET_SET_V, PRESET_SET_H)
+            preset_mode != PRESET_ECONO
             and self._economy
         ):
             await self._send_raw_ir(FUJITSU_IR_ECONO)
@@ -236,28 +231,6 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
                 self._turbo = "off"
                 self._clean = "off"
                 self._attr_preset_mode = PRESET_MIN_HEAT
-            self.async_schedule_update_ha_state()
-            return
-
-        elif preset_mode == PRESET_SET_V:
-            await self._send_raw_ir(FUJITSU_IR_SET_V)
-            self._swingv = None
-            if self._attr_swing_mode == SWING_BOTH:
-                self._attr_swing_mode = SWING_HORIZONTAL
-            elif self._attr_swing_mode == SWING_VERTICAL:
-                self._attr_swing_mode = SWING_OFF
-            self._attr_preset_mode = self._attr_preset_mode
-            self.async_schedule_update_ha_state()
-            return
-
-        elif preset_mode == PRESET_SET_H:
-            await self._send_raw_ir(FUJITSU_IR_SET_H)
-            self._swingh = None
-            if self._attr_swing_mode == SWING_BOTH:
-                self._attr_swing_mode = SWING_VERTICAL
-            elif self._attr_swing_mode == SWING_HORIZONTAL:
-                self._attr_swing_mode = SWING_OFF
-            self._attr_preset_mode = self._attr_preset_mode
             self.async_schedule_update_ha_state()
             return
 

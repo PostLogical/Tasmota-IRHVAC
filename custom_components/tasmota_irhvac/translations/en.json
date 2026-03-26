@@ -10,6 +10,14 @@
       "ff_offset": {
         "name": "FF Offset"
       }
+    },
+    "button": {
+      "set_vertical_vane": {
+        "name": "Set Vertical Vane"
+      },
+      "set_horizontal_vane": {
+        "name": "Set Horizontal Vane"
+      }
     }
   },
   "config": {
@@ -83,10 +91,14 @@
           "temperature_sensor": "Temperature Sensor",
           "humidity_sensor": "Humidity Sensor",
           "power_sensor": "Power Sensor",
-          "pi_enabled": "Enable PI Controller"
+          "pi_enabled": "Enable PI Controller",
+          "has_set_vertical_vane": "Has Set Vertical Vane Button",
+          "has_set_horizontal_vane": "Has Set Horizontal Vane Button"
         },
         "data_description": {
           "pi_enabled": "Enable the PI+feedforward controller for automatic temperature regulation. When enabled, the next step will let you configure PI parameters.",
+          "has_set_vertical_vane": "Enable if your unit has a button to cycle the vertical vane to a fixed position. Creates a button entity.",
+          "has_set_horizontal_vane": "Enable if your unit has a button to cycle the horizontal vane to a fixed position. Creates a button entity.",
           "default_quiet_mode": "Quiet mode via IRHVAC JSON command. Some vendors ignore this — use vendor-specific presets instead if available.",
           "default_turbo_mode": "Turbo mode via IRHVAC JSON command. Some vendors ignore this — use vendor-specific presets instead if available.",
           "default_econo_mode": "Economy mode via IRHVAC JSON command. Some vendors ignore this — use vendor-specific presets instead if available.",

@@ -107,7 +107,7 @@ CONF_STATE_TOPIC_2 = "state_topic_2"
 
 DATA_KEY = "tasmota_irhvac.climate"
 DOMAIN = "tasmota_irhvac"
-PLATFORMS = ["climate", "sensor"]
+PLATFORMS = ["climate", "sensor", "button"]
 
 ATTR_ECONO = "econo"
 ATTR_TURBO = "turbo"
@@ -175,6 +175,10 @@ PRESET_MIN_HEAT = "Min Heat"
 PRESET_ECONO = "Economy"
 PRESET_SET_V = "Set Vertical"
 PRESET_SET_H = "Set Horizontal"
+
+# Vane button config
+CONF_HAS_SET_V = "has_set_vertical_vane"
+CONF_HAS_SET_H = "has_set_horizontal_vane"
 CONF_PRESET_MODES_LIST = "supported_preset_modes"
 
 # PI controller config keys
