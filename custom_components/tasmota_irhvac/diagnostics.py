@@ -62,8 +62,14 @@ async def async_get_config_entry_diagnostics(
                 "setpoint_weight": climate_entity._pi_setpoint_weight,
                 "min_interval": climate_entity._pi_min_interval,
                 "outdoor_temp_sensor": climate_entity._outdoor_temp_sensor,
-                "suppress_learning_entity": climate_entity._ff_suppress_learning_entity,
-                "bias_entity": climate_entity._ff_bias_entity,
+                "disturbance_inputs": climate_entity._disturbance_inputs,
+            },
+            "disturbance_state": {
+                "learning_suppressed": climate_entity._disturbance_suppress_active,
+                "manual_suppress": climate_entity._manual_ff_suppress,
+                "manual_suppress_reason": climate_entity._manual_ff_suppress_reason,
+                "active_suppressors": climate_entity._disturbance_active_suppressors,
+                "total_bias": round(climate_entity._disturbance_total_bias, 2),
             },
             "ff_heat_buckets": {
                 str(k): round(v, 2) for k, v in climate_entity._ff_heat_buckets.items()

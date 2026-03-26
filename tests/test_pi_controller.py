@@ -358,15 +358,21 @@ class TestFeedforward:
         assert pi_entity._ff_offset == 0.0
 
     @pytest.mark.asyncio
-    async def test_bias_entity_adds_to_ff(self, pi_entity):
-        """Bias entity value should be added to FF offset."""
-        pi_entity._ff_bias_entity = "input_number.hvac_bias"
+    async def test_disturbance_bias_adds_to_ff(self, pi_entity):
+        """Disturbance input bias should be added to FF offset."""
+        pi_entity._disturbance_inputs = [{
+            "name": "Bias",
+            "entity_id": "input_number.hvac_bias",
+            "suppress_learning": False,
+            "default_bias": 0.0,
+            "gain": 1.0,
+        }]
         pi_entity._outdoor_temp = None  # No outdoor sensor, so base FF = 0
         pi_entity._attr_current_temperature = 68.0
         pi_entity._desired_temp = 72.0
         pi_entity._hp_setpoint = 22.0
 
-        # Mock bias entity state
+        # Mock bias entity state (numeric → value × gain)
         mock_state = MagicMock()
         mock_state.state = "2.5"
         pi_entity.hass.states.get.return_value = mock_state
@@ -376,9 +382,15 @@ class TestFeedforward:
         assert pi_entity._ff_offset == pytest.approx(2.5)
 
     @pytest.mark.asyncio
-    async def test_bias_entity_unavailable_ignored(self, pi_entity):
-        """Unavailable bias entity should not affect FF offset."""
-        pi_entity._ff_bias_entity = "input_number.hvac_bias"
+    async def test_disturbance_unavailable_ignored(self, pi_entity):
+        """Unavailable disturbance entity should not affect FF offset."""
+        pi_entity._disturbance_inputs = [{
+            "name": "Bias",
+            "entity_id": "input_number.hvac_bias",
+            "suppress_learning": False,
+            "default_bias": 0.0,
+            "gain": 1.0,
+        }]
         pi_entity._outdoor_temp = None
         pi_entity._attr_current_temperature = 68.0
         pi_entity._desired_temp = 72.0
@@ -393,9 +405,15 @@ class TestFeedforward:
         assert pi_entity._ff_offset == 0.0
 
     @pytest.mark.asyncio
-    async def test_learning_suppressed(self, pi_entity):
-        """When suppress entity is on, bucket learning should be skipped."""
-        pi_entity._ff_suppress_learning_entity = "input_boolean.suppress"
+    async def test_learning_suppressed_by_disturbance(self, pi_entity):
+        """When disturbance input with suppress=True is active, bucket learning should be skipped."""
+        pi_entity._disturbance_inputs = [{
+            "name": "Suppress",
+            "entity_id": "input_boolean.suppress",
+            "suppress_learning": True,
+            "default_bias": 0.0,
+            "gain": 1.0,
+        }]
         pi_entity._outdoor_temp = 0.0
         pi_entity._attr_current_temperature = 71.9  # In deadband of 72°F desired
         pi_entity._desired_temp = 72.0

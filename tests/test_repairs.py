@@ -60,22 +60,16 @@ class TestCheckConfigIssues:
                 for call in mock_create.call_args_list
             ) or mock_create.called
 
-    def test_issue_created_for_missing_suppress_entity(self, hass):
-        """Issue should be created when suppress learning entity doesn't exist."""
+    def test_issue_created_for_missing_disturbance_entity(self, hass):
+        """Issue should be created when a disturbance input entity doesn't exist."""
         config = make_pi_config({
-            "pi_ff_suppress_learning_entity": "input_boolean.nonexistent",
-            "outdoor_temp_sensor": "",
-        })
-        entry = _make_entry(config)
-
-        with patch.object(ir, "async_create_issue") as mock_create:
-            _check_config_issues(hass, entry)
-            assert mock_create.called
-
-    def test_issue_created_for_missing_bias_entity(self, hass):
-        """Issue should be created when bias entity doesn't exist."""
-        config = make_pi_config({
-            "pi_ff_bias_entity": "input_number.nonexistent",
+            "pi_disturbance_inputs": [{
+                "name": "Test Door",
+                "entity_id": "binary_sensor.nonexistent",
+                "suppress_learning": True,
+                "default_bias": 0.0,
+                "gain": 1.0,
+            }],
             "outdoor_temp_sensor": "",
         })
         entry = _make_entry(config)
@@ -97,12 +91,11 @@ class TestCheckConfigIssues:
             # Should delete the outdoor sensor issue since entity exists
             assert mock_delete.called
 
-    def test_empty_entity_id_skipped(self, hass):
-        """Empty entity IDs should not trigger issues."""
+    def test_empty_disturbance_inputs_no_issues(self, hass):
+        """Empty disturbance inputs should not trigger issues."""
         config = make_pi_config({
             "outdoor_temp_sensor": "",
-            "pi_ff_suppress_learning_entity": "",
-            "pi_ff_bias_entity": "",
+            "pi_disturbance_inputs": [],
         })
         entry = _make_entry(config)
 

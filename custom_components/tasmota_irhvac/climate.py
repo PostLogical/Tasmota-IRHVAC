@@ -450,6 +450,16 @@ SERVICE_TO_METHOD = {
         "method": "async_reset_ff_buckets",
         "schema": IRHVAC_SERVICE_SCHEMA,
     },
+    "suppress_ff_learning": {
+        "method": "async_suppress_ff_learning",
+        "schema": IRHVAC_SERVICE_SCHEMA.extend(
+            {vol.Optional("reason"): cv.string}
+        ),
+    },
+    "resume_ff_learning": {
+        "method": "async_resume_ff_learning",
+        "schema": IRHVAC_SERVICE_SCHEMA,
+    },
 }
 
 

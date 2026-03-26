@@ -11,9 +11,8 @@ from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.typing import ConfigType
 
 from .const import (
+    CONF_PI_DISTURBANCE_INPUTS,
     CONF_PI_ENABLED,
-    CONF_PI_FF_BIAS_ENTITY,
-    CONF_PI_FF_SUPPRESS_LEARNING_ENTITY,
     CONF_OUTDOOR_TEMP_SENSOR,
     DATA_KEY,
     DOMAIN,
@@ -39,7 +38,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Forward climate first so entity is in hass.data before sensor/button setup
     await hass.config_entries.async_forward_entry_setups(entry, ["climate"])
-    await hass.config_entries.async_forward_entry_setups(entry, ["sensor", "button"])
+    await hass.config_entries.async_forward_entry_setups(entry, ["sensor", "button", "binary_sensor"])
 
     # Defer config issue checks to give other integrations time to load entities
     @callback
@@ -66,8 +65,32 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             new_options.setdefault("pi_ff_bias_entity", "")
             new_options.setdefault("pi_setpoint_weight", 1.0)
 
+        if entry.minor_version < 3:
+            # v1.3: Migrate suppress/bias entities → disturbance_inputs list
+            for store in (new_data, new_options):
+                disturbance_inputs = store.get("pi_disturbance_inputs", [])
+                old_suppress = store.pop("pi_ff_suppress_learning_entity", "")
+                old_bias = store.pop("pi_ff_bias_entity", "")
+                if old_suppress:
+                    disturbance_inputs.append({
+                        "name": "Suppress Entity (migrated)",
+                        "entity_id": old_suppress,
+                        "suppress_learning": True,
+                        "default_bias": 0.0,
+                        "gain": 1.0,
+                    })
+                if old_bias:
+                    disturbance_inputs.append({
+                        "name": "Bias Entity (migrated)",
+                        "entity_id": old_bias,
+                        "suppress_learning": False,
+                        "default_bias": 0.0,
+                        "gain": 1.0,
+                    })
+                store["pi_disturbance_inputs"] = disturbance_inputs
+
         hass.config_entries.async_update_entry(
-            entry, data=new_data, options=new_options, minor_version=2, version=1,
+            entry, data=new_data, options=new_options, minor_version=3, version=1,
         )
         _LOGGER.info("Migrated config entry to version %s.%s", entry.version, entry.minor_version)
 
@@ -86,34 +109,48 @@ def _check_config_issues(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Check for config issues and surface via HA Repairs panel."""
     config = {**entry.data, **entry.options}
 
-    # Check entities referenced by PI controller config
-    checks = [
-        (CONF_OUTDOOR_TEMP_SENSOR, "outdoor_sensor_not_found"),
-        (CONF_PI_FF_SUPPRESS_LEARNING_ENTITY, "suppress_learning_entity_not_found"),
-        (CONF_PI_FF_BIAS_ENTITY, "bias_entity_not_found"),
-    ]
-
     # Only check PI-related entities if PI is enabled
     pi_enabled = config.get(CONF_PI_ENABLED, False)
 
-    for conf_key, issue_id in checks:
-        entity_id = config.get(conf_key)
-        full_issue_id = f"{issue_id}_{entry.entry_id}"
-        if entity_id and pi_enabled:
-            if hass.states.get(entity_id) is None:
+    # Check outdoor temp sensor
+    outdoor_entity = config.get(CONF_OUTDOOR_TEMP_SENSOR)
+    outdoor_issue_id = f"outdoor_sensor_not_found_{entry.entry_id}"
+    if outdoor_entity and pi_enabled:
+        if hass.states.get(outdoor_entity) is None:
+            ir.async_create_issue(
+                hass, DOMAIN, outdoor_issue_id, is_fixable=False,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key="outdoor_sensor_not_found",
+                translation_placeholders={"entity_id": outdoor_entity},
+            )
+        else:
+            ir.async_delete_issue(hass, DOMAIN, outdoor_issue_id)
+    else:
+        ir.async_delete_issue(hass, DOMAIN, outdoor_issue_id)
+
+    # Check disturbance input entities
+    disturbance_inputs = config.get(CONF_PI_DISTURBANCE_INPUTS, [])
+    if pi_enabled:
+        for d_input in disturbance_inputs:
+            entity_id = d_input.get("entity_id", "")
+            name = d_input.get("name", entity_id)
+            issue_id = f"disturbance_entity_not_found_{entry.entry_id}_{entity_id}"
+            if entity_id and hass.states.get(entity_id) is None:
                 ir.async_create_issue(
-                    hass,
-                    DOMAIN,
-                    full_issue_id,
-                    is_fixable=False,
+                    hass, DOMAIN, issue_id, is_fixable=False,
                     severity=ir.IssueSeverity.WARNING,
-                    translation_key=issue_id,
-                    translation_placeholders={"entity_id": entity_id},
+                    translation_key="disturbance_entity_not_found",
+                    translation_placeholders={
+                        "entity_id": entity_id,
+                        "name": name,
+                    },
                 )
             else:
-                ir.async_delete_issue(hass, DOMAIN, full_issue_id)
-        else:
-            ir.async_delete_issue(hass, DOMAIN, full_issue_id)
+                ir.async_delete_issue(hass, DOMAIN, issue_id)
+
+    # Clean up legacy issue IDs from v1.2
+    for legacy_key in ("suppress_learning_entity_not_found", "bias_entity_not_found"):
+        ir.async_delete_issue(hass, DOMAIN, f"{legacy_key}_{entry.entry_id}")
 
 
 def _register_services(hass: HomeAssistant) -> None:

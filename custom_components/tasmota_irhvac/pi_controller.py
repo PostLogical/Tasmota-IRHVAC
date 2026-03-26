@@ -24,13 +24,12 @@ from .const import (
     ATTR_PI_INTEGRAL,
     CONF_OUTDOOR_TEMP_SENSOR,
     CONF_PI_DEADBAND,
+    CONF_PI_DISTURBANCE_INPUTS,
     CONF_PI_ENABLED,
-    CONF_PI_FF_BIAS_ENTITY,
     CONF_PI_FF_COOL_REFERENCE,
     CONF_PI_FF_COOL_SLOPE,
     CONF_PI_FF_HEAT_REFERENCE,
     CONF_PI_FF_HEAT_SLOPE,
-    CONF_PI_FF_SUPPRESS_LEARNING_ENTITY,
     CONF_PI_KI,
     CONF_PI_KP,
     CONF_PI_MIN_INTERVAL,
@@ -45,6 +44,7 @@ from .const import (
     DEFAULT_PI_KP,
     DEFAULT_PI_MIN_INTERVAL,
     DEFAULT_PI_SETPOINT_WEIGHT,
+    SIGNAL_FF_SUPPRESS_UPDATE,
     SIGNAL_PI_UPDATE,
 )
 
@@ -94,9 +94,14 @@ class PIControllerMixin:
         self._ff_cool_reference = config.get(CONF_PI_FF_COOL_REFERENCE, DEFAULT_PI_FF_COOL_REFERENCE)
         self._ff_cool_slope = config.get(CONF_PI_FF_COOL_SLOPE, DEFAULT_PI_FF_COOL_SLOPE)
 
-        # External input entities
-        self._ff_suppress_learning_entity = config.get(CONF_PI_FF_SUPPRESS_LEARNING_ENTITY)
-        self._ff_bias_entity = config.get(CONF_PI_FF_BIAS_ENTITY)
+        # Disturbance inputs (replaces single suppress/bias entities)
+        self._disturbance_inputs = config.get(CONF_PI_DISTURBANCE_INPUTS, [])
+        self._manual_ff_suppress = False
+        self._manual_ff_suppress_reason = ""
+        self._last_disturbance_bias = 0.0
+        self._disturbance_suppress_active = False
+        self._disturbance_active_suppressors = []
+        self._disturbance_total_bias = 0.0
 
         # PI controller state
         self._desired_temp = self._attr_target_temperature
@@ -173,6 +178,17 @@ class PIControllerMixin:
             if outdoor_state is not None:
                 self._update_outdoor_temp(outdoor_state)
 
+        # Subscribe to disturbance input entities for real-time updates
+        disturbance_entity_ids = [
+            d["entity_id"] for d in self._disturbance_inputs if d.get("entity_id")
+        ]
+        if disturbance_entity_ids:
+            async_track_state_change_event(
+                self.hass,
+                disturbance_entity_ids,
+                self._async_disturbance_entity_changed,
+            )
+
         # Compute initial feedforward offset
         if self._outdoor_temp is not None:
             is_heating = self._attr_hvac_mode in (HVACMode.HEAT, HVACMode.HEAT_COOL, None)
@@ -216,6 +232,69 @@ class PIControllerMixin:
         """Zero the integral (e.g., after mode changes that invalidate it)."""
         self._pi_integral = 0.0
 
+    async def async_suppress_ff_learning(self, reason=""):
+        """Manually suppress FF learning (service call handler)."""
+        self._manual_ff_suppress = True
+        self._manual_ff_suppress_reason = reason or ""
+        _LOGGER.info("FF learning manually suppressed: %s", reason or "(no reason)")
+        if hasattr(self, "_config_entry_id"):
+            async_dispatcher_send(
+                self.hass,
+                SIGNAL_FF_SUPPRESS_UPDATE.format(self._config_entry_id),
+            )
+
+    async def async_resume_ff_learning(self):
+        """Resume FF learning after manual suppression (service call handler)."""
+        self._manual_ff_suppress = False
+        self._manual_ff_suppress_reason = ""
+        _LOGGER.info("FF learning manual suppress cleared")
+        if hasattr(self, "_config_entry_id"):
+            async_dispatcher_send(
+                self.hass,
+                SIGNAL_FF_SUPPRESS_UPDATE.format(self._config_entry_id),
+            )
+
+    def _compute_disturbance_effects(self):
+        """Compute combined suppress and bias from disturbance inputs.
+
+        Returns (suppress: bool, active_suppressors: list[str], total_bias: float).
+        """
+        suppress = self._manual_ff_suppress
+        active_suppressors = []
+        total_bias = 0.0
+
+        for d_input in self._disturbance_inputs:
+            entity_id = d_input.get("entity_id")
+            if not entity_id:
+                continue
+            state = self.hass.states.get(entity_id)
+            if not state or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+                continue
+
+            # Try to interpret as numeric first
+            try:
+                value = float(state.state)
+                is_numeric = True
+            except (ValueError, TypeError):
+                is_numeric = False
+
+            if is_numeric:
+                # Numeric entity: active when non-zero, bias = value × gain
+                if value != 0:
+                    if d_input.get("suppress_learning"):
+                        suppress = True
+                        active_suppressors.append(entity_id)
+                    total_bias += value * d_input.get("gain", 1.0)
+            else:
+                # Boolean entity: active when "on", bias = default_bias
+                if state.state == "on":
+                    if d_input.get("suppress_learning"):
+                        suppress = True
+                        active_suppressors.append(entity_id)
+                    total_bias += d_input.get("default_bias", 0.0)
+
+        return suppress, active_suppressors, total_bias
+
     # ── PI Internals ──────────────────────────────────────────────────
 
     @callback
@@ -236,6 +315,15 @@ class PIControllerMixin:
         new_state = event.data.get("new_state")
         if new_state is not None:
             self._update_outdoor_temp(new_state)
+
+    @callback
+    def _async_disturbance_entity_changed(self, event):
+        """Handle disturbance input entity state changes — update binary sensor."""
+        if hasattr(self, "_config_entry_id"):
+            async_dispatcher_send(
+                self.hass,
+                SIGNAL_FF_SUPPRESS_UPDATE.format(self._config_entry_id),
+            )
 
     async def _pi_async_sensor_changed(self, was_none=False):
         """Handle temp sensor update. Call from _async_sensor_changed override.
@@ -361,14 +449,23 @@ class PIControllerMixin:
                 ff_scale = max(0.0, min(1.0, 1.0 - error / self._pi_deadband))
             self._ff_offset = raw_ff * ff_scale
 
-        # External feedforward bias
-        if self._ff_bias_entity:
-            bias_state = self.hass.states.get(self._ff_bias_entity)
-            if bias_state and bias_state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN):
-                try:
-                    self._ff_offset += float(bias_state.state)
-                except (ValueError, TypeError):
-                    pass
+        # Disturbance inputs: compute suppress + bias
+        learning_suppressed, active_suppressors, disturbance_bias = (
+            self._compute_disturbance_effects()
+        )
+        self._disturbance_suppress_active = learning_suppressed
+        self._disturbance_active_suppressors = active_suppressors
+        self._disturbance_total_bias = disturbance_bias
+        self._ff_offset += disturbance_bias
+
+        # Reset integral on large disturbance bias transitions
+        if abs(disturbance_bias - self._last_disturbance_bias) > 1.0:
+            _LOGGER.info(
+                "PI: Disturbance bias changed by %.1f°C, resetting integral",
+                disturbance_bias - self._last_disturbance_bias,
+            )
+            self._pi_integral = 0.0
+        self._last_disturbance_bias = disturbance_bias
 
         # Adaptive setpoint weight: full P (b=1) for large errors,
         # blend to configured weight as error approaches deadband
@@ -387,13 +484,6 @@ class PIControllerMixin:
             self._pi_integral *= 0.9
             self._ff_settled_ticks += 1
             # Auto-learn: record offset when settled for 2+ ticks
-            learning_suppressed = False
-            if self._ff_suppress_learning_entity:
-                suppress_state = self.hass.states.get(self._ff_suppress_learning_entity)
-                if suppress_state and suppress_state.state not in (
-                    STATE_UNAVAILABLE, STATE_UNKNOWN, "off",
-                ):
-                    learning_suppressed = True
             if self._ff_settled_ticks >= 2 and self._outdoor_temp is not None and not learning_suppressed:
                 observed_offset = self._hp_setpoint - desired_c
                 bucket_key = round(self._outdoor_temp / 3) * 3
@@ -401,7 +491,10 @@ class PIControllerMixin:
                 old = learn_buckets.get(bucket_key, 0.0)
                 learn_buckets[bucket_key] = 0.8 * old + 0.2 * observed_offset
             elif learning_suppressed and self._ff_settled_ticks >= 2:
-                _LOGGER.debug("PI: FF learning suppressed by %s", self._ff_suppress_learning_entity)
+                _LOGGER.debug(
+                    "PI: FF learning suppressed by %s",
+                    active_suppressors if active_suppressors else "manual",
+                )
             p_term = 0.0
         else:
             self._ff_settled_ticks = 0
@@ -538,6 +631,8 @@ class PIControllerMixin:
                 ATTR_FF_COOL_BUCKETS: {
                     str(k): round(v, 2) for k, v in self._ff_cool_buckets.items()
                 },
+                "ff_learning_suppressed": self._disturbance_suppress_active,
+                "disturbance_bias": round(self._disturbance_total_bias, 2),
             })
         return attrs
 

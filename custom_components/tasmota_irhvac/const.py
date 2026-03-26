@@ -107,7 +107,7 @@ CONF_STATE_TOPIC_2 = "state_topic_2"
 
 DATA_KEY = "tasmota_irhvac.climate"
 DOMAIN = "tasmota_irhvac"
-PLATFORMS = ["climate", "sensor", "button"]
+PLATFORMS = ["climate", "sensor", "button", "binary_sensor"]
 
 ATTR_ECONO = "econo"
 ATTR_TURBO = "turbo"
@@ -134,6 +134,8 @@ SERVICE_BEEP_MODE = "set_beep"
 SERVICE_SLEEP_MODE = "set_sleep"
 SERVICE_SET_SWINGV = "set_swingv"
 SERVICE_SET_SWINGH = "set_swingh"
+SERVICE_SUPPRESS_FF_LEARNING = "suppress_ff_learning"
+SERVICE_RESUME_FF_LEARNING = "resume_ff_learning"
 
 # Map attributes to properties of the state object
 ATTRIBUTES_IRHVAC = {
@@ -195,8 +197,9 @@ CONF_PI_FF_HEAT_REFERENCE = "pi_ff_heat_reference"
 CONF_PI_FF_HEAT_SLOPE = "pi_ff_heat_slope"
 CONF_PI_FF_COOL_REFERENCE = "pi_ff_cool_reference"
 CONF_PI_FF_COOL_SLOPE = "pi_ff_cool_slope"
-CONF_PI_FF_SUPPRESS_LEARNING_ENTITY = "pi_ff_suppress_learning_entity"
-CONF_PI_FF_BIAS_ENTITY = "pi_ff_bias_entity"
+CONF_PI_FF_SUPPRESS_LEARNING_ENTITY = "pi_ff_suppress_learning_entity"  # Legacy (v1.2)
+CONF_PI_FF_BIAS_ENTITY = "pi_ff_bias_entity"  # Legacy (v1.2)
+CONF_PI_DISTURBANCE_INPUTS = "pi_disturbance_inputs"
 CONF_PI_SETPOINT_WEIGHT = "pi_setpoint_weight"
 
 # PI controller defaults
@@ -219,5 +222,6 @@ ATTR_FF_OFFSET = "ff_offset"
 ATTR_FF_HEAT_BUCKETS = "ff_heat_buckets"
 ATTR_FF_COOL_BUCKETS = "ff_cool_buckets"
 
-# Dispatcher signal for PI sensor updates (format with entry_id)
+# Dispatcher signals (format with entry_id)
 SIGNAL_PI_UPDATE = "tasmota_irhvac_pi_update_{}"
+SIGNAL_FF_SUPPRESS_UPDATE = "tasmota_irhvac_ff_suppress_update_{}"

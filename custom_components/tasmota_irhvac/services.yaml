@@ -229,6 +229,25 @@ reset_ff_buckets:
     entity:
       integration: tasmota_irhvac
 
+suppress_ff_learning:
+  description: Manually suppress feedforward auto-learning. Learning stays suppressed until resume_ff_learning is called or HA restarts.
+  target:
+    entity:
+      integration: tasmota_irhvac
+  fields:
+    reason:
+      description: Optional reason for suppression (shown in diagnostics and binary sensor attributes).
+      example: "Testing new bias values"
+      required: false
+      selector:
+        text:
+
+resume_ff_learning:
+  description: Resume feedforward auto-learning after manual suppression.
+  target:
+    entity:
+      integration: tasmota_irhvac
+
 set_swingh:
   name: Set swingh
   description: Sets vane horizonal position.

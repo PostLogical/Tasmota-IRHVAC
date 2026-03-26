@@ -60,6 +60,16 @@ PI_SENSOR_DESCRIPTIONS: tuple[TasmotaIrhvacPISensorDescription, ...] = (
         entity_category=EntityCategory.DIAGNOSTIC,
         suggested_display_precision=2,
     ),
+    TasmotaIrhvacPISensorDescription(
+        key="disturbance_bias",
+        translation_key="disturbance_bias",
+        climate_attr="_disturbance_total_bias",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        suggested_display_precision=2,
+    ),
 )
 
 

@@ -60,8 +60,7 @@ def make_config(overrides=None):
         "pi_ff_heat_slope": 0.3,
         "pi_ff_cool_reference": 25.0,
         "pi_ff_cool_slope": 0.3,
-        "pi_ff_suppress_learning_entity": "",
-        "pi_ff_bias_entity": "",
+        "pi_disturbance_inputs": [],
         "pi_setpoint_weight": 1.0,
     }
     if overrides:

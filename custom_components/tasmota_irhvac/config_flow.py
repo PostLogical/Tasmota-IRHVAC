@@ -86,10 +86,12 @@ from .const import (
     CONF_PI_FF_COOL_SLOPE,
     CONF_PI_FF_HEAT_REFERENCE,
     CONF_PI_FF_HEAT_SLOPE,
+    CONF_PI_DISTURBANCE_INPUTS,
     CONF_PI_FF_SUPPRESS_LEARNING_ENTITY,
     CONF_PI_KI,
     CONF_PI_KP,
     CONF_PI_MIN_INTERVAL,
+    CONF_PI_SETPOINT_WEIGHT,
     DEFAULT_COMMAND_TOPIC,
     DEFAULT_CONF_BEEP,
     DEFAULT_CONF_CELSIUS,
@@ -113,6 +115,7 @@ from .const import (
     DEFAULT_PI_KI,
     DEFAULT_PI_KP,
     DEFAULT_PI_MIN_INTERVAL,
+    DEFAULT_PI_SETPOINT_WEIGHT,
     DEFAULT_MIN_TEMP,
     DEFAULT_MQTT_DELAY,
     DEFAULT_NAME,
@@ -360,8 +363,8 @@ OPTIONS_PI_CONTROLLER_SCHEMA = vol.Schema(
         vol.Optional(CONF_PI_FF_COOL_SLOPE, default=DEFAULT_PI_FF_COOL_SLOPE): NumberSelector(
             NumberSelectorConfig(min=0, max=5, step=0.05, mode=NumberSelectorMode.BOX)
         ),
-        vol.Optional(CONF_PI_FF_SUPPRESS_LEARNING_ENTITY): EntitySelector(
-            EntitySelectorConfig(domain=["input_boolean", "binary_sensor"])
+        vol.Optional(CONF_PI_SETPOINT_WEIGHT, default=DEFAULT_PI_SETPOINT_WEIGHT): NumberSelector(
+            NumberSelectorConfig(min=0, max=1, step=0.05, mode=NumberSelectorMode.BOX)
         ),
     }
 )
@@ -375,7 +378,7 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Tasmota IRHVAC."""
 
     VERSION = 1
-    MINOR_VERSION = 2  # Added pi_ff_bias_entity, pi_setpoint_weight
+    MINOR_VERSION = 3  # Disturbance inputs (replaces suppress/bias entities)
 
     def __init__(self):
         """Initialize the config flow."""
@@ -686,8 +689,8 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ): NumberSelector(
                         NumberSelectorConfig(min=0, max=5, step=0.05, mode=NumberSelectorMode.BOX)
                     ),
-                    vol.Optional(CONF_PI_FF_SUPPRESS_LEARNING_ENTITY): EntitySelector(
-                        EntitySelectorConfig(domain=["input_boolean", "binary_sensor"])
+                    vol.Optional(CONF_PI_SETPOINT_WEIGHT, default=DEFAULT_PI_SETPOINT_WEIGHT): NumberSelector(
+                        NumberSelectorConfig(min=0, max=1, step=0.05, mode=NumberSelectorMode.BOX)
                     ),
                 }
             ),
@@ -801,6 +804,7 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
             "sensors",
             "advanced_options",
             "pi_controller",
+            "disturbance_inputs",
             "ir_actions",
         ]
         return self.async_show_menu(
@@ -903,6 +907,91 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
             step_id="pi_controller",
             data_schema=self.add_suggested_values_to_schema(
                 OPTIONS_PI_CONTROLLER_SCHEMA, self.config_entry.options
+            ),
+        )
+
+    # ── Disturbance Inputs ─────────────────────────────────────────────
+
+    async def async_step_disturbance_inputs(self, user_input=None):
+        """Disturbance inputs management menu."""
+        inputs = self.config_entry.options.get(CONF_PI_DISTURBANCE_INPUTS, [])
+        menu = ["disturbance_inputs_add"]
+        if inputs:
+            menu.append("disturbance_inputs_remove")
+        return self.async_show_menu(
+            step_id="disturbance_inputs",
+            menu_options=menu,
+            description_placeholders={
+                "count": str(len(inputs)),
+                "inputs": ", ".join(d["name"] for d in inputs) if inputs else "none",
+            },
+        )
+
+    async def async_step_disturbance_inputs_add(self, user_input=None):
+        """Add a new disturbance input."""
+        if user_input is not None:
+            inputs = list(self.config_entry.options.get(CONF_PI_DISTURBANCE_INPUTS, []))
+            new_input = {
+                "name": user_input["disturbance_name"],
+                "entity_id": user_input["disturbance_entity"],
+                "suppress_learning": user_input.get("disturbance_suppress", False),
+                "default_bias": float(user_input.get("disturbance_default_bias", 0.0)),
+                "gain": float(user_input.get("disturbance_gain", 1.0)),
+            }
+            inputs.append(new_input)
+            return self.async_create_entry(
+                data={**self.config_entry.options, CONF_PI_DISTURBANCE_INPUTS: inputs}
+            )
+
+        return self.async_show_form(
+            step_id="disturbance_inputs_add",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("disturbance_name"): TextSelector(),
+                    vol.Required("disturbance_entity"): EntitySelector(
+                        EntitySelectorConfig()
+                    ),
+                    vol.Optional("disturbance_suppress", default=True): BooleanSelector(),
+                    vol.Optional("disturbance_default_bias", default=0.0): NumberSelector(
+                        NumberSelectorConfig(
+                            min=-20, max=20, step=0.1, mode=NumberSelectorMode.BOX
+                        )
+                    ),
+                    vol.Optional("disturbance_gain", default=1.0): NumberSelector(
+                        NumberSelectorConfig(
+                            min=-10, max=10, step=0.1, mode=NumberSelectorMode.BOX
+                        )
+                    ),
+                }
+            ),
+        )
+
+    async def async_step_disturbance_inputs_remove(self, user_input=None):
+        """Remove disturbance inputs."""
+        inputs = list(self.config_entry.options.get(CONF_PI_DISTURBANCE_INPUTS, []))
+        if user_input is not None:
+            names_to_remove = set(user_input.get("disturbance_inputs_to_remove", []))
+            inputs = [d for d in inputs if d["name"] not in names_to_remove]
+            return self.async_create_entry(
+                data={**self.config_entry.options, CONF_PI_DISTURBANCE_INPUTS: inputs}
+            )
+
+        input_names = [d["name"] for d in inputs]
+        if not input_names:
+            return await self.async_step_disturbance_inputs()
+
+        return self.async_show_form(
+            step_id="disturbance_inputs_remove",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("disturbance_inputs_to_remove"): SelectSelector(
+                        SelectSelectorConfig(
+                            options=input_names,
+                            multiple=True,
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                }
             ),
         )
 
