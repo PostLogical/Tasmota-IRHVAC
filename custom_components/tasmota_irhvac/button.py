@@ -18,7 +18,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import CONF_HAS_SET_H, CONF_HAS_SET_V, DATA_KEY
+from .const import CONF_HAS_SET_H, CONF_HAS_SET_V, CONF_IR_ACTIONS, DATA_KEY
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -71,6 +71,17 @@ async def async_setup_entry(
                 VaneButton(
                     climate_entity=climate_entity,
                     description=description,
+                )
+            )
+
+    # Create user-defined IR action buttons
+    ir_actions = config.get(CONF_IR_ACTIONS, [])
+    for action in ir_actions:
+        if action.get("type") == "button":
+            buttons.append(
+                IRActionButton(
+                    climate_entity=climate_entity,
+                    action=action,
                 )
             )
 
@@ -133,3 +144,41 @@ class VaneButton(ButtonEntity):
 
         self._climate.async_schedule_update_ha_state()
         _LOGGER.debug("Vane button %s pressed, IR sent", description.key)
+
+
+class IRActionButton(ButtonEntity):
+    """User-defined button that sends a raw IR code."""
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+
+    def __init__(self, climate_entity, action: dict) -> None:
+        """Initialize from an IR action config dict."""
+        self._climate = climate_entity
+        self._ir_code = action["ir_code"]
+        self._action_name = action["name"]
+        # Create a slug-safe key from the action name
+        key = action["name"].lower().replace(" ", "_").replace("-", "_")
+        self._attr_unique_id = f"{climate_entity.unique_id}_ir_{key}"
+        self._attr_name = action["name"]
+
+    @property
+    def device_info(self):
+        """Return device info to group with climate entity."""
+        return self._climate.device_info
+
+    @property
+    def available(self) -> bool:
+        """Available when climate entity is available."""
+        return self._climate.available
+
+    async def async_press(self) -> None:
+        """Send the raw IR code via MQTT."""
+        topic = self._climate.topic
+        path = topic.split("/")
+        irsend_topic = f"cmnd/{path[1]}/irsend"
+        mqtt_delay = float(getattr(self._climate, "_mqtt_delay", "0"))
+        if mqtt_delay > 0:
+            await asyncio.sleep(mqtt_delay)
+        await mqtt.async_publish(self.hass, irsend_topic, self._ir_code)
+        _LOGGER.info("IR action '%s' sent", self._action_name)

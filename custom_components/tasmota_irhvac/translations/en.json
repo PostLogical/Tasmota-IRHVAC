@@ -175,7 +175,43 @@
           "defaults": "Default Values",
           "sensors": "Sensors",
           "advanced_options": "Advanced Settings",
-          "pi_controller": "PI Controller"
+          "pi_controller": "PI Controller",
+          "ir_actions": "IR Actions"
+        }
+      },
+      "ir_actions": {
+        "title": "IR Actions",
+        "description": "Custom IR actions: {count} defined ({actions})",
+        "menu_options": {
+          "ir_actions_add": "Add IR Action",
+          "ir_actions_remove": "Remove IR Action"
+        }
+      },
+      "ir_actions_add": {
+        "title": "Add IR Action",
+        "description": "Define a new IR action. Buttons send an IR code when pressed. Presets show in the preset dropdown with state tracking.",
+        "data": {
+          "ir_action_name": "Action Name",
+          "ir_action_type": "Action Type",
+          "ir_action_code": "IR Code",
+          "ir_action_exit_code": "Exit IR Code (optional, for presets)",
+          "ir_action_auto_clear": "Auto-clear Timeout (seconds, 0 = never)",
+          "ir_action_pause_pi": "Pause PI While Active"
+        },
+        "data_description": {
+          "ir_action_name": "Display name for the action (e.g., 'Powerful', 'Filter Clean').",
+          "ir_action_type": "Button: one-shot action, no state. Preset: shows in preset dropdown with state tracking.",
+          "ir_action_code": "Raw IR code string to send via Tasmota IRSend (e.g., 'raw,0,3324,1574,...').",
+          "ir_action_exit_code": "IR code to send when deactivating this preset. Leave empty if the preset toggles with the same code.",
+          "ir_action_auto_clear": "Automatically deactivate this preset after N seconds (e.g., 1200 for 20 min). 0 = stay active until manually changed.",
+          "ir_action_pause_pi": "Pause the PI controller while this preset is active. Use for modes that override normal temperature control."
+        }
+      },
+      "ir_actions_remove": {
+        "title": "Remove IR Actions",
+        "description": "Select actions to remove.",
+        "data": {
+          "ir_actions_to_remove": "Actions to Remove"
         }
       },
       "mqtt": {

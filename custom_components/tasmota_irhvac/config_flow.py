@@ -131,6 +131,7 @@ from .const import (
     HVAC_MODES,
     CONF_HAS_SET_H,
     CONF_HAS_SET_V,
+    CONF_IR_ACTIONS,
     CONF_PRESET_MODES_LIST,
     PRESET_ECONO,
     PRESET_MIN_HEAT,
@@ -800,6 +801,7 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
             "sensors",
             "advanced_options",
             "pi_controller",
+            "ir_actions",
         ]
         return self.async_show_menu(
             step_id="init",
@@ -901,5 +903,96 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
             step_id="pi_controller",
             data_schema=self.add_suggested_values_to_schema(
                 OPTIONS_PI_CONTROLLER_SCHEMA, self.config_entry.options
+            ),
+        )
+
+    # ── IR Actions ────────────────────────────────────────────────────
+
+    async def async_step_ir_actions(self, user_input=None):
+        """IR actions management menu."""
+        actions = self.config_entry.options.get(CONF_IR_ACTIONS, [])
+        menu = ["ir_actions_add"]
+        if actions:
+            menu.append("ir_actions_remove")
+        return self.async_show_menu(
+            step_id="ir_actions",
+            menu_options=menu,
+            description_placeholders={
+                "count": str(len(actions)),
+                "actions": ", ".join(a["name"] for a in actions) if actions else "none",
+            },
+        )
+
+    async def async_step_ir_actions_add(self, user_input=None):
+        """Add a new IR action."""
+        if user_input is not None:
+            actions = list(self.config_entry.options.get(CONF_IR_ACTIONS, []))
+            new_action = {
+                "name": user_input["ir_action_name"],
+                "type": user_input["ir_action_type"],
+                "ir_code": user_input["ir_action_code"],
+            }
+            # Optional fields for presets
+            if user_input.get("ir_action_exit_code"):
+                new_action["exit_ir_code"] = user_input["ir_action_exit_code"]
+            if user_input.get("ir_action_auto_clear"):
+                new_action["auto_clear_seconds"] = int(user_input["ir_action_auto_clear"])
+            if user_input.get("ir_action_pause_pi"):
+                new_action["pause_pi"] = True
+
+            actions.append(new_action)
+            return self.async_create_entry(
+                data={**self.config_entry.options, CONF_IR_ACTIONS: actions}
+            )
+
+        return self.async_show_form(
+            step_id="ir_actions_add",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("ir_action_name"): TextSelector(),
+                    vol.Required("ir_action_type", default="button"): SelectSelector(
+                        SelectSelectorConfig(
+                            options=["button", "preset"],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                    vol.Required("ir_action_code"): TextSelector(),
+                    vol.Optional("ir_action_exit_code"): TextSelector(),
+                    vol.Optional("ir_action_auto_clear"): NumberSelector(
+                        NumberSelectorConfig(
+                            min=0, max=7200, step=60, mode=NumberSelectorMode.BOX
+                        )
+                    ),
+                    vol.Optional("ir_action_pause_pi", default=False): BooleanSelector(),
+                }
+            ),
+        )
+
+    async def async_step_ir_actions_remove(self, user_input=None):
+        """Remove IR actions."""
+        actions = list(self.config_entry.options.get(CONF_IR_ACTIONS, []))
+        if user_input is not None:
+            names_to_remove = set(user_input.get("ir_actions_to_remove", []))
+            actions = [a for a in actions if a["name"] not in names_to_remove]
+            return self.async_create_entry(
+                data={**self.config_entry.options, CONF_IR_ACTIONS: actions}
+            )
+
+        action_names = [a["name"] for a in actions]
+        if not action_names:
+            return await self.async_step_ir_actions()
+
+        return self.async_show_form(
+            step_id="ir_actions_remove",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("ir_actions_to_remove"): SelectSelector(
+                        SelectSelectorConfig(
+                            options=action_names,
+                            multiple=True,
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                }
             ),
         )

@@ -82,6 +82,7 @@ from .const import (
     ATTR_TURBO,
     ATTRIBUTES_IRHVAC,
     CONF_AVAILABILITY_TOPIC,
+    CONF_IR_ACTIONS,
     CONF_OUTDOOR_TEMP_SENSOR,
     CONF_PI_DEADBAND,
     CONF_PI_ENABLED,
@@ -646,8 +647,18 @@ class TasmotaIrhvac(PIControllerMixin, RestoreEntity, ClimateEntity):
             if mode not in seen:
                 seen.add(mode)
                 unique_presets.append(mode)
-        if len(unique_presets) > 1 or self._away_temp:
-            # Enable presets if we have more than just "None", or if Away is configured
+        # Add IR action presets from config
+        ir_actions = config.get(CONF_IR_ACTIONS, [])
+        self._ir_action_presets = {}
+        for action in ir_actions:
+            if action.get("type") == "preset":
+                name = action["name"]
+                if name not in seen:
+                    unique_presets.append(name)
+                    seen.add(name)
+                self._ir_action_presets[name] = action
+
+        if len(unique_presets) > 1 or self._away_temp or self._ir_action_presets:
             self._attr_preset_modes = unique_presets
             self._support_flags |= ClimateEntityFeature.PRESET_MODE
         else:
@@ -1272,6 +1283,30 @@ class TasmotaIrhvac(PIControllerMixin, RestoreEntity, ClimateEntity):
 
         This method must be run in the event loop and returns a coroutine.
         """
+        # Handle IR action presets
+        if hasattr(self, "_ir_action_presets") and preset_mode in self._ir_action_presets:
+            action = self._ir_action_presets[preset_mode]
+            await self._activate_ir_action_preset(preset_mode, action)
+            return
+
+        # Deactivate IR action preset if switching away from one
+        if (
+            hasattr(self, "_ir_action_presets")
+            and self._attr_preset_mode in self._ir_action_presets
+            and preset_mode != self._attr_preset_mode
+        ):
+            old_action = self._ir_action_presets[self._attr_preset_mode]
+            # Send exit IR code if defined
+            if old_action.get("exit_ir_code"):
+                path = self.topic.split("/")
+                irsend_topic = f"cmnd/{path[1]}/irsend"
+                if float(self._mqtt_delay) != 0.0:
+                    await asyncio.sleep(float(self._mqtt_delay))
+                await mqtt.async_publish(self.hass, irsend_topic, old_action["exit_ir_code"])
+            # Resume PI if it was paused
+            if old_action.get("pause_pi") and hasattr(self, "pi_resume"):
+                self.pi_resume()
+
         if preset_mode == PRESET_AWAY and not self._is_away:
             self._is_away = True
             self._saved_target_temp = self._attr_target_temperature
@@ -1281,6 +1316,38 @@ class TasmotaIrhvac(PIControllerMixin, RestoreEntity, ClimateEntity):
             self._attr_target_temperature = self._saved_target_temp
         self._attr_preset_mode = PRESET_AWAY if self._is_away else PRESET_NONE
         await self.send_ir()
+
+    async def _activate_ir_action_preset(self, preset_name, action):
+        """Activate a user-defined IR action preset."""
+        # Send the IR code
+        path = self.topic.split("/")
+        irsend_topic = f"cmnd/{path[1]}/irsend"
+        if float(self._mqtt_delay) != 0.0:
+            await asyncio.sleep(float(self._mqtt_delay))
+        await mqtt.async_publish(self.hass, irsend_topic, action["ir_code"])
+
+        self._attr_preset_mode = preset_name
+
+        # Optionally pause PI
+        if action.get("pause_pi") and hasattr(self, "pi_pause"):
+            self.pi_pause()
+
+        # Optionally auto-clear after timeout
+        auto_clear = action.get("auto_clear_seconds")
+        if auto_clear and auto_clear > 0:
+            from homeassistant.helpers.event import async_call_later
+
+            @callback
+            def _clear_preset(_now):
+                self._attr_preset_mode = PRESET_NONE
+                if action.get("pause_pi") and hasattr(self, "pi_resume"):
+                    self.pi_resume()
+                self.async_schedule_update_ha_state()
+
+            async_call_later(self.hass, auto_clear, _clear_preset)
+
+        self.async_schedule_update_ha_state()
+        _LOGGER.info("IR action preset '%s' activated", preset_name)
 
     async def set_mode(self, hvac_mode):
         """Set hvac mode."""

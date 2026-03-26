@@ -179,6 +179,9 @@ PRESET_SET_H = "Set Horizontal"
 # Vane button config
 CONF_HAS_SET_V = "has_set_vertical_vane"
 CONF_HAS_SET_H = "has_set_horizontal_vane"
+
+# IR actions config
+CONF_IR_ACTIONS = "ir_actions"
 CONF_PRESET_MODES_LIST = "supported_preset_modes"
 
 # PI controller config keys
