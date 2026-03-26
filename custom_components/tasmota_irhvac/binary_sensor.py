@@ -51,13 +51,13 @@ class FFLearningSuppressedBinarySensor(BinarySensorEntity):
     _attr_should_poll = False
     _attr_device_class = BinarySensorDeviceClass.PROBLEM
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_translation_key = "ff_learning_suppressed"
+    _attr_translation_key = "ff_learning"
 
     def __init__(self, climate_entity, entry_id: str) -> None:
         """Initialize the binary sensor."""
         self._climate = climate_entity
         self._entry_id = entry_id
-        self._attr_unique_id = f"{climate_entity.unique_id}_ff_learning_suppressed"
+        self._attr_unique_id = f"{climate_entity.unique_id}_ff_learning"
 
     @property
     def device_info(self):

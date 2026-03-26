@@ -23,8 +23,8 @@
       }
     },
     "binary_sensor": {
-      "ff_learning_suppressed": {
-        "name": "FF Learning Suppressed"
+      "ff_learning": {
+        "name": "FF Learning"
       }
     }
   },
