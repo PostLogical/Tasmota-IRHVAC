@@ -83,11 +83,9 @@ async def async_setup_entry(
     if climate_entity is None:
         return
 
-    from .pi_controller import PIControllerMixin
-
-    if not isinstance(climate_entity, PIControllerMixin):
+    if not climate_entity._pi:
         return
-    if not climate_entity._pi_enabled:
+    if not climate_entity._pi._pi_enabled:
         return
 
     sensors = [
@@ -127,8 +125,11 @@ class TasmotaIrhvacPISensor(SensorEntity):
 
     @property
     def native_value(self):
-        """Read current value from the climate entity."""
-        return getattr(self._climate, self.entity_description.climate_attr, None)
+        """Read current value from the PI controller."""
+        pi = self._climate._pi
+        if pi is None:
+            return None
+        return getattr(pi, self.entity_description.climate_attr, None)
 
     @property
     def available(self) -> bool:

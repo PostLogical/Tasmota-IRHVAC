@@ -520,10 +520,10 @@ async def async_setup_entry(hass, entry, async_add_entities):
     async_add_entities([entity])
 
 
-from .pi_controller import PIControllerMixin
+from .pi_controller import PIController
 
 
-class TasmotaIrhvac(PIControllerMixin, RestoreEntity, ClimateEntity):
+class TasmotaIrhvac(RestoreEntity, ClimateEntity):
     """Representation of a Generic Thermostat device."""
 
     # It can remove from HA >= 2025.1
@@ -674,8 +674,8 @@ class TasmotaIrhvac(PIControllerMixin, RestoreEntity, ClimateEntity):
         else:
             self._attr_preset_modes = None
 
-        # Initialize PI controller (vendor-agnostic, gated by pi_enabled config)
-        self.pi_init(config)
+        # Initialize PI controller (composed object, gated by pi_enabled config)
+        self._pi = PIController(self, config) if config.get(CONF_PI_ENABLED) else None
 
     async def async_added_to_hass(self):
         # Replacing `async_track_state_change` with `async_track_state_change_event`
@@ -783,7 +783,8 @@ class TasmotaIrhvac(PIControllerMixin, RestoreEntity, ClimateEntity):
             regist_track_state_change_event(self._power_sensor)
 
         # Initialize PI controller (restores state, starts timers)
-        await self.pi_async_added_to_hass(old_state=old_state)
+        if self._pi:
+            await self._pi.async_added_to_hass(old_state=old_state)
 
     async def _subscribe_topics(self):
         """(Re)Subscribe to topics."""
@@ -942,6 +943,10 @@ class TasmotaIrhvac(PIControllerMixin, RestoreEntity, ClimateEntity):
             # Update HA UI and State
             self.async_schedule_update_ha_state()
 
+            # PI controller: restore desired temp over HP setpoint, handle echo
+            if self._pi:
+                await self._pi.handle_state_payload(payload)
+
             # Check power sensor state
             if (
                 self._power_sensor
@@ -958,9 +963,16 @@ class TasmotaIrhvac(PIControllerMixin, RestoreEntity, ClimateEntity):
 
     async def async_will_remove_from_hass(self):
         """Unsubscribe when removed."""
-        self.pi_async_will_remove_from_hass()
+        if self._pi:
+            self._pi.async_will_remove_from_hass()
         for unsubscribe in self._unsubscribes:
             unsubscribe()
+
+    def async_write_ha_state(self):
+        """Write state and fire PI dispatcher signal for companion sensors."""
+        super().async_write_ha_state()
+        if self._pi:
+            self._pi.fire_dispatcher()
 
     @property
     def device_info(self):
@@ -1000,17 +1012,33 @@ class TasmotaIrhvac(PIControllerMixin, RestoreEntity, ClimateEntity):
     @property
     def extra_state_attributes(self):
         """Return the state attributes of the device."""
-        return {
+        attrs = {
             attr: getattr(self, "_" + prop) for attr, prop in ATTRIBUTES_IRHVAC.items()
         }
+        if self._pi:
+            attrs.update(self._pi.get_extra_state_attributes())
+        return attrs
 
     @property
     def last_on_mode(self):
         """Return the last non-idle mode ie. heat, cool."""
         return self._last_on_mode
 
+    @property
+    def hvac_modes(self):
+        """Return the list of available HVAC modes."""
+        if self._pi:
+            return self._pi.filter_hvac_modes(self._attr_hvac_modes)
+        return self._attr_hvac_modes
+
     async def async_set_hvac_mode(self, hvac_mode):
         """Set hvac mode."""
+        if self._pi and self._pi.should_reject_hvac_mode(hvac_mode):
+            _LOGGER.warning(
+                "PI mode does not support %s — use HEAT or COOL explicitly",
+                hvac_mode,
+            )
+            return
         await self.set_mode(hvac_mode)
         # Ensure we update the current operation after changing the mode
         await self.async_send_cmd()
@@ -1034,6 +1062,11 @@ class TasmotaIrhvac(PIControllerMixin, RestoreEntity, ClimateEntity):
         temperature = kwargs.get(ATTR_TEMPERATURE)
         hvac_mode = kwargs.get(ATTR_HVAC_MODE)
         if temperature is None:
+            return
+
+        # PI controller handles its own setpoint logic
+        if self._pi:
+            await self._pi.set_temperature(temperature, hvac_mode)
             return
 
         if hvac_mode is not None:
@@ -1223,8 +1256,11 @@ class TasmotaIrhvac(PIControllerMixin, RestoreEntity, ClimateEntity):
             return
 
         if entity_id == self._temp_sensor:
+            was_none = self._attr_current_temperature is None
             self._async_update_temp(new_state)
             self.async_schedule_update_ha_state()
+            if self._pi:
+                await self._pi.sensor_changed(was_none)
         elif entity_id == self._humidity_sensor:
             self._async_update_humidity(new_state)
             self.async_schedule_update_ha_state()
@@ -1359,6 +1395,23 @@ class TasmotaIrhvac(PIControllerMixin, RestoreEntity, ClimateEntity):
         self.async_schedule_update_ha_state()
         _LOGGER.info("IR action preset '%s' activated", preset_name)
 
+    # ── PI service delegations (called by SERVICE_TO_METHOD handler) ──
+
+    async def async_reset_ff_buckets(self):
+        """Reset feedforward buckets to seed values."""
+        if self._pi:
+            await self._pi.async_reset_ff_buckets()
+
+    async def async_suppress_ff_learning(self, reason=""):
+        """Manually suppress FF learning."""
+        if self._pi:
+            await self._pi.async_suppress_ff_learning(reason=reason)
+
+    async def async_resume_ff_learning(self):
+        """Resume FF learning after manual suppression."""
+        if self._pi:
+            await self._pi.async_resume_ff_learning()
+
     async def set_mode(self, hvac_mode):
         """Set hvac mode."""
         hvac_mode = hvac_mode.lower()
@@ -1373,6 +1426,8 @@ class TasmotaIrhvac(PIControllerMixin, RestoreEntity, ClimateEntity):
 
     def _get_ir_temp(self):
         """Return temperature for IR payload."""
+        if self._pi and self._attr_hvac_mode != HVACMode.OFF:
+            return self._pi.get_ir_temp()
         return round(self._attr_target_temperature / self._temp_precision) * self._temp_precision
 
     async def send_ir(self):

@@ -2,7 +2,7 @@
 
 import pytest
 from custom_components.tasmota_irhvac.const import DOMAIN, PLATFORMS
-from custom_components.tasmota_irhvac.pi_controller import PIControllerMixin, _seed_buckets
+from custom_components.tasmota_irhvac.pi_controller import PIController, _seed_buckets
 
 
 def test_domain():

@@ -1,4 +1,9 @@
-"""Vendor-agnostic PI + feedforward controller mixin for IRHVAC climate entities."""
+"""Vendor-agnostic PI + feedforward controller for IRHVAC climate entities.
+
+Composed object (not a mixin). The climate entity creates a PIController instance
+and calls its hook methods at the appropriate points. This avoids MRO issues
+and minimizes changes to the upstream-derived climate.py.
+"""
 
 import logging
 import time
@@ -64,21 +69,34 @@ def _seed_buckets(reference, slope, is_cooling=False):
     return buckets
 
 
-class PIControllerMixin:
-    """Mixin providing PI + feedforward temperature control for IRHVAC entities.
+class PIController:
+    """PI + feedforward temperature controller for IRHVAC climate entities.
 
-    Vendor subclasses should:
-    - Call pi_init(config) in __init__ after super().__init__
-    - Call pi_async_added_to_hass() in async_added_to_hass after super()
-    - Call pi_async_will_remove_from_hass() in async_will_remove_from_hass
-    - Use pi_pause() / pi_resume() / pi_reset_integral() to control PI from presets
-    - Override _get_ir_temp() to return self._hp_setpoint when PI active
+    Usage in climate entity:
+        __init__:           self._pi = PIController(self, config)
+        async_added_to_hass:     await self._pi.async_added_to_hass(old_state)
+        async_will_remove:       self._pi.async_will_remove_from_hass()
+        async_set_temperature:   await self._pi.set_temperature(temp, hvac_mode)
+        _handle_state_payload:   await self._pi.handle_state_payload(payload)
+        _async_sensor_changed:   await self._pi.sensor_changed(was_none)
+        _get_ir_temp:            return self._pi.get_ir_temp()
+        extra_state_attributes:  attrs.update(self._pi.get_extra_state_attributes())
+        hvac_modes:              return self._pi.filter_hvac_modes(modes)
+        async_set_hvac_mode:     if self._pi.should_reject_hvac_mode(mode): return
+        async_write_ha_state:    self._pi.fire_dispatcher()
+
+    Vendor subclasses use: pi_pause(), pi_resume(), pi_reset_integral()
     """
 
-    # ── PI Initialization ─────────────────────────────────────────────
+    def __init__(self, entity, config):
+        """Initialize PI controller.
 
-    def pi_init(self, config):
-        """Initialize PI controller state from config. Call after super().__init__."""
+        Args:
+            entity: The climate entity this controller is attached to.
+            config: Merged config dict (entry.data + entry.options).
+        """
+        self._entity = entity
+
         # PI controller config
         self._pi_enabled = config.get(CONF_PI_ENABLED, DEFAULT_PI_ENABLED)
         self._pi_kp = config.get(CONF_PI_KP, DEFAULT_PI_KP)
@@ -124,8 +142,8 @@ class PIControllerMixin:
         self._disturbance_total_bias = 0.0
 
         # PI controller state
-        self._desired_temp = self._attr_target_temperature
-        self._hp_setpoint = self._attr_target_temperature
+        self._desired_temp = entity._attr_target_temperature
+        self._hp_setpoint = entity._attr_target_temperature
         self._pi_integral = 0.0
         self._pi_timer_unsub = None
         self._ff_offset = 0.0
@@ -135,8 +153,8 @@ class PIControllerMixin:
         self._sensor_recovery_pending = False
         self._sensor_recovery_unsub = None
         self._pi_paused = False
-        self._pi_last_tick_time = 0.0  # monotonic time of last tick
-        self._pi_last_error = 0.0  # previous error for trapezoidal integral
+        self._pi_last_tick_time = 0.0
+        self._pi_last_error = 0.0
 
         # Feedforward buckets
         self._ff_heat_buckets = _seed_buckets(self._ff_heat_reference, self._ff_heat_slope)
@@ -147,18 +165,24 @@ class PIControllerMixin:
         # Outdoor temp state
         self._outdoor_temp = None
 
-    async def pi_async_added_to_hass(self, old_state=None):
-        """Set up PI after entity is added. Call after super().async_added_to_hass().
+    # ── Shorthand entity access ──────────────────────────────────────
 
-        Args:
-            old_state: Previous entity state (optional, avoids duplicate lookup).
-        """
+    @property
+    def _hass(self):
+        return self._entity.hass
+
+    # ── Lifecycle hooks (called by climate entity) ───────────────────
+
+    async def async_added_to_hass(self, old_state=None):
+        """Set up PI after entity is added to HA."""
         if not self._pi_enabled:
             return
 
+        e = self._entity
+
         # Restore PI and feedforward state from previous session
         if old_state is None:
-            old_state = await self.async_get_last_state()
+            old_state = await e.async_get_last_state()
         if old_state is not None:
             attrs = old_state.attributes
             if attrs.get(ATTR_PI_INTEGRAL) is not None:
@@ -177,24 +201,24 @@ class PIControllerMixin:
                     int(k): float(v) for k, v in attrs[ATTR_FF_COOL_BUCKETS].items()
                 }
 
-        # Fallback: sync with restored _attr_target_temperature from super()
-        if self._desired_temp is None and self._attr_target_temperature is not None:
-            self._desired_temp = self._attr_target_temperature
-        if self._hp_setpoint is None and self._attr_target_temperature is not None:
+        # Fallback: sync with restored _attr_target_temperature
+        if self._desired_temp is None and e._attr_target_temperature is not None:
+            self._desired_temp = e._attr_target_temperature
+        if self._hp_setpoint is None and e._attr_target_temperature is not None:
             self._hp_setpoint = TemperatureConverter.convert(
-                self._attr_target_temperature,
-                self.temperature_unit,
+                e._attr_target_temperature,
+                e.temperature_unit,
                 UnitOfTemperature.CELSIUS,
             )
 
         # Register outdoor temp sensor
         if self._outdoor_temp_sensor:
             async_track_state_change_event(
-                self.hass,
+                self._hass,
                 self._outdoor_temp_sensor,
                 self._async_outdoor_temp_changed,
             )
-            outdoor_state = self.hass.states.get(self._outdoor_temp_sensor)
+            outdoor_state = self._hass.states.get(self._outdoor_temp_sensor)
             if outdoor_state is not None:
                 self._update_outdoor_temp(outdoor_state)
 
@@ -204,33 +228,32 @@ class PIControllerMixin:
         ]
         if disturbance_entity_ids:
             async_track_state_change_event(
-                self.hass,
+                self._hass,
                 disturbance_entity_ids,
                 self._async_disturbance_entity_changed,
             )
 
         # Compute initial feedforward offset
         if self._outdoor_temp is not None:
-            is_heating = self._attr_hvac_mode in (HVACMode.HEAT, HVACMode.HEAT_COOL, None)
+            is_heating = e._attr_hvac_mode in (HVACMode.HEAT, HVACMode.HEAT_COOL, None)
             buckets = self._ff_heat_buckets if is_heating else self._ff_cool_buckets
             bucket_key = round(self._outdoor_temp / 3) * 3
             self._ff_offset = buckets.get(bucket_key, 0.0)
 
-        # Start fallback timer (catches outdoor temp changes when room sensor is stable)
-        # Primary ticking is event-driven via _pi_async_sensor_changed
-        if self._temp_sensor:
+        # Start fallback timer
+        if e._temp_sensor:
             self._pi_timer_unsub = async_track_time_interval(
-                self.hass,
+                self._hass,
                 self._pi_tick,
                 timedelta(seconds=self._pi_min_interval),
             )
-            if self._attr_current_temperature is not None:
+            if e._attr_current_temperature is not None:
                 await self._pi_tick()
             else:
                 _LOGGER.debug("PI: skipping initial tick, waiting for sensor")
 
-    def pi_async_will_remove_from_hass(self):
-        """Clean up PI timers. Call in async_will_remove_from_hass."""
+    def async_will_remove_from_hass(self):
+        """Clean up PI timers."""
         if self._pi_timer_unsub:
             self._pi_timer_unsub()
             self._pi_timer_unsub = None
@@ -238,7 +261,87 @@ class PIControllerMixin:
             self._sensor_recovery_unsub()
             self._sensor_recovery_unsub = None
 
-    # ── PI Public API (for vendor subclasses) ─────────────────────────
+    # ── Hook methods (called by climate entity) ──────────────────────
+
+    async def set_temperature(self, temperature, hvac_mode=None):
+        """Handle temperature set when PI is active."""
+        if temperature is None:
+            return
+        e = self._entity
+        if hvac_mode is not None:
+            await e.set_mode(hvac_mode)
+        self._desired_temp = temperature
+        e._attr_target_temperature = temperature
+        self._pi_integral = 0.0
+        if e._attr_hvac_mode != HVACMode.OFF:
+            e.power_mode = STATE_ON
+        await self._pi_tick()
+        e.async_schedule_update_ha_state()
+
+    async def handle_state_payload(self, payload):
+        """Handle MQTT state echo. Call after base class processes payload."""
+        if not self._pi_enabled or self._desired_temp is None:
+            return
+        e = self._entity
+        # Capture HP setpoint from echo, restore user's desired temp
+        if "Temp" in payload and payload["Temp"] > 0:
+            self._hp_setpoint = payload["Temp"]
+        e._attr_target_temperature = self._desired_temp
+        e.async_write_ha_state()
+        # Echo detection
+        if "Temp" in payload and payload["Temp"] > 0:
+            if self._pi_command_pending:
+                self._pi_command_pending = False
+            else:
+                self._desired_temp = e._attr_target_temperature
+                await self._pi_tick()
+
+    async def sensor_changed(self, was_none):
+        """Handle temp sensor update."""
+        await self._pi_async_sensor_changed(was_none=was_none)
+
+    def get_ir_temp(self):
+        """Return PI-computed setpoint for IR command."""
+        return round(self._hp_setpoint)
+
+    def get_extra_state_attributes(self):
+        """Return PI state attributes to merge into entity attributes."""
+        if not self._pi_enabled:
+            return {}
+        return {
+            ATTR_HP_SETPOINT: self._hp_setpoint,
+            ATTR_PI_INTEGRAL: round(self._pi_integral, 3),
+            ATTR_DESIRED_TEMP: self._desired_temp,
+            ATTR_FF_OFFSET: round(self._ff_offset, 2),
+            ATTR_FF_HEAT_BUCKETS: {
+                str(k): round(v, 2) for k, v in self._ff_heat_buckets.items()
+            },
+            ATTR_FF_COOL_BUCKETS: {
+                str(k): round(v, 2) for k, v in self._ff_cool_buckets.items()
+            },
+            "ff_learning_suppressed": self._disturbance_suppress_active,
+            "disturbance_bias": round(self._disturbance_total_bias, 2),
+        }
+
+    def filter_hvac_modes(self, modes):
+        """Filter out auto/heat_cool when PI is enabled."""
+        if self._pi_enabled and modes:
+            return [m for m in modes if m not in (HVACMode.AUTO, HVACMode.HEAT_COOL)]
+        return modes
+
+    def should_reject_hvac_mode(self, hvac_mode):
+        """Return True if PI should reject this HVAC mode."""
+        return self._pi_enabled and hvac_mode in (HVACMode.AUTO, HVACMode.HEAT_COOL)
+
+    def fire_dispatcher(self):
+        """Fire dispatcher signal for companion PI sensors."""
+        if self._pi_enabled and hasattr(self._entity, "_config_entry_id"):
+            async_dispatcher_send(
+                self._hass,
+                SIGNAL_PI_UPDATE.format(self._entity._config_entry_id),
+            )
+
+    # ── Public API (for vendor subclasses via entity._pi) ────────────
 
     def pi_pause(self):
         """Pause PI control (e.g., during vendor-specific preset modes)."""
@@ -257,10 +360,10 @@ class PIControllerMixin:
         self._manual_ff_suppress = True
         self._manual_ff_suppress_reason = reason or ""
         _LOGGER.info("FF learning manually suppressed: %s", reason or "(no reason)")
-        if hasattr(self, "_config_entry_id"):
+        if hasattr(self._entity, "_config_entry_id"):
             async_dispatcher_send(
-                self.hass,
-                SIGNAL_FF_SUPPRESS_UPDATE.format(self._config_entry_id),
+                self._hass,
+                SIGNAL_FF_SUPPRESS_UPDATE.format(self._entity._config_entry_id),
             )
 
     async def async_resume_ff_learning(self):
@@ -268,11 +371,21 @@ class PIControllerMixin:
         self._manual_ff_suppress = False
         self._manual_ff_suppress_reason = ""
         _LOGGER.info("FF learning manual suppress cleared")
-        if hasattr(self, "_config_entry_id"):
+        if hasattr(self._entity, "_config_entry_id"):
             async_dispatcher_send(
-                self.hass,
-                SIGNAL_FF_SUPPRESS_UPDATE.format(self._config_entry_id),
+                self._hass,
+                SIGNAL_FF_SUPPRESS_UPDATE.format(self._entity._config_entry_id),
             )
+
+    async def async_reset_ff_buckets(self):
+        """Reset feedforward buckets to seed values from config."""
+        self._ff_heat_buckets = _seed_buckets(self._ff_heat_reference, self._ff_heat_slope)
+        self._ff_cool_buckets = _seed_buckets(
+            self._ff_cool_reference, self._ff_cool_slope, is_cooling=True
+        )
+        self._pi_integral = 0.0
+        _LOGGER.info("FF buckets reset to seed values, integral zeroed")
+        self._entity.async_schedule_update_ha_state()
 
     def _compute_disturbance_effects(self):
         """Compute combined suppress and bias from disturbance inputs.
@@ -287,7 +400,7 @@ class PIControllerMixin:
             entity_id = d_input.get("entity_id")
             if not entity_id:
                 continue
-            state = self.hass.states.get(entity_id)
+            state = self._hass.states.get(entity_id)
             if not state or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
                 continue
 
@@ -299,14 +412,12 @@ class PIControllerMixin:
                 is_numeric = False
 
             if is_numeric:
-                # Numeric entity: active when non-zero, bias = value × gain
                 if value != 0:
                     if d_input.get("suppress_learning"):
                         suppress = True
                         active_suppressors.append(entity_id)
                     total_bias += value * d_input.get("gain", 1.0)
             else:
-                # Boolean entity: active when "on", bias = default_bias
                 if state.state == "on":
                     if d_input.get("suppress_learning"):
                         suppress = True
@@ -339,22 +450,17 @@ class PIControllerMixin:
     @callback
     def _async_disturbance_entity_changed(self, event):
         """Handle disturbance input entity state changes — update binary sensor."""
-        if hasattr(self, "_config_entry_id"):
+        if hasattr(self._entity, "_config_entry_id"):
             async_dispatcher_send(
-                self.hass,
-                SIGNAL_FF_SUPPRESS_UPDATE.format(self._config_entry_id),
+                self._hass,
+                SIGNAL_FF_SUPPRESS_UPDATE.format(self._entity._config_entry_id),
             )
 
     async def _pi_async_sensor_changed(self, was_none=False):
-        """Handle temp sensor update. Call from _async_sensor_changed override.
-
-        Args:
-            was_none: True if sensor was previously unavailable (recovery case).
-        """
+        """Handle temp sensor update."""
         if not self._pi_enabled:
             return
         if was_none:
-            # Sensor recovery — cancel pending recovery callback
             if self._sensor_recovery_unsub:
                 self._sensor_recovery_unsub()
                 self._sensor_recovery_unsub = None
@@ -367,9 +473,8 @@ class PIControllerMixin:
             await self._pi_tick()
             return
 
-        # Event-driven tick: run PI on every sensor update, respecting min cooldown
         elapsed = time.monotonic() - self._pi_last_tick_time
-        min_cooldown = max(60.0, self._pi_min_interval / 3.0)  # At least 60s, at most interval/3
+        min_cooldown = max(60.0, self._pi_min_interval / 3.0)
         if elapsed >= min_cooldown:
             await self._pi_tick()
 
@@ -377,20 +482,20 @@ class PIControllerMixin:
         """Called 60s after sensor went unavailable. Fall back to FF-only if still gone."""
         self._sensor_recovery_pending = False
         self._sensor_recovery_unsub = None
-        if self._attr_current_temperature is not None:
+        e = self._entity
+        if e._attr_current_temperature is not None:
             _LOGGER.info("PI: temp sensor recovered during grace period")
             await self._pi_tick()
             return
-        # Confirmed unavailable — set flag, fall back to feedforward-only setpoint
         self._sensor_unavailable = True
         _LOGGER.warning("PI: temp sensor confirmed unavailable, using feedforward-only fallback")
         if self._desired_temp is None:
             return
         desired_c = TemperatureConverter.convert(
-            self._desired_temp, self.temperature_unit, UnitOfTemperature.CELSIUS,
+            self._desired_temp, e.temperature_unit, UnitOfTemperature.CELSIUS,
         )
-        is_heating = self._attr_hvac_mode == HVACMode.HEAT
-        if not is_heating and self._attr_hvac_mode not in (HVACMode.COOL, HVACMode.DRY):
+        is_heating = e._attr_hvac_mode == HVACMode.HEAT
+        if not is_heating and e._attr_hvac_mode not in (HVACMode.COOL, HVACMode.DRY):
             return
         ff_offset = 0.0
         if self._outdoor_temp is not None:
@@ -399,30 +504,31 @@ class PIControllerMixin:
             ff_offset = buckets.get(bucket_key, 0.0)
         self._ff_offset = ff_offset
         self._pi_integral = 0.0
-        new_setpoint = round(max(self._min_temp, min(self._max_temp, desired_c + ff_offset)))
+        new_setpoint = round(max(e._min_temp, min(e._max_temp, desired_c + ff_offset)))
         if new_setpoint != self._hp_setpoint:
             _LOGGER.info("PI fallback: setpoint %s -> %s (FF only)", self._hp_setpoint, new_setpoint)
             self._hp_setpoint = new_setpoint
             self._pi_command_pending = True
-            await self.send_ir()
-        self.async_schedule_update_ha_state()
+            await e.send_ir()
+        e.async_schedule_update_ha_state()
 
     async def _pi_tick(self, now=None):
         """PI + feedforward controller tick. Called by timer and sensor events."""
         if not self._pi_enabled:
             return
-        if self._attr_hvac_mode == HVACMode.OFF:
+        e = self._entity
+        if e._attr_hvac_mode == HVACMode.OFF:
             self._pi_integral = 0.0
             return
         if self._desired_temp is None:
             return
-        if self._attr_current_temperature is None:
+        if e._attr_current_temperature is None:
             if self._sensor_unavailable or self._sensor_recovery_pending:
                 return
             _LOGGER.info("PI: temp sensor unavailable, scheduling 60s recovery check")
             self._sensor_recovery_pending = True
             self._sensor_recovery_unsub = async_call_later(
-                self.hass, 60, self._check_sensor_recovery
+                self._hass, 60, self._check_sensor_recovery
             )
             return
         if self._pi_paused:
@@ -434,26 +540,26 @@ class PIControllerMixin:
         if self._pi_last_tick_time > 0:
             dt_seconds = min(now_mono - self._pi_last_tick_time, self._pi_min_interval * 2)
         else:
-            dt_seconds = float(self._pi_min_interval)  # First tick: assume one interval
+            dt_seconds = float(self._pi_min_interval)
         self._pi_last_tick_time = now_mono
-        dt_factor = dt_seconds / float(self._pi_min_interval)  # Normalize to reference interval
+        dt_factor = dt_seconds / float(self._pi_min_interval)
 
         # Convert both to °C for PI math
         current_c = TemperatureConverter.convert(
-            self._attr_current_temperature,
-            self.temperature_unit,
+            e._attr_current_temperature,
+            e.temperature_unit,
             UnitOfTemperature.CELSIUS,
         )
         desired_c = TemperatureConverter.convert(
             self._desired_temp,
-            self.temperature_unit,
+            e.temperature_unit,
             UnitOfTemperature.CELSIUS,
         )
         error = desired_c - current_c
 
         # PI only operates in explicit HEAT, COOL, or DRY modes
-        is_heating = self._attr_hvac_mode == HVACMode.HEAT
-        is_cooling = self._attr_hvac_mode in (HVACMode.COOL, HVACMode.DRY)
+        is_heating = e._attr_hvac_mode == HVACMode.HEAT
+        is_cooling = e._attr_hvac_mode in (HVACMode.COOL, HVACMode.DRY)
         if not is_heating and not is_cooling:
             return
 
@@ -487,8 +593,7 @@ class PIControllerMixin:
             self._pi_integral = 0.0
         self._last_disturbance_bias = disturbance_bias
 
-        # Adaptive setpoint weight: full P (b=1) for large errors,
-        # blend to configured weight as error approaches deadband
+        # Adaptive setpoint weight
         abs_error = abs(error)
         if abs_error > self._pi_deadband * 4:
             effective_weight = 1.0
@@ -518,11 +623,8 @@ class PIControllerMixin:
             p_term = 0.0
         else:
             self._ff_settled_ticks = 0
-            # 2-DOF setpoint weighting with adaptive blend
             p_error = effective_weight * desired_c - current_c
             p_term = self._pi_kp * p_error
-            # Time-normalized integral: trapezoidal (Tustin) method
-            # Accumulates (avg of current + previous error) * dt_factor
             avg_error = (error + self._pi_last_error) / 2.0
             self._pi_integral += avg_error * dt_factor
 
@@ -539,7 +641,7 @@ class PIControllerMixin:
 
         i_term = self._pi_ki * self._pi_integral
         raw_setpoint = desired_c + p_term + i_term + self._ff_offset
-        clamped_setpoint = max(self._min_temp, min(self._max_temp, raw_setpoint))
+        clamped_setpoint = max(e._min_temp, min(e._max_temp, raw_setpoint))
 
         # Back-calculation anti-windup
         if self._pi_ki != 0:
@@ -549,14 +651,13 @@ class PIControllerMixin:
                 self._pi_integral += kb * saturation_error
                 self._pi_integral = max(-50.0, min(50.0, self._pi_integral))
 
-        # Midpoint-crossing hysteresis: only change HP setpoint when the raw
-        # value crosses the midpoint between integers. Prevents 1°C limit cycles.
-        new_setpoint = self._hp_setpoint  # Default: keep current
+        # Midpoint-crossing hysteresis
+        new_setpoint = self._hp_setpoint
         if clamped_setpoint > self._hp_setpoint + 0.5:
             new_setpoint = round(clamped_setpoint)
         elif clamped_setpoint < self._hp_setpoint - 0.5:
             new_setpoint = round(clamped_setpoint)
-        new_setpoint = int(max(self._min_temp, min(self._max_temp, new_setpoint)))
+        new_setpoint = int(max(e._min_temp, min(e._max_temp, new_setpoint)))
 
         if new_setpoint != self._hp_setpoint:
             _LOGGER.info(
@@ -566,124 +667,11 @@ class PIControllerMixin:
             )
             self._hp_setpoint = new_setpoint
             self._pi_command_pending = True
-            await self.send_ir()
+            await e.send_ir()
         else:
             _LOGGER.debug(
                 "PI: error=%.1f raw=%.1f setpoint=%s (held)",
                 error, clamped_setpoint, self._hp_setpoint,
             )
 
-        self.async_schedule_update_ha_state()
-
-    # ── Method overrides (MRO: Mixin → TasmotaIrhvac → ClimateEntity) ──
-
-    async def _async_sensor_changed(self, entity_id_or_event, old_state=None, new_state=None):
-        """Override to add PI event-driven ticking on sensor updates."""
-        was_none = self._attr_current_temperature is None
-        await super()._async_sensor_changed(entity_id_or_event, old_state, new_state)
-        if self._attr_current_temperature is not None:
-            await self._pi_async_sensor_changed(was_none=was_none)
-
-    def _get_ir_temp(self):
-        """Override to return PI-computed setpoint when active."""
-        if self._pi_enabled and self._attr_hvac_mode != HVACMode.OFF:
-            return round(self._hp_setpoint)
-        return super()._get_ir_temp()
-
-    def async_write_ha_state(self):
-        """Override to fire dispatcher signal for companion PI sensors."""
-        super().async_write_ha_state()
-        if self._pi_enabled and hasattr(self, "_config_entry_id"):
-            async_dispatcher_send(
-                self.hass,
-                SIGNAL_PI_UPDATE.format(self._config_entry_id),
-            )
-
-    @property
-    def hvac_modes(self):
-        """Override to filter auto/heat_cool when PI is enabled."""
-        modes = self._attr_hvac_modes
-        if self._pi_enabled and modes:
-            return [m for m in modes if m not in (HVACMode.AUTO, HVACMode.HEAT_COOL)]
-        return modes
-
-    async def async_set_hvac_mode(self, hvac_mode):
-        """Override to reject auto/heat_cool when PI is enabled."""
-        if self._pi_enabled and hvac_mode in (HVACMode.AUTO, HVACMode.HEAT_COOL):
-            _LOGGER.warning(
-                "PI mode does not support %s — use HEAT or COOL explicitly", hvac_mode,
-            )
-            return
-        await super().async_set_hvac_mode(hvac_mode)
-
-    async def async_set_temperature(self, **kwargs):
-        """Override to route through PI when active."""
-        temperature = kwargs.get("temperature")
-        if temperature is None:
-            return
-        hvac_mode = kwargs.get("hvac_mode")
-        if hvac_mode is not None:
-            await super().async_set_hvac_mode(hvac_mode)
-        if self._pi_enabled:
-            self._desired_temp = temperature
-            self._attr_target_temperature = temperature
-            self._pi_integral = 0.0
-            if self._attr_hvac_mode != HVACMode.OFF:
-                self.power_mode = STATE_ON
-            await self._pi_tick()
-            self.async_schedule_update_ha_state()
-            return
-        await super().async_set_temperature(**kwargs)
-
-    @property
-    def extra_state_attributes(self):
-        """Override to include PI controller state attributes."""
-        attrs = super().extra_state_attributes
-        if self._pi_enabled:
-            attrs.update({
-                ATTR_HP_SETPOINT: self._hp_setpoint,
-                ATTR_PI_INTEGRAL: round(self._pi_integral, 3),
-                ATTR_DESIRED_TEMP: self._desired_temp,
-                ATTR_FF_OFFSET: round(self._ff_offset, 2),
-                ATTR_FF_HEAT_BUCKETS: {
-                    str(k): round(v, 2) for k, v in self._ff_heat_buckets.items()
-                },
-                ATTR_FF_COOL_BUCKETS: {
-                    str(k): round(v, 2) for k, v in self._ff_cool_buckets.items()
-                },
-                "ff_learning_suppressed": self._disturbance_suppress_active,
-                "disturbance_bias": round(self._disturbance_total_bias, 2),
-            })
-        return attrs
-
-    async def _handle_state_payload(self, json_payload, payload):
-        """Override to add PI MQTT hooks."""
-        # Save desired temp before super() overwrites it with HP setpoint
-        saved_desired = self._desired_temp if self._pi_enabled else None
-        await super()._handle_state_payload(json_payload, payload)
-        # Restore desired_temp over payload temp and re-write state.
-        # super() sets _attr_target_temperature to the HP's whole-°C setpoint
-        # and writes state — we must overwrite and write again so the UI shows
-        # the user's desired temp (which may be fractional °C / odd °F).
-        if self._pi_enabled and saved_desired is not None:
-            if "Temp" in payload and payload["Temp"] > 0:
-                self._hp_setpoint = payload["Temp"]
-            self._attr_target_temperature = saved_desired
-            self.async_write_ha_state()
-        # Handle temp echo detection
-        if self._pi_enabled and "Temp" in payload and payload["Temp"] > 0:
-            if self._pi_command_pending:
-                self._pi_command_pending = False
-            else:
-                self._desired_temp = self._attr_target_temperature
-                await self._pi_tick()
-
-    async def async_reset_ff_buckets(self):
-        """Reset feedforward buckets to seed values from config."""
-        self._ff_heat_buckets = _seed_buckets(self._ff_heat_reference, self._ff_heat_slope)
-        self._ff_cool_buckets = _seed_buckets(
-            self._ff_cool_reference, self._ff_cool_slope, is_cooling=True
-        )
-        self._pi_integral = 0.0
-        _LOGGER.info("FF buckets reset to seed values, integral zeroed")
-        self.async_schedule_update_ha_state()
+        e.async_schedule_update_ha_state()

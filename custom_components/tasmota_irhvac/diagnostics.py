@@ -8,7 +8,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .const import DATA_KEY
-from .pi_controller import PIControllerMixin
+from .pi_controller import PIController
 
 REDACT_KEYS = {"unique_id", "topic", "state_topic", "availability_topic"}
 
@@ -44,38 +44,39 @@ async def async_get_config_entry_diagnostics(
         "available": climate_entity.available,
     }
 
-    if isinstance(climate_entity, PIControllerMixin) and climate_entity._pi_enabled:
+    pi = climate_entity._pi
+    if pi and pi._pi_enabled:
         data["pi_controller"] = {
             "enabled": True,
-            "paused": climate_entity._pi_paused,
-            "desired_temp": climate_entity._desired_temp,
-            "hp_setpoint": climate_entity._hp_setpoint,
-            "integral": round(climate_entity._pi_integral, 3),
-            "ff_offset": round(climate_entity._ff_offset, 2),
-            "outdoor_temp": climate_entity._outdoor_temp,
-            "sensor_unavailable": climate_entity._sensor_unavailable,
-            "sensor_recovery_pending": climate_entity._sensor_recovery_pending,
+            "paused": pi._pi_paused,
+            "desired_temp": pi._desired_temp,
+            "hp_setpoint": pi._hp_setpoint,
+            "integral": round(pi._pi_integral, 3),
+            "ff_offset": round(pi._ff_offset, 2),
+            "outdoor_temp": pi._outdoor_temp,
+            "sensor_unavailable": pi._sensor_unavailable,
+            "sensor_recovery_pending": pi._sensor_recovery_pending,
             "config": {
-                "kp": climate_entity._pi_kp,
-                "ki": climate_entity._pi_ki,
-                "deadband": climate_entity._pi_deadband,
-                "setpoint_weight": climate_entity._pi_setpoint_weight,
-                "min_interval": climate_entity._pi_min_interval,
-                "outdoor_temp_sensor": climate_entity._outdoor_temp_sensor,
-                "disturbance_inputs": climate_entity._disturbance_inputs,
+                "kp": pi._pi_kp,
+                "ki": pi._pi_ki,
+                "deadband": pi._pi_deadband,
+                "setpoint_weight": pi._pi_setpoint_weight,
+                "min_interval": pi._pi_min_interval,
+                "outdoor_temp_sensor": pi._outdoor_temp_sensor,
+                "disturbance_inputs": pi._disturbance_inputs,
             },
             "disturbance_state": {
-                "learning_suppressed": climate_entity._disturbance_suppress_active,
-                "manual_suppress": climate_entity._manual_ff_suppress,
-                "manual_suppress_reason": climate_entity._manual_ff_suppress_reason,
-                "active_suppressors": climate_entity._disturbance_active_suppressors,
-                "total_bias": round(climate_entity._disturbance_total_bias, 2),
+                "learning_suppressed": pi._disturbance_suppress_active,
+                "manual_suppress": pi._manual_ff_suppress,
+                "manual_suppress_reason": pi._manual_ff_suppress_reason,
+                "active_suppressors": pi._disturbance_active_suppressors,
+                "total_bias": round(pi._disturbance_total_bias, 2),
             },
             "ff_heat_buckets": {
-                str(k): round(v, 2) for k, v in climate_entity._ff_heat_buckets.items()
+                str(k): round(v, 2) for k, v in pi._ff_heat_buckets.items()
             },
             "ff_cool_buckets": {
-                str(k): round(v, 2) for k, v in climate_entity._ff_cool_buckets.items()
+                str(k): round(v, 2) for k, v in pi._ff_cool_buckets.items()
             },
         }
 

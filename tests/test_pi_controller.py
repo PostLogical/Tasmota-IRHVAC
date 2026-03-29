@@ -21,7 +21,7 @@ from custom_components.tasmota_irhvac.const import (
     ATTR_PI_INTEGRAL,
     DOMAIN,
 )
-from custom_components.tasmota_irhvac.pi_controller import PIControllerMixin, _seed_buckets
+from custom_components.tasmota_irhvac.pi_controller import PIController, _seed_buckets
 
 from .conftest import make_pi_config
 
@@ -84,36 +84,11 @@ class TestSeedBuckets:
 # These test the PI math in isolation using a mock entity
 
 
-class FakeBaseEntity:
-    """Simulates TasmotaIrhvac base class methods that super() calls need."""
+class FakePIEntity:
+    """Minimal fake entity to test PI math without HA infrastructure."""
 
     _attr_hvac_modes = [HVACMode.HEAT, HVACMode.COOL, HVACMode.AUTO, HVACMode.OFF]
     _temp_precision = 1.0
-
-    async def _async_sensor_changed(self, *args, **kwargs):
-        pass
-
-    def _get_ir_temp(self):
-        return round(self._attr_target_temperature)
-
-    async def async_set_hvac_mode(self, hvac_mode):
-        self._attr_hvac_mode = hvac_mode
-
-    async def async_set_temperature(self, **kwargs):
-        temp = kwargs.get("temperature")
-        if temp is not None:
-            self._attr_target_temperature = temp
-
-    @property
-    def extra_state_attributes(self):
-        return {"test": True}
-
-    async def _handle_state_payload(self, json_payload, payload):
-        pass
-
-
-class FakePIEntity(PIControllerMixin, FakeBaseEntity):
-    """Minimal fake entity to test PI math without HA infrastructure."""
 
     def __init__(self, config):
         # Simulate base class attributes
@@ -126,18 +101,55 @@ class FakePIEntity(PIControllerMixin, FakeBaseEntity):
         self._max_temp = 30
         self.power_mode = STATE_ON
         self._mqtt_delay = "0"
+        self._config_entry_id = "test_entry"
 
         # Mock methods from base class
         self.send_ir = AsyncMock()
         self.async_schedule_update_ha_state = MagicMock()
+        self.async_write_ha_state = MagicMock()
         self.async_get_last_state = AsyncMock(return_value=None)
 
-        # Initialize PI
-        self.pi_init(config)
+        # Initialize PI via composition
+        self._pi = PIController(self, config)
 
     @property
     def temperature_unit(self):
         return UnitOfTemperature.FAHRENHEIT
+
+    async def set_mode(self, hvac_mode):
+        self._attr_hvac_mode = hvac_mode
+
+    # Minimal entity methods for integration tests
+    def _get_ir_temp(self):
+        if self._pi and self._attr_hvac_mode != HVACMode.OFF:
+            return self._pi.get_ir_temp()
+        return round(self._attr_target_temperature)
+
+    @property
+    def hvac_modes(self):
+        if self._pi:
+            return self._pi.filter_hvac_modes(self._attr_hvac_modes)
+        return self._attr_hvac_modes
+
+    async def async_set_hvac_mode(self, hvac_mode):
+        if self._pi and self._pi.should_reject_hvac_mode(hvac_mode):
+            return
+        self._attr_hvac_mode = hvac_mode
+
+    async def async_set_temperature(self, **kwargs):
+        temperature = kwargs.get("temperature")
+        if self._pi:
+            await self._pi.set_temperature(temperature)
+            return
+        if temperature is not None:
+            self._attr_target_temperature = temperature
+
+    @property
+    def extra_state_attributes(self):
+        attrs = {"test": True}
+        if self._pi:
+            attrs.update(self._pi.get_extra_state_attributes())
+        return attrs
 
 
 @pytest.fixture
@@ -155,13 +167,13 @@ class TestPIMath:
     async def test_basic_heating_error(self, pi_entity):
         """PI should increase setpoint when room is below desired."""
         pi_entity._attr_current_temperature = 68.0  # °F, ~20°C
-        pi_entity._desired_temp = 72.0  # °F, ~22.2°C
-        pi_entity._hp_setpoint = 22.0
+        pi_entity._pi._desired_temp = 72.0  # °F, ~22.2°C
+        pi_entity._pi._hp_setpoint = 22.0
 
-        await pi_entity._pi_tick()
+        await pi_entity._pi._pi_tick()
 
         # With error ~2.2°C, P term should push setpoint up
-        assert pi_entity._hp_setpoint > 22.0
+        assert pi_entity._pi._hp_setpoint > 22.0
         assert pi_entity.send_ir.called
 
     @pytest.mark.asyncio
@@ -169,22 +181,22 @@ class TestPIMath:
         """PI should decrease setpoint when room is above desired in cool mode."""
         pi_entity._attr_hvac_mode = HVACMode.COOL
         pi_entity._attr_current_temperature = 78.0  # °F, ~25.6°C
-        pi_entity._desired_temp = 74.0  # °F, ~23.3°C
-        pi_entity._hp_setpoint = 24.0
+        pi_entity._pi._desired_temp = 74.0  # °F, ~23.3°C
+        pi_entity._pi._hp_setpoint = 24.0
 
-        await pi_entity._pi_tick()
+        await pi_entity._pi._pi_tick()
 
-        assert pi_entity._hp_setpoint < 24.0
+        assert pi_entity._pi._hp_setpoint < 24.0
 
     @pytest.mark.asyncio
     async def test_deadband_no_p_term(self, pi_entity):
         """In deadband, P term should be zero (only integral action)."""
         # Set current temp very close to desired (within 0.5°C deadband)
         pi_entity._attr_current_temperature = 71.8  # ~22.1°C
-        pi_entity._desired_temp = 72.0  # ~22.2°C, error ~0.1°C
-        pi_entity._hp_setpoint = 22.0
+        pi_entity._pi._desired_temp = 72.0  # ~22.2°C, error ~0.1°C
+        pi_entity._pi._hp_setpoint = 22.0
 
-        await pi_entity._pi_tick()
+        await pi_entity._pi._pi_tick()
 
         # Integral should decay (multiply by 0.9)
         # No IR command should be sent (setpoint unchanged)
@@ -193,72 +205,72 @@ class TestPIMath:
     async def test_integral_accumulates(self, pi_entity):
         """Integral should accumulate error over multiple ticks."""
         pi_entity._attr_current_temperature = 68.0  # ~20°C
-        pi_entity._desired_temp = 72.0  # ~22.2°C
-        pi_entity._hp_setpoint = 22.0
+        pi_entity._pi._desired_temp = 72.0  # ~22.2°C
+        pi_entity._pi._hp_setpoint = 22.0
 
-        await pi_entity._pi_tick()
-        integral_after_1 = pi_entity._pi_integral
+        await pi_entity._pi._pi_tick()
+        integral_after_1 = pi_entity._pi._pi_integral
 
         # Reset setpoint to force another tick with same error
-        pi_entity._hp_setpoint = 22.0
+        pi_entity._pi._hp_setpoint = 22.0
         pi_entity.send_ir.reset_mock()
-        await pi_entity._pi_tick()
-        integral_after_2 = pi_entity._pi_integral
+        await pi_entity._pi._pi_tick()
+        integral_after_2 = pi_entity._pi._pi_integral
 
         assert integral_after_2 > integral_after_1
 
     @pytest.mark.asyncio
     async def test_integral_capped_at_50(self, pi_entity):
         """Integral should never exceed ±50."""
-        pi_entity._pi_integral = 100.0
+        pi_entity._pi._pi_integral = 100.0
         pi_entity._attr_current_temperature = 68.0
-        pi_entity._desired_temp = 72.0
-        pi_entity._hp_setpoint = 22.0
+        pi_entity._pi._desired_temp = 72.0
+        pi_entity._pi._hp_setpoint = 22.0
 
-        await pi_entity._pi_tick()
+        await pi_entity._pi._pi_tick()
 
-        assert pi_entity._pi_integral <= 50.0
-        assert pi_entity._pi_integral >= -50.0
+        assert pi_entity._pi._pi_integral <= 50.0
+        assert pi_entity._pi._pi_integral >= -50.0
 
     @pytest.mark.asyncio
     async def test_setpoint_clamped_to_range(self, pi_entity):
         """HP setpoint should be clamped to min_temp/max_temp."""
         pi_entity._attr_current_temperature = 50.0  # Very cold, huge error
-        pi_entity._desired_temp = 72.0
-        pi_entity._hp_setpoint = 22.0
-        pi_entity._pi_integral = 50.0  # Max integral
+        pi_entity._pi._desired_temp = 72.0
+        pi_entity._pi._hp_setpoint = 22.0
+        pi_entity._pi._pi_integral = 50.0  # Max integral
 
-        await pi_entity._pi_tick()
+        await pi_entity._pi._pi_tick()
 
-        assert pi_entity._hp_setpoint <= pi_entity._max_temp
-        assert pi_entity._hp_setpoint >= pi_entity._min_temp
+        assert pi_entity._pi._hp_setpoint <= pi_entity._max_temp
+        assert pi_entity._pi._hp_setpoint >= pi_entity._min_temp
 
     @pytest.mark.asyncio
     async def test_back_calculation_antiwindup(self, pi_entity):
         """Back-calculation should unwind integral when output saturates."""
         # Force saturation: huge error + huge integral → raw setpoint > max_temp
         pi_entity._attr_current_temperature = 50.0  # Very cold
-        pi_entity._desired_temp = 72.0
-        pi_entity._hp_setpoint = 22.0
-        pi_entity._pi_integral = 40.0  # Large positive integral
+        pi_entity._pi._desired_temp = 72.0
+        pi_entity._pi._hp_setpoint = 22.0
+        pi_entity._pi._pi_integral = 40.0  # Large positive integral
 
-        await pi_entity._pi_tick()
+        await pi_entity._pi._pi_tick()
 
         # Setpoint should be clamped at max
-        assert pi_entity._hp_setpoint == pi_entity._max_temp
+        assert pi_entity._pi._hp_setpoint == pi_entity._max_temp
         # Integral should have been unwound (back-calculation reduces it)
-        assert pi_entity._pi_integral < 40.0
+        assert pi_entity._pi._pi_integral < 40.0
 
     @pytest.mark.asyncio
     async def test_antiwindup_no_effect_when_not_saturated(self, pi_entity):
         """Anti-windup should not affect integral when output is in range."""
         pi_entity._attr_current_temperature = 70.0  # Small error
-        pi_entity._desired_temp = 72.0
-        pi_entity._hp_setpoint = 22.0
-        pi_entity._pi_integral = 2.0
+        pi_entity._pi._desired_temp = 72.0
+        pi_entity._pi._hp_setpoint = 22.0
+        pi_entity._pi._pi_integral = 2.0
 
-        await pi_entity._pi_tick()
-        integral_after = pi_entity._pi_integral
+        await pi_entity._pi._pi_tick()
+        integral_after = pi_entity._pi._pi_integral
 
         # Integral should have grown (error accumulated), not been unwound
         # The small error (~1.1°C) + small integral should not saturate
@@ -267,45 +279,45 @@ class TestPIMath:
     @pytest.mark.asyncio
     async def test_off_mode_zeros_integral(self, pi_entity):
         """HVAC OFF should zero the integral."""
-        pi_entity._pi_integral = 10.0
+        pi_entity._pi._pi_integral = 10.0
         pi_entity._attr_hvac_mode = HVACMode.OFF
 
-        await pi_entity._pi_tick()
+        await pi_entity._pi._pi_tick()
 
-        assert pi_entity._pi_integral == 0.0
+        assert pi_entity._pi._pi_integral == 0.0
 
     @pytest.mark.asyncio
     async def test_auto_mode_skipped(self, pi_entity):
         """AUTO mode should be skipped by PI."""
         pi_entity._attr_hvac_mode = HVACMode.AUTO
-        old_setpoint = pi_entity._hp_setpoint
+        old_setpoint = pi_entity._pi._hp_setpoint
 
-        await pi_entity._pi_tick()
+        await pi_entity._pi._pi_tick()
 
-        assert pi_entity._hp_setpoint == old_setpoint
+        assert pi_entity._pi._hp_setpoint == old_setpoint
         assert not pi_entity.send_ir.called
 
     @pytest.mark.asyncio
     async def test_setpoint_weight_reduces_p_response(self, pi_entity):
         """Lower setpoint weight should reduce P term response to setpoint changes."""
         # Standard PI (weight=1.0)
-        pi_entity._pi_setpoint_weight = 1.0
+        pi_entity._pi._pi_setpoint_weight = 1.0
         pi_entity._attr_current_temperature = 68.0
-        pi_entity._desired_temp = 76.0  # Big setpoint change
-        pi_entity._hp_setpoint = 22.0
-        pi_entity._pi_integral = 0.0
+        pi_entity._pi._desired_temp = 76.0  # Big setpoint change
+        pi_entity._pi._hp_setpoint = 22.0
+        pi_entity._pi._pi_integral = 0.0
 
-        await pi_entity._pi_tick()
-        setpoint_weight_1 = pi_entity._hp_setpoint
+        await pi_entity._pi._pi_tick()
+        setpoint_weight_1 = pi_entity._pi._hp_setpoint
 
         # Weighted PI (weight=0.5)
-        pi_entity._pi_setpoint_weight = 0.5
-        pi_entity._hp_setpoint = 22.0
-        pi_entity._pi_integral = 0.0
+        pi_entity._pi._pi_setpoint_weight = 0.5
+        pi_entity._pi._hp_setpoint = 22.0
+        pi_entity._pi._pi_integral = 0.0
         pi_entity.send_ir.reset_mock()
 
-        await pi_entity._pi_tick()
-        setpoint_weight_05 = pi_entity._hp_setpoint
+        await pi_entity._pi._pi_tick()
+        setpoint_weight_05 = pi_entity._pi._hp_setpoint
 
         # Lower weight → less aggressive response
         assert setpoint_weight_05 <= setpoint_weight_1
@@ -313,18 +325,18 @@ class TestPIMath:
     @pytest.mark.asyncio
     async def test_adaptive_setpoint_weight(self, pi_entity):
         """Adaptive weight should blend to b=1 for large errors, b=configured near deadband."""
-        pi_entity._pi_setpoint_weight = 0.0  # Configured weight
+        pi_entity._pi._pi_setpoint_weight = 0.0  # Configured weight
         # Large error (>4x deadband): adaptive weight should be 1.0
         pi_entity._attr_current_temperature = 66.0  # ~18.9°C, well below 22.2°C desired
-        pi_entity._desired_temp = 72.0
-        pi_entity._hp_setpoint = 22.0
-        pi_entity._pi_integral = 0.0
+        pi_entity._pi._desired_temp = 72.0
+        pi_entity._pi._hp_setpoint = 22.0
+        pi_entity._pi._pi_integral = 0.0
 
-        await pi_entity._pi_tick()
+        await pi_entity._pi._pi_tick()
 
         # With adaptive weight, large error → effective_weight=1.0
         # So P = Kp * (1.0 * desired_c - current_c) = positive → setpoint goes UP
-        assert pi_entity._hp_setpoint > 22.0
+        assert pi_entity._pi._hp_setpoint > 22.0
 
 
 # ── Feedforward Tests ─────────────────────────────────────────────────
@@ -336,99 +348,99 @@ class TestFeedforward:
     @pytest.mark.asyncio
     async def test_ff_offset_applied_in_heating(self, pi_entity):
         """FF offset from outdoor temp should be applied in heating mode."""
-        pi_entity._outdoor_temp = 0.0  # Cold outdoor
+        pi_entity._pi._outdoor_temp = 0.0  # Cold outdoor
         pi_entity._attr_current_temperature = 68.0
-        pi_entity._desired_temp = 72.0
-        pi_entity._hp_setpoint = 22.0
+        pi_entity._pi._desired_temp = 72.0
+        pi_entity._pi._hp_setpoint = 22.0
 
-        await pi_entity._pi_tick()
+        await pi_entity._pi._pi_tick()
 
-        assert pi_entity._ff_offset > 0  # Should have positive heating offset
+        assert pi_entity._pi._ff_offset > 0  # Should have positive heating offset
 
     @pytest.mark.asyncio
     async def test_ff_offset_zero_when_no_outdoor(self, pi_entity):
         """Without outdoor sensor, FF offset should be zero."""
-        pi_entity._outdoor_temp = None
+        pi_entity._pi._outdoor_temp = None
         pi_entity._attr_current_temperature = 68.0
-        pi_entity._desired_temp = 72.0
-        pi_entity._hp_setpoint = 22.0
+        pi_entity._pi._desired_temp = 72.0
+        pi_entity._pi._hp_setpoint = 22.0
 
-        await pi_entity._pi_tick()
+        await pi_entity._pi._pi_tick()
 
-        assert pi_entity._ff_offset == 0.0
+        assert pi_entity._pi._ff_offset == 0.0
 
     @pytest.mark.asyncio
     async def test_disturbance_bias_adds_to_ff(self, pi_entity):
         """Disturbance input bias should be added to FF offset."""
-        pi_entity._disturbance_inputs = [{
+        pi_entity._pi._disturbance_inputs = [{
             "name": "Bias",
             "entity_id": "input_number.hvac_bias",
             "suppress_learning": False,
             "default_bias": 0.0,
             "gain": 1.0,
         }]
-        pi_entity._outdoor_temp = None  # No outdoor sensor, so base FF = 0
+        pi_entity._pi._outdoor_temp = None  # No outdoor sensor, so base FF = 0
         pi_entity._attr_current_temperature = 68.0
-        pi_entity._desired_temp = 72.0
-        pi_entity._hp_setpoint = 22.0
+        pi_entity._pi._desired_temp = 72.0
+        pi_entity._pi._hp_setpoint = 22.0
 
         # Mock bias entity state (numeric → value × gain)
         mock_state = MagicMock()
         mock_state.state = "2.5"
         pi_entity.hass.states.get.return_value = mock_state
 
-        await pi_entity._pi_tick()
+        await pi_entity._pi._pi_tick()
 
-        assert pi_entity._ff_offset == pytest.approx(2.5)
+        assert pi_entity._pi._ff_offset == pytest.approx(2.5)
 
     @pytest.mark.asyncio
     async def test_disturbance_unavailable_ignored(self, pi_entity):
         """Unavailable disturbance entity should not affect FF offset."""
-        pi_entity._disturbance_inputs = [{
+        pi_entity._pi._disturbance_inputs = [{
             "name": "Bias",
             "entity_id": "input_number.hvac_bias",
             "suppress_learning": False,
             "default_bias": 0.0,
             "gain": 1.0,
         }]
-        pi_entity._outdoor_temp = None
+        pi_entity._pi._outdoor_temp = None
         pi_entity._attr_current_temperature = 68.0
-        pi_entity._desired_temp = 72.0
-        pi_entity._hp_setpoint = 22.0
+        pi_entity._pi._desired_temp = 72.0
+        pi_entity._pi._hp_setpoint = 22.0
 
         mock_state = MagicMock()
         mock_state.state = STATE_UNAVAILABLE
         pi_entity.hass.states.get.return_value = mock_state
 
-        await pi_entity._pi_tick()
+        await pi_entity._pi._pi_tick()
 
-        assert pi_entity._ff_offset == 0.0
+        assert pi_entity._pi._ff_offset == 0.0
 
     @pytest.mark.asyncio
     async def test_learning_suppressed_by_disturbance(self, pi_entity):
         """When disturbance input with suppress=True is active, bucket learning should be skipped."""
-        pi_entity._disturbance_inputs = [{
+        pi_entity._pi._disturbance_inputs = [{
             "name": "Suppress",
             "entity_id": "input_boolean.suppress",
             "suppress_learning": True,
             "default_bias": 0.0,
             "gain": 1.0,
         }]
-        pi_entity._outdoor_temp = 0.0
+        pi_entity._pi._outdoor_temp = 0.0
         pi_entity._attr_current_temperature = 71.9  # In deadband of 72°F desired
-        pi_entity._desired_temp = 72.0
-        pi_entity._hp_setpoint = 22.0
-        pi_entity._ff_settled_ticks = 5  # Already settled
+        pi_entity._pi._desired_temp = 72.0
+        pi_entity._pi._hp_setpoint = 22.0
+        pi_entity._pi._ff_settled_ticks = 5  # Already settled
 
         mock_state = MagicMock()
         mock_state.state = "on"
         pi_entity.hass.states.get.return_value = mock_state
 
-        old_bucket = pi_entity._ff_heat_buckets[0]
-        await pi_entity._pi_tick()
+        old_bucket = pi_entity._pi._ff_heat_buckets[0]
+        await pi_entity._pi._pi_tick()
 
         # Bucket should NOT have been updated
-        assert pi_entity._ff_heat_buckets[0] == old_bucket
+        assert pi_entity._pi._ff_heat_buckets[0] == old_bucket
 
 
 # ── Pause/Resume Tests ────────────────────────────────────────────────
@@ -440,38 +452,38 @@ class TestPauseResume:
     @pytest.mark.asyncio
     async def test_paused_skips_tick(self, pi_entity):
         """PI should skip tick when paused."""
-        pi_entity.pi_pause()
+        pi_entity._pi.pi_pause()
         pi_entity._attr_current_temperature = 68.0
-        pi_entity._desired_temp = 72.0
-        old_setpoint = pi_entity._hp_setpoint
+        pi_entity._pi._desired_temp = 72.0
+        old_setpoint = pi_entity._pi._hp_setpoint
 
-        await pi_entity._pi_tick()
+        await pi_entity._pi._pi_tick()
 
-        assert pi_entity._hp_setpoint == old_setpoint
+        assert pi_entity._pi._hp_setpoint == old_setpoint
         assert not pi_entity.send_ir.called
 
     @pytest.mark.asyncio
     async def test_resume_allows_tick(self, pi_entity):
         """PI should run normally after resume."""
-        pi_entity.pi_pause()
-        pi_entity.pi_resume()
+        pi_entity._pi.pi_pause()
+        pi_entity._pi.pi_resume()
         pi_entity._attr_current_temperature = 68.0
-        pi_entity._desired_temp = 72.0
-        pi_entity._hp_setpoint = 22.0
+        pi_entity._pi._desired_temp = 72.0
+        pi_entity._pi._hp_setpoint = 22.0
 
-        await pi_entity._pi_tick()
+        await pi_entity._pi._pi_tick()
 
         # Should have computed a new setpoint
-        assert pi_entity._hp_setpoint != 22.0 or pi_entity.send_ir.called or True
+        assert pi_entity._pi._hp_setpoint != 22.0 or pi_entity.send_ir.called or True
         # At minimum, the tick should have run (not returned early)
-        assert not pi_entity._pi_paused
+        assert not pi_entity._pi._pi_paused
 
     @pytest.mark.asyncio
     async def test_reset_integral(self, pi_entity):
         """pi_reset_integral should zero the integral."""
-        pi_entity._pi_integral = 25.0
-        pi_entity.pi_reset_integral()
-        assert pi_entity._pi_integral == 0.0
+        pi_entity._pi._pi_integral = 25.0
+        pi_entity._pi.pi_reset_integral()
+        assert pi_entity._pi._pi_integral == 0.0
 
 
 # ── Sensor Recovery Tests ─────────────────────────────────────────────
@@ -485,18 +497,18 @@ class TestSensorRecovery:
         """When sensor is None, should schedule 60s recovery check."""
         pi_entity._attr_current_temperature = None
 
-        await pi_entity._pi_tick()
+        await pi_entity._pi._pi_tick()
 
-        assert pi_entity._sensor_recovery_pending is True
-        assert pi_entity._sensor_recovery_unsub is not None
+        assert pi_entity._pi._sensor_recovery_pending is True
+        assert pi_entity._pi._sensor_recovery_unsub is not None
 
     @pytest.mark.asyncio
     async def test_sensor_none_skips_when_recovery_pending(self, pi_entity):
         """When recovery is already pending, tick should skip immediately."""
         pi_entity._attr_current_temperature = None
-        pi_entity._sensor_recovery_pending = True
+        pi_entity._pi._sensor_recovery_pending = True
 
-        await pi_entity._pi_tick()
+        await pi_entity._pi._pi_tick()
 
         # Should return without scheduling another callback
 
@@ -504,9 +516,9 @@ class TestSensorRecovery:
     async def test_sensor_none_skips_when_unavailable(self, pi_entity):
         """When sensor is confirmed unavailable, tick should skip immediately."""
         pi_entity._attr_current_temperature = None
-        pi_entity._sensor_unavailable = True
+        pi_entity._pi._sensor_unavailable = True
 
-        await pi_entity._pi_tick()
+        await pi_entity._pi._pi_tick()
 
         # Should return without scheduling callback
 
@@ -514,46 +526,46 @@ class TestSensorRecovery:
     async def test_recovery_callback_with_sensor_back(self, pi_entity):
         """If sensor recovers before callback, callback should run PI tick."""
         pi_entity._attr_current_temperature = 70.0  # Sensor back
-        pi_entity._sensor_recovery_pending = True
-        pi_entity._desired_temp = 72.0
-        pi_entity._hp_setpoint = 22.0
+        pi_entity._pi._sensor_recovery_pending = True
+        pi_entity._pi._desired_temp = 72.0
+        pi_entity._pi._hp_setpoint = 22.0
 
-        await pi_entity._check_sensor_recovery()
+        await pi_entity._pi._check_sensor_recovery()
 
-        assert pi_entity._sensor_recovery_pending is False
-        assert pi_entity._sensor_unavailable is False
+        assert pi_entity._pi._sensor_recovery_pending is False
+        assert pi_entity._pi._sensor_unavailable is False
 
     @pytest.mark.asyncio
     async def test_recovery_callback_sensor_still_gone(self, pi_entity):
         """If sensor still gone at callback, should fall back to FF-only."""
         pi_entity._attr_current_temperature = None
-        pi_entity._sensor_recovery_pending = True
-        pi_entity._desired_temp = 72.0
-        pi_entity._hp_setpoint = 22.0
-        pi_entity._outdoor_temp = 0.0
+        pi_entity._pi._sensor_recovery_pending = True
+        pi_entity._pi._desired_temp = 72.0
+        pi_entity._pi._hp_setpoint = 22.0
+        pi_entity._pi._outdoor_temp = 0.0
 
-        await pi_entity._check_sensor_recovery()
+        await pi_entity._pi._check_sensor_recovery()
 
-        assert pi_entity._sensor_unavailable is True
-        assert pi_entity._sensor_recovery_pending is False
-        assert pi_entity._pi_integral == 0.0
+        assert pi_entity._pi._sensor_unavailable is True
+        assert pi_entity._pi._sensor_recovery_pending is False
+        assert pi_entity._pi._pi_integral == 0.0
 
     @pytest.mark.asyncio
     async def test_sensor_changed_clears_recovery(self, pi_entity):
         """When sensor becomes available, should cancel pending recovery."""
-        pi_entity._sensor_recovery_pending = True
+        pi_entity._pi._sensor_recovery_pending = True
         mock_unsub = MagicMock()
-        pi_entity._sensor_recovery_unsub = mock_unsub
-        pi_entity._sensor_unavailable = True
+        pi_entity._pi._sensor_recovery_unsub = mock_unsub
+        pi_entity._pi._sensor_unavailable = True
 
         pi_entity._attr_current_temperature = 70.0  # Now available
-        pi_entity._desired_temp = 72.0
-        pi_entity._hp_setpoint = 22.0
+        pi_entity._pi._desired_temp = 72.0
+        pi_entity._pi._hp_setpoint = 22.0
 
-        await pi_entity._pi_async_sensor_changed(was_none=True)
+        await pi_entity._pi._pi_async_sensor_changed(was_none=True)
 
-        assert pi_entity._sensor_recovery_pending is False
-        assert pi_entity._sensor_unavailable is False
+        assert pi_entity._pi._sensor_recovery_pending is False
+        assert pi_entity._pi._sensor_unavailable is False
         mock_unsub.assert_called_once()
 
 
@@ -567,11 +579,11 @@ class TestEventDrivenTicking:
     async def test_sensor_update_triggers_tick(self, pi_entity):
         """Sensor update should trigger PI tick if cooldown elapsed."""
         pi_entity._attr_current_temperature = 68.0
-        pi_entity._desired_temp = 72.0
-        pi_entity._hp_setpoint = 22.0
-        pi_entity._pi_last_tick_time = 0.0  # No previous tick
+        pi_entity._pi._desired_temp = 72.0
+        pi_entity._pi._hp_setpoint = 22.0
+        pi_entity._pi._pi_last_tick_time = 0.0  # No previous tick
 
-        await pi_entity._pi_async_sensor_changed(was_none=False)
+        await pi_entity._pi._pi_async_sensor_changed(was_none=False)
 
         # Should have ticked (cooldown elapsed since last_tick_time=0)
         assert pi_entity.send_ir.called
@@ -581,12 +593,12 @@ class TestEventDrivenTicking:
         """Sensor update should not tick if within cooldown."""
         import time as _time
         pi_entity._attr_current_temperature = 68.0
-        pi_entity._desired_temp = 72.0
-        pi_entity._hp_setpoint = 22.0
-        pi_entity._pi_last_tick_time = _time.monotonic()  # Just ticked
+        pi_entity._pi._desired_temp = 72.0
+        pi_entity._pi._hp_setpoint = 22.0
+        pi_entity._pi._pi_last_tick_time = _time.monotonic()  # Just ticked
 
         pi_entity.send_ir.reset_mock()
-        await pi_entity._pi_async_sensor_changed(was_none=False)
+        await pi_entity._pi._pi_async_sensor_changed(was_none=False)
 
         # Should NOT have ticked (within cooldown)
         assert not pi_entity.send_ir.called
@@ -596,21 +608,21 @@ class TestEventDrivenTicking:
         """Integral accumulation should scale with time between ticks."""
         import time as _time
         pi_entity._attr_current_temperature = 68.0
-        pi_entity._desired_temp = 72.0
-        pi_entity._hp_setpoint = 22.0
+        pi_entity._pi._desired_temp = 72.0
+        pi_entity._pi._hp_setpoint = 22.0
 
         # Simulate a tick at normal interval (dt_factor = 1.0)
-        pi_entity._pi_last_tick_time = _time.monotonic() - pi_entity._pi_min_interval
-        await pi_entity._pi_tick()
-        integral_normal = pi_entity._pi_integral
+        pi_entity._pi._pi_last_tick_time = _time.monotonic() - pi_entity._pi._pi_min_interval
+        await pi_entity._pi._pi_tick()
+        integral_normal = pi_entity._pi._pi_integral
 
         # Reset and simulate a tick at half interval (dt_factor = 0.5)
-        pi_entity._pi_integral = 0.0
-        pi_entity._pi_last_error = 0.0
-        pi_entity._pi_last_tick_time = _time.monotonic() - (pi_entity._pi_min_interval / 2)
+        pi_entity._pi._pi_integral = 0.0
+        pi_entity._pi._pi_last_error = 0.0
+        pi_entity._pi._pi_last_tick_time = _time.monotonic() - (pi_entity._pi._pi_min_interval / 2)
         pi_entity.send_ir.reset_mock()
-        await pi_entity._pi_tick()
-        integral_half = pi_entity._pi_integral
+        await pi_entity._pi._pi_tick()
+        integral_half = pi_entity._pi._pi_integral
 
         # Half-interval tick should accumulate roughly half the integral
         # (not exactly half due to trapezoidal averaging, but close)
@@ -621,28 +633,28 @@ class TestEventDrivenTicking:
     async def test_hysteresis_prevents_small_change(self, pi_entity):
         """Midpoint hysteresis should prevent 1°C oscillation."""
         pi_entity._attr_current_temperature = 71.5  # ~21.9°C
-        pi_entity._desired_temp = 72.0  # ~22.2°C
-        pi_entity._hp_setpoint = 22  # Current setpoint
-        pi_entity._pi_integral = 0.0
+        pi_entity._pi._desired_temp = 72.0  # ~22.2°C
+        pi_entity._pi._hp_setpoint = 22  # Current setpoint
+        pi_entity._pi._pi_integral = 0.0
 
-        await pi_entity._pi_tick()
+        await pi_entity._pi._pi_tick()
 
         # Error is small (~0.3°C), raw setpoint should be near 22.3°C
         # With hysteresis, 22.3 doesn't cross 22.5 (midpoint to 23), so stay at 22
-        assert pi_entity._hp_setpoint == 22
+        assert pi_entity._pi._hp_setpoint == 22
 
     @pytest.mark.asyncio
     async def test_hysteresis_allows_large_change(self, pi_entity):
         """Midpoint hysteresis should allow change when crossing midpoint."""
         pi_entity._attr_current_temperature = 68.0  # ~20°C
-        pi_entity._desired_temp = 72.0  # ~22.2°C
-        pi_entity._hp_setpoint = 22  # Current setpoint
+        pi_entity._pi._desired_temp = 72.0  # ~22.2°C
+        pi_entity._pi._hp_setpoint = 22  # Current setpoint
 
-        await pi_entity._pi_tick()
+        await pi_entity._pi._pi_tick()
 
         # Error is large (~2.2°C), raw setpoint should be well above 22.5
         # Hysteresis allows the change
-        assert pi_entity._hp_setpoint > 22
+        assert pi_entity._pi._hp_setpoint > 22
 
 
 # ── PI API Tests ──────────────────────────────────────────────────────
@@ -653,7 +665,7 @@ class TestPIOverrides:
 
     def test_get_ir_temp_when_enabled(self, pi_entity):
         """_get_ir_temp should return rounded hp_setpoint when PI active."""
-        pi_entity._hp_setpoint = 23.7
+        pi_entity._pi._hp_setpoint = 23.7
         result = pi_entity._get_ir_temp()
         assert result == 24
 
@@ -666,7 +678,7 @@ class TestPIOverrides:
 
     def test_get_ir_temp_when_disabled(self, pi_entity):
         """_get_ir_temp should fall back to base when PI disabled."""
-        pi_entity._pi_enabled = False
+        pi_entity._pi = None
         pi_entity._attr_target_temperature = 72.0
         result = pi_entity._get_ir_temp()
         assert result == 72  # Falls through to base class
@@ -674,16 +686,16 @@ class TestPIOverrides:
     @pytest.mark.asyncio
     async def test_set_temperature_with_pi(self, pi_entity):
         """async_set_temperature should route through PI when enabled."""
-        pi_entity._pi_integral = 5.0
+        pi_entity._pi._pi_integral = 5.0
         await pi_entity.async_set_temperature(temperature=74.0)
-        assert pi_entity._desired_temp == 74.0
+        assert pi_entity._pi._desired_temp == 74.0
         assert pi_entity._attr_target_temperature == 74.0
         assert pi_entity.send_ir.called
 
     @pytest.mark.asyncio
     async def test_set_temperature_without_pi(self, pi_entity):
         """async_set_temperature should fall through when PI disabled."""
-        pi_entity._pi_enabled = False
+        pi_entity._pi._pi_enabled = False
         await pi_entity.async_set_temperature(temperature=74.0)
         # Falls to FakeBaseEntity.async_set_temperature
         assert pi_entity._attr_target_temperature == 74.0
@@ -705,10 +717,10 @@ class TestPIOverrides:
 
     def test_extra_state_attributes_includes_pi(self, pi_entity):
         """extra_state_attributes should include PI state when enabled."""
-        pi_entity._hp_setpoint = 23.0
-        pi_entity._pi_integral = 1.234
-        pi_entity._desired_temp = 72.0
-        pi_entity._ff_offset = 2.567
+        pi_entity._pi._hp_setpoint = 23.0
+        pi_entity._pi._pi_integral = 1.234
+        pi_entity._pi._desired_temp = 72.0
+        pi_entity._pi._ff_offset = 2.567
 
         attrs = pi_entity.extra_state_attributes
         assert attrs[ATTR_HP_SETPOINT] == 23.0
@@ -719,7 +731,7 @@ class TestPIOverrides:
 
     def test_extra_state_attributes_no_pi(self, pi_entity):
         """extra_state_attributes should only have base attrs when PI disabled."""
-        pi_entity._pi_enabled = False
+        pi_entity._pi._pi_enabled = False
         attrs = pi_entity.extra_state_attributes
         assert ATTR_HP_SETPOINT not in attrs
         assert "test" in attrs  # Base class attrs still present

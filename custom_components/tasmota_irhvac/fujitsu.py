@@ -68,13 +68,13 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
             preset = old_state.attributes.get(ATTR_PRESET_MODE)
             if preset == PRESET_MIN_HEAT:
                 self._min_heat = True
-                self.pi_pause()
+                if self._pi: self._pi.pi_pause()
             elif preset == PRESET_ECONO:
                 self._economy = True
-                self.pi_pause()
+                if self._pi: self._pi.pi_pause()
             elif preset == PRESET_POWERFUL:
                 self._powerful = True
-                self.pi_pause()
+                if self._pi: self._pi.pi_pause()
 
     async def async_will_remove_from_hass(self):
         if self._powerful_timer_unsub:
@@ -109,19 +109,19 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
             self._min_heat = False
             self._powerful = False
             self._economy = False
-            self.pi_resume()
+            if self._pi: self._pi.pi_resume()
         if self._turbo == "on":
             self._attr_preset_mode = PRESET_POWERFUL
             self._powerful = True
-            self.pi_pause()
+            if self._pi: self._pi.pi_pause()
         if self._econo == "on":
             self._attr_preset_mode = PRESET_ECONO
             self._economy = True
-            self.pi_pause()
+            if self._pi: self._pi.pi_pause()
         if self._clean == "on":
             self._attr_preset_mode = PRESET_MIN_HEAT
             self._min_heat = True
-            self.pi_pause()
+            if self._pi: self._pi.pi_pause()
 
         # 56-bit / special data detection
         if "Data" in json_payload and prev_model3:
@@ -139,11 +139,11 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
                 if data == FUJITSU_DATA_POWERFUL:
                     self._powerful = True
                     self._attr_preset_mode = PRESET_POWERFUL
-                    self.pi_pause()
+                    if self._pi: self._pi.pi_pause()
                 elif data == FUJITSU_DATA_ECONO:
                     self._economy = True
                     self._attr_preset_mode = PRESET_ECONO
-                    self.pi_pause()
+                    if self._pi: self._pi.pi_pause()
                 elif data == FUJITSU_DATA_SET_V:
                     # Physical remote set vertical vane — update swing state
                     self._swingv = None
@@ -164,8 +164,8 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
                 self.power_mode = "on"
                 self._attr_hvac_mode = HVACMode.HEAT
                 self._attr_target_temperature = 10  # 10°C / 50°F
-                self.pi_pause()
-                self.pi_reset_integral()
+                if self._pi: self._pi.pi_pause()
+                if self._pi: self._pi.pi_reset_integral()
                 self._econo = "off"
                 self._turbo = "off"
                 self._clean = "off"
@@ -183,7 +183,7 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
             if hasattr(self, "_saved_target_temp") and self._saved_target_temp:
                 self._attr_target_temperature = self._saved_target_temp
             self._min_heat = False
-            self.pi_resume()
+            if self._pi: self._pi.pi_resume()
 
         if (
             preset_mode != PRESET_ECONO
@@ -197,7 +197,7 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
                 await self._send_raw_ir(FUJITSU_IR_POWERFUL)
                 self._powerful = True
                 self._attr_preset_mode = PRESET_POWERFUL
-                self.pi_pause()
+                if self._pi: self._pi.pi_pause()
                 if self._powerful_timer_unsub:
                     self._powerful_timer_unsub()
                 self._powerful_timer_unsub = async_call_later(
@@ -211,7 +211,7 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
                 await self._send_raw_ir(FUJITSU_IR_ECONO)
                 self._economy = True
                 self._attr_preset_mode = PRESET_ECONO
-                self.pi_pause()
+                if self._pi: self._pi.pi_pause()
             self.async_schedule_update_ha_state()
             return
 
@@ -223,8 +223,8 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
                 self._min_heat = True
                 self._attr_hvac_mode = HVACMode.HEAT
                 self._attr_target_temperature = 10  # 10°C / 50°F
-                self.pi_pause()
-                self.pi_reset_integral()
+                if self._pi: self._pi.pi_pause()
+                if self._pi: self._pi.pi_reset_integral()
                 self._econo = "off"
                 self._economy = False
                 self._powerful = False
@@ -242,7 +242,7 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
             self._min_heat = False
             self._powerful = False
             self._attr_preset_mode = PRESET_NONE
-            self.pi_resume()
+            if self._pi: self._pi.pi_resume()
             await self.send_ir()
             return
 
@@ -256,7 +256,7 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
         if self._attr_preset_mode == PRESET_POWERFUL:
             self._attr_preset_mode = PRESET_NONE
         self._powerful_timer_unsub = None
-        self.pi_resume()
+        if self._pi: self._pi.pi_resume()
         self.async_schedule_update_ha_state()
 
     # ── Raw IR Helper ──────────────────────────────────────────────────

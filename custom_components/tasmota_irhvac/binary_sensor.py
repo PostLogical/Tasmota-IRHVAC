@@ -29,11 +29,9 @@ async def async_setup_entry(
     if climate_entity is None:
         return
 
-    from .pi_controller import PIControllerMixin
-
-    if not isinstance(climate_entity, PIControllerMixin):
+    if not climate_entity._pi:
         return
-    if not climate_entity._pi_enabled:
+    if not climate_entity._pi._pi_enabled:
         return
 
     async_add_entities([
@@ -72,18 +70,17 @@ class FFLearningSuppressedBinarySensor(BinarySensorEntity):
     @property
     def is_on(self) -> bool:
         """True when FF learning is suppressed."""
-        suppress, _, _ = self._climate._compute_disturbance_effects()
+        suppress, _, _ = self._climate._pi._compute_disturbance_effects()
         return suppress
 
     @property
     def extra_state_attributes(self):
         """Return details about what is suppressing learning."""
-        suppress, active_entities, total_bias = (
-            self._climate._compute_disturbance_effects()
-        )
+        pi = self._climate._pi
+        suppress, active_entities, total_bias = pi._compute_disturbance_effects()
         return {
-            "manual_suppress": self._climate._manual_ff_suppress,
-            "manual_suppress_reason": self._climate._manual_ff_suppress_reason,
+            "manual_suppress": pi._manual_ff_suppress,
+            "manual_suppress_reason": pi._manual_ff_suppress_reason,
             "active_entity_suppressors": active_entities,
             "total_bias": round(total_bias, 2),
         }

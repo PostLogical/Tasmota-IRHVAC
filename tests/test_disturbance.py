@@ -7,7 +7,7 @@ from homeassistant.components.climate.const import HVACMode
 from homeassistant.const import STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN, UnitOfTemperature
 from homeassistant.core import State
 
-from custom_components.tasmota_irhvac.pi_controller import PIControllerMixin
+from custom_components.tasmota_irhvac.pi_controller import PIController
 
 from .conftest import make_pi_config
 
@@ -15,32 +15,7 @@ from .conftest import make_pi_config
 # ── Test Entity ──────────────────────────────────────────────────────
 
 
-class FakeBaseEntity:
-    """Simulates TasmotaIrhvac base class methods."""
-
-    _attr_hvac_modes = [HVACMode.HEAT, HVACMode.COOL, HVACMode.OFF]
-
-    async def _async_sensor_changed(self, *args, **kwargs):
-        pass
-
-    def _get_ir_temp(self):
-        return round(self._attr_target_temperature)
-
-    async def async_set_hvac_mode(self, hvac_mode):
-        self._attr_hvac_mode = hvac_mode
-
-    async def async_set_temperature(self, **kwargs):
-        pass
-
-    @property
-    def extra_state_attributes(self):
-        return {}
-
-    async def _handle_state_payload(self, json_payload, payload):
-        pass
-
-
-class FakePIEntity(PIControllerMixin, FakeBaseEntity):
+class FakePIEntity:
     """Minimal fake entity for disturbance testing."""
 
     def __init__(self, config):
@@ -55,9 +30,10 @@ class FakePIEntity(PIControllerMixin, FakeBaseEntity):
         self._mqtt_delay = "0"
         self.send_ir = AsyncMock()
         self.async_schedule_update_ha_state = MagicMock()
+        self.async_write_ha_state = MagicMock()
         self.async_get_last_state = AsyncMock(return_value=None)
         self._config_entry_id = "test_entry"
-        self.pi_init(config)
+        self._pi = PIController(self, config)
 
     @property
     def temperature_unit(self):
@@ -88,7 +64,7 @@ class TestComputeDisturbanceEffects:
         """No disturbance inputs → no suppress, no bias."""
         entity = FakePIEntity(make_pi_config())
         _setup_hass_states(entity, {})
-        suppress, active, bias = entity._compute_disturbance_effects()
+        suppress, active, bias = entity._pi._compute_disturbance_effects()
         assert suppress is False
         assert active == []
         assert bias == 0.0
@@ -106,7 +82,7 @@ class TestComputeDisturbanceEffects:
         })
         entity = FakePIEntity(config)
         _setup_hass_states(entity, {"binary_sensor.door": "on"})
-        suppress, active, bias = entity._compute_disturbance_effects()
+        suppress, active, bias = entity._pi._compute_disturbance_effects()
         assert suppress is True
         assert "binary_sensor.door" in active
         assert bias == pytest.approx(1.0)
@@ -124,7 +100,7 @@ class TestComputeDisturbanceEffects:
         })
         entity = FakePIEntity(config)
         _setup_hass_states(entity, {"binary_sensor.door": "off"})
-        suppress, active, bias = entity._compute_disturbance_effects()
+        suppress, active, bias = entity._pi._compute_disturbance_effects()
         assert suppress is False
         assert active == []
         assert bias == 0.0
@@ -142,7 +118,7 @@ class TestComputeDisturbanceEffects:
         })
         entity = FakePIEntity(config)
         _setup_hass_states(entity, {"sensor.bias": "-4.0"})
-        suppress, active, bias = entity._compute_disturbance_effects()
+        suppress, active, bias = entity._pi._compute_disturbance_effects()
         assert suppress is False
         assert active == []
         assert bias == pytest.approx(-2.0)
@@ -160,7 +136,7 @@ class TestComputeDisturbanceEffects:
         })
         entity = FakePIEntity(config)
         _setup_hass_states(entity, {"sensor.bias": "0"})
-        suppress, active, bias = entity._compute_disturbance_effects()
+        suppress, active, bias = entity._pi._compute_disturbance_effects()
         assert suppress is False
         assert bias == 0.0
 
@@ -177,7 +153,7 @@ class TestComputeDisturbanceEffects:
         })
         entity = FakePIEntity(config)
         _setup_hass_states(entity, {"binary_sensor.door": STATE_UNAVAILABLE})
-        suppress, active, bias = entity._compute_disturbance_effects()
+        suppress, active, bias = entity._pi._compute_disturbance_effects()
         assert suppress is False
         assert bias == 0.0
 
@@ -194,7 +170,7 @@ class TestComputeDisturbanceEffects:
         })
         entity = FakePIEntity(config)
         _setup_hass_states(entity, {"binary_sensor.door": STATE_UNKNOWN})
-        suppress, active, bias = entity._compute_disturbance_effects()
+        suppress, active, bias = entity._pi._compute_disturbance_effects()
         assert suppress is False
         assert bias == 0.0
 
@@ -211,7 +187,7 @@ class TestComputeDisturbanceEffects:
         })
         entity = FakePIEntity(config)
         _setup_hass_states(entity, {})  # entity not in map
-        suppress, active, bias = entity._compute_disturbance_effects()
+        suppress, active, bias = entity._pi._compute_disturbance_effects()
         assert suppress is False
 
     def test_multiple_inputs_sum_bias(self):
@@ -239,7 +215,7 @@ class TestComputeDisturbanceEffects:
             "binary_sensor.door": "on",
             "binary_sensor.stove": "on",
         })
-        suppress, active, bias = entity._compute_disturbance_effects()
+        suppress, active, bias = entity._pi._compute_disturbance_effects()
         assert suppress is True
         assert len(active) == 2
         assert bias == pytest.approx(-3.5)
@@ -269,7 +245,7 @@ class TestComputeDisturbanceEffects:
             "binary_sensor.door": "on",
             "sensor.solar_bias": "-0.5",
         })
-        suppress, active, bias = entity._compute_disturbance_effects()
+        suppress, active, bias = entity._pi._compute_disturbance_effects()
         assert suppress is True
         assert bias == pytest.approx(0.5)  # 1.0 + (-0.5)
 
@@ -286,7 +262,7 @@ class TestComputeDisturbanceEffects:
         })
         entity = FakePIEntity(config)
         _setup_hass_states(entity, {"binary_sensor.oil_zone": "on"})
-        suppress, active, bias = entity._compute_disturbance_effects()
+        suppress, active, bias = entity._pi._compute_disturbance_effects()
         assert suppress is True
         assert bias == 0.0
 
@@ -303,7 +279,7 @@ class TestComputeDisturbanceEffects:
         })
         entity = FakePIEntity(config)
         _setup_hass_states(entity, {"sensor.pellet_bias": "-3.0"})
-        suppress, active, bias = entity._compute_disturbance_effects()
+        suppress, active, bias = entity._pi._compute_disturbance_effects()
         assert suppress is True
         assert "sensor.pellet_bias" in active
         assert bias == pytest.approx(-3.0)
@@ -320,11 +296,11 @@ class TestManualSuppress:
         """suppress_ff_learning sets the manual flag and reason."""
         entity = FakePIEntity(make_pi_config())
         _setup_hass_states(entity, {})
-        await entity.async_suppress_ff_learning(reason="testing")
-        assert entity._manual_ff_suppress is True
-        assert entity._manual_ff_suppress_reason == "testing"
+        await entity._pi.async_suppress_ff_learning(reason="testing")
+        assert entity._pi._manual_ff_suppress is True
+        assert entity._pi._manual_ff_suppress_reason == "testing"
 
-        suppress, _, _ = entity._compute_disturbance_effects()
+        suppress, _, _ = entity._pi._compute_disturbance_effects()
         assert suppress is True
 
     @pytest.mark.asyncio
@@ -332,19 +308,19 @@ class TestManualSuppress:
         """resume_ff_learning clears the manual flag."""
         entity = FakePIEntity(make_pi_config())
         _setup_hass_states(entity, {})
-        await entity.async_suppress_ff_learning(reason="test")
-        await entity.async_resume_ff_learning()
-        assert entity._manual_ff_suppress is False
-        assert entity._manual_ff_suppress_reason == ""
+        await entity._pi.async_suppress_ff_learning(reason="test")
+        await entity._pi.async_resume_ff_learning()
+        assert entity._pi._manual_ff_suppress is False
+        assert entity._pi._manual_ff_suppress_reason == ""
 
     @pytest.mark.asyncio
     async def test_manual_suppress_empty_reason(self):
         """suppress with no reason works."""
         entity = FakePIEntity(make_pi_config())
         _setup_hass_states(entity, {})
-        await entity.async_suppress_ff_learning()
-        assert entity._manual_ff_suppress is True
-        assert entity._manual_ff_suppress_reason == ""
+        await entity._pi.async_suppress_ff_learning()
+        assert entity._pi._manual_ff_suppress is True
+        assert entity._pi._manual_ff_suppress_reason == ""
 
 
 # ── Tests: Integral Reset on Bias Transition ─────────────────────────
@@ -366,8 +342,8 @@ class TestIntegralReset:
             }]
         })
         entity = FakePIEntity(config)
-        entity._pi_integral = 3.5  # Accumulated integral
-        entity._last_disturbance_bias = 0.0  # Was 0 (stove off)
+        entity._pi._pi_integral = 3.5  # Accumulated integral
+        entity._pi._last_disturbance_bias = 0.0  # Was 0 (stove off)
 
         # Stove turns on → bias jumps to -5.0
         _setup_hass_states(entity, {
@@ -375,12 +351,12 @@ class TestIntegralReset:
             "sensor.outdoor_temp": "0",
             "sensor.room_temp": "72",
         })
-        await entity._pi_tick()
+        await entity._pi._pi_tick()
 
         # Integral should have been reset (change was |−5 − 0| = 5 > 1)
         # Note: _pi_tick may have added to integral after reset, but it
         # should have been zeroed at the transition point
-        assert entity._last_disturbance_bias == pytest.approx(-5.0)
+        assert entity._pi._last_disturbance_bias == pytest.approx(-5.0)
 
     @pytest.mark.asyncio
     async def test_small_bias_change_preserves_integral(self):
@@ -395,8 +371,8 @@ class TestIntegralReset:
             }]
         })
         entity = FakePIEntity(config)
-        entity._pi_integral = 3.5
-        entity._last_disturbance_bias = -0.3  # Was -0.3
+        entity._pi._pi_integral = 3.5
+        entity._pi._last_disturbance_bias = -0.3  # Was -0.3
 
         # Solar changes slightly → bias goes to -0.5
         _setup_hass_states(entity, {
@@ -404,11 +380,11 @@ class TestIntegralReset:
             "sensor.outdoor_temp": "10",
             "sensor.room_temp": "72",
         })
-        await entity._pi_tick()
+        await entity._pi._pi_tick()
 
         # Change was |−0.5 − (−0.3)| = 0.2 < 1 → integral preserved
         # (may have been modified by PI math, but not zeroed by transition)
-        assert entity._last_disturbance_bias == pytest.approx(-0.5)
+        assert entity._pi._last_disturbance_bias == pytest.approx(-0.5)
 
 
 # ── Tests: Migration ────────────────────────────────────────────────
