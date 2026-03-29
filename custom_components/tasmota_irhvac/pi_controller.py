@@ -703,7 +703,7 @@ class PIController:
             p_term = 0.0
         else:
             self._ff_settled_ticks = 0
-            p_error = effective_weight * desired_c - current_c
+            p_error = effective_weight * (desired_c - current_c)
             p_term = self._pi_kp * p_error
             avg_error = (error + self._pi_last_error) / 2.0
             self._pi_integral += avg_error * dt_factor
