@@ -658,12 +658,18 @@ class PIControllerMixin:
 
     async def _handle_state_payload(self, json_payload, payload):
         """Override to add PI MQTT hooks."""
+        # Save desired temp before super() overwrites it with HP setpoint
+        saved_desired = self._desired_temp if self._pi_enabled else None
         await super()._handle_state_payload(json_payload, payload)
-        # Restore desired_temp over payload temp
-        if self._pi_enabled and self._desired_temp is not None:
+        # Restore desired_temp over payload temp and re-write state.
+        # super() sets _attr_target_temperature to the HP's whole-°C setpoint
+        # and writes state — we must overwrite and write again so the UI shows
+        # the user's desired temp (which may be fractional °C / odd °F).
+        if self._pi_enabled and saved_desired is not None:
             if "Temp" in payload and payload["Temp"] > 0:
                 self._hp_setpoint = payload["Temp"]
-            self._attr_target_temperature = self._desired_temp
+            self._attr_target_temperature = saved_desired
+            self.async_write_ha_state()
         # Handle temp echo detection
         if self._pi_enabled and "Temp" in payload and payload["Temp"] > 0:
             if self._pi_command_pending:
