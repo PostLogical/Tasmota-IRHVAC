@@ -95,7 +95,27 @@ class PIControllerMixin:
         self._ff_cool_slope = config.get(CONF_PI_FF_COOL_SLOPE, DEFAULT_PI_FF_COOL_SLOPE)
 
         # Disturbance inputs (replaces single suppress/bias entities)
+        # Fallback: convert legacy keys if disturbance_inputs is empty (e.g., YAML import)
         self._disturbance_inputs = config.get(CONF_PI_DISTURBANCE_INPUTS, [])
+        if not self._disturbance_inputs:
+            old_suppress = config.get("pi_ff_suppress_learning_entity", "")
+            old_bias = config.get("pi_ff_bias_entity", "")
+            if old_suppress:
+                self._disturbance_inputs.append({
+                    "name": "Suppress Entity (migrated)",
+                    "entity_id": old_suppress,
+                    "suppress_learning": True,
+                    "default_bias": 0.0,
+                    "gain": 1.0,
+                })
+            if old_bias:
+                self._disturbance_inputs.append({
+                    "name": "Bias Entity (migrated)",
+                    "entity_id": old_bias,
+                    "suppress_learning": False,
+                    "default_bias": 0.0,
+                    "gain": 1.0,
+                })
         self._manual_ff_suppress = False
         self._manual_ff_suppress_reason = ""
         self._last_disturbance_bias = 0.0
