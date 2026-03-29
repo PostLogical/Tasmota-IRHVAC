@@ -85,18 +85,23 @@ class TestSeedBuckets:
 
 
 class FakePIEntity:
-    """Minimal fake entity to test PI math without HA infrastructure."""
+    """Minimal fake entity to test PI math without HA infrastructure.
+
+    Mirrors the real entity: _attr_temperature_unit = CELSIUS, all temps in °C.
+    The temperature_unit property must match _attr_temperature_unit so that
+    PIController.__init__ and _pi_tick use the same unit for conversions.
+    """
 
     _attr_hvac_modes = [HVACMode.HEAT, HVACMode.COOL, HVACMode.AUTO, HVACMode.OFF]
     _attr_temperature_unit = UnitOfTemperature.CELSIUS
     _temp_precision = 1.0
 
     def __init__(self, config):
-        # Simulate base class attributes
+        # Simulate base class attributes — all temps in °C (entity unit)
         self.hass = MagicMock()
         self._attr_hvac_mode = HVACMode.HEAT
-        self._attr_current_temperature = 70.0  # °F
-        self._attr_target_temperature = 72.0  # °F
+        self._attr_current_temperature = 21.0  # °C
+        self._attr_target_temperature = 22.0  # °C
         self._temp_sensor = "sensor.room_temp"
         self._min_temp = 16
         self._max_temp = 30
@@ -115,7 +120,7 @@ class FakePIEntity:
 
     @property
     def temperature_unit(self):
-        return UnitOfTemperature.FAHRENHEIT
+        return UnitOfTemperature.CELSIUS
 
     async def set_mode(self, hvac_mode):
         self._attr_hvac_mode = hvac_mode
@@ -167,13 +172,13 @@ class TestPIMath:
     @pytest.mark.asyncio
     async def test_basic_heating_error(self, pi_entity):
         """PI should increase setpoint when room is below desired."""
-        pi_entity._attr_current_temperature = 68.0  # °F, ~20°C
-        pi_entity._pi._desired_temp = 72.0  # °F, ~22.2°C
+        pi_entity._attr_current_temperature = 20.0  # °C
+        pi_entity._pi._desired_temp = 22.0  # °C
         pi_entity._pi._hp_setpoint = 22.0
 
         await pi_entity._pi._pi_tick()
 
-        # With error ~2.2°C, P term should push setpoint up
+        # With error = 2.0°C, P term should push setpoint up
         assert pi_entity._pi._hp_setpoint > 22.0
         assert pi_entity.send_ir.called
 
@@ -181,8 +186,8 @@ class TestPIMath:
     async def test_basic_cooling_error(self, pi_entity):
         """PI should decrease setpoint when room is above desired in cool mode."""
         pi_entity._attr_hvac_mode = HVACMode.COOL
-        pi_entity._attr_current_temperature = 78.0  # °F, ~25.6°C
-        pi_entity._pi._desired_temp = 74.0  # °F, ~23.3°C
+        pi_entity._attr_current_temperature = 25.5  # °C
+        pi_entity._pi._desired_temp = 23.0  # °C
         pi_entity._pi._hp_setpoint = 24.0
 
         await pi_entity._pi._pi_tick()
@@ -193,8 +198,8 @@ class TestPIMath:
     async def test_deadband_no_p_term(self, pi_entity):
         """In deadband, P term should be zero (only integral action)."""
         # Set current temp very close to desired (within 0.5°C deadband)
-        pi_entity._attr_current_temperature = 71.8  # ~22.1°C
-        pi_entity._pi._desired_temp = 72.0  # ~22.2°C, error ~0.1°C
+        pi_entity._attr_current_temperature = 22.1  # °C
+        pi_entity._pi._desired_temp = 22.0  # °C, error = -0.1°C (within deadband)
         pi_entity._pi._hp_setpoint = 22.0
 
         await pi_entity._pi._pi_tick()
@@ -205,8 +210,8 @@ class TestPIMath:
     @pytest.mark.asyncio
     async def test_integral_accumulates(self, pi_entity):
         """Integral should accumulate error over multiple ticks."""
-        pi_entity._attr_current_temperature = 68.0  # ~20°C
-        pi_entity._pi._desired_temp = 72.0  # ~22.2°C
+        pi_entity._attr_current_temperature = 20.0  # °C
+        pi_entity._pi._desired_temp = 22.0  # °C, error = 2.0°C
         pi_entity._pi._hp_setpoint = 22.0
 
         await pi_entity._pi._pi_tick()
@@ -224,8 +229,8 @@ class TestPIMath:
     async def test_integral_capped_at_50(self, pi_entity):
         """Integral should never exceed ±50."""
         pi_entity._pi._pi_integral = 100.0
-        pi_entity._attr_current_temperature = 68.0
-        pi_entity._pi._desired_temp = 72.0
+        pi_entity._attr_current_temperature = 20.0  # °C
+        pi_entity._pi._desired_temp = 22.0  # °C
         pi_entity._pi._hp_setpoint = 22.0
 
         await pi_entity._pi._pi_tick()
@@ -235,38 +240,40 @@ class TestPIMath:
 
     @pytest.mark.asyncio
     async def test_setpoint_clamped_to_range(self, pi_entity):
-        """HP setpoint should be clamped to min_temp/max_temp."""
-        pi_entity._attr_current_temperature = 50.0  # Very cold, huge error
-        pi_entity._pi._desired_temp = 72.0
+        """HP setpoint should be clamped to °C limits (16-30)."""
+        pi_entity._attr_current_temperature = 10.0  # °C, very cold, huge error
+        pi_entity._pi._desired_temp = 28.0  # °C
         pi_entity._pi._hp_setpoint = 22.0
         pi_entity._pi._pi_integral = 50.0  # Max integral
 
         await pi_entity._pi._pi_tick()
 
-        assert pi_entity._pi._hp_setpoint <= pi_entity._max_temp
-        assert pi_entity._pi._hp_setpoint >= pi_entity._min_temp
+        # Must clamp to °C limits (16-30)
+        assert pi_entity._pi._hp_setpoint <= 30  # max_temp_c
+        assert pi_entity._pi._hp_setpoint >= 16  # min_temp_c
+        assert pi_entity._pi._hp_setpoint == 30  # Should hit max with this much error + integral
 
     @pytest.mark.asyncio
     async def test_back_calculation_antiwindup(self, pi_entity):
         """Back-calculation should unwind integral when output saturates."""
         # Force saturation: huge error + huge integral → raw setpoint > max_temp
-        pi_entity._attr_current_temperature = 50.0  # Very cold
-        pi_entity._pi._desired_temp = 72.0
+        pi_entity._attr_current_temperature = 10.0  # °C, very cold
+        pi_entity._pi._desired_temp = 28.0  # °C
         pi_entity._pi._hp_setpoint = 22.0
         pi_entity._pi._pi_integral = 40.0  # Large positive integral
 
         await pi_entity._pi._pi_tick()
 
-        # Setpoint should be clamped at max
-        assert pi_entity._pi._hp_setpoint == pi_entity._max_temp
+        # Setpoint should be clamped at 30°C max
+        assert pi_entity._pi._hp_setpoint == 30
         # Integral should have been unwound (back-calculation reduces it)
         assert pi_entity._pi._pi_integral < 40.0
 
     @pytest.mark.asyncio
     async def test_antiwindup_no_effect_when_not_saturated(self, pi_entity):
         """Anti-windup should not affect integral when output is in range."""
-        pi_entity._attr_current_temperature = 70.0  # Small error
-        pi_entity._pi._desired_temp = 72.0
+        pi_entity._attr_current_temperature = 21.0  # °C, small error
+        pi_entity._pi._desired_temp = 22.0  # °C, error = 1.0°C
         pi_entity._pi._hp_setpoint = 22.0
         pi_entity._pi._pi_integral = 2.0
 
@@ -274,8 +281,8 @@ class TestPIMath:
         integral_after = pi_entity._pi._pi_integral
 
         # Integral should have grown (error accumulated), not been unwound
-        # The small error (~1.1°C) + small integral should not saturate
-        assert integral_after > 2.0  # accumulated error
+        # The 1.0°C error + small integral should not saturate
+        assert integral_after > 2.0
 
     @pytest.mark.asyncio
     async def test_off_mode_zeros_integral(self, pi_entity):
@@ -303,8 +310,8 @@ class TestPIMath:
         """Lower setpoint weight should reduce P term response to setpoint changes."""
         # Standard PI (weight=1.0)
         pi_entity._pi._pi_setpoint_weight = 1.0
-        pi_entity._attr_current_temperature = 68.0
-        pi_entity._pi._desired_temp = 76.0  # Big setpoint change
+        pi_entity._attr_current_temperature = 20.0  # °C
+        pi_entity._pi._desired_temp = 24.0  # °C, 4°C error
         pi_entity._pi._hp_setpoint = 22.0
         pi_entity._pi._pi_integral = 0.0
 
@@ -327,17 +334,82 @@ class TestPIMath:
     async def test_adaptive_setpoint_weight(self, pi_entity):
         """Adaptive weight should blend to b=1 for large errors, b=configured near deadband."""
         pi_entity._pi._pi_setpoint_weight = 0.0  # Configured weight
-        # Large error (>4x deadband): adaptive weight should be 1.0
-        pi_entity._attr_current_temperature = 66.0  # ~18.9°C, well below 22.2°C desired
-        pi_entity._pi._desired_temp = 72.0
+        # Large error (>4x deadband of 0.5°C = 2.0°C): adaptive weight should be ~1.0
+        pi_entity._attr_current_temperature = 19.0  # °C, well below desired
+        pi_entity._pi._desired_temp = 22.0  # °C, error = 3.0°C
         pi_entity._pi._hp_setpoint = 22.0
         pi_entity._pi._pi_integral = 0.0
 
         await pi_entity._pi._pi_tick()
 
-        # With adaptive weight, large error → effective_weight=1.0
-        # So P = Kp * (1.0 * desired_c - current_c) = positive → setpoint goes UP
+        # With adaptive weight, large error → effective_weight≈1.0
+        # P = Kp * weight * (desired - current) = positive → setpoint goes UP
         assert pi_entity._pi._hp_setpoint > 22.0
+
+    @pytest.mark.asyncio
+    async def test_2dof_p_term_correct_formula(self, pi_entity):
+        """Verify 2-DOF P term = Kp * weight * (desired - current), not Kp * (weight * desired - current)."""
+        # Use known values: Kp=1.5, weight=0.5, desired=22.2°C, current=20°C
+        # Correct: P = 1.5 * 0.5 * (22.2 - 20.0) = 1.5 * 0.5 * 2.2 = 1.65
+        # Wrong:   P = 1.5 * (0.5 * 22.2 - 20.0) = 1.5 * (11.1 - 20.0) = -13.35
+        pi_entity._pi._pi_setpoint_weight = 0.5
+        pi_entity._pi._pi_kp = 1.5
+        pi_entity._pi._pi_ki = 0.0  # No integral to simplify test
+        pi_entity._attr_current_temperature = 20.0  # °C (entity is celsius)
+        pi_entity._pi._desired_temp = 22.2  # °C
+        pi_entity._pi._hp_setpoint = 22.0
+        pi_entity._pi._pi_integral = 0.0
+        pi_entity._pi._ff_offset = 0.0
+
+        await pi_entity._pi._pi_tick()
+
+        # With correct formula, setpoint should go UP (room is cold)
+        assert pi_entity._pi._hp_setpoint >= 23, (
+            f"Setpoint should increase for positive error, got {pi_entity._pi._hp_setpoint}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_2dof_wrong_precedence_would_fail(self, pi_entity):
+        """If weight * desired - current were used (wrong), setpoint would decrease for positive error."""
+        # With weight=0.5, desired=22°C, current=20°C:
+        #   Wrong: 0.5 * 22 - 20 = -9.0 → setpoint would DROP
+        #   Right: 0.5 * (22 - 20) = 1.0 → setpoint goes UP
+        pi_entity._pi._pi_setpoint_weight = 0.5
+        pi_entity._pi._pi_kp = 1.0
+        pi_entity._pi._pi_ki = 0.0
+        pi_entity._attr_current_temperature = 20.0
+        pi_entity._pi._desired_temp = 22.0
+        pi_entity._pi._hp_setpoint = 21.0
+        pi_entity._pi._pi_integral = 0.0
+        pi_entity._pi._ff_offset = 0.0
+
+        await pi_entity._pi._pi_tick()
+
+        # If formula were wrong, hp_setpoint would be < 21 (dropped)
+        # With correct formula, it should be > 21 (increased)
+        assert pi_entity._pi._hp_setpoint > 21, (
+            f"P term pushed setpoint wrong direction: {pi_entity._pi._hp_setpoint}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_clamp_uses_celsius_not_display_unit(self, pi_entity):
+        """Clamping must use °C limits (16/30), not display unit limits."""
+        # If clamp used °F (e.g. 61/86), a valid °C setpoint of 24 would
+        # be clamped to 61 (the °F min interpreted as °C).
+        assert pi_entity._pi._min_temp_c == 16.0
+        assert pi_entity._pi._max_temp_c == 30.0
+
+        pi_entity._attr_current_temperature = 20.0
+        pi_entity._pi._desired_temp = 24.0
+        pi_entity._pi._hp_setpoint = 22.0
+        pi_entity._pi._pi_integral = 0.0
+
+        await pi_entity._pi._pi_tick()
+
+        # A setpoint of ~24 must NOT be clamped down
+        assert pi_entity._pi._hp_setpoint >= 22, (
+            f"Setpoint clamped incorrectly: {pi_entity._pi._hp_setpoint}"
+        )
 
 
 # ── Feedforward Tests ─────────────────────────────────────────────────
@@ -428,8 +500,8 @@ class TestFeedforward:
             "gain": 1.0,
         }]
         pi_entity._pi._outdoor_temp = 0.0
-        pi_entity._attr_current_temperature = 71.9  # In deadband of 72°F desired
-        pi_entity._pi._desired_temp = 72.0
+        pi_entity._attr_current_temperature = 21.9  # °C, in deadband of 22°C desired
+        pi_entity._pi._desired_temp = 22.0
         pi_entity._pi._hp_setpoint = 22.0
         pi_entity._pi._ff_settled_ticks = 5  # Already settled
 
@@ -608,8 +680,8 @@ class TestEventDrivenTicking:
     async def test_time_normalized_integral(self, pi_entity):
         """Integral accumulation should scale with time between ticks."""
         import time as _time
-        pi_entity._attr_current_temperature = 68.0
-        pi_entity._pi._desired_temp = 72.0
+        pi_entity._attr_current_temperature = 20.0  # °C
+        pi_entity._pi._desired_temp = 22.0  # °C, error = 2.0°C
         pi_entity._pi._hp_setpoint = 22.0
 
         # Simulate a tick at normal interval (dt_factor = 1.0)
@@ -633,28 +705,28 @@ class TestEventDrivenTicking:
     @pytest.mark.asyncio
     async def test_hysteresis_prevents_small_change(self, pi_entity):
         """Midpoint hysteresis should prevent 1°C oscillation."""
-        pi_entity._attr_current_temperature = 71.5  # ~21.9°C
-        pi_entity._pi._desired_temp = 72.0  # ~22.2°C
+        pi_entity._attr_current_temperature = 21.7  # °C
+        pi_entity._pi._desired_temp = 22.0  # °C, error = 0.3°C (within deadband)
         pi_entity._pi._hp_setpoint = 22  # Current setpoint
         pi_entity._pi._pi_integral = 0.0
 
         await pi_entity._pi._pi_tick()
 
-        # Error is small (~0.3°C), raw setpoint should be near 22.3°C
-        # With hysteresis, 22.3 doesn't cross 22.5 (midpoint to 23), so stay at 22
+        # Error is 0.3°C (within 0.5°C deadband), P term = 0, only integral decay
+        # raw setpoint ≈ 22.0, doesn't cross 22.5 midpoint, so stay at 22
         assert pi_entity._pi._hp_setpoint == 22
 
     @pytest.mark.asyncio
     async def test_hysteresis_allows_large_change(self, pi_entity):
         """Midpoint hysteresis should allow change when crossing midpoint."""
-        pi_entity._attr_current_temperature = 68.0  # ~20°C
-        pi_entity._pi._desired_temp = 72.0  # ~22.2°C
+        pi_entity._attr_current_temperature = 20.0  # °C
+        pi_entity._pi._desired_temp = 22.0  # °C, error = 2.0°C
         pi_entity._pi._hp_setpoint = 22  # Current setpoint
 
         await pi_entity._pi._pi_tick()
 
-        # Error is large (~2.2°C), raw setpoint should be well above 22.5
-        # Hysteresis allows the change
+        # Error is 2.0°C, P = 1.5 * 1.0 * 2.0 = 3.0, raw = 22 + 3 + I ≈ 25
+        # Well above 22.5 midpoint, hysteresis allows the change
         assert pi_entity._pi._hp_setpoint > 22
 
 
