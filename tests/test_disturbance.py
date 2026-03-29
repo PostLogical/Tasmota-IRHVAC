@@ -18,6 +18,8 @@ from .conftest import make_pi_config
 class FakePIEntity:
     """Minimal fake entity for disturbance testing."""
 
+    _attr_temperature_unit = UnitOfTemperature.CELSIUS
+
     def __init__(self, config):
         self.hass = MagicMock()
         self._attr_hvac_mode = HVACMode.HEAT

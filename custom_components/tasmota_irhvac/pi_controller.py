@@ -139,6 +139,14 @@ class PIController:
         """
         self._entity = entity
 
+        # Convert entity temp limits to °C for internal PI math
+        self._min_temp_c = TemperatureConverter.convert(
+            entity._min_temp, entity._attr_temperature_unit, UnitOfTemperature.CELSIUS
+        )
+        self._max_temp_c = TemperatureConverter.convert(
+            entity._max_temp, entity._attr_temperature_unit, UnitOfTemperature.CELSIUS
+        )
+
         # PI controller config
         self._pi_enabled = config.get(CONF_PI_ENABLED, DEFAULT_PI_ENABLED)
         self._pi_kp = config.get(CONF_PI_KP, DEFAULT_PI_KP)
@@ -576,7 +584,7 @@ class PIController:
             ff_offset = buckets.get(bucket_key, 0.0)
         self._ff_offset = ff_offset
         self._pi_integral = 0.0
-        new_setpoint = round(max(e._min_temp, min(e._max_temp, desired_c + ff_offset)))
+        new_setpoint = round(max(self._min_temp_c, min(self._max_temp_c, desired_c + ff_offset)))
         if new_setpoint != self._hp_setpoint:
             _LOGGER.info("PI fallback: setpoint %s -> %s (FF only)", self._hp_setpoint, new_setpoint)
             self._hp_setpoint = new_setpoint
@@ -713,7 +721,7 @@ class PIController:
 
         i_term = self._pi_ki * self._pi_integral
         raw_setpoint = desired_c + p_term + i_term + self._ff_offset
-        clamped_setpoint = max(e._min_temp, min(e._max_temp, raw_setpoint))
+        clamped_setpoint = max(self._min_temp_c, min(self._max_temp_c, raw_setpoint))
 
         # Back-calculation anti-windup
         if self._pi_ki != 0:
@@ -729,7 +737,7 @@ class PIController:
             new_setpoint = round(clamped_setpoint)
         elif clamped_setpoint < self._hp_setpoint - 0.5:
             new_setpoint = round(clamped_setpoint)
-        new_setpoint = int(max(e._min_temp, min(e._max_temp, new_setpoint)))
+        new_setpoint = int(max(self._min_temp_c, min(self._max_temp_c, new_setpoint)))
 
         if new_setpoint != self._hp_setpoint:
             _LOGGER.info(
