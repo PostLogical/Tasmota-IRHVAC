@@ -355,13 +355,13 @@ OPTIONS_PI_CONTROLLER_SCHEMA = vol.Schema(
             NumberSelectorConfig(min=-20, max=50, step=0.5, mode=NumberSelectorMode.BOX)
         ),
         vol.Optional(CONF_PI_FF_HEAT_SLOPE, default=DEFAULT_PI_FF_HEAT_SLOPE): NumberSelector(
-            NumberSelectorConfig(min=0, max=5, step=0.05, mode=NumberSelectorMode.BOX)
+            NumberSelectorConfig(min=0, max=5, step=0.01, mode=NumberSelectorMode.BOX)
         ),
         vol.Optional(CONF_PI_FF_COOL_REFERENCE, default=DEFAULT_PI_FF_COOL_REFERENCE): NumberSelector(
             NumberSelectorConfig(min=0, max=60, step=0.5, mode=NumberSelectorMode.BOX)
         ),
         vol.Optional(CONF_PI_FF_COOL_SLOPE, default=DEFAULT_PI_FF_COOL_SLOPE): NumberSelector(
-            NumberSelectorConfig(min=0, max=5, step=0.05, mode=NumberSelectorMode.BOX)
+            NumberSelectorConfig(min=0, max=5, step=0.01, mode=NumberSelectorMode.BOX)
         ),
         vol.Optional(CONF_PI_SETPOINT_WEIGHT, default=DEFAULT_PI_SETPOINT_WEIGHT): NumberSelector(
             NumberSelectorConfig(min=0, max=1, step=0.05, mode=NumberSelectorMode.BOX)
@@ -677,7 +677,7 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Optional(
                         CONF_PI_FF_HEAT_SLOPE, default=DEFAULT_PI_FF_HEAT_SLOPE
                     ): NumberSelector(
-                        NumberSelectorConfig(min=0, max=5, step=0.05, mode=NumberSelectorMode.BOX)
+                        NumberSelectorConfig(min=0, max=5, step=0.01, mode=NumberSelectorMode.BOX)
                     ),
                     vol.Optional(
                         CONF_PI_FF_COOL_REFERENCE, default=DEFAULT_PI_FF_COOL_REFERENCE
@@ -687,7 +687,7 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Optional(
                         CONF_PI_FF_COOL_SLOPE, default=DEFAULT_PI_FF_COOL_SLOPE
                     ): NumberSelector(
-                        NumberSelectorConfig(min=0, max=5, step=0.05, mode=NumberSelectorMode.BOX)
+                        NumberSelectorConfig(min=0, max=5, step=0.01, mode=NumberSelectorMode.BOX)
                     ),
                     vol.Optional(CONF_PI_SETPOINT_WEIGHT, default=DEFAULT_PI_SETPOINT_WEIGHT): NumberSelector(
                         NumberSelectorConfig(min=0, max=1, step=0.05, mode=NumberSelectorMode.BOX)
