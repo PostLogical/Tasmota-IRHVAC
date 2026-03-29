@@ -5,14 +5,17 @@ and calls its hook methods at the appropriate points. This avoids MRO issues
 and minimizes changes to the upstream-derived climate.py.
 """
 
+import dataclasses
 import logging
 import time
 from datetime import timedelta
+from typing import Any, Self
 
 from homeassistant.components.climate.const import HVACMode
 from homeassistant.const import STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN, UnitOfTemperature
 from homeassistant.core import callback
 from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.helpers.restore_state import ExtraStoredData
 from homeassistant.helpers.event import (
     async_call_later,
     async_track_state_change_event,
@@ -67,6 +70,45 @@ def _seed_buckets(reference, slope, is_cooling=False):
             delta = max(0, reference - bucket_temp)
             buckets[bucket_temp] = slope * delta
     return buckets
+
+
+@dataclasses.dataclass
+class PIExtraStoredData(ExtraStoredData):
+    """PI controller data persisted via RestoreEntity's ExtraStoredData mechanism.
+
+    Stores FF buckets, integral, desired_temp, and hp_setpoint so they survive
+    restarts without bloating the recorder DB on every state write.
+    """
+
+    ff_heat_buckets: dict[int, float]
+    ff_cool_buckets: dict[int, float]
+    pi_integral: float
+    desired_temp: float | None
+    hp_setpoint: float | None
+
+    def as_dict(self) -> dict[str, Any]:
+        """Serialize to JSON-compatible dict."""
+        return {
+            "ff_heat_buckets": {str(k): v for k, v in self.ff_heat_buckets.items()},
+            "ff_cool_buckets": {str(k): v for k, v in self.ff_cool_buckets.items()},
+            "pi_integral": self.pi_integral,
+            "desired_temp": self.desired_temp,
+            "hp_setpoint": self.hp_setpoint,
+        }
+
+    @classmethod
+    def from_dict(cls, restored: dict[str, Any]) -> Self | None:
+        """Deserialize from stored dict."""
+        try:
+            return cls(
+                ff_heat_buckets={int(k): float(v) for k, v in restored["ff_heat_buckets"].items()},
+                ff_cool_buckets={int(k): float(v) for k, v in restored["ff_cool_buckets"].items()},
+                pi_integral=float(restored["pi_integral"]),
+                desired_temp=restored.get("desired_temp"),
+                hp_setpoint=restored.get("hp_setpoint"),
+            )
+        except (KeyError, ValueError, TypeError):
+            return None
 
 
 class PIController:
@@ -180,26 +222,34 @@ class PIController:
 
         e = self._entity
 
-        # Restore PI and feedforward state from previous session
-        if old_state is None:
-            old_state = await e.async_get_last_state()
-        if old_state is not None:
-            attrs = old_state.attributes
-            if attrs.get(ATTR_PI_INTEGRAL) is not None:
-                restored_integral = float(attrs[ATTR_PI_INTEGRAL])
-                self._pi_integral = max(-50, min(50, restored_integral))
-            if attrs.get(ATTR_DESIRED_TEMP) is not None:
-                self._desired_temp = float(attrs[ATTR_DESIRED_TEMP])
-            if attrs.get(ATTR_HP_SETPOINT) is not None:
-                self._hp_setpoint = float(attrs[ATTR_HP_SETPOINT])
-            if attrs.get(ATTR_FF_HEAT_BUCKETS) is not None:
-                self._ff_heat_buckets = {
-                    int(k): float(v) for k, v in attrs[ATTR_FF_HEAT_BUCKETS].items()
-                }
-            if attrs.get(ATTR_FF_COOL_BUCKETS) is not None:
-                self._ff_cool_buckets = {
-                    int(k): float(v) for k, v in attrs[ATTR_FF_COOL_BUCKETS].items()
-                }
+        # Restore PI state — prefer ExtraStoredData, fall back to state attributes
+        extra_data = await e.async_get_last_extra_data()
+        if extra_data is not None:
+            pi_data = PIExtraStoredData.from_dict(extra_data.as_dict())
+            if pi_data is not None:
+                self.restore_extra_stored_data(pi_data)
+                _LOGGER.debug("PI: restored from ExtraStoredData")
+        else:
+            # Fall back to state attributes (migration from pre-ExtraStoredData versions)
+            if old_state is None:
+                old_state = await e.async_get_last_state()
+            if old_state is not None:
+                attrs = old_state.attributes
+                if attrs.get(ATTR_PI_INTEGRAL) is not None:
+                    self._pi_integral = max(-50, min(50, float(attrs[ATTR_PI_INTEGRAL])))
+                if attrs.get(ATTR_DESIRED_TEMP) is not None:
+                    self._desired_temp = float(attrs[ATTR_DESIRED_TEMP])
+                if attrs.get(ATTR_HP_SETPOINT) is not None:
+                    self._hp_setpoint = float(attrs[ATTR_HP_SETPOINT])
+                if attrs.get(ATTR_FF_HEAT_BUCKETS) is not None:
+                    self._ff_heat_buckets = {
+                        int(k): float(v) for k, v in attrs[ATTR_FF_HEAT_BUCKETS].items()
+                    }
+                if attrs.get(ATTR_FF_COOL_BUCKETS) is not None:
+                    self._ff_cool_buckets = {
+                        int(k): float(v) for k, v in attrs[ATTR_FF_COOL_BUCKETS].items()
+                    }
+                _LOGGER.debug("PI: restored from state attributes (legacy)")
 
         # Fallback: sync with restored _attr_target_temperature
         if self._desired_temp is None and e._attr_target_temperature is not None:
@@ -262,6 +312,28 @@ class PIController:
             self._sensor_recovery_unsub = None
 
     # ── Hook methods (called by climate entity) ──────────────────────
+
+    def get_extra_stored_data(self) -> PIExtraStoredData | None:
+        """Return PI data for RestoreEntity's ExtraStoredData persistence."""
+        if not self._pi_enabled:
+            return None
+        return PIExtraStoredData(
+            ff_heat_buckets=dict(self._ff_heat_buckets),
+            ff_cool_buckets=dict(self._ff_cool_buckets),
+            pi_integral=self._pi_integral,
+            desired_temp=self._desired_temp,
+            hp_setpoint=self._hp_setpoint,
+        )
+
+    def restore_extra_stored_data(self, data: PIExtraStoredData) -> None:
+        """Restore PI data from ExtraStoredData."""
+        self._ff_heat_buckets = data.ff_heat_buckets
+        self._ff_cool_buckets = data.ff_cool_buckets
+        self._pi_integral = max(-50, min(50, data.pi_integral))
+        if data.desired_temp is not None:
+            self._desired_temp = data.desired_temp
+        if data.hp_setpoint is not None:
+            self._hp_setpoint = data.hp_setpoint
 
     async def set_temperature(self, temperature, hvac_mode=None):
         """Handle temperature set when PI is active."""

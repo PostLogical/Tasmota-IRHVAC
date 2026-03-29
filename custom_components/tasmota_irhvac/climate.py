@@ -71,6 +71,8 @@ from .const import (
     ATTR_BEEP,
     ATTR_CLEAN,
     ATTR_ECONO,
+    ATTR_FF_COOL_BUCKETS,
+    ATTR_FF_HEAT_BUCKETS,
     ATTR_FILTERS,
     ATTR_LAST_ON_MODE,
     ATTR_LIGHT,
@@ -973,6 +975,13 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         super().async_write_ha_state()
         if self._pi:
             self._pi.fire_dispatcher()
+
+    @property
+    def extra_restore_state_data(self):
+        """Return PI data for ExtraStoredData persistence."""
+        if self._pi:
+            return self._pi.get_extra_stored_data()
+        return None
 
     @property
     def device_info(self):
