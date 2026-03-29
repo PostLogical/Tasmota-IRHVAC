@@ -726,6 +726,34 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if old_key in import_data and CONF_STATE_TOPIC_2 not in import_data:
             import_data[CONF_STATE_TOPIC_2] = import_data.pop(old_key)
 
+        # Migrate legacy suppress/bias entities → disturbance_inputs
+        disturbance_inputs = import_data.get(CONF_PI_DISTURBANCE_INPUTS, [])
+        if not disturbance_inputs:
+            old_suppress = import_data.pop("pi_ff_suppress_learning_entity", "")
+            old_bias = import_data.pop("pi_ff_bias_entity", "")
+            if old_suppress:
+                disturbance_inputs.append({
+                    "name": "Suppress Entity (migrated)",
+                    "entity_id": old_suppress,
+                    "suppress_learning": True,
+                    "default_bias": 0.0,
+                    "gain": 1.0,
+                })
+            if old_bias:
+                disturbance_inputs.append({
+                    "name": "Bias Entity (migrated)",
+                    "entity_id": old_bias,
+                    "suppress_learning": False,
+                    "default_bias": 0.0,
+                    "gain": 1.0,
+                })
+            if disturbance_inputs:
+                import_data[CONF_PI_DISTURBANCE_INPUTS] = disturbance_inputs
+        else:
+            # Clean up old keys if disturbance_inputs already present
+            import_data.pop("pi_ff_suppress_learning_entity", None)
+            import_data.pop("pi_ff_bias_entity", None)
+
         vendor = import_data.get(CONF_VENDOR, "")
         topic = import_data.get(CONF_COMMAND_TOPIC, "")
         await self.async_set_unique_id(f"{vendor}_{topic}")
