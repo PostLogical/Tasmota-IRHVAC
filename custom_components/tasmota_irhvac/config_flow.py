@@ -945,6 +945,7 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
         inputs = self.config_entry.options.get(CONF_PI_DISTURBANCE_INPUTS, [])
         menu = ["disturbance_inputs_add"]
         if inputs:
+            menu.append("disturbance_inputs_edit")
             menu.append("disturbance_inputs_remove")
         return self.async_show_menu(
             step_id="disturbance_inputs",
@@ -991,6 +992,89 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
                         )
                     ),
                 }
+            ),
+        )
+
+    async def async_step_disturbance_inputs_edit(self, user_input=None):
+        """Select a disturbance input to edit."""
+        inputs = self.config_entry.options.get(CONF_PI_DISTURBANCE_INPUTS, [])
+        if user_input is not None:
+            # Store the selected name and show the edit form
+            self._editing_disturbance = user_input["disturbance_to_edit"]
+            return await self.async_step_disturbance_inputs_edit_form()
+
+        input_names = [d["name"] for d in inputs]
+        if not input_names:
+            return await self.async_step_disturbance_inputs()
+
+        return self.async_show_form(
+            step_id="disturbance_inputs_edit",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("disturbance_to_edit"): SelectSelector(
+                        SelectSelectorConfig(
+                            options=input_names,
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                }
+            ),
+        )
+
+    async def async_step_disturbance_inputs_edit_form(self, user_input=None):
+        """Edit a disturbance input's settings."""
+        inputs = list(self.config_entry.options.get(CONF_PI_DISTURBANCE_INPUTS, []))
+        editing_name = self._editing_disturbance
+
+        if user_input is not None:
+            # Replace the edited input
+            updated_input = {
+                "name": user_input["disturbance_name"],
+                "entity_id": user_input["disturbance_entity"],
+                "suppress_learning": user_input.get("disturbance_suppress", False),
+                "default_bias": float(user_input.get("disturbance_default_bias", 0.0)),
+                "gain": float(user_input.get("disturbance_gain", 1.0)),
+            }
+            inputs = [
+                updated_input if d["name"] == editing_name else d
+                for d in inputs
+            ]
+            return self.async_create_entry(
+                data={**self.config_entry.options, CONF_PI_DISTURBANCE_INPUTS: inputs}
+            )
+
+        # Find the existing input to pre-fill
+        existing = next((d for d in inputs if d["name"] == editing_name), {})
+
+        return self.async_show_form(
+            step_id="disturbance_inputs_edit_form",
+            data_schema=self.add_suggested_values_to_schema(
+                vol.Schema(
+                    {
+                        vol.Required("disturbance_name"): TextSelector(),
+                        vol.Required("disturbance_entity"): EntitySelector(
+                            EntitySelectorConfig()
+                        ),
+                        vol.Optional("disturbance_suppress", default=True): BooleanSelector(),
+                        vol.Optional("disturbance_default_bias", default=0.0): NumberSelector(
+                            NumberSelectorConfig(
+                                min=-20, max=20, step=0.1, mode=NumberSelectorMode.BOX
+                            )
+                        ),
+                        vol.Optional("disturbance_gain", default=1.0): NumberSelector(
+                            NumberSelectorConfig(
+                                min=-10, max=10, step=0.1, mode=NumberSelectorMode.BOX
+                            )
+                        ),
+                    }
+                ),
+                {
+                    "disturbance_name": existing.get("name", ""),
+                    "disturbance_entity": existing.get("entity_id", ""),
+                    "disturbance_suppress": existing.get("suppress_learning", True),
+                    "disturbance_default_bias": existing.get("default_bias", 0.0),
+                    "disturbance_gain": existing.get("gain", 1.0),
+                },
             ),
         )
 

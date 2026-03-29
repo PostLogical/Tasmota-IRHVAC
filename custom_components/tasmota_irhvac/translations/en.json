@@ -189,12 +189,38 @@
         "description": "External disturbance sources: {count} defined ({inputs})",
         "menu_options": {
           "disturbance_inputs_add": "Add Disturbance Input",
+          "disturbance_inputs_edit": "Edit Disturbance Input",
           "disturbance_inputs_remove": "Remove Disturbance Input"
         }
       },
       "disturbance_inputs_add": {
         "title": "Add Disturbance Input",
         "description": "Define an external disturbance source. Boolean entities (binary_sensor, input_boolean) use the default bias when active. Numeric entities (sensor, input_number) use their value multiplied by the gain as bias.",
+        "data": {
+          "disturbance_name": "Name",
+          "disturbance_entity": "Entity",
+          "disturbance_suppress": "Suppress FF Learning When Active",
+          "disturbance_default_bias": "Default Bias (°C)",
+          "disturbance_gain": "Gain"
+        },
+        "data_description": {
+          "disturbance_name": "Display name for this disturbance source (e.g., 'Pellet Stove', 'Bunkroom Door').",
+          "disturbance_entity": "Entity to watch. Binary sensors use the default bias when on. Numeric sensors use their value × gain as bias in °C.",
+          "disturbance_suppress": "Suppress feedforward auto-learning when this entity is active. Prevents the controller from learning bad offsets during atypical conditions.",
+          "disturbance_default_bias": "Bias in °C applied when a boolean entity is 'on'. Negative = reduce HP effort (e.g., pellet stove heating), positive = increase HP effort (e.g., door open). Ignored for numeric entities.",
+          "disturbance_gain": "Multiplier for numeric entity values. The bias applied is entity_value × gain. Use 1.0 if the entity already outputs °C directly (e.g., a template sensor). Ignored for boolean entities."
+        }
+      },
+      "disturbance_inputs_edit": {
+        "title": "Edit Disturbance Input",
+        "description": "Select a disturbance input to edit.",
+        "data": {
+          "disturbance_to_edit": "Disturbance Input"
+        }
+      },
+      "disturbance_inputs_edit_form": {
+        "title": "Edit Disturbance Input",
+        "description": "Update the settings for this disturbance input.",
         "data": {
           "disturbance_name": "Name",
           "disturbance_entity": "Entity",
