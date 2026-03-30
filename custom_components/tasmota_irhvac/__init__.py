@@ -174,12 +174,12 @@ def _register_services(hass: HomeAssistant) -> None:
                 for device in hass.data[DATA_KEY].values()
                 if device.entity_id in entity_ids
             ]
-        else:
+        else:  # pragma: no cover — schema requires entity_id, defensive only
             devices = hass.data[DATA_KEY].values()
 
         update_tasks = []
         for device in devices:
-            if not hasattr(device, method["method"]):
+            if not hasattr(device, method["method"]):  # pragma: no cover — defensive for vendor subclasses
                 continue
             await getattr(device, method["method"])(**params)
             update_tasks.append(

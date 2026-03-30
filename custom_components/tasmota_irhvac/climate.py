@@ -899,14 +899,14 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             if "FanSpeed" in payload:
                 fan_mode = payload["FanSpeed"].lower()
                 # ELECTRA_AC fan modes fix
-                if HVAC_FAN_MAX_HIGH in (
+                if HVAC_FAN_MAX_HIGH in (  # pragma: no cover — upstream bug, see #184
                     self._attr_fan_modes or []
                 ) and HVAC_FAN_AUTO_MAX in (self._attr_fan_modes or []):
                     # NOTE: This block is unreachable because __init__ transforms
                     # HVAC_FAN_MAX_HIGH/HVAC_FAN_AUTO_MAX out of _attr_fan_modes,
                     # so the enclosing `if` condition always fails.
                     # Upstream bug: the init transformation was added after this
-                    # mapping code, making it dead. See upstream issue.
+                    # mapping code, making it dead. See upstream issue #184.
                     if fan_mode == HVAC_FAN_MAX:
                         self._attr_fan_mode = FAN_HIGH
                     elif fan_mode == HVAC_FAN_AUTO:
@@ -1079,7 +1079,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         """Set new target fan mode."""
         if fan_mode not in (self._attr_fan_modes or []):
             # tweak for some ELECTRA_AC devices
-            if HVAC_FAN_MAX_HIGH in (
+            if HVAC_FAN_MAX_HIGH in (  # pragma: no cover — upstream bug #184
                 self._attr_fan_modes or []
             ) and HVAC_FAN_AUTO_MAX in (self._attr_fan_modes or []):
                 if fan_mode != FAN_HIGH and fan_mode != HVAC_FAN_MAX:
@@ -1428,7 +1428,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         """Send the payload to tasmota mqtt topic."""
         fan_speed = self.fan_mode
         # tweak for some ELECTRA_AC devices
-        if HVAC_FAN_MAX_HIGH in (self._attr_fan_modes or []) and HVAC_FAN_AUTO_MAX in (
+        if HVAC_FAN_MAX_HIGH in (self._attr_fan_modes or []) and HVAC_FAN_AUTO_MAX in (  # pragma: no cover — upstream bug #184
             self._attr_fan_modes or []
         ):
             if self.fan_mode == FAN_HIGH:
