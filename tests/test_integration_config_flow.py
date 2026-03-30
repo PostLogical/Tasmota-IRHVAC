@@ -228,6 +228,105 @@ class TestOptionsFlow:
         assert result["type"] in (FlowResultType.MENU, FlowResultType.CREATE_ENTRY)
 
 
+class TestOptionsFlowSubSteps:
+    """Tests for each options flow sub-step."""
+
+    async def _navigate_to_step(self, hass, entry, step_name):
+        """Helper: init options flow and navigate to a sub-step."""
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        assert result["type"] == FlowResultType.MENU
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={"next_step_id": step_name},
+        )
+        assert result["type"] == FlowResultType.FORM
+        assert result["step_id"] == step_name
+        return result
+
+    @pytest.mark.asyncio
+    async def test_options_mqtt_step(self, hass, setup_integration):
+        """MQTT options step should accept input and save."""
+        entry = await setup_integration()
+        result = await self._navigate_to_step(hass, entry, "mqtt")
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={},
+        )
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+
+    @pytest.mark.asyncio
+    async def test_options_modes_step(self, hass, setup_integration):
+        """Modes options step should accept input and save."""
+        entry = await setup_integration()
+        result = await self._navigate_to_step(hass, entry, "modes")
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={},
+        )
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+
+    @pytest.mark.asyncio
+    async def test_options_defaults_step(self, hass, setup_integration):
+        """Defaults options step should accept input and save."""
+        entry = await setup_integration()
+        result = await self._navigate_to_step(hass, entry, "defaults")
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={},
+        )
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+
+    @pytest.mark.asyncio
+    async def test_options_sensors_step(self, hass, setup_integration):
+        """Sensors options step should accept input and save."""
+        entry = await setup_integration()
+        result = await self._navigate_to_step(hass, entry, "sensors")
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={},
+        )
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+
+    @pytest.mark.asyncio
+    async def test_options_advanced_step(self, hass, setup_integration):
+        """Advanced options step should accept input and save."""
+        entry = await setup_integration()
+        result = await self._navigate_to_step(hass, entry, "advanced_options")
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={},
+        )
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+
+    @pytest.mark.asyncio
+    async def test_options_pi_controller_step(self, hass, setup_integration):
+        """PI controller options step should accept input and save."""
+        entry = await setup_integration()
+        result = await self._navigate_to_step(hass, entry, "pi_controller")
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={},
+        )
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+
+    @pytest.mark.asyncio
+    async def test_options_disturbance_inputs_menu(self, hass, setup_integration):
+        """Disturbance inputs should show a management menu."""
+        entry = await setup_integration()
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={"next_step_id": "disturbance_inputs"},
+        )
+        # Shows menu with add/edit/remove options
+        assert result["type"] == FlowResultType.MENU
+
+    @pytest.mark.asyncio
+    async def test_options_ir_actions_menu(self, hass, setup_integration):
+        """IR actions should show a management menu."""
+        entry = await setup_integration()
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={"next_step_id": "ir_actions"},
+        )
+        assert result["type"] == FlowResultType.MENU
+
+
 class TestMigration:
     """Tests for config entry migration during setup."""
 

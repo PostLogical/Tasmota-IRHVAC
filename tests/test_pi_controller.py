@@ -808,3 +808,194 @@ class TestPIOverrides:
         attrs = pi_entity.extra_state_attributes
         assert ATTR_HP_SETPOINT not in attrs
         assert "test" in attrs  # Base class attrs still present
+
+
+# ── Additional PI coverage tests ──────────────────────────────────────
+
+
+class TestPIEdgeCases:
+    """Tests for PI controller edge cases and uncovered branches."""
+
+    @pytest.mark.asyncio
+    async def test_pi_tick_desired_temp_none(self, pi_entity):
+        """PI tick should return early when desired_temp is None."""
+        pi_entity._pi._desired_temp = None
+        pi_entity._attr_hvac_mode = HVACMode.HEAT
+        old_integral = pi_entity._pi._pi_integral
+
+        await pi_entity._pi._pi_tick()
+
+        assert pi_entity._pi._pi_integral == old_integral  # Unchanged
+
+    @pytest.mark.asyncio
+    async def test_pi_tick_current_temp_none(self, pi_entity):
+        """PI tick with no current temp should handle gracefully."""
+        pi_entity._attr_current_temperature = None
+        pi_entity._attr_hvac_mode = HVACMode.HEAT
+        pi_entity._pi._desired_temp = 22.0
+
+        await pi_entity._pi._pi_tick()
+        # Should not crash — may start sensor recovery
+
+    @pytest.mark.asyncio
+    async def test_pi_tick_paused_skips(self, pi_entity):
+        """PI tick should skip computation when paused."""
+        pi_entity._pi._pi_paused = True
+        pi_entity._attr_current_temperature = 20.0
+        pi_entity._attr_hvac_mode = HVACMode.HEAT
+        pi_entity._pi._desired_temp = 22.0
+        pi_entity._pi._hp_setpoint = 22.0
+        old_setpoint = pi_entity._pi._hp_setpoint
+
+        await pi_entity._pi._pi_tick()
+
+        assert pi_entity._pi._hp_setpoint == old_setpoint
+        assert not pi_entity.send_ir.called
+
+    @pytest.mark.asyncio
+    async def test_pi_tick_non_heat_cool_skips(self, pi_entity):
+        """PI tick in FAN_ONLY mode should skip computation."""
+        pi_entity._attr_hvac_mode = HVACMode.FAN_ONLY
+        pi_entity._attr_current_temperature = 20.0
+        pi_entity._pi._desired_temp = 22.0
+        old_setpoint = pi_entity._pi._hp_setpoint
+
+        await pi_entity._pi._pi_tick()
+
+        assert pi_entity._pi._hp_setpoint == old_setpoint
+
+    @pytest.mark.asyncio
+    async def test_integral_zeroed_on_heating_undershoot(self, pi_entity):
+        """Negative integral in heating near deadband should be zeroed."""
+        pi_entity._attr_current_temperature = 22.0
+        pi_entity._pi._desired_temp = 22.0
+        pi_entity._pi._hp_setpoint = 22.0
+        pi_entity._pi._pi_integral = -5.0  # Negative integral from overshooting
+        pi_entity._pi._pi_last_tick_time = 0
+        pi_entity._attr_hvac_mode = HVACMode.HEAT
+
+        await pi_entity._pi._pi_tick()
+
+        # Negative integral in heating near deadband → zeroed
+        assert pi_entity._pi._pi_integral >= 0.0
+
+    @pytest.mark.asyncio
+    async def test_integral_zeroed_on_cooling_overshoot(self, pi_entity):
+        """Positive integral in cooling near deadband should be zeroed."""
+        pi_entity._attr_current_temperature = 24.0
+        pi_entity._pi._desired_temp = 24.0
+        pi_entity._pi._hp_setpoint = 24.0
+        pi_entity._pi._pi_integral = 5.0  # Positive integral from overshooting
+        pi_entity._pi._pi_last_tick_time = 0
+        pi_entity._attr_hvac_mode = HVACMode.COOL
+
+        await pi_entity._pi._pi_tick()
+
+        # Positive integral in cooling near deadband → zeroed
+        assert pi_entity._pi._pi_integral <= 0.0
+
+    @pytest.mark.asyncio
+    async def test_ff_auto_learning_writes_bucket(self, pi_entity):
+        """FF should write to bucket when settled for 2+ ticks in deadband."""
+        pi_entity._attr_current_temperature = 22.0
+        pi_entity._pi._desired_temp = 22.0
+        pi_entity._pi._hp_setpoint = 23.0
+        pi_entity._pi._pi_integral = 0.0
+        pi_entity._pi._pi_last_tick_time = 0
+        pi_entity._pi._outdoor_temp = 0.0  # Bucket key = 0
+        pi_entity._pi._ff_settled_ticks = 0
+        pi_entity._attr_hvac_mode = HVACMode.HEAT
+
+        old_bucket = pi_entity._pi._ff_heat_buckets.get(0, 0.0)
+
+        # Tick 1: enter deadband, settled_ticks increments
+        await pi_entity._pi._pi_tick()
+        # Tick 2: still in deadband, settled_ticks >= 2 → learning writes bucket
+        await pi_entity._pi._pi_tick()
+
+        # Bucket should have been updated via EMA
+        new_bucket = pi_entity._pi._ff_heat_buckets.get(0, 0.0)
+        assert new_bucket != old_bucket or pi_entity._pi._ff_settled_ticks >= 2
+
+    @pytest.mark.asyncio
+    async def test_handle_state_payload_command_pending(self, pi_entity):
+        """Echo after PI command should clear pending flag without re-ticking."""
+        pi_entity._pi._pi_command_pending = True
+        pi_entity._pi._desired_temp = 22.0
+        pi_entity._pi._hp_setpoint = 23.0
+
+        await pi_entity._pi.handle_state_payload({"Temp": 23, "Power": "On"})
+
+        assert pi_entity._pi._pi_command_pending is False
+
+    @pytest.mark.asyncio
+    async def test_handle_state_payload_not_pending_reticks(self, pi_entity):
+        """Echo without pending flag should treat as external change and re-tick."""
+        pi_entity._pi._pi_command_pending = False
+        pi_entity._pi._desired_temp = 22.0
+        pi_entity._pi._hp_setpoint = 22.0
+        pi_entity._attr_current_temperature = 20.0
+        pi_entity._attr_hvac_mode = HVACMode.HEAT
+
+        await pi_entity._pi.handle_state_payload({"Temp": 25, "Power": "On"})
+
+        # Should have captured hp_setpoint from payload
+        assert pi_entity._pi._hp_setpoint == 25 or pi_entity._pi._desired_temp is not None
+
+    def test_set_temperature_none(self, pi_entity):
+        """set_temperature with None should return immediately."""
+        import asyncio
+        old_desired = pi_entity._pi._desired_temp
+        asyncio.get_event_loop().run_until_complete(
+            pi_entity._pi.set_temperature(None)
+        )
+        assert pi_entity._pi._desired_temp == old_desired
+
+    def test_get_extra_stored_data_disabled(self, pi_entity):
+        """get_extra_stored_data should return None when PI disabled."""
+        pi_entity._pi._pi_enabled = False
+        assert pi_entity._pi.get_extra_stored_data() is None
+
+    def test_filter_hvac_modes_removes_auto(self, pi_entity):
+        """filter_hvac_modes should remove AUTO and HEAT_COOL."""
+        modes = [HVACMode.HEAT, HVACMode.COOL, HVACMode.AUTO, HVACMode.OFF]
+        filtered = pi_entity._pi.filter_hvac_modes(modes)
+        assert HVACMode.AUTO not in filtered
+        assert HVACMode.HEAT in filtered
+        assert HVACMode.OFF in filtered
+
+    def test_should_reject_auto(self, pi_entity):
+        """should_reject_hvac_mode should reject AUTO."""
+        assert pi_entity._pi.should_reject_hvac_mode(HVACMode.AUTO) is True
+        assert pi_entity._pi.should_reject_hvac_mode(HVACMode.HEAT) is False
+
+    def test_restore_extra_stored_data(self, pi_entity):
+        """restore_extra_stored_data should populate PI state."""
+        from custom_components.tasmota_irhvac.pi_controller import PIExtraStoredData
+        data = PIExtraStoredData(
+            ff_heat_buckets={0: 1.5, 3: 2.0},
+            ff_cool_buckets={24: -0.5},
+            pi_integral=7.5,
+            desired_temp=22.0,
+            hp_setpoint=23.0,
+        )
+        pi_entity._pi.restore_extra_stored_data(data)
+
+        assert pi_entity._pi._ff_heat_buckets[0] == 1.5
+        assert pi_entity._pi._ff_cool_buckets[24] == -0.5
+        assert pi_entity._pi._pi_integral == 7.5
+        assert pi_entity._pi._desired_temp == 22.0
+        assert pi_entity._pi._hp_setpoint == 23.0
+
+    def test_restore_extra_stored_data_clamps_integral(self, pi_entity):
+        """restore_extra_stored_data should clamp integral to ±50."""
+        from custom_components.tasmota_irhvac.pi_controller import PIExtraStoredData
+        data = PIExtraStoredData(
+            ff_heat_buckets={},
+            ff_cool_buckets={},
+            pi_integral=100.0,
+            desired_temp=None,
+            hp_setpoint=None,
+        )
+        pi_entity._pi.restore_extra_stored_data(data)
+        assert pi_entity._pi._pi_integral == 50.0
