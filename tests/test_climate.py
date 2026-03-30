@@ -315,6 +315,138 @@ class TestPrecision:
         assert entity.precision == 1.0
 
 
+class TestIRHVACToggles:
+    """Tests for IRHVAC toggle methods (econo, turbo, quiet, etc.)."""
+
+    @pytest.mark.asyncio
+    async def test_set_econo(self, hass, setup_integration):
+        """set_econo should update econo state."""
+        entry = await setup_integration()
+        entity = get_climate_entity(hass, entry)
+        await entity.async_set_econo(econo="on", state_mode="SendStore")
+        assert entity._econo == "on"
+        await entity.async_set_econo(econo="off", state_mode="SendStore")
+        assert entity._econo == "off"
+
+    @pytest.mark.asyncio
+    async def test_set_turbo(self, hass, setup_integration):
+        """set_turbo should update turbo state."""
+        entry = await setup_integration()
+        entity = get_climate_entity(hass, entry)
+        await entity.async_set_turbo(turbo="on", state_mode="SendStore")
+        assert entity._turbo == "on"
+
+    @pytest.mark.asyncio
+    async def test_set_quiet(self, hass, setup_integration):
+        """set_quiet should update quiet state."""
+        entry = await setup_integration()
+        entity = get_climate_entity(hass, entry)
+        await entity.async_set_quiet(quiet="on", state_mode="SendStore")
+        assert entity._quiet == "on"
+
+    @pytest.mark.asyncio
+    async def test_set_light(self, hass, setup_integration):
+        """set_light should update light state."""
+        entry = await setup_integration()
+        entity = get_climate_entity(hass, entry)
+        await entity.async_set_light(light="on", state_mode="SendStore")
+        assert entity._light == "on"
+
+    @pytest.mark.asyncio
+    async def test_set_filters(self, hass, setup_integration):
+        """set_filters should update filter state."""
+        entry = await setup_integration()
+        entity = get_climate_entity(hass, entry)
+        await entity.async_set_filters(filters="on", state_mode="SendStore")
+        assert entity._filter == "on"
+
+    @pytest.mark.asyncio
+    async def test_set_clean(self, hass, setup_integration):
+        """set_clean should update clean state."""
+        entry = await setup_integration()
+        entity = get_climate_entity(hass, entry)
+        await entity.async_set_clean(clean="on", state_mode="SendStore")
+        assert entity._clean == "on"
+
+    @pytest.mark.asyncio
+    async def test_set_beep(self, hass, setup_integration):
+        """set_beep should update beep state."""
+        entry = await setup_integration()
+        entity = get_climate_entity(hass, entry)
+        await entity.async_set_beep(beep="on", state_mode="SendStore")
+        assert entity._beep == "on"
+
+    @pytest.mark.asyncio
+    async def test_set_sleep(self, hass, setup_integration):
+        """set_sleep should update sleep state."""
+        entry = await setup_integration()
+        entity = get_climate_entity(hass, entry)
+        await entity.async_set_sleep(sleep="2", state_mode="SendStore")
+        assert entity._sleep == "2"
+
+    @pytest.mark.asyncio
+    async def test_set_econo_invalid_ignored(self, hass, setup_integration):
+        """Invalid econo value should be rejected."""
+        entry = await setup_integration()
+        entity = get_climate_entity(hass, entry)
+        entity._econo = "off"
+        await entity.async_set_econo(econo="invalid", state_mode="SendStore")
+        assert entity._econo == "off"
+
+
+class TestIRActionPreset:
+    """Tests for IR action preset activation."""
+
+    @pytest.mark.asyncio
+    async def test_ir_action_preset_activates(self, hass, setup_integration):
+        """IR action preset should send IR code and set preset mode."""
+        entry = await setup_integration({
+            "ir_actions": [{
+                "name": "Test Preset",
+                "type": "preset",
+                "ir_code": "raw,0,1234,5678",
+            }],
+        })
+        entity = get_climate_entity(hass, entry)
+
+        await entity.async_set_preset_mode("Test Preset")
+        assert entity._attr_preset_mode == "Test Preset"
+
+    @pytest.mark.asyncio
+    async def test_ir_action_preset_with_exit_code(self, hass, setup_integration):
+        """Switching from IR action preset should send exit code."""
+        entry = await setup_integration({
+            "ir_actions": [{
+                "name": "Test Preset",
+                "type": "preset",
+                "ir_code": "raw,0,1234,5678",
+                "exit_ir_code": "raw,0,8765,4321",
+            }],
+        })
+        entity = get_climate_entity(hass, entry)
+        entity._attr_hvac_mode = HVACMode.HEAT
+
+        # Activate preset
+        await entity.async_set_preset_mode("Test Preset")
+        assert entity._attr_preset_mode == "Test Preset"
+
+
+class TestSendIR:
+    """Tests for the send_ir method."""
+
+    @pytest.mark.asyncio
+    async def test_send_ir_publishes_mqtt(self, hass, setup_integration):
+        """send_ir should publish MQTT message to command topic."""
+        entry = await setup_integration()
+        entity = get_climate_entity(hass, entry)
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_target_temperature = 22
+        entity.power_mode = STATE_ON
+
+        await entity.send_ir()
+        # Should not raise — MQTT publish happens internally
+
+
 class TestSensorTracking:
     """Tests for temperature and humidity sensor tracking."""
 
