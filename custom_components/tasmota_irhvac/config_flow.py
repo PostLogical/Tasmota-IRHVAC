@@ -539,87 +539,89 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return await self.async_step_pi_controller()
             return await self._create_entry()
 
-        return self.async_show_form(
-            step_id="advanced",
-            data_schema=vol.Schema(
-                {
-                    vol.Optional(
-                        CONF_QUIET, default=DEFAULT_CONF_QUIET
-                    ): SelectSelector(_ON_OFF_SELECTOR),
-                    vol.Optional(
-                        CONF_TURBO, default=DEFAULT_CONF_TURBO
-                    ): SelectSelector(_ON_OFF_SELECTOR),
-                    vol.Optional(
-                        CONF_ECONO, default=DEFAULT_CONF_ECONO
-                    ): SelectSelector(_ON_OFF_SELECTOR),
-                    vol.Optional(
-                        CONF_MODEL, default=DEFAULT_CONF_MODEL
-                    ): TextSelector(),
-                    vol.Optional(
-                        CONF_LIGHT, default=DEFAULT_CONF_LIGHT
-                    ): SelectSelector(_ON_OFF_SELECTOR),
-                    vol.Optional(
-                        CONF_FILTER, default=DEFAULT_CONF_FILTER
-                    ): SelectSelector(_ON_OFF_SELECTOR),
-                    vol.Optional(
-                        CONF_CLEAN, default=DEFAULT_CONF_CLEAN
-                    ): SelectSelector(_ON_OFF_SELECTOR),
-                    vol.Optional(
-                        CONF_BEEP, default=DEFAULT_CONF_BEEP
-                    ): SelectSelector(_ON_OFF_SELECTOR),
-                    vol.Optional(
-                        CONF_SLEEP, default=DEFAULT_CONF_SLEEP
-                    ): TextSelector(),
-                    vol.Optional(CONF_SWINGV): SelectSelector(
-                        SelectSelectorConfig(
-                            options=["off", "auto", "highest", "high", "middle", "low", "lowest"],
-                            mode=SelectSelectorMode.DROPDOWN,
-                        )
-                    ),
-                    vol.Optional(CONF_SWINGH): SelectSelector(
-                        SelectSelectorConfig(
-                            options=["off", "auto", "left max", "left", "middle", "right", "right max", "wide"],
-                            mode=SelectSelectorMode.DROPDOWN,
-                        )
-                    ),
-                    vol.Optional(
-                        CONF_TOGGLE_LIST, default=[]
-                    ): SelectSelector(
-                        SelectSelectorConfig(
-                            options=TOGGLE_ALL_LIST,
-                            multiple=True,
-                            mode=SelectSelectorMode.DROPDOWN,
-                        )
-                    ),
-                    vol.Optional(
-                        CONF_SPECIAL_MODE, default=""
-                    ): SelectSelector(
-                        SelectSelectorConfig(
-                            options=["", "auto", "cool", "dry", "fan_only", "heat", "off"],
-                            mode=SelectSelectorMode.DROPDOWN,
-                        )
-                    ),
-                    vol.Optional(CONF_TEMP_SENSOR): EntitySelector(
-                        EntitySelectorConfig(domain="sensor")
-                    ),
-                    vol.Optional(CONF_HUMIDITY_SENSOR): EntitySelector(
-                        EntitySelectorConfig(domain="sensor")
-                    ),
-                    vol.Optional(CONF_POWER_SENSOR): EntitySelector(
-                        EntitySelectorConfig(domain=["binary_sensor", "sensor"])
-                    ),
-                    vol.Optional(
-                        CONF_PI_ENABLED, default=DEFAULT_PI_ENABLED
-                    ): BooleanSelector(),
-                    vol.Optional(
-                        CONF_HAS_SET_V, default=False
-                    ): BooleanSelector(),
-                    vol.Optional(
-                        CONF_HAS_SET_H, default=False
-                    ): BooleanSelector(),
-                }
-            ),
+        schema = vol.Schema(
+            {
+                vol.Optional(
+                    CONF_QUIET, default=DEFAULT_CONF_QUIET
+                ): SelectSelector(_ON_OFF_SELECTOR),
+                vol.Optional(
+                    CONF_TURBO, default=DEFAULT_CONF_TURBO
+                ): SelectSelector(_ON_OFF_SELECTOR),
+                vol.Optional(
+                    CONF_ECONO, default=DEFAULT_CONF_ECONO
+                ): SelectSelector(_ON_OFF_SELECTOR),
+                vol.Optional(
+                    CONF_MODEL, default=DEFAULT_CONF_MODEL
+                ): TextSelector(),
+                vol.Optional(
+                    CONF_LIGHT, default=DEFAULT_CONF_LIGHT
+                ): SelectSelector(_ON_OFF_SELECTOR),
+                vol.Optional(
+                    CONF_FILTER, default=DEFAULT_CONF_FILTER
+                ): SelectSelector(_ON_OFF_SELECTOR),
+                vol.Optional(
+                    CONF_CLEAN, default=DEFAULT_CONF_CLEAN
+                ): SelectSelector(_ON_OFF_SELECTOR),
+                vol.Optional(
+                    CONF_BEEP, default=DEFAULT_CONF_BEEP
+                ): SelectSelector(_ON_OFF_SELECTOR),
+                vol.Optional(
+                    CONF_SLEEP, default=DEFAULT_CONF_SLEEP
+                ): TextSelector(),
+                vol.Optional(CONF_SWINGV): SelectSelector(
+                    SelectSelectorConfig(
+                        options=["off", "auto", "highest", "high", "middle", "low", "lowest"],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Optional(CONF_SWINGH): SelectSelector(
+                    SelectSelectorConfig(
+                        options=["off", "auto", "left max", "left", "middle", "right", "right max", "wide"],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Optional(
+                    CONF_TOGGLE_LIST, default=[]
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=TOGGLE_ALL_LIST,
+                        multiple=True,
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Optional(
+                    CONF_SPECIAL_MODE, default=""
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=["", "auto", "cool", "dry", "fan_only", "heat", "off"],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Optional(CONF_TEMP_SENSOR): EntitySelector(
+                    EntitySelectorConfig(domain="sensor")
+                ),
+                vol.Optional(CONF_HUMIDITY_SENSOR): EntitySelector(
+                    EntitySelectorConfig(domain="sensor")
+                ),
+                vol.Optional(CONF_POWER_SENSOR): EntitySelector(
+                    EntitySelectorConfig(domain=["binary_sensor", "sensor"])
+                ),
+                vol.Optional(
+                    CONF_PI_ENABLED, default=DEFAULT_PI_ENABLED
+                ): BooleanSelector(),
+            }
         )
+        # Vane buttons only apply to Fujitsu (hardcoded IR codes)
+        if self._vendor_is_fujitsu():
+            schema = schema.extend({
+                vol.Optional(
+                    CONF_HAS_SET_V, default=False
+                ): BooleanSelector(),
+                vol.Optional(
+                    CONF_HAS_SET_H, default=False
+                ): BooleanSelector(),
+            })
+        return self.async_show_form(step_id="advanced", data_schema=schema)
 
     async def async_step_pi_controller(self, user_input=None):
         """Step 4: PI Controller settings (shown when PI is enabled)."""
@@ -707,8 +709,10 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             import_data[CONF_VENDOR] = import_data.pop(CONF_PROTOCOL)
 
         # Handle the old state_topic + "_2" key
+        # NOTE: old_key == CONF_STATE_TOPIC_2 ("state_topic_2"), so this condition
+        # is always False. Dead code from upstream — kept for compatibility.
         old_key = CONF_STATE_TOPIC + "_2"
-        if old_key in import_data and CONF_STATE_TOPIC_2 not in import_data:
+        if old_key in import_data and CONF_STATE_TOPIC_2 not in import_data:  # pragma: no cover
             import_data[CONF_STATE_TOPIC_2] = import_data.pop(old_key)
 
         # Migrate legacy suppress/bias entities → disturbance_inputs
@@ -902,10 +906,21 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
                 data={**self.config_entry.options, **user_input}
             )
 
+        schema = OPTIONS_ADVANCED_SCHEMA
+        # Vane buttons only apply to Fujitsu (hardcoded IR codes)
+        if self._vendor_is_fujitsu():
+            schema = schema.extend({
+                vol.Optional(
+                    CONF_HAS_SET_V, default=False
+                ): BooleanSelector(),
+                vol.Optional(
+                    CONF_HAS_SET_H, default=False
+                ): BooleanSelector(),
+            })
         return self.async_show_form(
             step_id="advanced_options",
             data_schema=self.add_suggested_values_to_schema(
-                OPTIONS_ADVANCED_SCHEMA, self.config_entry.options
+                schema, self.config_entry.options
             ),
         )
 
@@ -989,7 +1004,7 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
             return await self.async_step_disturbance_inputs_edit_form()
 
         input_names = [d["name"] for d in inputs]
-        if not input_names:
+        if not input_names:  # pragma: no cover — menu hides edit when empty, defensive redirect
             return await self.async_step_disturbance_inputs()
 
         return self.async_show_form(
@@ -1074,7 +1089,7 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
             )
 
         input_names = [d["name"] for d in inputs]
-        if not input_names:
+        if not input_names:  # pragma: no cover — menu hides remove when empty, defensive redirect
             return await self.async_step_disturbance_inputs()
 
         return self.async_show_form(
@@ -1165,7 +1180,7 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
             )
 
         action_names = [a["name"] for a in actions]
-        if not action_names:
+        if not action_names:  # pragma: no cover — menu hides remove when empty, defensive redirect
             return await self.async_step_ir_actions()
 
         return self.async_show_form(

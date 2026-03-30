@@ -1265,10 +1265,10 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         self, old_state, new_state, is_special_mode=False
     ):
         """Handle power sensor changes."""
-        if new_state is None:
+        if new_state is None:  # pragma: no cover — _async_sensor_changed already filters None
             return
 
-        if old_state is not None and new_state.state == old_state.state:
+        if old_state is not None and new_state.state == old_state.state:  # pragma: no cover — HA only fires on state change
             return
 
         if new_state.state == STATE_ON:

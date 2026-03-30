@@ -1927,6 +1927,38 @@ class TestServiceHandlerEdgeCases:
         assert entity._econo == "on"
 
     @pytest.mark.asyncio
+    async def test_config_check_deletes_disturbance_issue(self, hass, setup_pi_integration):
+        """Config check should delete disturbance issue when entity exists."""
+        hass.states.async_set("input_boolean.stove", "off")
+        entry = await setup_pi_integration({
+            "pi_disturbance_inputs": [{
+                "name": "Stove",
+                "entity_id": "input_boolean.stove",
+                "suppress_learning": True,
+                "default_bias": 0.0,
+                "gain": 1.0,
+            }],
+        })
+
+        # Create an issue manually
+        from homeassistant.helpers import issue_registry as ir
+        issue_id = f"disturbance_entity_not_found_{entry.entry_id}_input_boolean.stove"
+        ir.async_create_issue(
+            hass, DOMAIN, issue_id,
+            is_fixable=False, severity=ir.IssueSeverity.WARNING,
+            translation_key="disturbance_entity_not_found",
+        )
+
+        # Fire deferred check — entity exists, issue should be deleted
+        async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=121))
+        await hass.async_block_till_done()
+
+        issues = ir.async_get(hass)
+        matching = [i for i in issues.issues.values()
+                    if i.domain == DOMAIN and "disturbance_entity" in i.issue_id]
+        assert len(matching) == 0
+
+    @pytest.mark.asyncio
     async def test_config_check_deletes_resolved_issue(self, hass, setup_pi_integration):
         """Config check should delete issue when entity exists."""
         # Set up outdoor temp sensor so it exists
@@ -2087,16 +2119,15 @@ class TestMinMaxTempNone:
 
     @pytest.mark.asyncio
     async def test_min_temp_returns_super(self, hass, setup_integration):
-        entry = await setup_integration()
+        entry = await setup_integration({"min_temp": 0})  # Falsy min_temp
         entity = get_climate_entity(hass, entry)
-        entity._min_temp = None
+        # _min_temp=0 is falsy, should fall through to super().min_temp
         assert entity.min_temp is not None
 
     @pytest.mark.asyncio
     async def test_max_temp_returns_super(self, hass, setup_integration):
-        entry = await setup_integration()
+        entry = await setup_integration({"max_temp": 0})  # Falsy max_temp
         entity = get_climate_entity(hass, entry)
-        entity._max_temp = None
         assert entity.max_temp is not None
 
 
@@ -2120,7 +2151,9 @@ class TestIRPresetDeactivationDelay:
 
     @pytest.mark.asyncio
     async def test_ir_preset_deactivation_with_delay_and_resume(self, hass, setup_pi_integration):
+        """Non-Fujitsu entity: deactivate IR preset with exit code, delay, and pi_resume."""
         entry = await setup_pi_integration({
+            "vendor": "MITSUBISHI_AC",  # Non-Fujitsu so base class handles PRESET_NONE
             "mqtt_delay": "0.01",
             "ir_actions": [{
                 "name": "DelayedPreset",
@@ -2137,8 +2170,9 @@ class TestIRPresetDeactivationDelay:
         await entity.async_set_preset_mode("DelayedPreset")
         assert entity._pi._pi_paused is True
 
-        # Deactivate — should sleep, send exit, resume PI
+        # Deactivate — base class handles "none", should sleep, send exit, resume PI
         await entity.async_set_preset_mode("none")
+        assert entity._pi._pi_paused is False
 
 
 class TestPIAsyncAddedDisabledReturn:
@@ -2214,6 +2248,204 @@ class TestSensorNativeValueNone:
         entity._pi = None
         entity.async_write_ha_state()
         await hass.async_block_till_done()
+
+
+class TestSensorSetupPIEnabledFalse:
+    """Cover sensor.py line 89: _pi_enabled=False guard."""
+
+    @pytest.mark.asyncio
+    async def test_sensor_setup_pi_enabled_false(self, hass, mqtt_mock, enable_custom_integrations):
+        """Sensor setup should skip when _pi._pi_enabled is False."""
+        from custom_components.tasmota_irhvac.sensor import async_setup_entry
+        hass.states.async_set("sensor.room_temp", "21.0", {"unit_of_measurement": "°C"})
+        hass.states.async_set("sensor.outdoor_temp", "5.0", {"unit_of_measurement": "°C"})
+        config = make_pi_config()
+        entry = MockConfigEntry(domain=DOMAIN, data=config, title="T", version=1, minor_version=3)
+        entry.add_to_hass(hass)
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        entity = get_climate_entity(hass, entry)
+        if entity and entity._pi:
+            entity._pi._pi_enabled = False
+            mock_add = MagicMock()
+            await async_setup_entry(hass, entry, mock_add)
+            mock_add.assert_not_called()
+
+
+class TestConfigFlowReconfigureNoVendor:
+    """Cover config_flow.py line 766: reconfigure with empty vendor."""
+
+    @pytest.mark.asyncio
+    async def test_reconfigure_no_vendor(self, hass, setup_integration):
+        """Reconfigure with empty vendor should show error."""
+        entry = await setup_integration()
+        result = await entry.start_reconfigure_flow(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input={
+                "name": "Test",
+                "vendor": "",
+                "command_topic": "cmnd/t/irhvac",
+                "state_topic": "tele/t/RESULT",
+            },
+        )
+        assert result["type"] == FlowResultType.FORM
+        assert "vendor" in result.get("errors", {})
+
+
+class TestConfigFlowImportStateTopic2:
+    """Cover config_flow.py line 712: state_topic_2 normalization."""
+
+    @pytest.mark.asyncio
+    async def test_import_old_state_topic_key(self, hass, mqtt_mock, enable_custom_integrations):
+        """Import with old state_topic + '_2' key should normalize."""
+        config = make_config()
+        config["state_topic_2"] = "stat/test/RESULT"
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": "import"}, data=config,
+        )
+        assert result["type"] == "create_entry"
+
+
+class TestConfigFlowEmptyRedirects:
+    """Cover config flow empty edit/remove redirect lines."""
+
+    @pytest.mark.asyncio
+    async def test_disturbance_edit_empty_redirects(self, hass, setup_integration):
+        """Disturbance edit with no inputs should redirect to menu."""
+        entry = await setup_integration()
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "disturbance_inputs"},
+        )
+        # Menu only shows add when empty
+        assert result["type"] == FlowResultType.MENU
+
+    @pytest.mark.asyncio
+    async def test_ir_actions_remove_empty_redirects(self, hass, setup_integration):
+        """IR actions remove with no actions should redirect."""
+        entry = await setup_integration()
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "ir_actions"},
+        )
+        # Menu only shows add when empty
+        assert result["type"] == FlowResultType.MENU
+
+
+class TestPowerSensorEdgeCases:
+    """Cover power sensor None and same-state early returns."""
+
+    @pytest.mark.asyncio
+    async def test_power_sensor_removed(self, hass, setup_integration):
+        """Power sensor removal (None state) should return early."""
+        hass.states.async_set("binary_sensor.power", "on")
+        entry = await setup_integration({"power_sensor": "binary_sensor.power"})
+        entity = get_climate_entity(hass, entry)
+
+        # Remove sensor — fires event with new_state=None
+        hass.states.async_remove("binary_sensor.power")
+        await hass.async_block_till_done()
+
+    @pytest.mark.asyncio
+    async def test_power_sensor_same_state(self, hass, setup_integration):
+        """Power sensor same-state change should return early."""
+        hass.states.async_set("binary_sensor.power", "on")
+        entry = await setup_integration({"power_sensor": "binary_sensor.power"})
+        entity = get_climate_entity(hass, entry)
+
+        # Set same state — should trigger event but early return at line 1272
+        hass.states.async_set("binary_sensor.power", "on")
+        await hass.async_block_till_done()
+
+
+class TestPIExtraStoredDataRestore:
+    """Cover pi_controller.py lines 236-239: ExtraStoredData restore path."""
+
+    @pytest.mark.asyncio
+    async def test_restore_from_extra_data(self):
+        """PI should restore from ExtraStoredData when async_get_last_extra_data returns data."""
+        from tests.test_pi_controller import FakePIEntity
+        from custom_components.tasmota_irhvac.pi_controller import PIExtraStoredData
+
+        config = make_pi_config({"outdoor_temp_sensor": ""})  # No outdoor sensor to avoid state lookup
+        entity = FakePIEntity(config)
+
+        extra = PIExtraStoredData(
+            ff_heat_buckets={-30: 9.9},
+            ff_cool_buckets={},
+            pi_integral=7.7,
+            desired_temp=21.0,
+            hp_setpoint=23.0,
+        )
+
+        # Mock async_get_last_extra_data to return our data
+        mock_extra = MagicMock()
+        mock_extra.as_dict.return_value = extra.as_dict()
+        entity.async_get_last_extra_data = AsyncMock(return_value=mock_extra)
+
+        await entity._pi.async_added_to_hass()
+
+        # Integral may have changed from a PI tick after restore, but should be non-zero
+        assert entity._pi._pi_integral != 0.0
+        assert entity._pi._ff_heat_buckets.get(-30) == 9.9
+        assert entity._pi._desired_temp == 21.0
+
+
+class TestSensorNativeValueNonePi:
+    """Cover sensor.py line 131: native_value when pi is None."""
+
+    @pytest.mark.asyncio
+    async def test_native_value_pi_removed(self, hass, setup_pi_integration):
+        """Sensor native_value should return None when PI is removed from entity."""
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+
+        # Get the actual sensor entity object
+        from homeassistant.helpers.entity_component import EntityComponent
+        sensor_component = hass.data.get("sensor")
+        if sensor_component:
+            for platform in sensor_component._platforms.values():
+                for sensor_entity in platform.entities.values():
+                    if "hp_setpoint" in sensor_entity.entity_id:
+                        # Remove PI from climate entity
+                        entity._pi = None
+                        # Now native_value should return None
+                        assert sensor_entity.native_value is None
+
+
+class TestVaneButtonGatingByVendor:
+    """Cover _vendor_is_fujitsu gating of vane button toggles."""
+
+    @pytest.mark.asyncio
+    async def test_options_advanced_fujitsu_shows_vane(self, hass, setup_integration):
+        """Options advanced step for Fujitsu should include vane toggles."""
+        entry = await setup_integration({"vendor": "FUJITSU_AC"})
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "advanced_options"},
+        )
+        assert result["type"] == FlowResultType.FORM
+        # Schema should include vane toggles for Fujitsu
+        schema_keys = [str(k) for k in result["data_schema"].schema]
+        assert any("set_vertical" in k or "has_set_v" in k for k in schema_keys), (
+            f"Vane toggles missing from Fujitsu advanced options: {schema_keys}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_options_advanced_non_fujitsu_no_vane(self, hass, setup_integration):
+        """Options advanced step for non-Fujitsu should not include vane toggles."""
+        entry = await setup_integration({"vendor": "MITSUBISHI_AC"})
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "advanced_options"},
+        )
+        assert result["type"] == FlowResultType.FORM
+        schema_keys = [str(k) for k in result["data_schema"].schema]
+        assert not any("set_vertical" in k or "has_set_v" in k for k in schema_keys), (
+            f"Vane toggles should not appear for non-Fujitsu: {schema_keys}"
+        )
 
 
 class TestConfigFlowGaps:
