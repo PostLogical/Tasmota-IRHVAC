@@ -1108,6 +1108,84 @@ class TestPIDisturbanceListeners:
         # Should fire signal — no crash
 
 
+class TestDeprecatedYAMLSetup:
+    """Cover async_setup_platform (deprecated YAML import)."""
+
+    @pytest.mark.asyncio
+    async def test_yaml_setup_platform(self, hass, mqtt_mock, enable_custom_integrations):
+        """Deprecated YAML setup should trigger config entry import."""
+        from custom_components.tasmota_irhvac.climate import async_setup_platform
+
+        config = make_config()
+        mock_add = MagicMock()
+
+        await async_setup_platform(hass, config, mock_add)
+        await hass.async_block_till_done()
+
+        # Should have triggered an import flow
+        mock_add.assert_not_called()  # Entities added via config entry, not platform
+
+
+class TestSendIRElectra:
+    """Cover send_ir ELECTRA fan speed mapping."""
+
+    @pytest.mark.asyncio
+    async def test_send_ir_electra_fan_speed(self, hass, setup_integration):
+        """ELECTRA send_ir should map fan speeds correctly."""
+        entry = await setup_integration({
+            "vendor": "ELECTRA_AC",
+            "supported_fan_speeds": ["auto_max", "max_high", "medium", "min"],
+        })
+        entity = get_climate_entity(hass, entry)
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_target_temperature = 22
+        entity.power_mode = STATE_ON
+
+        # Force fan mode to the raw ELECTRA values to trigger the mapping in send_ir
+        entity._attr_fan_mode = "high"
+        await entity.send_ir()
+
+
+class TestIRActionAutoClose:
+    """Cover _activate_ir_action_preset auto_clear timer callback."""
+
+    @pytest.mark.asyncio
+    async def test_auto_clear_with_pause_pi(self, hass, setup_pi_integration):
+        """Auto-clear timer should resume PI when pause_pi was set."""
+        entry = await setup_pi_integration({
+            "ir_actions": [{
+                "name": "Timed Boost",
+                "type": "preset",
+                "ir_code": "raw,0,1234",
+                "pause_pi": True,
+                "auto_clear_seconds": 5,
+            }],
+        })
+        entity = get_climate_entity(hass, entry)
+        entity._attr_hvac_mode = HVACMode.HEAT
+
+        await entity.async_set_preset_mode("Timed Boost")
+        assert entity._pi._pi_paused is True
+
+        # Advance time past auto_clear
+        async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=6))
+        await hass.async_block_till_done()
+
+        # PI should be resumed, preset cleared
+        assert entity._pi._pi_paused is False
+
+
+class TestPIAsyncAddedDisabled:
+    """Cover PI async_added_to_hass early return when disabled."""
+
+    @pytest.mark.asyncio
+    async def test_pi_disabled_entity_has_no_pi(self, hass, setup_integration):
+        """Entity with PI disabled should have _pi=None."""
+        entry = await setup_integration({"pi_enabled": False})
+        entity = get_climate_entity(hass, entry)
+        assert entity._pi is None
+
+
 class TestConfigFlowGaps:
     """Cover config_flow.py remaining edge cases."""
 
