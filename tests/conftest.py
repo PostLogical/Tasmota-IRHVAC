@@ -1,5 +1,6 @@
 """Test fixtures for Tasmota IRHVAC integration."""
 
+import json
 import pytest
 from unittest.mock import AsyncMock, patch
 
@@ -8,7 +9,7 @@ from homeassistant.core import HomeAssistant
 
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.tasmota_irhvac.const import DOMAIN
+from custom_components.tasmota_irhvac.const import DATA_KEY, DOMAIN
 
 
 def make_config(overrides=None):
@@ -46,6 +47,7 @@ def make_config(overrides=None):
         "default_swingv": "auto",
         "default_swingh": "auto",
         "toggle_list": [],
+        "special_mode": "",
         "temperature_sensor": "",
         "humidity_sensor": "",
         "power_sensor": "",
@@ -98,3 +100,90 @@ def mock_pi_config_entry():
         data=make_pi_config(),
         title="Test AC PI",
     )
+
+
+# ── Integration test fixtures ─────────────────────────────────────────
+
+
+@pytest.fixture
+def setup_integration(hass, mqtt_mock, enable_custom_integrations):
+    """Return a factory that sets up a config entry through real HA machinery.
+
+    Usage:
+        entry = await setup_integration()
+        entry = await setup_integration({"vendor": "MITSUBISHI_AC"})
+    """
+    async def _setup(config_overrides=None):
+        config = make_config(config_overrides or {})
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            data=config,
+            title=config.get("name", "Test AC"),
+            version=1,
+            minor_version=3,
+        )
+        entry.add_to_hass(hass)
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        return entry
+    return _setup
+
+
+@pytest.fixture
+def setup_pi_integration(hass, mqtt_mock, enable_custom_integrations):
+    """Return a factory that sets up a PI-enabled config entry with pre-seeded sensors.
+
+    Seeds room temp (21°C) and outdoor temp (5°C) states before setup.
+    """
+    async def _setup(config_overrides=None):
+        hass.states.async_set(
+            "sensor.room_temp", "21.0",
+            {"unit_of_measurement": "°C"},
+        )
+        hass.states.async_set(
+            "sensor.outdoor_temp", "5.0",
+            {"unit_of_measurement": "°C"},
+        )
+        config = make_pi_config(config_overrides or {})
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            data=config,
+            title=config.get("name", "Test AC PI"),
+            version=1,
+            minor_version=3,
+        )
+        entry.add_to_hass(hass)
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        return entry
+    return _setup
+
+
+def get_climate_entity(hass, entry):
+    """Look up the climate entity for a config entry."""
+    return hass.data.get(DATA_KEY, {}).get(entry.entry_id)
+
+
+def make_mqtt_state_payload(overrides=None):
+    """Build a standard IRHVAC MQTT state payload."""
+    payload = {
+        "Vendor": "FUJITSU_AC",
+        "Power": "On",
+        "Mode": "Heat",
+        "Temp": 22,
+        "Celsius": "On",
+        "FanSpeed": "Auto",
+        "SwingV": "Auto",
+        "SwingH": "Off",
+        "Quiet": "Off",
+        "Turbo": "Off",
+        "Econo": "Off",
+        "Light": "Off",
+        "Filter": "Off",
+        "Clean": "Off",
+        "Beep": "Off",
+        "Sleep": "-1",
+    }
+    if overrides:
+        payload.update(overrides)
+    return json.dumps({"IRHVAC": payload})

@@ -107,7 +107,7 @@ class PIExtraStoredData(ExtraStoredData):
                 desired_temp=restored.get("desired_temp"),
                 hp_setpoint=restored.get("hp_setpoint"),
             )
-        except (KeyError, ValueError, TypeError):
+        except (KeyError, ValueError, TypeError, AttributeError):
             return None
 
 
