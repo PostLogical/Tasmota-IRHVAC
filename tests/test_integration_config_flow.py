@@ -327,6 +327,164 @@ class TestOptionsFlowSubSteps:
         assert result["type"] == FlowResultType.MENU
 
 
+class TestDisturbanceInputsFlow:
+    """Tests for disturbance inputs add/remove in options flow."""
+
+    @pytest.mark.asyncio
+    async def test_add_disturbance_input(self, hass, setup_integration):
+        """Adding a disturbance input should save to options."""
+        entry = await setup_integration()
+
+        # Navigate to disturbance_inputs menu → add
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={"next_step_id": "disturbance_inputs"},
+        )
+        assert result["type"] == FlowResultType.MENU
+
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={"next_step_id": "disturbance_inputs_add"},
+        )
+        assert result["type"] == FlowResultType.FORM
+        assert result["step_id"] == "disturbance_inputs_add"
+
+        # Submit add form
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={
+                "disturbance_name": "Test Stove",
+                "disturbance_entity": "input_boolean.stove",
+                "disturbance_suppress": True,
+                "disturbance_default_bias": 0.0,
+                "disturbance_gain": 1.0,
+            },
+        )
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+        inputs = entry.options.get("pi_disturbance_inputs", [])
+        assert len(inputs) == 1
+        assert inputs[0]["name"] == "Test Stove"
+
+    @pytest.mark.asyncio
+    async def test_add_then_remove_disturbance_input(self, hass, setup_integration):
+        """Add a disturbance input, then remove it via options flow."""
+        entry = await setup_integration()
+
+        # First add one
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={"next_step_id": "disturbance_inputs"},
+        )
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={"next_step_id": "disturbance_inputs_add"},
+        )
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={
+                "disturbance_name": "Stove",
+                "disturbance_entity": "input_boolean.stove",
+                "disturbance_suppress": True,
+                "disturbance_default_bias": 0.0,
+                "disturbance_gain": 1.0,
+            },
+        )
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+        assert len(entry.options.get("pi_disturbance_inputs", [])) == 1
+
+        # Now remove it
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={"next_step_id": "disturbance_inputs"},
+        )
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={"next_step_id": "disturbance_inputs_remove"},
+        )
+        assert result["step_id"] == "disturbance_inputs_remove"
+
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={"disturbance_inputs_to_remove": ["Stove"]},
+        )
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+        assert len(entry.options.get("pi_disturbance_inputs", [])) == 0
+
+
+class TestIRActionsFlow:
+    """Tests for IR actions add/remove in options flow."""
+
+    @pytest.mark.asyncio
+    async def test_add_ir_action(self, hass, setup_integration):
+        """Adding an IR action should save to options."""
+        entry = await setup_integration()
+
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={"next_step_id": "ir_actions"},
+        )
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={"next_step_id": "ir_actions_add"},
+        )
+        assert result["step_id"] == "ir_actions_add"
+
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={
+                "ir_action_name": "Test Button",
+                "ir_action_type": "button",
+                "ir_action_code": "raw,0,1234,5678",
+            },
+        )
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+        actions = entry.options.get("ir_actions", [])
+        assert len(actions) == 1
+        assert actions[0]["name"] == "Test Button"
+
+    @pytest.mark.asyncio
+    async def test_remove_ir_action(self, hass, mqtt_mock, enable_custom_integrations):
+        """Removing an IR action should update options."""
+        config = make_config()
+        options = {
+            "ir_actions": [{
+                "name": "Old Button",
+                "type": "button",
+                "ir_code": "raw,0,1234",
+            }],
+        }
+        entry = MockConfigEntry(
+            domain=DOMAIN, data=config, options=options,
+            title="Test AC", version=1, minor_version=3,
+        )
+        entry.add_to_hass(hass)
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={"next_step_id": "ir_actions"},
+        )
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={"next_step_id": "ir_actions_remove"},
+        )
+        assert result["step_id"] == "ir_actions_remove"
+
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={"ir_actions_to_remove": ["Old Button"]},
+        )
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+        actions = entry.options.get("ir_actions", [])
+        assert len(actions) == 0
+
+
 class TestMigration:
     """Tests for config entry migration during setup."""
 
