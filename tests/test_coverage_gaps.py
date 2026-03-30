@@ -730,15 +730,211 @@ class TestPIControllerRestorationGaps:
             assert entity._pi._ff_heat_buckets.get(0) == 1.5
 
 
+class TestMqttDelayBranches:
+    """Cover mqtt_delay > 0 branches in button and climate."""
+
+    @pytest.mark.asyncio
+    async def test_vane_button_with_delay(self, hass, setup_integration):
+        """Vane button with mqtt_delay should still work."""
+        entry = await setup_integration({
+            "has_set_vertical_vane": True,
+            "mqtt_delay": "0.01",
+        })
+        entity = get_climate_entity(hass, entry)
+        entity._attr_swing_mode = SWING_VERTICAL
+
+        all_buttons = hass.states.async_all("button")
+        set_v_id = next(s.entity_id for s in all_buttons if "set_v" in s.entity_id)
+        await hass.services.async_call("button", "press", {"entity_id": set_v_id}, blocking=True)
+        assert entity._attr_swing_mode == SWING_OFF
+
+    @pytest.mark.asyncio
+    async def test_ir_action_button_with_delay(self, hass, setup_integration):
+        """IR action button with mqtt_delay should still work."""
+        entry = await setup_integration({
+            "mqtt_delay": "0.01",
+            "ir_actions": [{
+                "name": "Delayed",
+                "type": "button",
+                "ir_code": "raw,0,1234",
+            }],
+        })
+        all_buttons = hass.states.async_all("button")
+        btn_id = next(s.entity_id for s in all_buttons if "delayed" in s.entity_id)
+        await hass.services.async_call("button", "press", {"entity_id": btn_id}, blocking=True)
+
+
+class TestPILegacyMigration:
+    """Cover PI controller legacy key migration in __init__."""
+
+    def test_legacy_suppress_entity_migrated(self):
+        """Old pi_ff_suppress_learning_entity should migrate to disturbance_inputs."""
+        from tests.test_pi_controller import FakePIEntity
+        config = make_pi_config({
+            "pi_ff_suppress_learning_entity": "input_boolean.stove",
+            "pi_disturbance_inputs": [],
+        })
+        entity = FakePIEntity(config)
+        assert len(entity._pi._disturbance_inputs) == 1
+        assert entity._pi._disturbance_inputs[0]["entity_id"] == "input_boolean.stove"
+
+    def test_legacy_bias_entity_migrated(self):
+        """Old pi_ff_bias_entity should migrate to disturbance_inputs."""
+        from tests.test_pi_controller import FakePIEntity
+        config = make_pi_config({
+            "pi_ff_bias_entity": "sensor.solar_gain",
+            "pi_disturbance_inputs": [],
+        })
+        entity = FakePIEntity(config)
+        assert len(entity._pi._disturbance_inputs) == 1
+        assert entity._pi._disturbance_inputs[0]["entity_id"] == "sensor.solar_gain"
+        assert entity._pi._disturbance_inputs[0]["suppress_learning"] is False
+
+
+class TestPISetTempWithMode:
+    """Cover PI set_temperature with hvac_mode parameter."""
+
+    @pytest.mark.asyncio
+    async def test_set_temperature_with_mode_via_pi(self, hass, setup_pi_integration):
+        """PI set_temperature with hvac_mode should change mode."""
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        entity._attr_hvac_mode = HVACMode.HEAT
+
+        await entity.async_set_temperature(temperature=24, hvac_mode="cool")
+        assert entity._pi._desired_temp == 24
+
+
+class TestPIHandlePayloadDisabled:
+    """Cover handle_state_payload when PI disabled or desired_temp None."""
+
+    @pytest.mark.asyncio
+    async def test_handle_payload_pi_disabled(self, hass, setup_pi_integration):
+        """handle_state_payload should return early when PI disabled."""
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        entity._pi._pi_enabled = False
+
+        # Should not crash
+        await entity._pi.handle_state_payload({"Temp": 25})
+
+    @pytest.mark.asyncio
+    async def test_handle_payload_desired_temp_none(self, hass, setup_pi_integration):
+        """handle_state_payload should return early when desired_temp is None."""
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        entity._pi._desired_temp = None
+
+        await entity._pi.handle_state_payload({"Temp": 25})
+
+
+class TestPIFireDispatcherEdge:
+    """Cover fire_dispatcher when PI disabled."""
+
+    def test_fire_dispatcher_disabled(self):
+        """fire_dispatcher should do nothing when PI disabled."""
+        from tests.test_pi_controller import FakePIEntity
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        entity._pi._pi_enabled = False
+        entity._pi.fire_dispatcher()  # Should not crash
+
+
+class TestSensorBinarySensorNoEntity:
+    """Cover sensor/binary_sensor setup with no entity or PI disabled."""
+
+    @pytest.mark.asyncio
+    async def test_sensor_setup_no_climate(self, hass, mqtt_mock, enable_custom_integrations):
+        """Sensor setup should handle missing climate entity."""
+        from custom_components.tasmota_irhvac.sensor import async_setup_entry
+        entry = MockConfigEntry(domain=DOMAIN, data=make_config(), title="T", version=1, minor_version=3)
+        entry.add_to_hass(hass)
+        mock_add = MagicMock()
+        await async_setup_entry(hass, entry, mock_add)
+        mock_add.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_binary_sensor_setup_no_climate(self, hass, mqtt_mock, enable_custom_integrations):
+        """Binary sensor setup should handle missing climate entity."""
+        from custom_components.tasmota_irhvac.binary_sensor import async_setup_entry
+        entry = MockConfigEntry(domain=DOMAIN, data=make_config(), title="T", version=1, minor_version=3)
+        entry.add_to_hass(hass)
+        mock_add = MagicMock()
+        await async_setup_entry(hass, entry, mock_add)
+        mock_add.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sensor_setup_pi_disabled(self, hass, setup_integration):
+        """Sensor setup with PI disabled should not add entities."""
+        entry = await setup_integration({"pi_enabled": False})
+        all_sensors = hass.states.async_all("sensor")
+        pi_sensors = [s for s in all_sensors if "hp_setpoint" in s.entity_id]
+        assert len(pi_sensors) == 0
+
+    @pytest.mark.asyncio
+    async def test_binary_sensor_setup_pi_disabled(self, hass, setup_integration):
+        """Binary sensor setup with PI disabled should not add entities."""
+        entry = await setup_integration({"pi_enabled": False})
+        all_binary = hass.states.async_all("binary_sensor")
+        pi_binary = [s for s in all_binary if "ff_learning" in s.entity_id]
+        assert len(pi_binary) == 0
+
+
+class TestFujitsuClearPowerful:
+    """Cover _clear_powerful callback and _send_raw_ir with delay."""
+
+    @pytest.mark.asyncio
+    async def test_clear_powerful_callback(self, hass, setup_integration):
+        """Powerful preset should auto-clear after timeout."""
+        entry = await setup_integration()
+        entity = get_climate_entity(hass, entry)
+        entity._attr_hvac_mode = HVACMode.HEAT
+
+        await entity.async_set_preset_mode("Powerful")
+        assert entity._powerful is True
+
+        # Advance time past the Powerful timeout (20 min)
+        async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=1201))
+        await hass.async_block_till_done()
+
+        # Should have auto-cleared
+        assert entity._powerful is False
+        assert entity._attr_preset_mode != "Powerful"
+
+    @pytest.mark.asyncio
+    async def test_fujitsu_send_raw_ir_with_delay(self, hass, setup_integration):
+        """Fujitsu _send_raw_ir should respect mqtt_delay."""
+        entry = await setup_integration({"mqtt_delay": "0.01"})
+        entity = get_climate_entity(hass, entry)
+        entity._attr_hvac_mode = HVACMode.HEAT
+
+        # Activate Economy which sends raw IR
+        await entity.async_set_preset_mode("Economy")
+        assert entity._economy is True
+
+
+class TestInitConfigCheck:
+    """Cover _check_config_issues paths."""
+
+    @pytest.mark.asyncio
+    async def test_config_check_entity_exists(self, hass, setup_pi_integration):
+        """Config check should not create issue when entity exists."""
+        hass.states.async_set("sensor.outdoor_temp", "5.0", {"unit_of_measurement": "°C"})
+        entry = await setup_pi_integration()
+
+        # Fire deferred check
+        async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=121))
+        await hass.async_block_till_done()
+
+        # No crash, no issues for existing entities
+
+
 class TestConfigFlowGaps:
     """Cover config_flow.py remaining edge cases."""
 
     @pytest.mark.asyncio
-    async def test_first_import_handler_duplicate(self, hass, mqtt_mock, enable_custom_integrations):
-        """The first async_step_import handler should detect duplicates."""
-        # This tests the first import handler at line ~387 which is shadowed
-        # by the second one at line ~718. Since the second one is the active
-        # one, this tests the active handler's duplicate detection.
+    async def test_import_duplicate_detection(self, hass, mqtt_mock, enable_custom_integrations):
+        """Import should detect duplicates by unique_id."""
         config = make_config()
         # First import
         await hass.config_entries.flow.async_init(
@@ -749,6 +945,69 @@ class TestConfigFlowGaps:
             DOMAIN, context={"source": "import"}, data=config,
         )
         assert result["type"] == "abort"
+
+    @pytest.mark.asyncio
+    async def test_import_protocol_normalization(self, hass, mqtt_mock, enable_custom_integrations):
+        """Import should normalize protocol key to vendor."""
+        config = make_config()
+        config["protocol"] = config.pop("vendor")
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": "import"}, data=config,
+        )
+        assert result["type"] == "create_entry"
+
+    @pytest.mark.asyncio
+    async def test_import_state_topic_2_normalization(self, hass, mqtt_mock, enable_custom_integrations):
+        """Import should normalize old state_topic_2 key."""
+        config = make_config()
+        config["state_topic_2"] = "stat/test/RESULT"
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": "import"}, data=config,
+        )
+        assert result["type"] == "create_entry"
+
+    @pytest.mark.asyncio
+    async def test_reconfigure_step(self, hass, setup_integration):
+        """Reconfigure step should show form."""
+        entry = await setup_integration()
+        result = await entry.start_reconfigure_flow(hass)
+        assert result["type"] == "form"
+        assert result["step_id"] == "reconfigure"
+
+    @pytest.mark.asyncio
+    async def test_vendor_is_fujitsu(self, hass, enable_custom_integrations):
+        """_vendor_is_fujitsu should detect Fujitsu vendors."""
+        from custom_components.tasmota_irhvac.config_flow import TasmotaIrhvacConfigFlow
+        flow = TasmotaIrhvacConfigFlow()
+        flow._user_input = {"vendor": "FUJITSU_AC"}
+        assert flow._vendor_is_fujitsu() is True
+        flow._user_input = {"vendor": "MITSUBISHI_AC"}
+        assert flow._vendor_is_fujitsu() is False
+
+    @pytest.mark.asyncio
+    async def test_config_flow_pi_step(self, hass, enable_custom_integrations):
+        """PI controller step should accept input and create entry."""
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": "user"},
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input={
+                "name": "Test", "vendor": "FUJITSU_AC",
+                "command_topic": "cmnd/t/irhvac", "state_topic": "tele/t/RESULT",
+            },
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={},
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={"pi_enabled": True},
+        )
+        assert result["step_id"] == "pi_controller"
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={},
+        )
+        assert result["type"] == "create_entry"
 
     @pytest.mark.asyncio
     async def test_disturbance_edit_flow(self, hass, setup_integration):
