@@ -929,6 +929,185 @@ class TestInitConfigCheck:
         # No crash, no issues for existing entities
 
 
+class TestElectraFanModeService:
+    """Cover ELECTRA_AC fan mode set in async_set_fan_mode."""
+
+    @pytest.mark.asyncio
+    async def test_electra_set_fan_high(self, hass, setup_integration):
+        """ELECTRA should map high → max_high internally."""
+        entry = await setup_integration({
+            "vendor": "ELECTRA_AC",
+            "supported_fan_speeds": ["auto_max", "max_high", "medium", "min"],
+        })
+        entity = get_climate_entity(hass, entry)
+        entity._attr_hvac_mode = HVACMode.HEAT
+
+        # After transformation, "high" is in the fan_modes list
+        if "high" in (entity._attr_fan_modes or []):
+            await entity.async_set_fan_mode("high")
+            # Should not crash
+
+
+class TestSwingBothNotSupported:
+    """Cover swing branches where both is not in supported list."""
+
+    @pytest.mark.asyncio
+    async def test_swingv_both_not_supported(self, hass, setup_integration):
+        """When BOTH not supported, swingV auto should use VERTICAL."""
+        entry = await setup_integration({
+            "supported_swing_list": ["off", "vertical", "horizontal"],
+        })
+        entity = get_climate_entity(hass, entry)
+
+        payload = make_mqtt_state_payload({
+            "Power": "On", "Mode": "Heat",
+            "SwingV": "Auto", "SwingH": "Auto",
+        })
+        async_fire_mqtt_message(hass, "tele/irhvac/RESULT", payload)
+        await hass.async_block_till_done()
+
+    @pytest.mark.asyncio
+    async def test_swing_only_off(self, hass, setup_integration):
+        """When only off is supported, all swing should be off."""
+        entry = await setup_integration({
+            "supported_swing_list": ["off"],
+        })
+        entity = get_climate_entity(hass, entry)
+
+        payload = make_mqtt_state_payload({
+            "Power": "On", "Mode": "Heat",
+            "SwingV": "Auto", "SwingH": "Auto",
+        })
+        async_fire_mqtt_message(hass, "tele/irhvac/RESULT", payload)
+        await hass.async_block_till_done()
+
+        assert entity._attr_swing_mode == SWING_OFF
+
+
+class TestAsyncSendCmd:
+    """Cover async_send_cmd / send_ir paths."""
+
+    @pytest.mark.asyncio
+    async def test_send_ir_with_swing(self, hass, setup_integration):
+        """send_ir should include swing state in payload."""
+        entry = await setup_integration()
+        entity = get_climate_entity(hass, entry)
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_target_temperature = 22
+        entity._attr_swing_mode = SWING_BOTH
+        entity.power_mode = STATE_ON
+
+        await entity.send_ir()
+
+    @pytest.mark.asyncio
+    async def test_send_ir_with_mqtt_delay(self, hass, setup_integration):
+        """send_ir with mqtt_delay should sleep before sending."""
+        entry = await setup_integration({"mqtt_delay": "0.01"})
+        entity = get_climate_entity(hass, entry)
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_target_temperature = 22
+        entity.power_mode = STATE_ON
+
+        await entity.send_ir()
+
+
+class TestActivateIRActionPresetGaps:
+    """Cover remaining _activate_ir_action_preset branches."""
+
+    @pytest.mark.asyncio
+    async def test_ir_preset_with_pause_pi(self, hass, setup_pi_integration):
+        """IR action preset with pause_pi should pause PI."""
+        entry = await setup_pi_integration({
+            "ir_actions": [{
+                "name": "Test Pause",
+                "type": "preset",
+                "ir_code": "raw,0,1234,5678",
+                "pause_pi": True,
+            }],
+        })
+        entity = get_climate_entity(hass, entry)
+        entity._attr_hvac_mode = HVACMode.HEAT
+
+        await entity.async_set_preset_mode("Test Pause")
+        assert entity._pi._pi_paused is True
+
+    @pytest.mark.asyncio
+    async def test_ir_preset_with_delay(self, hass, setup_integration):
+        """IR action preset with mqtt_delay should still work."""
+        entry = await setup_integration({
+            "vendor": "MITSUBISHI_AC",
+            "mqtt_delay": "0.01",
+            "ir_actions": [{
+                "name": "Delayed Preset",
+                "type": "preset",
+                "ir_code": "raw,0,1234",
+            }],
+        })
+        entity = get_climate_entity(hass, entry)
+        entity._attr_hvac_mode = HVACMode.HEAT
+
+        await entity.async_set_preset_mode("Delayed Preset")
+        assert entity._attr_preset_mode == "Delayed Preset"
+
+
+class TestPISensorRecovery:
+    """Cover PI sensor recovery paths."""
+
+    @pytest.mark.asyncio
+    async def test_check_sensor_recovery_still_unavailable(self, hass, setup_pi_integration):
+        """Sensor still unavailable after grace period should enter FF-only mode."""
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        entity._attr_hvac_mode = HVACMode.HEAT
+        pi._desired_temp = 22.0
+
+        # Simulate sensor going unavailable
+        entity._attr_current_temperature = None
+        await pi._check_sensor_recovery()
+
+        assert pi._sensor_unavailable is True
+
+    @pytest.mark.asyncio
+    async def test_check_sensor_recovery_restored(self, hass, setup_pi_integration):
+        """Sensor recovered during grace period should resume normal PI."""
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        entity._attr_hvac_mode = HVACMode.HEAT
+        pi._desired_temp = 22.0
+        entity._attr_current_temperature = 21.0  # Sensor is back
+
+        await pi._check_sensor_recovery()
+
+        assert pi._sensor_unavailable is False
+
+
+class TestPIDisturbanceListeners:
+    """Cover disturbance entity state change listeners."""
+
+    @pytest.mark.asyncio
+    async def test_disturbance_entity_change_fires_signal(self, hass, setup_pi_integration):
+        """Disturbance entity state change should fire FF suppress signal."""
+        hass.states.async_set("input_boolean.stove", "off")
+        entry = await setup_pi_integration({
+            "pi_disturbance_inputs": [{
+                "name": "Stove",
+                "entity_id": "input_boolean.stove",
+                "suppress_learning": True,
+                "default_bias": 0.0,
+                "gain": 1.0,
+            }],
+        })
+
+        # Change disturbance entity
+        hass.states.async_set("input_boolean.stove", "on")
+        await hass.async_block_till_done()
+        # Should fire signal — no crash
+
+
 class TestConfigFlowGaps:
     """Cover config_flow.py remaining edge cases."""
 

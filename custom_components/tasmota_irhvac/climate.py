@@ -1359,8 +1359,8 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                     await asyncio.sleep(float(self._mqtt_delay))
                 await mqtt.async_publish(self.hass, irsend_topic, old_action["exit_ir_code"])
             # Resume PI if it was paused
-            if old_action.get("pause_pi") and hasattr(self, "pi_resume"):
-                self.pi_resume()
+            if old_action.get("pause_pi") and self._pi:
+                self._pi.pi_resume()
 
         if preset_mode == PRESET_AWAY and not self._is_away:
             self._is_away = True
@@ -1384,8 +1384,8 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         self._attr_preset_mode = preset_name
 
         # Optionally pause PI
-        if action.get("pause_pi") and hasattr(self, "pi_pause"):
-            self.pi_pause()
+        if action.get("pause_pi") and self._pi:
+            self._pi.pi_pause()
 
         # Optionally auto-clear after timeout
         auto_clear = action.get("auto_clear_seconds")
@@ -1395,8 +1395,8 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             @callback
             def _clear_preset(_now):
                 self._attr_preset_mode = PRESET_NONE
-                if action.get("pause_pi") and hasattr(self, "pi_resume"):
-                    self.pi_resume()
+                if action.get("pause_pi") and self._pi:
+                    self._pi.pi_resume()
                 self.async_schedule_update_ha_state()
 
             async_call_later(self.hass, auto_clear, _clear_preset)
