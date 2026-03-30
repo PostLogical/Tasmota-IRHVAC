@@ -97,6 +97,7 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
                 "hvac_mode": self._attr_hvac_mode,
                 "target_temp": self._attr_target_temperature,
                 "fan_mode": self._attr_fan_mode,
+                "swing_mode": self._attr_swing_mode,
                 "swingv": self._swingv,
                 "swingh": self._swingh,
             }
@@ -131,6 +132,7 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
             self._attr_hvac_mode = saved.get("hvac_mode", self._attr_hvac_mode)
             self._attr_target_temperature = saved.get("target_temp", self._attr_target_temperature)
             self._attr_fan_mode = saved.get("fan_mode", self._attr_fan_mode)
+            self._attr_swing_mode = saved.get("swing_mode", self._attr_swing_mode)
             self._swingv = saved.get("swingv", self._swingv)
             self._swingh = saved.get("swingh", self._swingh)
 
