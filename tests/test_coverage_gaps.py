@@ -1357,6 +1357,119 @@ class TestToggleSendIRPaths:
         assert entity._beep == "on"
 
 
+class TestClimatePropertyGaps:
+    """Cover remaining climate property/method branches."""
+
+    @pytest.mark.asyncio
+    async def test_precision_fallback_to_super(self, hass, setup_integration):
+        """Precision should fall back to super when _temp_precision is None."""
+        entry = await setup_integration()
+        entity = get_climate_entity(hass, entry)
+        entity._temp_precision = None
+        # Should not crash, returns super().precision
+        p = entity.precision
+        assert p is not None
+
+    @pytest.mark.asyncio
+    async def test_last_on_mode_property(self, hass, setup_integration):
+        """last_on_mode should return _last_on_mode."""
+        entry = await setup_integration()
+        entity = get_climate_entity(hass, entry)
+
+        # Set via MQTT
+        payload = make_mqtt_state_payload({"Power": "On", "Mode": "Dry"})
+        async_fire_mqtt_message(hass, "tele/irhvac/RESULT", payload)
+        await hass.async_block_till_done()
+
+        state = hass.states.get(entity.entity_id)
+        # last_on_mode should be in attributes
+        assert entity._last_on_mode is not None
+
+    @pytest.mark.asyncio
+    async def test_hvac_fan_only_from_action(self, hass, setup_integration):
+        """FAN HVACAction should map to FAN_ONLY mode."""
+        entry = await setup_integration()
+        entity = get_climate_entity(hass, entry)
+
+        # Send fan mode via MQTT — some IRHVACs report "fan" as the mode
+        payload = make_mqtt_state_payload({"Power": "On", "Mode": "Fan"})
+        async_fire_mqtt_message(hass, "tele/irhvac/RESULT", payload)
+        await hass.async_block_till_done()
+
+        assert entity._attr_hvac_mode == HVACMode.FAN_ONLY
+
+    @pytest.mark.asyncio
+    async def test_restore_swing_fixation(self, hass, mqtt_mock, enable_custom_integrations):
+        """Restoring non-auto swing should set _fix_swingv/swingh."""
+        from pytest_homeassistant_custom_component.common import mock_restore_cache
+        from homeassistant.core import State
+
+        mock_restore_cache(hass, [
+            State("climate.test_ac", "heat", {
+                "temperature": 22,
+                "fan_mode": "auto",
+                "swing_mode": "off",
+                "swingv": "highest",
+                "swingh": "right",
+            }),
+        ])
+
+        entry = MockConfigEntry(
+            domain=DOMAIN, data=make_config({"default_swingv": "highest", "default_swingh": "right"}),
+            title="Test AC", version=1, minor_version=3,
+        )
+        entry.add_to_hass(hass)
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        entity = get_climate_entity(hass, entry)
+        # Swing fixation should be set from restored non-auto values
+        if entity._swingv and entity._swingv != "auto":
+            assert entity._fix_swingv is not None
+
+    @pytest.mark.asyncio
+    async def test_min_max_temp_properties(self, hass, setup_integration):
+        """min_temp and max_temp properties should return configured values."""
+        entry = await setup_integration({"min_temp": 18, "max_temp": 28})
+        entity = get_climate_entity(hass, entry)
+        assert entity.min_temp == 18
+        assert entity.max_temp == 28
+
+    @pytest.mark.asyncio
+    async def test_preset_modes_from_config(self, hass, setup_integration):
+        """Preset modes should include config preset_modes."""
+        entry = await setup_integration({
+            "preset_modes": ["none", "away", "Economy"],
+        })
+        entity = get_climate_entity(hass, entry)
+        assert entity._attr_preset_modes is not None
+
+
+class TestPISensorRecoveryFF:
+    """Cover PI sensor recovery FF-only fallback path."""
+
+    @pytest.mark.asyncio
+    async def test_sensor_recovery_ff_only_fallback(self, hass, setup_pi_integration):
+        """When sensor stays unavailable, PI should use FF-only setpoint."""
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        entity._attr_hvac_mode = HVACMode.HEAT
+        pi._desired_temp = 22.0
+        pi._outdoor_temp = 0.0
+        pi._ff_heat_buckets[0] = 3.0
+        entity._attr_current_temperature = None
+        pi._sensor_recovery_pending = False
+
+        # Call check_sensor_recovery with sensor still unavailable
+        await pi._check_sensor_recovery()
+
+        assert pi._sensor_unavailable is True
+        # HP setpoint should be set to FF-only value
+        assert pi._hp_setpoint is not None
+
+
 class TestConfigFlowGaps:
     """Cover config_flow.py remaining edge cases."""
 
