@@ -384,21 +384,6 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Initialize the config flow."""
         self._user_input = {}
 
-    async def async_step_import(self, import_data=None):
-        """Handle YAML import. Check for duplicates before creating entry."""
-        if import_data is None:
-            return self.async_abort(reason="already_configured")
-
-        # Check if an entry with the same command topic already exists
-        command_topic = import_data.get(CONF_COMMAND_TOPIC, "")
-        for entry in self._async_current_entries():
-            if entry.data.get(CONF_COMMAND_TOPIC) == command_topic:
-                return self.async_abort(reason="already_configured")
-
-        # Skip the UI steps — create entry directly from YAML data
-        name = import_data.get(CONF_NAME, DEFAULT_NAME)
-        return self.async_create_entry(title=name, data=import_data)
-
     async def async_step_user(self, user_input=None):
         """Step 1: Device Setup."""
         errors = {}

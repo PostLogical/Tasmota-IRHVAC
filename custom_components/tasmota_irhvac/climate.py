@@ -11,10 +11,7 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.components import mqtt
 
-try:
-    from homeassistant.components.mqtt.schemas import MQTT_ENTITY_COMMON_SCHEMA
-except ImportError:
-    from homeassistant.components.mqtt.mixins import MQTT_ENTITY_COMMON_SCHEMA
+from homeassistant.components.mqtt.schemas import MQTT_ENTITY_COMMON_SCHEMA
 
 from homeassistant.components.climate import PLATFORM_SCHEMA as CLIMATE_PLATFORM_SCHEMA
 
@@ -315,10 +312,7 @@ PLATFORM_SCHEMA = CLIMATE_PLATFORM_SCHEMA.extend(
 )
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(MQTT_ENTITY_COMMON_SCHEMA.schema)
-if hasattr(mqtt, "MQTT_BASE_PLATFORM_SCHEMA"):
-    PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(mqtt.MQTT_BASE_PLATFORM_SCHEMA.schema)
-else:
-    PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(mqtt.config.MQTT_BASE_SCHEMA.schema)
+PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(mqtt.config.MQTT_BASE_SCHEMA.schema)
 
 IRHVAC_SERVICE_SCHEMA = vol.Schema({vol.Required(ATTR_ENTITY_ID): cv.entity_ids})
 
@@ -680,20 +674,10 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         self._pi = PIController(self, config) if config.get(CONF_PI_ENABLED) else None
 
     async def async_added_to_hass(self):
-        # Replacing `async_track_state_change` with `async_track_state_change_event`
-        # See, https://developers.home-assistant.io/blog/2024/04/13/deprecate_async_track_state_change/
-        if hasattr(ha_event, "async_track_state_change_event"):
-            self._use_track_state_change_event = True
-
         def regist_track_state_change_event(entity_id):
-            if self._use_track_state_change_event:
-                ha_event.async_track_state_change_event(
-                    self.hass, entity_id, self._async_sensor_changed
-                )
-            else:
-                ha_event.async_track_state_change(
-                    self.hass, entity_id, self._async_sensor_changed
-                )
+            ha_event.async_track_state_change_event(
+                self.hass, entity_id, self._async_sensor_changed
+            )
 
         # Make sure MQTT integration is enabled and the client is available
         await mqtt.async_wait_for_mqtt_client(self.hass)
@@ -1253,13 +1237,9 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         self, entity_id_or_event, old_state=None, new_state=None
     ):
         # Replacing `async_track_state_change` with `async_track_state_change_event`
-        # See, https://developers.home-assistant.io/blog/2024/04/13/deprecate_async_track_state_change/
-        if self._use_track_state_change_event:
-            entity_id = entity_id_or_event.data["entity_id"]
-            old_state = entity_id_or_event.data["old_state"]
-            new_state = entity_id_or_event.data["new_state"]
-        else:
-            entity_id = entity_id_or_event
+        entity_id = entity_id_or_event.data["entity_id"]
+        old_state = entity_id_or_event.data["old_state"]
+        new_state = entity_id_or_event.data["new_state"]
 
         if new_state is None:
             return
