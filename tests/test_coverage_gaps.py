@@ -1927,26 +1927,33 @@ class TestServiceHandlerEdgeCases:
         assert entity._econo == "on"
 
     @pytest.mark.asyncio
-    async def test_config_check_deletes_disturbance_issue(self, hass, setup_pi_integration):
-        """Config check should delete disturbance issue when entity exists."""
+    async def test_config_check_model_input_entity_exists(self, hass, mqtt_mock, enable_custom_integrations):
+        """Config check should delete model input issue when entity exists."""
+        from homeassistant.helpers import issue_registry as ir
         hass.states.async_set("input_boolean.stove", "off")
-        entry = await setup_pi_integration({
-            "pi_disturbance_inputs": [{
-                "name": "Stove",
-                "entity_id": "input_boolean.stove",
-                "suppress_learning": True,
-                "default_bias": 0.0,
-                "gain": 1.0,
-            }],
-        })
+        hass.states.async_set("sensor.room_temp", "21.0", {"unit_of_measurement": "°C"})
+        hass.states.async_set("sensor.outdoor_temp", "5.0", {"unit_of_measurement": "°C"})
+
+        config = make_pi_config()
+        options = {"pi_model_inputs": [{
+            "name": "Stove",
+            "entity_id": "input_boolean.stove",
+            "seed_heat": -3.2,
+            "seed_cool": 0.0,
+            "lag_tau": 0,
+        }]}
+        entry = MockConfigEntry(domain=DOMAIN, data=config, options=options,
+                               title="T", version=1, minor_version=4)
+        entry.add_to_hass(hass)
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
 
         # Create an issue manually
-        from homeassistant.helpers import issue_registry as ir
-        issue_id = f"disturbance_entity_not_found_{entry.entry_id}_input_boolean.stove"
+        issue_id = f"model_input_entity_not_found_{entry.entry_id}_input_boolean.stove"
         ir.async_create_issue(
             hass, DOMAIN, issue_id,
             is_fixable=False, severity=ir.IssueSeverity.WARNING,
-            translation_key="disturbance_entity_not_found",
+            translation_key="model_input_entity_not_found",
         )
 
         # Fire deferred check — entity exists, issue should be deleted
@@ -1955,7 +1962,7 @@ class TestServiceHandlerEdgeCases:
 
         issues = ir.async_get(hass)
         matching = [i for i in issues.issues.values()
-                    if i.domain == DOMAIN and "disturbance_entity" in i.issue_id]
+                    if i.domain == DOMAIN and "model_input_entity" in i.issue_id]
         assert len(matching) == 0
 
     @pytest.mark.asyncio

@@ -10,14 +10,14 @@
       "ff_offset": {
         "name": "FF Offset"
       },
-      "disturbance_bias": {
-        "name": "Disturbance Bias"
-      },
       "ff_anticipated_offset": {
         "name": "FF Anticipated Offset"
       },
       "integral_convergence": {
         "name": "Integral Convergence"
+      },
+      "ff_offset_buckets": {
+        "name": "FF Offset (Buckets)"
       }
     },
     "button": {
@@ -61,13 +61,13 @@
         "title": "Climate Settings",
         "description": "Configure temperature ranges, modes, and fan settings. All fields have sensible defaults.",
         "data": {
-          "min_temp": "Minimum Temperature (\u00b0C)",
-          "max_temp": "Maximum Temperature (\u00b0C)",
-          "target_temp": "Default Target Temperature (\u00b0C)",
+          "min_temp": "Minimum Temperature (°C)",
+          "max_temp": "Maximum Temperature (°C)",
+          "target_temp": "Default Target Temperature (°C)",
           "precision": "Temperature Precision",
           "temp_step": "Temperature Step Size",
           "celsius_mode": "IR Command Temperature Unit",
-          "away_temp": "Away Temperature (\u00b0C)",
+          "away_temp": "Away Temperature (°C)",
           "ignore_off_temp": "Ignore Off Temperature",
           "supported_modes": "Supported HVAC Modes",
           "supported_fan_speeds": "Supported Fan Speeds",
@@ -132,11 +132,11 @@
           "pi_kp": "Proportional Gain (Kp)",
           "pi_ki": "Integral Gain (Ki)",
           "pi_min_interval": "Minimum Interval (seconds)",
-          "pi_deadband": "Deadband (\u00b0C)",
+          "pi_deadband": "Deadband (°C)",
           "outdoor_temp_sensor": "Outdoor Temperature Sensor",
-          "pi_ff_heat_reference": "FF Heat Reference Temp (\u00b0C)",
+          "pi_ff_heat_reference": "FF Heat Reference Temp (°C)",
           "pi_ff_heat_slope": "FF Heat Slope",
-          "pi_ff_cool_reference": "FF Cool Reference Temp (\u00b0C)",
+          "pi_ff_cool_reference": "FF Cool Reference Temp (°C)",
           "pi_ff_cool_slope": "FF Cool Slope",
           "pi_setpoint_weight": "Setpoint Weight (0-1)"
         },
@@ -186,67 +186,67 @@
           "sensors": "Sensors",
           "advanced_options": "Advanced Settings",
           "pi_controller": "PI Controller",
-          "disturbance_inputs": "Disturbance Inputs",
+          "model_inputs": "Model Inputs",
           "ir_actions": "IR Actions"
         }
       },
-      "disturbance_inputs": {
-        "title": "Disturbance Inputs",
+      "model_inputs": {
+        "title": "Model Inputs",
         "description": "External disturbance sources: {count} defined ({inputs})",
         "menu_options": {
-          "disturbance_inputs_add": "Add Disturbance Input",
-          "disturbance_inputs_edit": "Edit Disturbance Input",
-          "disturbance_inputs_remove": "Remove Disturbance Input"
+          "model_inputs_add": "Add Model Input",
+          "model_inputs_edit": "Edit Model Input",
+          "model_inputs_remove": "Remove Model Input"
         }
       },
-      "disturbance_inputs_add": {
-        "title": "Add Disturbance Input",
+      "model_inputs_add": {
+        "title": "Add Model Input",
         "description": "Define an external disturbance source. Boolean entities (binary_sensor, input_boolean) use the default bias when active. Numeric entities (sensor, input_number) use their value multiplied by the gain as bias.",
         "data": {
-          "disturbance_name": "Name",
-          "disturbance_entity": "Entity",
-          "disturbance_suppress": "Suppress FF Learning When Active",
-          "disturbance_default_bias": "Default Bias (°C)",
-          "disturbance_gain": "Gain"
+          "model_input_name": "Name",
+          "model_input_entity": "Entity",
+          "model_input_suppress": "Suppress FF Learning When Active",
+          "model_input_seed_heat": "Default Bias (°C)",
+          "model_input_seed_cool": "Gain"
         },
         "data_description": {
-          "disturbance_name": "Display name for this disturbance source (e.g., 'Pellet Stove', 'Bunkroom Door').",
-          "disturbance_entity": "Entity to watch. Binary sensors use the default bias when on. Numeric sensors use their value × gain as bias in °C.",
-          "disturbance_suppress": "Suppress feedforward auto-learning when this entity is active. Prevents the controller from learning bad offsets during atypical conditions.",
-          "disturbance_default_bias": "Bias in °C applied when a boolean entity is 'on'. Negative = reduce HP effort (e.g., pellet stove heating), positive = increase HP effort (e.g., door open). Ignored for numeric entities.",
-          "disturbance_gain": "Multiplier for numeric entity values. The bias applied is entity_value × gain. Use 1.0 if the entity already outputs °C directly (e.g., a template sensor). Ignored for boolean entities."
+          "model_input_name": "Display name for this disturbance source (e.g., 'Pellet Stove', 'Bunkroom Door').",
+          "model_input_entity": "Entity to watch. Binary sensors use the default bias when on. Numeric sensors use their value × gain as bias in °C.",
+          "model_input_suppress": "Suppress feedforward auto-learning when this entity is active. Prevents the controller from learning bad offsets during atypical conditions.",
+          "model_input_seed_heat": "Bias in °C applied when a boolean entity is 'on'. Negative = reduce HP effort (e.g., pellet stove heating), positive = increase HP effort (e.g., door open). Ignored for numeric entities.",
+          "model_input_seed_cool": "Multiplier for numeric entity values. The bias applied is entity_value × gain. Use 1.0 if the entity already outputs °C directly (e.g., a template sensor). Ignored for boolean entities."
         }
       },
-      "disturbance_inputs_edit": {
-        "title": "Edit Disturbance Input",
-        "description": "Select a disturbance input to edit.",
+      "model_inputs_edit": {
+        "title": "Edit Model Input",
+        "description": "Select a model input to edit.",
         "data": {
-          "disturbance_to_edit": "Disturbance Input"
+          "model_input_to_edit": "Model Input"
         }
       },
-      "disturbance_inputs_edit_form": {
-        "title": "Edit Disturbance Input",
-        "description": "Update the settings for this disturbance input.",
+      "model_inputs_edit_form": {
+        "title": "Edit Model Input",
+        "description": "Update the settings for this model input.",
         "data": {
-          "disturbance_name": "Name",
-          "disturbance_entity": "Entity",
-          "disturbance_suppress": "Suppress FF Learning When Active",
-          "disturbance_default_bias": "Default Bias (°C)",
-          "disturbance_gain": "Gain"
+          "model_input_name": "Name",
+          "model_input_entity": "Entity",
+          "model_input_suppress": "Suppress FF Learning When Active",
+          "model_input_seed_heat": "Default Bias (°C)",
+          "model_input_seed_cool": "Gain"
         },
         "data_description": {
-          "disturbance_name": "Display name for this disturbance source (e.g., 'Pellet Stove', 'Bunkroom Door').",
-          "disturbance_entity": "Entity to watch. Binary sensors use the default bias when on. Numeric sensors use their value × gain as bias in °C.",
-          "disturbance_suppress": "Suppress feedforward auto-learning when this entity is active. Prevents the controller from learning bad offsets during atypical conditions.",
-          "disturbance_default_bias": "Bias in °C applied when a boolean entity is 'on'. Negative = reduce HP effort (e.g., pellet stove heating), positive = increase HP effort (e.g., door open). Ignored for numeric entities.",
-          "disturbance_gain": "Multiplier for numeric entity values. The bias applied is entity_value × gain. Use 1.0 if the entity already outputs °C directly (e.g., a template sensor). Ignored for boolean entities."
+          "model_input_name": "Display name for this disturbance source (e.g., 'Pellet Stove', 'Bunkroom Door').",
+          "model_input_entity": "Entity to watch. Binary sensors use the default bias when on. Numeric sensors use their value × gain as bias in °C.",
+          "model_input_suppress": "Suppress feedforward auto-learning when this entity is active. Prevents the controller from learning bad offsets during atypical conditions.",
+          "model_input_seed_heat": "Bias in °C applied when a boolean entity is 'on'. Negative = reduce HP effort (e.g., pellet stove heating), positive = increase HP effort (e.g., door open). Ignored for numeric entities.",
+          "model_input_seed_cool": "Multiplier for numeric entity values. The bias applied is entity_value × gain. Use 1.0 if the entity already outputs °C directly (e.g., a template sensor). Ignored for boolean entities."
         }
       },
-      "disturbance_inputs_remove": {
-        "title": "Remove Disturbance Inputs",
-        "description": "Select disturbance inputs to remove.",
+      "model_inputs_remove": {
+        "title": "Remove Model Inputs",
+        "description": "Select model inputs to remove.",
         "data": {
-          "disturbance_inputs_to_remove": "Inputs to Remove"
+          "model_inputs_to_remove": "Inputs to Remove"
         }
       },
       "ir_actions": {
@@ -296,13 +296,13 @@
       "temperature": {
         "title": "Temperature Settings",
         "data": {
-          "min_temp": "Minimum Temperature (\u00b0C)",
-          "max_temp": "Maximum Temperature (\u00b0C)",
-          "target_temp": "Default Target Temperature (\u00b0C)",
+          "min_temp": "Minimum Temperature (°C)",
+          "max_temp": "Maximum Temperature (°C)",
+          "target_temp": "Default Target Temperature (°C)",
           "precision": "Temperature Precision",
           "temp_step": "Temperature Step Size",
           "celsius_mode": "IR Command Temperature Unit",
-          "away_temp": "Away Temperature (\u00b0C)",
+          "away_temp": "Away Temperature (°C)",
           "ignore_off_temp": "Ignore Off Temperature"
         },
         "data_description": {
@@ -378,11 +378,11 @@
           "pi_kp": "Proportional Gain (Kp)",
           "pi_ki": "Integral Gain (Ki)",
           "pi_min_interval": "Minimum Interval (seconds)",
-          "pi_deadband": "Deadband (\u00b0C)",
+          "pi_deadband": "Deadband (°C)",
           "outdoor_temp_sensor": "Outdoor Temperature Sensor",
-          "pi_ff_heat_reference": "FF Heat Reference Temp (\u00b0C)",
+          "pi_ff_heat_reference": "FF Heat Reference Temp (°C)",
           "pi_ff_heat_slope": "FF Heat Slope",
-          "pi_ff_cool_reference": "FF Cool Reference Temp (\u00b0C)",
+          "pi_ff_cool_reference": "FF Cool Reference Temp (°C)",
           "pi_ff_cool_slope": "FF Cool Slope",
           "pi_setpoint_weight": "Setpoint Weight (0-1)"
         },
@@ -407,9 +407,9 @@
       "title": "Outdoor temperature sensor not found",
       "description": "The PI controller is configured to use outdoor temperature sensor `{entity_id}`, but this entity does not exist in Home Assistant. Feedforward compensation will not work until this is resolved."
     },
-    "disturbance_entity_not_found": {
-      "title": "Disturbance input entity not found",
-      "description": "The disturbance input '{name}' references entity `{entity_id}`, but this entity does not exist. Suppress/bias from this input will not work until the entity is available."
+    "model_input_entity_not_found": {
+      "title": "Model input entity not found",
+      "description": "The model input '{name}' references entity `{entity_id}`, but this entity does not exist. Suppress/bias from this input will not work until the entity is available."
     },
     "temp_sensor_not_found": {
       "title": "Temperature sensor not found",

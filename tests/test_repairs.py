@@ -60,15 +60,15 @@ class TestCheckConfigIssues:
                 for call in mock_create.call_args_list
             ) or mock_create.called
 
-    def test_issue_created_for_missing_disturbance_entity(self, hass):
-        """Issue should be created when a disturbance input entity doesn't exist."""
+    def test_issue_created_for_missing_model_input_entity(self, hass):
+        """Issue should be created when a model input entity doesn't exist."""
         config = make_pi_config({
-            "pi_disturbance_inputs": [{
+            "pi_model_inputs": [{
                 "name": "Test Door",
                 "entity_id": "binary_sensor.nonexistent",
-                "suppress_learning": True,
-                "default_bias": 0.0,
-                "gain": 1.0,
+                "seed_heat": -1.5,
+                "seed_cool": 0.0,
+                "lag_tau": 0,
             }],
             "outdoor_temp_sensor": "",
         })

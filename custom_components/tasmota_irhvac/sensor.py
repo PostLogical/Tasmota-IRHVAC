@@ -61,9 +61,9 @@ PI_SENSOR_DESCRIPTIONS: tuple[TasmotaIrhvacPISensorDescription, ...] = (
         suggested_display_precision=2,
     ),
     TasmotaIrhvacPISensorDescription(
-        key="disturbance_bias",
-        translation_key="disturbance_bias",
-        climate_attr="_disturbance_total_bias",
+        key="ff_offset_buckets",
+        translation_key="ff_offset_buckets",
+        climate_attr="_ff_offset_buckets",
         device_class=None,
         native_unit_of_measurement="°C",
         state_class=SensorStateClass.MEASUREMENT,

@@ -54,7 +54,8 @@ class TestDiagnosticsWithEntity:
         assert "config_entry" in diag
         assert "pi_controller" in diag
         assert diag["pi_controller"]["enabled"] is True
-        assert "ff_heat_buckets" in diag["pi_controller"]
+        assert "rls_model" in diag["pi_controller"]
+        assert "legacy_buckets" in diag["pi_controller"]
 
     @pytest.mark.asyncio
     async def test_diagnostics_without_pi(self, hass, setup_integration):

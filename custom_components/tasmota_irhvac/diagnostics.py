@@ -46,13 +46,27 @@ async def async_get_config_entry_diagnostics(
 
     pi = climate_entity._pi
     if pi and pi._pi_enabled:
+        # RLS model state
+        coeff_names = ["intercept", "outdoor_delta"]
+        for m_input in pi._model_inputs:
+            coeff_names.append(m_input.get("name", "unknown"))
+
+        rls_heat_coeffs = {coeff_names[i]: round(pi._rls_heat.beta[i], 4)
+                          for i in range(min(len(coeff_names), len(pi._rls_heat.beta)))}
+        rls_cool_coeffs = {coeff_names[i]: round(pi._rls_cool.beta[i], 4)
+                          for i in range(min(len(coeff_names), len(pi._rls_cool.beta)))}
+        rls_heat_uncertainty = {coeff_names[i]: round(pi._rls_heat.get_covariance_diagonal()[i], 4)
+                               for i in range(min(len(coeff_names), len(pi._rls_heat.beta)))}
+
         data["pi_controller"] = {
             "enabled": True,
             "paused": pi._pi_paused,
             "desired_temp": pi._desired_temp,
             "hp_setpoint": pi._hp_setpoint,
             "integral": round(pi._pi_integral, 3),
+            "integral_convergence": round(pi._integral_convergence, 2),
             "ff_offset": round(pi._ff_offset, 2),
+            "ff_offset_buckets": round(pi._ff_offset_buckets, 2),
             "outdoor_temp": pi._outdoor_temp,
             "sensor_unavailable": pi._sensor_unavailable,
             "sensor_recovery_pending": pi._sensor_recovery_pending,
@@ -63,20 +77,24 @@ async def async_get_config_entry_diagnostics(
                 "setpoint_weight": pi._pi_setpoint_weight,
                 "min_interval": pi._pi_min_interval,
                 "outdoor_temp_sensor": pi._outdoor_temp_sensor,
-                "disturbance_inputs": pi._disturbance_inputs,
+                "model_inputs": pi._model_inputs,
             },
-            "disturbance_state": {
-                "learning_suppressed": pi._disturbance_suppress_active,
-                "manual_suppress": pi._manual_ff_suppress,
+            "rls_model": {
+                "heat_coefficients": rls_heat_coeffs,
+                "cool_coefficients": rls_cool_coeffs,
+                "heat_uncertainty": rls_heat_uncertainty,
+                "heat_observation_count": pi._rls_heat.observation_count,
+                "cool_observation_count": pi._rls_cool.observation_count,
+                "learning_suppressed": pi._manual_ff_suppress,
                 "manual_suppress_reason": pi._manual_ff_suppress_reason,
-                "active_suppressors": pi._disturbance_active_suppressors,
-                "total_bias": round(pi._disturbance_total_bias, 2),
             },
-            "ff_heat_buckets": {
-                str(k): round(v, 2) for k, v in pi._ff_heat_buckets.items()
-            },
-            "ff_cool_buckets": {
-                str(k): round(v, 2) for k, v in pi._ff_cool_buckets.items()
+            "legacy_buckets": {
+                "ff_heat_buckets": {
+                    str(k): round(v, 2) for k, v in pi._ff_heat_buckets.items()
+                },
+                "ff_cool_buckets": {
+                    str(k): round(v, 2) for k, v in pi._ff_cool_buckets.items()
+                },
             },
         }
 

@@ -35,17 +35,17 @@ class TestConfigMigration:
 
         result = await async_migrate_entry(hass, entry)
         assert result is True
-        assert entry.minor_version == 3
+        assert entry.minor_version == 4
 
-        # v1.2 keys should have been added then migrated away
-        # v1.3 should have disturbance_inputs
-        inputs = entry.data.get("pi_disturbance_inputs", [])
-        assert len(inputs) == 1
-        assert inputs[0]["entity_id"] == "input_boolean.suppress"
-        assert inputs[0]["suppress_learning"] is True
+        # v1.2→v1.3 migrated suppress/bias to disturbance_inputs
+        # v1.3→v1.4 migrated disturbance_inputs to model_inputs
+        model_inputs = entry.data.get("pi_model_inputs", [])
+        assert len(model_inputs) == 1
+        assert model_inputs[0]["entity_id"] == "input_boolean.suppress"
         # Old keys should be removed
         assert "pi_ff_suppress_learning_entity" not in entry.data
         assert "pi_ff_bias_entity" not in entry.data
+        assert "pi_disturbance_inputs" not in entry.data
 
     @pytest.mark.asyncio
     async def test_migrate_v1_2_to_v1_3(self, hass):
@@ -67,17 +67,25 @@ class TestConfigMigration:
 
         result = await async_migrate_entry(hass, entry)
         assert result is True
-        assert entry.minor_version == 3
+        assert entry.minor_version == 4
 
-        inputs = entry.data.get("pi_disturbance_inputs", [])
-        assert len(inputs) == 2
-        assert inputs[0]["entity_id"] == "input_boolean.suppress"
-        assert inputs[1]["entity_id"] == "input_number.bias"
+        # v1.2→v1.3→v1.4: disturbance_inputs migrated to model_inputs
+        model_inputs = entry.data.get("pi_model_inputs", [])
+        assert len(model_inputs) == 2
+        assert model_inputs[0]["entity_id"] == "input_boolean.suppress"
+        assert model_inputs[1]["entity_id"] == "input_number.bias"
 
     @pytest.mark.asyncio
-    async def test_migrate_v1_3_noop(self, hass):
-        """Migration of v1.3 entry should be a no-op."""
+    async def test_migrate_v1_3_to_v1_4(self, hass):
+        """Migration from v1.3 should convert disturbance_inputs to model_inputs."""
         config = make_config()
+        config["pi_disturbance_inputs"] = [{
+            "name": "Stove",
+            "entity_id": "input_boolean.stove",
+            "suppress_learning": True,
+            "default_bias": -3.0,
+            "gain": 1.0,
+        }]
         entry = MockConfigEntry(
             domain=DOMAIN,
             data=config,
@@ -89,7 +97,29 @@ class TestConfigMigration:
 
         result = await async_migrate_entry(hass, entry)
         assert result is True
-        assert entry.minor_version == 3
+        assert entry.minor_version == 4
+        model_inputs = entry.data.get("pi_model_inputs", [])
+        assert len(model_inputs) == 1
+        assert model_inputs[0]["entity_id"] == "input_boolean.stove"
+        assert model_inputs[0]["seed_heat"] == -3.0
+        assert "pi_disturbance_inputs" not in entry.data
+
+    @pytest.mark.asyncio
+    async def test_migrate_v1_4_noop(self, hass):
+        """Migration of v1.4 entry should be a no-op."""
+        config = make_config()
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            data=config,
+            title="Test",
+            version=1,
+            minor_version=4,
+        )
+        entry.add_to_hass(hass)
+
+        result = await async_migrate_entry(hass, entry)
+        assert result is True
+        assert entry.minor_version == 4
 
     @pytest.mark.asyncio
     async def test_migrate_empty_entities(self, hass):

@@ -89,8 +89,29 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     })
                 store["pi_disturbance_inputs"] = disturbance_inputs
 
+        if entry.minor_version < 4:
+            # v1.4: Migrate disturbance_inputs → model_inputs
+            for store in (new_data, new_options):
+                disturbance_inputs = store.pop("pi_disturbance_inputs", [])
+                model_inputs = store.get("pi_model_inputs", [])
+                for d_input in disturbance_inputs:
+                    model_input = {
+                        "name": d_input.get("name", "Migrated Input"),
+                        "entity_id": d_input.get("entity_id", ""),
+                        "seed_heat": float(d_input.get("default_bias", 0.0)),
+                        "seed_cool": float(d_input.get("default_bias", 0.0)),
+                        "lag_tau": 0,
+                    }
+                    gain = d_input.get("gain", 1.0)
+                    if gain != 1.0:
+                        # Old gain was a multiplier on entity value; approximate as seed
+                        model_input["seed_heat"] = float(gain)
+                        model_input["seed_cool"] = float(gain)
+                    model_inputs.append(model_input)
+                store["pi_model_inputs"] = model_inputs
+
         hass.config_entries.async_update_entry(
-            entry, data=new_data, options=new_options, minor_version=3, version=1,
+            entry, data=new_data, options=new_options, minor_version=4, version=1,
         )
         _LOGGER.info("Migrated config entry to version %s.%s", entry.version, entry.minor_version)
 
@@ -129,18 +150,19 @@ def _check_config_issues(hass: HomeAssistant, entry: ConfigEntry) -> None:
     else:
         ir.async_delete_issue(hass, DOMAIN, outdoor_issue_id)
 
-    # Check disturbance input entities
-    disturbance_inputs = config.get(CONF_PI_DISTURBANCE_INPUTS, [])
+    # Check model input entities
+    from .const import CONF_PI_MODEL_INPUTS
+    model_inputs = config.get(CONF_PI_MODEL_INPUTS, [])
     if pi_enabled:
-        for d_input in disturbance_inputs:
-            entity_id = d_input.get("entity_id", "")
-            name = d_input.get("name", entity_id)
-            issue_id = f"disturbance_entity_not_found_{entry.entry_id}_{entity_id}"
+        for m_input in model_inputs:
+            entity_id = m_input.get("entity_id", "")
+            name = m_input.get("name", entity_id)
+            issue_id = f"model_input_entity_not_found_{entry.entry_id}_{entity_id}"
             if entity_id and hass.states.get(entity_id) is None:
                 ir.async_create_issue(
                     hass, DOMAIN, issue_id, is_fixable=False,
                     severity=ir.IssueSeverity.WARNING,
-                    translation_key="disturbance_entity_not_found",
+                    translation_key="model_input_entity_not_found",
                     translation_placeholders={
                         "entity_id": entity_id,
                         "name": name,
@@ -149,8 +171,9 @@ def _check_config_issues(hass: HomeAssistant, entry: ConfigEntry) -> None:
             else:
                 ir.async_delete_issue(hass, DOMAIN, issue_id)
 
-    # Clean up legacy issue IDs from v1.2
-    for legacy_key in ("suppress_learning_entity_not_found", "bias_entity_not_found"):
+    # Clean up legacy issue IDs
+    for legacy_key in ("suppress_learning_entity_not_found", "bias_entity_not_found",
+                       "disturbance_entity_not_found"):
         ir.async_delete_issue(hass, DOMAIN, f"{legacy_key}_{entry.entry_id}")
 
 

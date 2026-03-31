@@ -396,7 +396,7 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Tasmota IRHVAC."""
 
     VERSION = 1
-    MINOR_VERSION = 3  # Disturbance inputs (replaces suppress/bias entities)
+    MINOR_VERSION = 4  # Model inputs with RLS (replaces disturbance inputs)
 
     def __init__(self):
         """Initialize the config flow."""
