@@ -92,6 +92,10 @@ from .const import (
     CONF_PI_KP,
     CONF_PI_MIN_INTERVAL,
     CONF_PI_SETPOINT_WEIGHT,
+    CONF_PI_FF_LEARN_NIGHT_ONLY,
+    CONF_PI_FF_LEARN_SUNSET_DELAY,
+    CONF_PI_FF_ANTICIPATED_CHANGE_ENTITY,
+    CONF_PI_FF_ANTICIPATED_CHANGE_GAIN,
     DEFAULT_COMMAND_TOPIC,
     DEFAULT_CONF_BEEP,
     DEFAULT_CONF_CELSIUS,
@@ -116,6 +120,9 @@ from .const import (
     DEFAULT_PI_KP,
     DEFAULT_PI_MIN_INTERVAL,
     DEFAULT_PI_SETPOINT_WEIGHT,
+    DEFAULT_PI_FF_LEARN_NIGHT_ONLY,
+    DEFAULT_PI_FF_LEARN_SUNSET_DELAY,
+    DEFAULT_PI_FF_ANTICIPATED_CHANGE_GAIN,
     DEFAULT_MIN_TEMP,
     DEFAULT_MQTT_DELAY,
     DEFAULT_NAME,
@@ -365,6 +372,16 @@ OPTIONS_PI_CONTROLLER_SCHEMA = vol.Schema(
         ),
         vol.Optional(CONF_PI_SETPOINT_WEIGHT, default=DEFAULT_PI_SETPOINT_WEIGHT): NumberSelector(
             NumberSelectorConfig(min=0, max=1, step=0.05, mode=NumberSelectorMode.BOX)
+        ),
+        vol.Optional(CONF_PI_FF_LEARN_NIGHT_ONLY, default=DEFAULT_PI_FF_LEARN_NIGHT_ONLY): BooleanSelector(),
+        vol.Optional(CONF_PI_FF_LEARN_SUNSET_DELAY, default=DEFAULT_PI_FF_LEARN_SUNSET_DELAY): NumberSelector(
+            NumberSelectorConfig(min=0, max=240, step=15, mode=NumberSelectorMode.BOX)
+        ),
+        vol.Optional(CONF_PI_FF_ANTICIPATED_CHANGE_ENTITY): EntitySelector(
+            EntitySelectorConfig(domain="sensor")
+        ),
+        vol.Optional(CONF_PI_FF_ANTICIPATED_CHANGE_GAIN, default=DEFAULT_PI_FF_ANTICIPATED_CHANGE_GAIN): NumberSelector(
+            NumberSelectorConfig(min=0, max=5, step=0.1, mode=NumberSelectorMode.BOX)
         ),
     }
 )
@@ -678,6 +695,16 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ),
                     vol.Optional(CONF_PI_SETPOINT_WEIGHT, default=DEFAULT_PI_SETPOINT_WEIGHT): NumberSelector(
                         NumberSelectorConfig(min=0, max=1, step=0.05, mode=NumberSelectorMode.BOX)
+                    ),
+                    vol.Optional(CONF_PI_FF_LEARN_NIGHT_ONLY, default=DEFAULT_PI_FF_LEARN_NIGHT_ONLY): BooleanSelector(),
+                    vol.Optional(CONF_PI_FF_LEARN_SUNSET_DELAY, default=DEFAULT_PI_FF_LEARN_SUNSET_DELAY): NumberSelector(
+                        NumberSelectorConfig(min=0, max=240, step=15, mode=NumberSelectorMode.BOX)
+                    ),
+                    vol.Optional(CONF_PI_FF_ANTICIPATED_CHANGE_ENTITY): EntitySelector(
+                        EntitySelectorConfig(domain="sensor")
+                    ),
+                    vol.Optional(CONF_PI_FF_ANTICIPATED_CHANGE_GAIN, default=DEFAULT_PI_FF_ANTICIPATED_CHANGE_GAIN): NumberSelector(
+                        NumberSelectorConfig(min=0, max=5, step=0.1, mode=NumberSelectorMode.BOX)
                     ),
                 }
             ),

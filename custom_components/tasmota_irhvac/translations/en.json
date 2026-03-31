@@ -12,6 +12,12 @@
       },
       "disturbance_bias": {
         "name": "Disturbance Bias"
+      },
+      "ff_anticipated_offset": {
+        "name": "FF Anticipated Offset"
+      },
+      "integral_convergence": {
+        "name": "Integral Convergence"
       }
     },
     "button": {

@@ -70,6 +70,26 @@ PI_SENSOR_DESCRIPTIONS: tuple[TasmotaIrhvacPISensorDescription, ...] = (
         entity_category=EntityCategory.DIAGNOSTIC,
         suggested_display_precision=2,
     ),
+    TasmotaIrhvacPISensorDescription(
+        key="ff_anticipated_offset",
+        translation_key="ff_anticipated_offset",
+        climate_attr="_ff_anticipated_offset",
+        device_class=None,
+        native_unit_of_measurement="°C",
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        suggested_display_precision=2,
+    ),
+    TasmotaIrhvacPISensorDescription(
+        key="integral_convergence",
+        translation_key="integral_convergence",
+        climate_attr="_integral_convergence",
+        device_class=None,
+        native_unit_of_measurement=None,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        suggested_display_precision=2,
+    ),
 )
 
 

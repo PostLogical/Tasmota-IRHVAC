@@ -201,6 +201,10 @@ CONF_PI_FF_SUPPRESS_LEARNING_ENTITY = "pi_ff_suppress_learning_entity"  # Legacy
 CONF_PI_FF_BIAS_ENTITY = "pi_ff_bias_entity"  # Legacy (v1.2)
 CONF_PI_DISTURBANCE_INPUTS = "pi_disturbance_inputs"
 CONF_PI_SETPOINT_WEIGHT = "pi_setpoint_weight"
+CONF_PI_FF_LEARN_NIGHT_ONLY = "pi_ff_learn_night_only"
+CONF_PI_FF_LEARN_SUNSET_DELAY = "pi_ff_learn_sunset_delay"
+CONF_PI_FF_ANTICIPATED_CHANGE_ENTITY = "pi_ff_anticipated_change_entity"
+CONF_PI_FF_ANTICIPATED_CHANGE_GAIN = "pi_ff_anticipated_change_gain"
 
 # PI controller defaults
 DEFAULT_PI_ENABLED = False
@@ -213,6 +217,12 @@ DEFAULT_PI_FF_HEAT_SLOPE = 0.3
 DEFAULT_PI_FF_COOL_REFERENCE = 25.0
 DEFAULT_PI_FF_COOL_SLOPE = 0.3
 DEFAULT_PI_SETPOINT_WEIGHT = 0.5  # Adaptive: full P for large errors, weighted near setpoint
+DEFAULT_PI_FF_LEARN_NIGHT_ONLY = True
+DEFAULT_PI_FF_LEARN_SUNSET_DELAY = 90  # minutes after sunset before learning starts
+DEFAULT_PI_FF_ANTICIPATED_CHANGE_GAIN = 0.5
+DEFAULT_PI_FF_MIN_OBSERVATIONS = 10  # min observations before EMA overwrites seed
+DEFAULT_PI_FF_ALPHA = 0.05  # EMA learning rate (was 0.2)
+DEFAULT_PI_FF_ALPHA_OVERSHOOT_RATIO = 0.25  # learn at alpha*ratio when overshooting
 
 # PI controller extra state attributes
 ATTR_HP_SETPOINT = "hp_setpoint"

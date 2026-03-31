@@ -34,20 +34,30 @@ from .const import (
     CONF_PI_DEADBAND,
     CONF_PI_DISTURBANCE_INPUTS,
     CONF_PI_ENABLED,
+    CONF_PI_FF_ANTICIPATED_CHANGE_ENTITY,
+    CONF_PI_FF_ANTICIPATED_CHANGE_GAIN,
     CONF_PI_FF_COOL_REFERENCE,
     CONF_PI_FF_COOL_SLOPE,
     CONF_PI_FF_HEAT_REFERENCE,
     CONF_PI_FF_HEAT_SLOPE,
+    CONF_PI_FF_LEARN_NIGHT_ONLY,
+    CONF_PI_FF_LEARN_SUNSET_DELAY,
     CONF_PI_KI,
     CONF_PI_KP,
     CONF_PI_MIN_INTERVAL,
     CONF_PI_SETPOINT_WEIGHT,
     DEFAULT_PI_DEADBAND,
     DEFAULT_PI_ENABLED,
+    DEFAULT_PI_FF_ALPHA,
+    DEFAULT_PI_FF_ALPHA_OVERSHOOT_RATIO,
+    DEFAULT_PI_FF_ANTICIPATED_CHANGE_GAIN,
     DEFAULT_PI_FF_COOL_REFERENCE,
     DEFAULT_PI_FF_COOL_SLOPE,
     DEFAULT_PI_FF_HEAT_REFERENCE,
     DEFAULT_PI_FF_HEAT_SLOPE,
+    DEFAULT_PI_FF_LEARN_NIGHT_ONLY,
+    DEFAULT_PI_FF_LEARN_SUNSET_DELAY,
+    DEFAULT_PI_FF_MIN_OBSERVATIONS,
     DEFAULT_PI_KI,
     DEFAULT_PI_KP,
     DEFAULT_PI_MIN_INTERVAL,
@@ -85,6 +95,8 @@ class PIExtraStoredData(ExtraStoredData):
     pi_integral: float
     desired_temp: float | None
     hp_setpoint: float | None
+    ff_bucket_observation_counts: dict[int, int] = dataclasses.field(default_factory=dict)
+    integral_convergence: float = 0.0
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize to JSON-compatible dict."""
@@ -94,18 +106,25 @@ class PIExtraStoredData(ExtraStoredData):
             "pi_integral": self.pi_integral,
             "desired_temp": self.desired_temp,
             "hp_setpoint": self.hp_setpoint,
+            "ff_bucket_observation_counts": {str(k): v for k, v in self.ff_bucket_observation_counts.items()},
+            "integral_convergence": self.integral_convergence,
         }
 
     @classmethod
     def from_dict(cls, restored: dict[str, Any]) -> Self | None:
         """Deserialize from stored dict."""
         try:
+            obs_counts = {}
+            if "ff_bucket_observation_counts" in restored:
+                obs_counts = {int(k): int(v) for k, v in restored["ff_bucket_observation_counts"].items()}
             return cls(
                 ff_heat_buckets={int(k): float(v) for k, v in restored["ff_heat_buckets"].items()},
                 ff_cool_buckets={int(k): float(v) for k, v in restored["ff_cool_buckets"].items()},
                 pi_integral=float(restored["pi_integral"]),
                 desired_temp=restored.get("desired_temp"),
                 hp_setpoint=restored.get("hp_setpoint"),
+                ff_bucket_observation_counts=obs_counts,
+                integral_convergence=float(restored.get("integral_convergence", 0.0)),
             )
         except (KeyError, ValueError, TypeError, AttributeError):
             return None
@@ -162,6 +181,17 @@ class PIController:
         self._ff_cool_reference = config.get(CONF_PI_FF_COOL_REFERENCE, DEFAULT_PI_FF_COOL_REFERENCE)
         self._ff_cool_slope = config.get(CONF_PI_FF_COOL_SLOPE, DEFAULT_PI_FF_COOL_SLOPE)
 
+        # FF learning config
+        self._ff_learn_night_only = config.get(CONF_PI_FF_LEARN_NIGHT_ONLY, DEFAULT_PI_FF_LEARN_NIGHT_ONLY)
+        self._ff_learn_sunset_delay = config.get(CONF_PI_FF_LEARN_SUNSET_DELAY, DEFAULT_PI_FF_LEARN_SUNSET_DELAY) * 60  # Convert min → sec
+        self._ff_alpha = DEFAULT_PI_FF_ALPHA
+        self._ff_alpha_overshoot_ratio = DEFAULT_PI_FF_ALPHA_OVERSHOOT_RATIO
+        self._ff_min_observations = DEFAULT_PI_FF_MIN_OBSERVATIONS
+
+        # Anticipated change FF config
+        self._anticipated_change_entity = config.get(CONF_PI_FF_ANTICIPATED_CHANGE_ENTITY, "")
+        self._anticipated_change_gain = config.get(CONF_PI_FF_ANTICIPATED_CHANGE_GAIN, DEFAULT_PI_FF_ANTICIPATED_CHANGE_GAIN)
+
         # Disturbance inputs (replaces single suppress/bias entities)
         # Fallback: convert legacy keys if disturbance_inputs is empty (e.g., YAML import)
         self._disturbance_inputs = config.get(CONF_PI_DISTURBANCE_INPUTS, [])
@@ -211,9 +241,20 @@ class PIController:
         self._ff_cool_buckets = _seed_buckets(
             self._ff_cool_reference, self._ff_cool_slope, is_cooling=True
         )
+        self._ff_bucket_observation_counts: dict[int, int] = {}
 
         # Outdoor temp state
         self._outdoor_temp = None
+
+        # Anticipated change state
+        self._anticipated_change = 0.0
+        self._ff_anticipated_offset = 0.0
+
+        # Night learning state
+        self._sun_below_horizon_since = 0.0  # monotonic timestamp
+
+        # Integral convergence tracking (EMA of abs(integral) over ~24hr)
+        self._integral_convergence = 0.0
 
     # ── Shorthand entity access ──────────────────────────────────────
 
@@ -291,6 +332,29 @@ class PIController:
                 self._async_disturbance_entity_changed,
             )
 
+        # Register anticipated change entity
+        if self._anticipated_change_entity:
+            async_track_state_change_event(
+                self._hass,
+                self._anticipated_change_entity,
+                self._async_anticipated_change_changed,
+            )
+            ac_state = self._hass.states.get(self._anticipated_change_entity)
+            if ac_state is not None and ac_state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+                try:
+                    self._anticipated_change = float(ac_state.state)
+                except (ValueError, TypeError):
+                    pass
+
+        # Register sun.sun for night-only learning
+        if self._ff_learn_night_only:
+            async_track_state_change_event(
+                self._hass, "sun.sun", self._async_sun_state_changed,
+            )
+            sun_state = self._hass.states.get("sun.sun")
+            if sun_state is not None and sun_state.state == "below_horizon":
+                self._sun_below_horizon_since = time.monotonic()
+
         # Compute initial feedforward offset
         if self._outdoor_temp is not None:
             is_heating = e._attr_hvac_mode in (HVACMode.HEAT, HVACMode.HEAT_COOL, None)
@@ -331,6 +395,8 @@ class PIController:
             pi_integral=self._pi_integral,
             desired_temp=self._desired_temp,
             hp_setpoint=self._hp_setpoint,
+            ff_bucket_observation_counts=dict(self._ff_bucket_observation_counts),
+            integral_convergence=self._integral_convergence,
         )
 
     def restore_extra_stored_data(self, data: PIExtraStoredData) -> None:
@@ -342,6 +408,9 @@ class PIController:
             self._desired_temp = data.desired_temp
         if data.hp_setpoint is not None:
             self._hp_setpoint = data.hp_setpoint
+        if data.ff_bucket_observation_counts:
+            self._ff_bucket_observation_counts = data.ff_bucket_observation_counts
+        self._integral_convergence = data.integral_convergence
 
     async def set_temperature(self, temperature, hvac_mode=None):
         """Handle temperature set when PI is active."""
@@ -401,6 +470,8 @@ class PIController:
             },
             "ff_learning_suppressed": self._disturbance_suppress_active,
             "disturbance_bias": round(self._disturbance_total_bias, 2),
+            "ff_anticipated_offset": round(self._ff_anticipated_offset, 2),
+            "integral_convergence": round(self._integral_convergence, 2),
         }
 
     def filter_hvac_modes(self, modes):
@@ -526,6 +597,47 @@ class PIController:
         new_state = event.data.get("new_state")
         if new_state is not None:
             self._update_outdoor_temp(new_state)
+
+    @callback
+    def _async_anticipated_change_changed(self, event):
+        """Handle anticipated change entity state changes."""
+        new_state = event.data.get("new_state")
+        if new_state is not None and new_state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+            try:
+                self._anticipated_change = float(new_state.state)
+            except (ValueError, TypeError):
+                self._anticipated_change = 0.0
+        else:
+            self._anticipated_change = 0.0
+
+    @callback
+    def _async_sun_state_changed(self, event):
+        """Track when sun goes below horizon for night-only learning."""
+        new_state = event.data.get("new_state")
+        if new_state is not None:
+            if new_state.state == "below_horizon":
+                if self._sun_below_horizon_since == 0.0:
+                    self._sun_below_horizon_since = time.monotonic()
+            else:
+                self._sun_below_horizon_since = 0.0
+
+    def _is_learning_time_allowed(self) -> bool:
+        """Check if FF learning is allowed based on night-only setting."""
+        if not self._ff_learn_night_only:
+            return True
+        # Check sun.sun entity state
+        sun_state = self._hass.states.get("sun.sun")
+        if sun_state is None:
+            return True  # No sun entity — allow learning always
+        if sun_state.state != "below_horizon":
+            return False
+        # Check sunset delay
+        if self._sun_below_horizon_since == 0.0:
+            # First check — set the timestamp now
+            self._sun_below_horizon_since = time.monotonic()
+            return False
+        elapsed = time.monotonic() - self._sun_below_horizon_since
+        return elapsed >= self._ff_learn_sunset_delay
 
     @callback
     def _async_disturbance_entity_changed(self, event):
@@ -664,6 +776,13 @@ class PIController:
         self._disturbance_total_bias = disturbance_bias
         self._ff_offset += disturbance_bias
 
+        # Anticipated change feedforward
+        if self._anticipated_change_entity and self._anticipated_change != 0.0:
+            self._ff_anticipated_offset = self._anticipated_change_gain * self._anticipated_change
+            self._ff_offset += self._ff_anticipated_offset
+        else:
+            self._ff_anticipated_offset = 0.0
+
         # Reset integral on large disturbance bias transitions
         if abs(disturbance_bias - self._last_disturbance_bias) > 1.0:
             _LOGGER.info(
@@ -689,12 +808,35 @@ class PIController:
             self._pi_integral *= 0.9
             self._ff_settled_ticks += 1
             # Auto-learn: record offset when settled for 2+ ticks
-            if self._ff_settled_ticks >= 2 and self._outdoor_temp is not None and not learning_suppressed:
-                observed_offset = self._hp_setpoint - desired_c
+            can_learn = (
+                self._ff_settled_ticks >= 2
+                and self._outdoor_temp is not None
+                and not learning_suppressed
+                and self._is_learning_time_allowed()
+            )
+            if can_learn:
+                # Learn from total need (FF + integral contribution)
+                observed_offset = (
+                    self._hp_setpoint
+                    + (self._pi_ki * self._pi_integral)
+                    - desired_c
+                )
                 bucket_key = round(self._outdoor_temp / 3) * 3
                 learn_buckets = self._ff_heat_buckets if is_heating else self._ff_cool_buckets
                 old = learn_buckets.get(bucket_key, 0.0)
-                learn_buckets[bucket_key] = 0.8 * old + 0.2 * observed_offset
+
+                # Seed protection: don't EMA until enough observations
+                obs_count = self._ff_bucket_observation_counts.get(bucket_key, 0)
+                self._ff_bucket_observation_counts[bucket_key] = obs_count + 1
+                if obs_count + 1 >= self._ff_min_observations:
+                    # Asymmetric learning: faster for undershoot, slower for overshoot
+                    needed_more = (
+                        (is_heating and observed_offset > old)
+                        or (is_cooling and observed_offset < old)
+                    )
+                    alpha = self._ff_alpha if needed_more else self._ff_alpha * self._ff_alpha_overshoot_ratio
+                    learn_buckets[bucket_key] = (1.0 - alpha) * old + alpha * observed_offset
+                # else: keep seed value until enough observations
             elif learning_suppressed and self._ff_settled_ticks >= 2:
                 _LOGGER.debug(
                     "PI: FF learning suppressed by %s",
@@ -718,6 +860,14 @@ class PIController:
 
         # Hard safety cap on integral
         self._pi_integral = max(-50.0, min(50.0, self._pi_integral))
+
+        # Update integral convergence metric (EMA of abs(integral), ~24hr time constant)
+        # With 15-min ticks, 96 ticks/day → alpha ≈ 1/96 ≈ 0.01
+        convergence_alpha = 0.01
+        self._integral_convergence = (
+            (1.0 - convergence_alpha) * self._integral_convergence
+            + convergence_alpha * abs(self._pi_integral)
+        )
 
         i_term = self._pi_ki * self._pi_integral
         raw_setpoint = desired_c + p_term + i_term + self._ff_offset

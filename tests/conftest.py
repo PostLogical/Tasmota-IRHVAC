@@ -64,6 +64,10 @@ def make_config(overrides=None):
         "pi_ff_cool_slope": 0.3,
         "pi_disturbance_inputs": [],
         "pi_setpoint_weight": 1.0,
+        "pi_ff_learn_night_only": False,  # Disabled in tests for predictability
+        "pi_ff_learn_sunset_delay": 90,
+        "pi_ff_anticipated_change_entity": "",
+        "pi_ff_anticipated_change_gain": 0.5,
     }
     if overrides:
         config.update(overrides)
