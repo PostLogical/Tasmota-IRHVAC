@@ -2317,7 +2317,7 @@ class TestConfigFlowEmptyRedirects:
         entry = await setup_integration()
         result = await hass.config_entries.options.async_init(entry.entry_id)
         result = await hass.config_entries.options.async_configure(
-            result["flow_id"], user_input={"next_step_id": "disturbance_inputs"},
+            result["flow_id"], user_input={"next_step_id": "model_inputs"},
         )
         # Menu only shows add when empty
         assert result["type"] == FlowResultType.MENU
@@ -2564,7 +2564,7 @@ class TestConfigFlowGaps:
         entry = await setup_integration()
         result = await hass.config_entries.options.async_init(entry.entry_id)
         result = await hass.config_entries.options.async_configure(
-            result["flow_id"], user_input={"next_step_id": "disturbance_inputs"},
+            result["flow_id"], user_input={"next_step_id": "model_inputs"},
         )
         # Menu should only show "add" when empty
         assert result["type"] == FlowResultType.MENU
@@ -2577,49 +2577,47 @@ class TestConfigFlowGaps:
         # First add one
         result = await hass.config_entries.options.async_init(entry.entry_id)
         result = await hass.config_entries.options.async_configure(
-            result["flow_id"], user_input={"next_step_id": "disturbance_inputs"},
+            result["flow_id"], user_input={"next_step_id": "model_inputs"},
         )
         result = await hass.config_entries.options.async_configure(
-            result["flow_id"], user_input={"next_step_id": "disturbance_inputs_add"},
+            result["flow_id"], user_input={"next_step_id": "model_inputs_add"},
         )
         result = await hass.config_entries.options.async_configure(
             result["flow_id"],
             user_input={
-                "disturbance_name": "Stove",
-                "disturbance_entity": "input_boolean.stove",
-                "disturbance_suppress": True,
-                "disturbance_default_bias": 0.0,
-                "disturbance_gain": 1.0,
+                "model_input_name": "Stove",
+                "model_input_entity": "input_boolean.stove",
+                "model_input_seed_heat": -3.2,
+                "model_input_seed_cool": 0.0,
             },
         )
 
         # Now edit it
         result = await hass.config_entries.options.async_init(entry.entry_id)
         result = await hass.config_entries.options.async_configure(
-            result["flow_id"], user_input={"next_step_id": "disturbance_inputs"},
+            result["flow_id"], user_input={"next_step_id": "model_inputs"},
         )
         result = await hass.config_entries.options.async_configure(
-            result["flow_id"], user_input={"next_step_id": "disturbance_inputs_edit"},
+            result["flow_id"], user_input={"next_step_id": "model_inputs_edit"},
         )
-        assert result["step_id"] == "disturbance_inputs_edit"
+        assert result["step_id"] == "model_inputs_edit"
 
         result = await hass.config_entries.options.async_configure(
             result["flow_id"],
-            user_input={"disturbance_to_edit": "Stove"},
+            user_input={"model_input_to_edit": "Stove"},
         )
-        assert result["step_id"] == "disturbance_inputs_edit_form"
+        assert result["step_id"] == "model_inputs_edit_form"
 
         result = await hass.config_entries.options.async_configure(
             result["flow_id"],
             user_input={
-                "disturbance_name": "Stove Updated",
-                "disturbance_entity": "input_boolean.stove",
-                "disturbance_suppress": False,
-                "disturbance_default_bias": -2.0,
-                "disturbance_gain": 1.0,
+                "model_input_name": "Stove Updated",
+                "model_input_entity": "input_boolean.stove",
+                "model_input_seed_heat": -4.0,
+                "model_input_seed_cool": 0.0,
             },
         )
         assert result["type"] == "create_entry"
-        inputs = entry.options.get("pi_disturbance_inputs", [])
+        inputs = entry.options.get("pi_model_inputs", [])
         assert inputs[0]["name"] == "Stove Updated"
-        assert inputs[0]["default_bias"] == -2.0
+        assert inputs[0]["seed_heat"] == -4.0

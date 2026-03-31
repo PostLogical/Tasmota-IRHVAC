@@ -96,6 +96,7 @@ from .const import (
     CONF_PI_FF_LEARN_SUNSET_DELAY,
     CONF_PI_FF_ANTICIPATED_CHANGE_ENTITY,
     CONF_PI_FF_ANTICIPATED_CHANGE_GAIN,
+    CONF_PI_MODEL_INPUTS,
     DEFAULT_COMMAND_TOPIC,
     DEFAULT_CONF_BEEP,
     DEFAULT_CONF_CELSIUS,
@@ -848,7 +849,7 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
             "sensors",
             "advanced_options",
             "pi_controller",
-            "disturbance_inputs",
+            "model_inputs",
             "ir_actions",
         ]
         return self.async_show_menu(
@@ -965,17 +966,17 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
             ),
         )
 
-    # ── Disturbance Inputs ─────────────────────────────────────────────
+    # ── Model Inputs (FF factors with learnable coefficients) ─────────
 
-    async def async_step_disturbance_inputs(self, user_input=None):
-        """Disturbance inputs management menu."""
-        inputs = self.config_entry.options.get(CONF_PI_DISTURBANCE_INPUTS, [])
-        menu = ["disturbance_inputs_add"]
+    async def async_step_model_inputs(self, user_input=None):
+        """Model inputs management menu."""
+        inputs = self.config_entry.options.get(CONF_PI_MODEL_INPUTS, [])
+        menu = ["model_inputs_add"]
         if inputs:
-            menu.append("disturbance_inputs_edit")
-            menu.append("disturbance_inputs_remove")
+            menu.append("model_inputs_edit")
+            menu.append("model_inputs_remove")
         return self.async_show_menu(
-            step_id="disturbance_inputs",
+            step_id="model_inputs",
             menu_options=menu,
             description_placeholders={
                 "count": str(len(inputs)),
@@ -983,62 +984,82 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
             },
         )
 
-    async def async_step_disturbance_inputs_add(self, user_input=None):
-        """Add a new disturbance input."""
+    async def async_step_model_inputs_add(self, user_input=None):
+        """Add a new model input."""
         if user_input is not None:
-            inputs = list(self.config_entry.options.get(CONF_PI_DISTURBANCE_INPUTS, []))
+            inputs = list(self.config_entry.options.get(CONF_PI_MODEL_INPUTS, []))
             new_input = {
-                "name": user_input["disturbance_name"],
-                "entity_id": user_input["disturbance_entity"],
-                "suppress_learning": user_input.get("disturbance_suppress", False),
-                "default_bias": float(user_input.get("disturbance_default_bias", 0.0)),
-                "gain": float(user_input.get("disturbance_gain", 1.0)),
+                "name": user_input["model_input_name"],
+                "entity_id": user_input["model_input_entity"],
+                "seed_heat": float(user_input.get("model_input_seed_heat", 0.0)),
+                "seed_cool": float(user_input.get("model_input_seed_cool", 0.0)),
+                "lag_tau": float(user_input.get("model_input_lag_tau", 0.0)) * 60,  # min → sec
             }
+            clamp_min = user_input.get("model_input_clamp_min")
+            clamp_max = user_input.get("model_input_clamp_max")
+            if clamp_min is not None:
+                new_input["clamp_min"] = float(clamp_min)
+            if clamp_max is not None:
+                new_input["clamp_max"] = float(clamp_max)
             inputs.append(new_input)
             return self.async_create_entry(
-                data={**self.config_entry.options, CONF_PI_DISTURBANCE_INPUTS: inputs}
+                data={**self.config_entry.options, CONF_PI_MODEL_INPUTS: inputs}
             )
 
         return self.async_show_form(
-            step_id="disturbance_inputs_add",
+            step_id="model_inputs_add",
             data_schema=vol.Schema(
                 {
-                    vol.Required("disturbance_name"): TextSelector(),
-                    vol.Required("disturbance_entity"): EntitySelector(
+                    vol.Required("model_input_name"): TextSelector(),
+                    vol.Required("model_input_entity"): EntitySelector(
                         EntitySelectorConfig()
                     ),
-                    vol.Optional("disturbance_suppress", default=True): BooleanSelector(),
-                    vol.Optional("disturbance_default_bias", default=0.0): NumberSelector(
+                    vol.Optional("model_input_seed_heat", default=0.0): NumberSelector(
                         NumberSelectorConfig(
                             min=-20, max=20, step=0.1, mode=NumberSelectorMode.BOX
                         )
                     ),
-                    vol.Optional("disturbance_gain", default=1.0): NumberSelector(
+                    vol.Optional("model_input_seed_cool", default=0.0): NumberSelector(
                         NumberSelectorConfig(
-                            min=-10, max=10, step=0.1, mode=NumberSelectorMode.BOX
+                            min=-20, max=20, step=0.1, mode=NumberSelectorMode.BOX
+                        )
+                    ),
+                    vol.Optional("model_input_clamp_min"): NumberSelector(
+                        NumberSelectorConfig(
+                            min=-20, max=20, step=0.1, mode=NumberSelectorMode.BOX
+                        )
+                    ),
+                    vol.Optional("model_input_clamp_max"): NumberSelector(
+                        NumberSelectorConfig(
+                            min=-20, max=20, step=0.1, mode=NumberSelectorMode.BOX
+                        )
+                    ),
+                    vol.Optional("model_input_lag_tau", default=0): NumberSelector(
+                        NumberSelectorConfig(
+                            min=0, max=120, step=5, mode=NumberSelectorMode.BOX,
+                            unit_of_measurement="min",
                         )
                     ),
                 }
             ),
         )
 
-    async def async_step_disturbance_inputs_edit(self, user_input=None):
-        """Select a disturbance input to edit."""
-        inputs = self.config_entry.options.get(CONF_PI_DISTURBANCE_INPUTS, [])
+    async def async_step_model_inputs_edit(self, user_input=None):
+        """Select a model input to edit."""
+        inputs = self.config_entry.options.get(CONF_PI_MODEL_INPUTS, [])
         if user_input is not None:
-            # Store the selected name and show the edit form
-            self._editing_disturbance = user_input["disturbance_to_edit"]
-            return await self.async_step_disturbance_inputs_edit_form()
+            self._editing_model_input = user_input["model_input_to_edit"]
+            return await self.async_step_model_inputs_edit_form()
 
         input_names = [d["name"] for d in inputs]
-        if not input_names:  # pragma: no cover — menu hides edit when empty, defensive redirect
-            return await self.async_step_disturbance_inputs()
+        if not input_names:  # pragma: no cover — menu hides edit when empty
+            return await self.async_step_model_inputs()
 
         return self.async_show_form(
-            step_id="disturbance_inputs_edit",
+            step_id="model_inputs_edit",
             data_schema=vol.Schema(
                 {
-                    vol.Required("disturbance_to_edit"): SelectSelector(
+                    vol.Required("model_input_to_edit"): SelectSelector(
                         SelectSelectorConfig(
                             options=input_names,
                             mode=SelectSelectorMode.DROPDOWN,
@@ -1048,82 +1069,90 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
             ),
         )
 
-    async def async_step_disturbance_inputs_edit_form(self, user_input=None):
-        """Edit a disturbance input's settings."""
-        inputs = list(self.config_entry.options.get(CONF_PI_DISTURBANCE_INPUTS, []))
-        editing_name = self._editing_disturbance
+    async def async_step_model_inputs_edit_form(self, user_input=None):
+        """Edit a model input's settings."""
+        inputs = list(self.config_entry.options.get(CONF_PI_MODEL_INPUTS, []))
+        editing_name = self._editing_model_input
 
         if user_input is not None:
-            # Replace the edited input
-            updated_input = {
-                "name": user_input["disturbance_name"],
-                "entity_id": user_input["disturbance_entity"],
-                "suppress_learning": user_input.get("disturbance_suppress", False),
-                "default_bias": float(user_input.get("disturbance_default_bias", 0.0)),
-                "gain": float(user_input.get("disturbance_gain", 1.0)),
+            updated = {
+                "name": user_input["model_input_name"],
+                "entity_id": user_input["model_input_entity"],
+                "seed_heat": float(user_input.get("model_input_seed_heat", 0.0)),
+                "seed_cool": float(user_input.get("model_input_seed_cool", 0.0)),
+                "lag_tau": float(user_input.get("model_input_lag_tau", 0.0)) * 60,
             }
-            inputs = [
-                updated_input if d["name"] == editing_name else d
-                for d in inputs
-            ]
+            clamp_min = user_input.get("model_input_clamp_min")
+            clamp_max = user_input.get("model_input_clamp_max")
+            if clamp_min is not None:
+                updated["clamp_min"] = float(clamp_min)
+            if clamp_max is not None:
+                updated["clamp_max"] = float(clamp_max)
+            inputs = [updated if d["name"] == editing_name else d for d in inputs]
             return self.async_create_entry(
-                data={**self.config_entry.options, CONF_PI_DISTURBANCE_INPUTS: inputs}
+                data={**self.config_entry.options, CONF_PI_MODEL_INPUTS: inputs}
             )
 
-        # Find the existing input to pre-fill
         existing = next((d for d in inputs if d["name"] == editing_name), {})
 
         return self.async_show_form(
-            step_id="disturbance_inputs_edit_form",
+            step_id="model_inputs_edit_form",
             data_schema=self.add_suggested_values_to_schema(
                 vol.Schema(
                     {
-                        vol.Required("disturbance_name"): TextSelector(),
-                        vol.Required("disturbance_entity"): EntitySelector(
+                        vol.Required("model_input_name"): TextSelector(),
+                        vol.Required("model_input_entity"): EntitySelector(
                             EntitySelectorConfig()
                         ),
-                        vol.Optional("disturbance_suppress", default=True): BooleanSelector(),
-                        vol.Optional("disturbance_default_bias", default=0.0): NumberSelector(
-                            NumberSelectorConfig(
-                                min=-20, max=20, step=0.1, mode=NumberSelectorMode.BOX
-                            )
+                        vol.Optional("model_input_seed_heat", default=0.0): NumberSelector(
+                            NumberSelectorConfig(min=-20, max=20, step=0.1, mode=NumberSelectorMode.BOX)
                         ),
-                        vol.Optional("disturbance_gain", default=1.0): NumberSelector(
-                            NumberSelectorConfig(
-                                min=-10, max=10, step=0.1, mode=NumberSelectorMode.BOX
-                            )
+                        vol.Optional("model_input_seed_cool", default=0.0): NumberSelector(
+                            NumberSelectorConfig(min=-20, max=20, step=0.1, mode=NumberSelectorMode.BOX)
+                        ),
+                        vol.Optional("model_input_clamp_min"): NumberSelector(
+                            NumberSelectorConfig(min=-20, max=20, step=0.1, mode=NumberSelectorMode.BOX)
+                        ),
+                        vol.Optional("model_input_clamp_max"): NumberSelector(
+                            NumberSelectorConfig(min=-20, max=20, step=0.1, mode=NumberSelectorMode.BOX)
+                        ),
+                        vol.Optional("model_input_lag_tau", default=0): NumberSelector(
+                            NumberSelectorConfig(min=0, max=120, step=5, mode=NumberSelectorMode.BOX,
+                                                unit_of_measurement="min")
                         ),
                     }
                 ),
                 {
-                    "disturbance_name": existing.get("name", ""),
-                    "disturbance_entity": existing.get("entity_id", ""),
-                    "disturbance_suppress": existing.get("suppress_learning", True),
-                    "disturbance_default_bias": existing.get("default_bias", 0.0),
-                    "disturbance_gain": existing.get("gain", 1.0),
+                    "model_input_name": existing.get("name", ""),
+                    "model_input_entity": existing.get("entity_id", ""),
+                    "model_input_seed_heat": existing.get("seed_heat", 0.0),
+                    "model_input_seed_cool": existing.get("seed_cool", 0.0),
+                    "model_input_clamp_min": existing.get("clamp_min"),
+                    "model_input_clamp_max": existing.get("clamp_max"),
+                    "model_input_lag_tau": existing.get("lag_tau", 0) / 60,  # sec → min for display
                 },
             ),
         )
 
-    async def async_step_disturbance_inputs_remove(self, user_input=None):
-        """Remove disturbance inputs."""
-        inputs = list(self.config_entry.options.get(CONF_PI_DISTURBANCE_INPUTS, []))
+    async def async_step_model_inputs_remove(self, user_input=None):
+        """Remove model inputs."""
+        inputs = list(self.config_entry.options.get(CONF_PI_MODEL_INPUTS, []))
         if user_input is not None:
-            names_to_remove = set(user_input.get("disturbance_inputs_to_remove", []))
+            names_to_remove = set(user_input.get("model_inputs_to_remove", []))
             inputs = [d for d in inputs if d["name"] not in names_to_remove]
             return self.async_create_entry(
-                data={**self.config_entry.options, CONF_PI_DISTURBANCE_INPUTS: inputs}
+                data={**self.config_entry.options, CONF_PI_MODEL_INPUTS: inputs}
             )
 
         input_names = [d["name"] for d in inputs]
-        if not input_names:  # pragma: no cover — menu hides remove when empty, defensive redirect
-            return await self.async_step_disturbance_inputs()
+        if not input_names:  # pragma: no cover — menu hides remove when empty
+            return await self.async_step_model_inputs()
 
         return self.async_show_form(
-            step_id="disturbance_inputs_remove",
+            step_id="model_inputs_remove",
             data_schema=vol.Schema(
                 {
-                    vol.Required("disturbance_inputs_to_remove"): SelectSelector(
+                    vol.Required("model_inputs_to_remove"): SelectSelector(
                         SelectSelectorConfig(
                             options=input_names,
                             multiple=True,
