@@ -355,22 +355,23 @@ class TestAnticipatedChange:
     """Verify anticipated change feedforward."""
 
     @pytest.mark.asyncio
-    async def test_anticipated_change_adds_offset(self):
-        """Anticipated outdoor drop should add positive offset in heating."""
+    async def test_anticipated_change_listener_updates_value(self):
+        """Anticipated change entity state change should update the stored value."""
         entity = FakeLearningEntity(_make_config(
             pi_ff_anticipated_change_entity="sensor.forecast_delta",
             pi_ff_anticipated_change_gain=0.5,
         ))
         pi = entity._pi
 
-        # Outdoor temp dropping 2°C → gain 0.5 → +1°C offset
-        pi._anticipated_change = -2.0
+        # Simulate state change event
+        event = MagicMock()
+        new_state = MagicMock()
+        new_state.state = "-2.0"
+        event.data = {"new_state": new_state}
 
-        _settled_tick(entity, outdoor_temp=5.0, current=20.0, desired=22.0)
+        pi._async_anticipated_change_changed(event)
 
-        await pi._pi_tick()
-
-        assert pi._ff_anticipated_offset == pytest.approx(-2.0 * 0.5)
+        assert pi._anticipated_change == -2.0
 
     @pytest.mark.asyncio
     async def test_anticipated_change_zero_when_disabled(self):

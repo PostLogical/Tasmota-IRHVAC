@@ -205,6 +205,7 @@ CONF_PI_FF_LEARN_NIGHT_ONLY = "pi_ff_learn_night_only"
 CONF_PI_FF_LEARN_SUNSET_DELAY = "pi_ff_learn_sunset_delay"
 CONF_PI_FF_ANTICIPATED_CHANGE_ENTITY = "pi_ff_anticipated_change_entity"
 CONF_PI_FF_ANTICIPATED_CHANGE_GAIN = "pi_ff_anticipated_change_gain"
+CONF_PI_MODEL_INPUTS = "pi_model_inputs"
 
 # PI controller defaults
 DEFAULT_PI_ENABLED = False
@@ -222,6 +223,13 @@ DEFAULT_PI_FF_LEARN_SUNSET_DELAY = 90  # minutes after sunset before learning st
 DEFAULT_PI_FF_ANTICIPATED_CHANGE_GAIN = 0.5
 DEFAULT_PI_FF_ALPHA = 0.05  # EMA learning rate (was 0.2)
 DEFAULT_PI_FF_ALPHA_OVERSHOOT_RATIO = 0.25  # learn at alpha*ratio when overshooting
+
+# RLS model defaults
+DEFAULT_RLS_LAMBDA_BASE = 0.999  # Base forgetting factor (~10 day effective memory)
+DEFAULT_RLS_LAMBDA_MIN = 0.995   # Minimum λ when residuals are large
+DEFAULT_RLS_DELTA = 0.001        # Ridge regularization
+DEFAULT_RLS_P_INIT = 10.0        # Initial covariance diagonal
+DEFAULT_RLS_RESIDUAL_THRESHOLD = 3.0  # °C, for variable forgetting factor
 
 # PI controller extra state attributes
 ATTR_HP_SETPOINT = "hp_setpoint"

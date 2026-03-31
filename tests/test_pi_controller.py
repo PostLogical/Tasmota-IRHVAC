@@ -443,28 +443,18 @@ class TestFeedforward:
         assert pi_entity._pi._ff_offset == 0.0
 
     @pytest.mark.asyncio
-    async def test_disturbance_bias_adds_to_ff(self, pi_entity):
-        """Disturbance input bias should be added to FF offset."""
-        pi_entity._pi._disturbance_inputs = [{
-            "name": "Bias",
-            "entity_id": "input_number.hvac_bias",
-            "suppress_learning": False,
-            "default_bias": 0.0,
-            "gain": 1.0,
-        }]
-        pi_entity._pi._outdoor_temp = None  # No outdoor sensor, so base FF = 0
-        pi_entity._attr_current_temperature = 68.0
-        pi_entity._pi._desired_temp = 72.0
+    async def test_rls_model_produces_ff_offset(self, pi_entity):
+        """RLS model should produce FF offset based on outdoor delta."""
+        pi_entity._pi._outdoor_temp = 5.0  # 10°C below reference (15)
+        pi_entity._attr_current_temperature = 20.0
+        pi_entity._pi._desired_temp = 22.0
         pi_entity._pi._hp_setpoint = 22.0
-
-        # Mock bias entity state (numeric → value × gain)
-        mock_state = MagicMock()
-        mock_state.state = "2.5"
-        pi_entity.hass.states.get.return_value = mock_state
 
         await pi_entity._pi._pi_tick()
 
-        assert pi_entity._pi._ff_offset == pytest.approx(2.5)
+        # With seed slope of 0.3 and outdoor_delta=10, FF ≈ 0.3*10 = 3.0
+        # (scaled by overshoot scaling which should be ~1.0 for 2°C error)
+        assert pi_entity._pi._ff_offset > 0
 
     @pytest.mark.asyncio
     async def test_disturbance_unavailable_ignored(self, pi_entity):

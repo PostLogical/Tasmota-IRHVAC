@@ -39,7 +39,7 @@ class FakePIEntity:
 
     @property
     def temperature_unit(self):
-        return UnitOfTemperature.FAHRENHEIT
+        return UnitOfTemperature.CELSIUS
 
 
 def _mock_state(entity_id, state_val, attributes=None):
@@ -329,64 +329,43 @@ class TestManualSuppress:
 
 
 class TestIntegralReset:
-    """Tests for integral reset on large disturbance bias changes."""
+    """Tests for integral behavior with RLS model (formerly disturbance bias reset)."""
 
     @pytest.mark.asyncio
-    async def test_large_bias_change_resets_integral(self):
-        """When total bias changes by >1°C, integral should be zeroed."""
-        config = make_pi_config({
-            "pi_disturbance_inputs": [{
-                "name": "Stove",
-                "entity_id": "binary_sensor.stove",
-                "suppress_learning": True,
-                "default_bias": -5.0,
-                "gain": 1.0,
-            }]
-        })
+    async def test_integral_accumulates_with_error(self):
+        """Integral should accumulate when there is heating error."""
+        config = make_pi_config()
         entity = FakePIEntity(config)
-        entity._pi._pi_integral = 3.5  # Accumulated integral
-        entity._pi._last_disturbance_bias = 0.0  # Was 0 (stove off)
+        entity._pi._pi_integral = 0.0
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 20.0
+        entity._pi._desired_temp = 22.0
+        entity._pi._hp_setpoint = 22.0
+        entity._pi._outdoor_temp = 5.0
+        entity._pi._pi_last_tick_time = 0
 
-        # Stove turns on → bias jumps to -5.0
-        _setup_hass_states(entity, {
-            "binary_sensor.stove": "on",
-            "sensor.outdoor_temp": "0",
-            "sensor.room_temp": "72",
-        })
         await entity._pi._pi_tick()
 
-        # Integral should have been reset (change was |−5 − 0| = 5 > 1)
-        # Note: _pi_tick may have added to integral after reset, but it
-        # should have been zeroed at the transition point
-        assert entity._pi._last_disturbance_bias == pytest.approx(-5.0)
+        assert entity._pi._pi_integral > 0.0
 
     @pytest.mark.asyncio
-    async def test_small_bias_change_preserves_integral(self):
-        """When total bias changes by ≤1°C, integral should be preserved."""
-        config = make_pi_config({
-            "pi_disturbance_inputs": [{
-                "name": "Solar",
-                "entity_id": "sensor.solar",
-                "suppress_learning": False,
-                "default_bias": 0.0,
-                "gain": 1.0,
-            }]
-        })
+    async def test_integral_decays_in_deadband(self):
+        """Integral should decay (×0.9) but not reset in deadband."""
+        config = make_pi_config()
         entity = FakePIEntity(config)
-        entity._pi._pi_integral = 3.5
-        entity._pi._last_disturbance_bias = -0.3  # Was -0.3
+        entity._pi._pi_integral = 5.0
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 22.0
+        entity._pi._desired_temp = 22.0
+        entity._pi._hp_setpoint = 22.0
+        entity._pi._outdoor_temp = 14.0  # Near reference, low FF offset
+        entity._pi._pi_last_tick_time = 0
 
-        # Solar changes slightly → bias goes to -0.5
-        _setup_hass_states(entity, {
-            "sensor.solar": "-0.5",
-            "sensor.outdoor_temp": "10",
-            "sensor.room_temp": "72",
-        })
         await entity._pi._pi_tick()
 
-        # Change was |−0.5 − (−0.3)| = 0.2 < 1 → integral preserved
-        # (may have been modified by PI math, but not zeroed by transition)
-        assert entity._pi._last_disturbance_bias == pytest.approx(-0.5)
+        # In deadband: integral *= 0.9, so should be ~4.5
+        assert entity._pi._pi_integral > 0.0
+        assert entity._pi._pi_integral < 5.0
 
 
 # ── Tests: Migration ────────────────────────────────────────────────
