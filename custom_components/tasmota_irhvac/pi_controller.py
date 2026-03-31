@@ -57,7 +57,6 @@ from .const import (
     DEFAULT_PI_FF_HEAT_SLOPE,
     DEFAULT_PI_FF_LEARN_NIGHT_ONLY,
     DEFAULT_PI_FF_LEARN_SUNSET_DELAY,
-    DEFAULT_PI_FF_MIN_OBSERVATIONS,
     DEFAULT_PI_KI,
     DEFAULT_PI_KP,
     DEFAULT_PI_MIN_INTERVAL,
@@ -186,7 +185,7 @@ class PIController:
         self._ff_learn_sunset_delay = config.get(CONF_PI_FF_LEARN_SUNSET_DELAY, DEFAULT_PI_FF_LEARN_SUNSET_DELAY) * 60  # Convert min → sec
         self._ff_alpha = DEFAULT_PI_FF_ALPHA
         self._ff_alpha_overshoot_ratio = DEFAULT_PI_FF_ALPHA_OVERSHOOT_RATIO
-        self._ff_min_observations = DEFAULT_PI_FF_MIN_OBSERVATIONS
+        self._ff_min_observation_hours = 4.0  # Hours of data before EMA overwrites seed
 
         # Anticipated change FF config
         self._anticipated_change_entity = config.get(CONF_PI_FF_ANTICIPATED_CHANGE_ENTITY, "")
@@ -242,6 +241,7 @@ class PIController:
             self._ff_cool_reference, self._ff_cool_slope, is_cooling=True
         )
         self._ff_bucket_observation_counts: dict[int, int] = {}
+        self._ff_bucket_first_obs_time: dict[int, float] = {}
 
         # Outdoor temp state
         self._outdoor_temp = None
@@ -825,10 +825,16 @@ class PIController:
                 learn_buckets = self._ff_heat_buckets if is_heating else self._ff_cool_buckets
                 old = learn_buckets.get(bucket_key, 0.0)
 
-                # Seed protection: don't EMA until enough observations
-                obs_count = self._ff_bucket_observation_counts.get(bucket_key, 0)
-                self._ff_bucket_observation_counts[bucket_key] = obs_count + 1
-                if obs_count + 1 >= self._ff_min_observations:
+                # Seed protection: don't EMA until enough time has passed
+                first_obs_time = self._ff_bucket_first_obs_time.get(bucket_key)
+                if first_obs_time is None:
+                    self._ff_bucket_first_obs_time[bucket_key] = now_mono
+                    first_obs_time = now_mono
+                self._ff_bucket_observation_counts[bucket_key] = (
+                    self._ff_bucket_observation_counts.get(bucket_key, 0) + 1
+                )
+                hours_observed = (now_mono - first_obs_time) / 3600.0
+                if hours_observed >= self._ff_min_observation_hours:
                     # Asymmetric learning: faster for undershoot, slower for overshoot
                     needed_more = (
                         (is_heating and observed_offset > old)

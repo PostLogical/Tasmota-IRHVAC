@@ -220,7 +220,6 @@ DEFAULT_PI_SETPOINT_WEIGHT = 0.5  # Adaptive: full P for large errors, weighted 
 DEFAULT_PI_FF_LEARN_NIGHT_ONLY = True
 DEFAULT_PI_FF_LEARN_SUNSET_DELAY = 90  # minutes after sunset before learning starts
 DEFAULT_PI_FF_ANTICIPATED_CHANGE_GAIN = 0.5
-DEFAULT_PI_FF_MIN_OBSERVATIONS = 10  # min observations before EMA overwrites seed
 DEFAULT_PI_FF_ALPHA = 0.05  # EMA learning rate (was 0.2)
 DEFAULT_PI_FF_ALPHA_OVERSHOOT_RATIO = 0.25  # learn at alpha*ratio when overshooting
 
