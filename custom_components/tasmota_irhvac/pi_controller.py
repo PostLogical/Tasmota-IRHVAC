@@ -36,8 +36,6 @@ from .const import (
     CONF_PI_DEADBAND,
     CONF_PI_DISTURBANCE_INPUTS,
     CONF_PI_ENABLED,
-    CONF_PI_FF_ANTICIPATED_CHANGE_ENTITY,
-    CONF_PI_FF_ANTICIPATED_CHANGE_GAIN,
     CONF_PI_FF_COOL_REFERENCE,
     CONF_PI_FF_COOL_SLOPE,
     CONF_PI_FF_HEAT_REFERENCE,
@@ -53,7 +51,6 @@ from .const import (
     DEFAULT_PI_ENABLED,
     DEFAULT_PI_FF_ALPHA,
     DEFAULT_PI_FF_ALPHA_OVERSHOOT_RATIO,
-    DEFAULT_PI_FF_ANTICIPATED_CHANGE_GAIN,
     DEFAULT_PI_FF_COOL_REFERENCE,
     DEFAULT_PI_FF_COOL_SLOPE,
     DEFAULT_PI_FF_HEAT_REFERENCE,
@@ -371,9 +368,7 @@ class PIController:
         self._ff_alpha_overshoot_ratio = DEFAULT_PI_FF_ALPHA_OVERSHOOT_RATIO
         self._ff_min_observation_hours = 4.0  # Hours of data before EMA overwrites seed
 
-        # Anticipated change FF config
-        self._anticipated_change_entity = config.get(CONF_PI_FF_ANTICIPATED_CHANGE_ENTITY, "")
-        self._anticipated_change_gain = config.get(CONF_PI_FF_ANTICIPATED_CHANGE_GAIN, DEFAULT_PI_FF_ANTICIPATED_CHANGE_GAIN)
+        # (Anticipated change entity removed — use model inputs instead)
 
         # Disturbance inputs (replaces single suppress/bias entities)
         # Fallback: convert legacy keys if disturbance_inputs is empty (e.g., YAML import)
@@ -473,9 +468,6 @@ class PIController:
         # Outdoor temp state
         self._outdoor_temp = None
 
-        # Anticipated change state (now a model input, kept for backward compat)
-        self._anticipated_change = 0.0
-        self._ff_anticipated_offset = 0.0
 
         # Night learning state (kept for bucket learning, RLS doesn't need it)
         self._sun_below_horizon_since = 0.0
@@ -565,21 +557,7 @@ class PIController:
                 self._async_disturbance_entity_changed,
             )
 
-        # Register anticipated change entity
-        if self._anticipated_change_entity:
-            async_track_state_change_event(
-                self._hass,
-                self._anticipated_change_entity,
-                self._async_anticipated_change_changed,
-            )
-            ac_state = self._hass.states.get(self._anticipated_change_entity)
-            if ac_state is not None and ac_state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN):
-                try:
-                    self._anticipated_change = float(ac_state.state)
-                except (ValueError, TypeError):
-                    pass
-
-        # Register sun.sun for night-only learning
+        # Register sun.sun for night-only learning (legacy bucket learning only)
         if self._ff_learn_night_only:
             async_track_state_change_event(
                 self._hass, "sun.sun", self._async_sun_state_changed,
@@ -723,13 +701,16 @@ class PIController:
         # Second+ echo: flag already False, but we use a cooldown to ignore.
         if "Temp" in payload and payload["Temp"] > 0:
             if self._pi_command_pending:
+                _LOGGER.debug("MQTT echo: first echo (command pending), clearing flag")
                 self._pi_command_pending = False
             else:
-                # Only re-tick if enough time has passed (cooldown prevents duplicate processing)
                 elapsed = time.monotonic() - self._pi_last_tick_time
-                if elapsed >= 5.0:  # At least 5 seconds since last tick
+                if elapsed >= 5.0:
+                    _LOGGER.debug("MQTT echo: external change (elapsed=%.1fs), re-ticking", elapsed)
                     self._desired_temp = e._attr_target_temperature
                     await self._pi_tick()
+                else:
+                    _LOGGER.debug("MQTT echo: duplicate ignored (elapsed=%.1fs < 5s)", elapsed)
 
     async def sensor_changed(self, was_none):
         """Handle temp sensor update."""
@@ -913,18 +894,6 @@ class PIController:
             self._update_outdoor_temp(new_state)
 
     @callback
-    def _async_anticipated_change_changed(self, event):
-        """Handle anticipated change entity state changes."""
-        new_state = event.data.get("new_state")
-        if new_state is not None and new_state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN):
-            try:
-                self._anticipated_change = float(new_state.state)
-            except (ValueError, TypeError):
-                self._anticipated_change = 0.0
-        else:
-            self._anticipated_change = 0.0
-
-    @callback
     def _async_sun_state_changed(self, event):
         """Track when sun goes below horizon for night-only learning."""
         new_state = event.data.get("new_state")
@@ -984,7 +953,8 @@ class PIController:
                 continue
             state = self._hass.states.get(entity_id)
             if not state or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
-                # Keep last known value (don't set to 0)
+                _LOGGER.debug("Model input '%s' (%s) unavailable, using last value %.2f",
+                             m_input.get("name", "?"), entity_id, self._model_input_values[i])
                 continue
             try:
                 self._model_input_values[i] = float(state.state)
@@ -1195,9 +1165,10 @@ class PIController:
             # In deadband: accumulate error at full rate (both positive and negative)
             # to balance asymmetric oscillation. Apply gentle decay (0.99) to bleed
             # off stale integral from prior conditions without eroding quickly.
+            # Decay old integral first, then add fresh error (standard EMA order)
+            self._pi_integral *= 0.99
             avg_error = (error + self._pi_last_error) / 2.0
             self._pi_integral += avg_error * dt_factor
-            self._pi_integral *= 0.99
             self._ff_settled_ticks += 1
             # RLS learning: update model when settled AND integral is small and stable.
             # Integral < 3 ensures FF is providing most of the offset, not the integral.
@@ -1218,18 +1189,39 @@ class PIController:
                 and not self._any_model_input_unavailable()
                 and self._rls_warmup_done
             )
+            if not can_learn_rls and self._ff_settled_ticks == 4:
+                # Log why learning was blocked (once, at the gate threshold)
+                reasons = []
+                if self._outdoor_temp is None:
+                    reasons.append("no outdoor temp")
+                if learning_suppressed:
+                    reasons.append("manually suppressed")
+                if not integral_stable:
+                    reasons.append(f"integral not stable (|I|={abs(self._pi_integral):.1f}, rate={abs(self._pi_integral - self._prev_integral_for_rls):.2f})")
+                if self._any_model_input_unavailable():
+                    reasons.append("model input unavailable")
+                if not self._rls_warmup_done:
+                    reasons.append("warmup not complete")
+                if reasons:
+                    _LOGGER.debug("RLS learning blocked: %s", ", ".join(reasons))
             if can_learn_rls:
-                # Observe the total offset being applied:
-                # FF prediction + integral's contribution = what keeps the room at target.
-                # Adaptive ki matches what's used in the actual i_term computation.
                 obs_ki = self._pi_ki * (1.0 + abs(self._pi_integral) / 10.0)
                 observed_offset = self._ff_offset + obs_ki * self._pi_integral
+                beta_before = list(rls.beta)
                 residual = rls.update(x, observed_offset)
                 _LOGGER.debug(
                     "RLS update: observed=%.2f predicted=%.2f residual=%.2f obs_count=%d",
                     observed_offset, observed_offset - residual, residual,
                     rls.observation_count,
                 )
+                # Log significant coefficient changes
+                for idx in range(len(rls.beta)):
+                    if beta_before[idx] != 0 and abs(rls.beta[idx] - beta_before[idx]) / abs(beta_before[idx]) > 0.1:
+                        _LOGGER.info(
+                            "RLS coefficient[%d] changed %.3f -> %.3f (%.0f%%)",
+                            idx, beta_before[idx], rls.beta[idx],
+                            100 * (rls.beta[idx] - beta_before[idx]) / beta_before[idx],
+                        )
 
             # Legacy bucket learning (parallel comparison, same gate as before)
             can_learn_buckets = (
@@ -1281,8 +1273,10 @@ class PIController:
         # Only when the integral is small — large opposite-sign integral means FF is wrong
         # and the integral is legitimately compensating. Don't fight it.
         if is_heating and -3.0 < self._pi_integral < 0 and abs(error) < self._pi_deadband:
+            _LOGGER.debug("Overshoot recovery: zeroing small negative integral %.2f in heating", self._pi_integral)
             self._pi_integral = 0.0
         elif is_cooling and 0 < self._pi_integral < 3.0 and abs(error) < self._pi_deadband:
+            _LOGGER.debug("Overshoot recovery: zeroing small positive integral %.2f in cooling", self._pi_integral)
             self._pi_integral = 0.0
 
         # Hard safety cap on integral
@@ -1304,6 +1298,9 @@ class PIController:
         effective_ki = self._pi_ki * adaptive_ki_boost
 
         i_term = effective_ki * self._pi_integral
+        if adaptive_ki_boost > 1.5:
+            _LOGGER.debug("Adaptive ki boost: %.1fx (integral=%.1f, effective_ki=%.3f)",
+                         adaptive_ki_boost, self._pi_integral, effective_ki)
         raw_setpoint = desired_c + p_term + i_term + self._ff_offset
         clamped_setpoint = max(self._min_temp_c, min(self._max_temp_c, raw_setpoint))
 

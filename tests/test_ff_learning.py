@@ -356,78 +356,7 @@ class TestNightOnlyLearning:
         assert pi._is_learning_time_allowed() is True
 
 
-# ── Anticipated Change FF Tests ──────────────────────────────────────
-
-
-class TestAnticipatedChange:
-    """Verify anticipated change feedforward."""
-
-    @pytest.mark.asyncio
-    async def test_anticipated_change_listener_updates_value(self):
-        """Anticipated change entity state change should update the stored value."""
-        entity = FakeLearningEntity(_make_config(
-            pi_ff_anticipated_change_entity="sensor.forecast_delta",
-            pi_ff_anticipated_change_gain=0.5,
-        ))
-        pi = entity._pi
-
-        # Simulate state change event
-        event = MagicMock()
-        new_state = MagicMock()
-        new_state.state = "-2.0"
-        event.data = {"new_state": new_state}
-
-        pi._async_anticipated_change_changed(event)
-
-        assert pi._anticipated_change == -2.0
-
-    @pytest.mark.asyncio
-    async def test_anticipated_change_zero_when_disabled(self):
-        """No anticipated change entity → offset should be 0."""
-        entity = FakeLearningEntity(_make_config())
-        pi = entity._pi
-
-        _settled_tick(entity, outdoor_temp=5.0, current=20.0, desired=22.0)
-
-        await pi._pi_tick()
-
-        assert pi._ff_anticipated_offset == 0.0
-
-    @pytest.mark.asyncio
-    async def test_anticipated_change_listener(self):
-        """State change on anticipated entity should update value."""
-        entity = FakeLearningEntity(_make_config(
-            pi_ff_anticipated_change_entity="sensor.forecast_delta",
-        ))
-        pi = entity._pi
-
-        # Simulate state change event
-        event = MagicMock()
-        new_state = MagicMock()
-        new_state.state = "-1.5"
-        event.data = {"new_state": new_state}
-
-        pi._async_anticipated_change_changed(event)
-
-        assert pi._anticipated_change == -1.5
-
-    @pytest.mark.asyncio
-    async def test_anticipated_change_unavailable(self):
-        """Unavailable state should set anticipated change to 0."""
-        entity = FakeLearningEntity(_make_config(
-            pi_ff_anticipated_change_entity="sensor.forecast_delta",
-        ))
-        pi = entity._pi
-        pi._anticipated_change = -2.0  # Had a value
-
-        event = MagicMock()
-        new_state = MagicMock()
-        new_state.state = STATE_UNAVAILABLE
-        event.data = {"new_state": new_state}
-
-        pi._async_anticipated_change_changed(event)
-
-        assert pi._anticipated_change == 0.0
+# (Anticipated Change tests removed — functionality replaced by model inputs)
 
 
 # ── Integral Convergence Tests ───────────────────────────────────────
