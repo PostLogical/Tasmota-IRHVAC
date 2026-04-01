@@ -442,7 +442,7 @@ class PIController:
         # Index 2+: model inputs in order
         heat_seeds = [0.0, self._ff_heat_slope]
         cool_seeds = [0.0, -self._ff_cool_slope]  # Negative: hotter outdoor → lower HP setpoint
-        clamps = [None, (-1.0, 0.0)]  # Intercept unclamped, outdoor_delta negative
+        clamps = [None, (0.0, 2.0)]  # Intercept unclamped, outdoor_delta positive (more cold = more offset)
         for m_input in self._model_inputs:
             heat_seeds.append(float(m_input.get("seed_heat", 0.0)))
             cool_seeds.append(float(m_input.get("seed_cool", 0.0)))
@@ -1149,8 +1149,7 @@ class PIController:
         raw_rls_offset = rls.predict(x)
 
         # FF is based on external conditions (outdoor, solar, stove), not room temp.
-        # No overshoot scaling — let the PI integral handle room temp deviations.
-        # Scaling FF based on error creates positive feedback oscillation.
+        # The PI integral handles room temp deviations from target.
         self._ff_offset = raw_rls_offset
 
         # Legacy bucket FF for parallel comparison
@@ -1181,9 +1180,17 @@ class PIController:
         else:
             effective_weight = self._pi_setpoint_weight
 
-        # Deadband: if error is small, skip P term. Integral holds (no decay).
+        # Deadband: if error is small, skip P term.
+        # Integral still accumulates error in deadband (at reduced rate) to prevent
+        # unbounded growth from asymmetric oscillation around setpoint.
         in_deadband = abs_error < self._pi_deadband
         if in_deadband:
+            # In deadband: accumulate error at full rate (both positive and negative)
+            # to balance asymmetric oscillation. Apply gentle decay (0.99) to bleed
+            # off stale integral from prior conditions without eroding quickly.
+            avg_error = (error + self._pi_last_error) / 2.0
+            self._pi_integral += avg_error * dt_factor
+            self._pi_integral *= 0.99
             self._ff_settled_ticks += 1
             # RLS learning: update model when settled AND integral is small and stable.
             # Integral < 3 ensures FF is providing most of the offset, not the integral.

@@ -855,34 +855,49 @@ class TestPIEdgeCases:
         assert pi_entity._pi._hp_setpoint == old_setpoint
 
     @pytest.mark.asyncio
-    async def test_integral_zeroed_on_heating_undershoot(self, pi_entity):
-        """Negative integral in heating near deadband should be zeroed."""
+    async def test_small_negative_integral_zeroed_in_heating(self, pi_entity):
+        """Small negative integral in heating near deadband should be zeroed."""
         pi_entity._attr_current_temperature = 22.0
         pi_entity._pi._desired_temp = 22.0
         pi_entity._pi._hp_setpoint = 22.0
-        pi_entity._pi._pi_integral = -5.0  # Negative integral from overshooting
+        pi_entity._pi._pi_integral = -1.5  # Small negative from brief overshoot
         pi_entity._pi._pi_last_tick_time = 0
         pi_entity._attr_hvac_mode = HVACMode.HEAT
 
         await pi_entity._pi._pi_tick()
 
-        # Negative integral in heating near deadband → zeroed
-        assert pi_entity._pi._pi_integral >= 0.0
+        # Small negative integral (> -3) in heating deadband → zeroed
+        assert pi_entity._pi._pi_integral >= -0.1
 
     @pytest.mark.asyncio
-    async def test_integral_zeroed_on_cooling_overshoot(self, pi_entity):
-        """Positive integral in cooling near deadband should be zeroed."""
+    async def test_large_negative_integral_preserved_in_heating(self, pi_entity):
+        """Large negative integral in heating should be preserved (FF is too high)."""
+        pi_entity._attr_current_temperature = 22.0
+        pi_entity._pi._desired_temp = 22.0
+        pi_entity._pi._hp_setpoint = 22.0
+        pi_entity._pi._pi_integral = -10.0  # Large negative = FF overpredicting
+        pi_entity._pi._pi_last_tick_time = 0
+        pi_entity._attr_hvac_mode = HVACMode.HEAT
+
+        await pi_entity._pi._pi_tick()
+
+        # Large negative integral preserved — FF is legitimately too high
+        assert pi_entity._pi._pi_integral < -3.0
+
+    @pytest.mark.asyncio
+    async def test_small_positive_integral_zeroed_in_cooling(self, pi_entity):
+        """Small positive integral in cooling near deadband should be zeroed."""
         pi_entity._attr_current_temperature = 24.0
         pi_entity._pi._desired_temp = 24.0
         pi_entity._pi._hp_setpoint = 24.0
-        pi_entity._pi._pi_integral = 5.0  # Positive integral from overshooting
+        pi_entity._pi._pi_integral = 1.5  # Small positive from brief overcool
         pi_entity._pi._pi_last_tick_time = 0
         pi_entity._attr_hvac_mode = HVACMode.COOL
 
         await pi_entity._pi._pi_tick()
 
-        # Positive integral in cooling near deadband → zeroed
-        assert pi_entity._pi._pi_integral <= 0.0
+        # Small positive integral (< 3) in cooling deadband → zeroed
+        assert pi_entity._pi._pi_integral <= 0.1
 
     @pytest.mark.asyncio
     async def test_ff_auto_learning_writes_bucket(self, pi_entity):

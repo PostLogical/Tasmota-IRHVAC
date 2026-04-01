@@ -211,8 +211,8 @@ class TestPIControllerGaps:
         await hass.async_block_till_done()
 
     @pytest.mark.asyncio
-    async def test_ff_ramp_gradient_heating(self, hass, setup_pi_integration):
-        """FF should scale down when overshooting in heating mode."""
+    async def test_ff_constant_when_overshooting(self, hass, setup_pi_integration):
+        """FF stays constant regardless of room temp — PI handles overshoot."""
         entry = await setup_pi_integration()
         entity = get_climate_entity(hass, entry)
         pi = entity._pi
@@ -223,16 +223,16 @@ class TestPIControllerGaps:
         pi._pi_integral = 0.0
         pi._pi_last_tick_time = 0
         pi._outdoor_temp = 0.0
-        # Set a known bucket value
-        pi._ff_heat_buckets[0] = 3.0
 
         # Room is ABOVE desired — overshooting in heat mode
         entity._attr_current_temperature = 23.0
 
         await pi._pi_tick()
 
-        # FF should be scaled down (error is negative in heating)
-        assert pi._ff_offset < 3.0
+        # FF is based on outdoor temp, not room temp — stays constant
+        # PI integral goes negative to handle the overshoot
+        assert pi._ff_offset > 0  # FF still active
+        assert pi._pi_integral < 0  # Integral compensating for overshoot
 
     @pytest.mark.asyncio
     async def test_ff_ramp_gradient_cooling(self, hass, setup_pi_integration):
