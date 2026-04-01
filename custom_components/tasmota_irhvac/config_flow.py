@@ -989,22 +989,22 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
                     ),
                     vol.Optional("model_input_seed_heat", default=0.0): NumberSelector(
                         NumberSelectorConfig(
-                            min=-20, max=20, step=0.1, mode=NumberSelectorMode.BOX
+                            min=-20, max=20, step=0.01, mode=NumberSelectorMode.BOX
                         )
                     ),
                     vol.Optional("model_input_seed_cool", default=0.0): NumberSelector(
                         NumberSelectorConfig(
-                            min=-20, max=20, step=0.1, mode=NumberSelectorMode.BOX
+                            min=-20, max=20, step=0.01, mode=NumberSelectorMode.BOX
                         )
                     ),
                     vol.Optional("model_input_clamp_min"): NumberSelector(
                         NumberSelectorConfig(
-                            min=-20, max=20, step=0.1, mode=NumberSelectorMode.BOX
+                            min=-20, max=20, step=0.01, mode=NumberSelectorMode.BOX
                         )
                     ),
                     vol.Optional("model_input_clamp_max"): NumberSelector(
                         NumberSelectorConfig(
-                            min=-20, max=20, step=0.1, mode=NumberSelectorMode.BOX
+                            min=-20, max=20, step=0.01, mode=NumberSelectorMode.BOX
                         )
                     ),
                     vol.Optional("model_input_lag_tau", default=0): NumberSelector(
@@ -1078,16 +1078,16 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
                             EntitySelectorConfig()
                         ),
                         vol.Optional("model_input_seed_heat", default=0.0): NumberSelector(
-                            NumberSelectorConfig(min=-20, max=20, step=0.1, mode=NumberSelectorMode.BOX)
+                            NumberSelectorConfig(min=-20, max=20, step=0.01, mode=NumberSelectorMode.BOX)
                         ),
                         vol.Optional("model_input_seed_cool", default=0.0): NumberSelector(
-                            NumberSelectorConfig(min=-20, max=20, step=0.1, mode=NumberSelectorMode.BOX)
+                            NumberSelectorConfig(min=-20, max=20, step=0.01, mode=NumberSelectorMode.BOX)
                         ),
                         vol.Optional("model_input_clamp_min"): NumberSelector(
-                            NumberSelectorConfig(min=-20, max=20, step=0.1, mode=NumberSelectorMode.BOX)
+                            NumberSelectorConfig(min=-20, max=20, step=0.01, mode=NumberSelectorMode.BOX)
                         ),
                         vol.Optional("model_input_clamp_max"): NumberSelector(
-                            NumberSelectorConfig(min=-20, max=20, step=0.1, mode=NumberSelectorMode.BOX)
+                            NumberSelectorConfig(min=-20, max=20, step=0.01, mode=NumberSelectorMode.BOX)
                         ),
                         vol.Optional("model_input_lag_tau", default=0): NumberSelector(
                             NumberSelectorConfig(min=0, max=120, step=5, mode=NumberSelectorMode.BOX,
