@@ -483,8 +483,10 @@ class PIController:
         # Integral convergence tracking (EMA of abs(integral) over ~24hr)
         self._integral_convergence = 0.0
 
-        # RLS learning gate: track integral stability
+        # RLS learning gate: track integral stability + warmup
         self._prev_integral_for_rls = 0.0
+        self._rls_start_time = time.monotonic()  # Track when RLS was initialized
+        self._rls_warmup_hours = 4.0  # Don't learn for first 4 hours after init/restart
 
     # ── Shorthand entity access ──────────────────────────────────────
 
@@ -1185,12 +1187,14 @@ class PIController:
                 abs(self._pi_integral) < 10
                 and abs(self._pi_integral - self._prev_integral_for_rls) < 1.0
             )
+            warmup_elapsed = (now_mono - self._rls_start_time) / 3600.0
             can_learn_rls = (
                 self._ff_settled_ticks >= 2
                 and self._outdoor_temp is not None
                 and not learning_suppressed
                 and integral_stable
                 and not self._any_model_input_unavailable()
+                and warmup_elapsed >= self._rls_warmup_hours
             )
             if can_learn_rls:
                 # Learn from total need (FF + integral contribution)

@@ -228,7 +228,7 @@ DEFAULT_PI_FF_ALPHA_OVERSHOOT_RATIO = 0.25  # learn at alpha*ratio when overshoo
 DEFAULT_RLS_LAMBDA_BASE = 0.999  # Base forgetting factor (~10 day effective memory)
 DEFAULT_RLS_LAMBDA_MIN = 0.995   # Minimum λ when residuals are large
 DEFAULT_RLS_DELTA = 0.001        # Ridge regularization
-DEFAULT_RLS_P_INIT = 10.0        # Initial covariance diagonal
+DEFAULT_RLS_P_INIT = 1.0         # Initial covariance diagonal (lower = trust seeds more)
 DEFAULT_RLS_RESIDUAL_THRESHOLD = 3.0  # °C, for variable forgetting factor
 
 # PI controller extra state attributes
