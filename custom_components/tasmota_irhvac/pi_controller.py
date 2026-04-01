@@ -716,13 +716,20 @@ class PIController:
             self._hp_setpoint = payload["Temp"]
         e._attr_target_temperature = self._desired_temp
         e.async_write_ha_state()
-        # Echo detection
+        # Echo detection: only process the first echo per command.
+        # With dual MQTT topics (tele + stat), we get 2+ echoes.
+        # _pi_command_pending is True after we send a command.
+        # First echo: clear the flag, don't re-tick.
+        # Second+ echo: flag already False, but we use a cooldown to ignore.
         if "Temp" in payload and payload["Temp"] > 0:
             if self._pi_command_pending:
                 self._pi_command_pending = False
             else:
-                self._desired_temp = e._attr_target_temperature
-                await self._pi_tick()
+                # Only re-tick if enough time has passed (cooldown prevents duplicate processing)
+                elapsed = time.monotonic() - self._pi_last_tick_time
+                if elapsed >= 5.0:  # At least 5 seconds since last tick
+                    self._desired_temp = e._attr_target_temperature
+                    await self._pi_tick()
 
     async def sensor_changed(self, was_none):
         """Handle temp sensor update."""

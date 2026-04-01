@@ -201,6 +201,70 @@ class TestMQTTAvailability:
         assert state.state == "unavailable"
 
 
+class TestDualTopicEcho:
+    """Tests for duplicate MQTT echoes from tele + stat topics."""
+
+    @pytest.mark.asyncio
+    async def test_dual_echo_single_ir_send(self, hass, setup_pi_integration):
+        """Two echoes from tele + stat should not produce extra IR sends."""
+        from unittest.mock import AsyncMock, patch
+
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        # Set up heating mode with a known state
+        entity._attr_hvac_mode = HVACMode.HEAT
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 24
+        pi._pi_command_pending = True  # We just sent a command
+
+        # Ensure last tick time is recent (simulates a tick just ran)
+        import time as _time
+        pi._pi_last_tick_time = _time.monotonic()
+
+        # Patch send_ir to track calls
+        with patch.object(entity, 'send_ir', new_callable=AsyncMock) as mock_send:
+            # First echo (tele topic) — should clear _pi_command_pending
+            payload = make_mqtt_state_payload({"Temp": 24, "Mode": "Heat"})
+            async_fire_mqtt_message(hass, "tele/irhvac/RESULT", payload)
+            await hass.async_block_till_done()
+
+            assert pi._pi_command_pending is False
+
+            # Second echo (stat topic) — should NOT trigger another send_ir
+            async_fire_mqtt_message(hass, "tele/irhvac/RESULT", payload)
+            await hass.async_block_till_done()
+
+            # send_ir should NOT have been called from echo processing
+            assert mock_send.call_count == 0, (
+                f"send_ir called {mock_send.call_count} times from echo — expected 0"
+            )
+
+    @pytest.mark.asyncio
+    async def test_dual_echo_preserves_desired_temp(self, hass, setup_pi_integration):
+        """Both echoes should preserve the user's desired temperature."""
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        entity._attr_hvac_mode = HVACMode.HEAT
+        pi._desired_temp = 21.5
+        entity._attr_target_temperature = 21.5
+        pi._pi_command_pending = True
+
+        # Two echoes back to back
+        payload = make_mqtt_state_payload({"Temp": 24, "Mode": "Heat"})
+        async_fire_mqtt_message(hass, "tele/irhvac/RESULT", payload)
+        await hass.async_block_till_done()
+        async_fire_mqtt_message(hass, "tele/irhvac/RESULT", payload)
+        await hass.async_block_till_done()
+
+        # desired_temp should still be 21.5 after both echoes
+        assert pi._desired_temp == 21.5
+        assert entity._attr_target_temperature == 21.5
+
+
 class TestIrRecvWrapper:
     """Tests for IrReceived wrapper parsing."""
 
