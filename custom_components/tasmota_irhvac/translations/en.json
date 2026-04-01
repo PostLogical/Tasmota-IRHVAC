@@ -201,20 +201,24 @@
       },
       "model_inputs_add": {
         "title": "Add Model Input",
-        "description": "Define an external disturbance source. Boolean entities (binary_sensor, input_boolean) use the default bias when active. Numeric entities (sensor, input_number) use their value multiplied by the gain as bias.",
+        "description": "Add a factor that influences the feedforward model. The RLS algorithm learns each factor's coefficient over time.",
         "data": {
           "model_input_name": "Name",
           "model_input_entity": "Entity",
-          "model_input_suppress": "Suppress FF Learning When Active",
-          "model_input_seed_heat": "Default Bias (°C)",
-          "model_input_seed_cool": "Gain"
+          "model_input_seed_heat": "Seed Coefficient (Heating)",
+          "model_input_seed_cool": "Seed Coefficient (Cooling)",
+          "model_input_clamp_min": "Min Coefficient Clamp",
+          "model_input_clamp_max": "Max Coefficient Clamp",
+          "model_input_lag_tau": "Lag Filter (minutes)"
         },
         "data_description": {
-          "model_input_name": "Display name for this disturbance source (e.g., 'Pellet Stove', 'Bunkroom Door').",
-          "model_input_entity": "Entity to watch. Binary sensors use the default bias when on. Numeric sensors use their value × gain as bias in °C.",
-          "model_input_suppress": "Suppress feedforward auto-learning when this entity is active. Prevents the controller from learning bad offsets during atypical conditions.",
-          "model_input_seed_heat": "Bias in °C applied when a boolean entity is 'on'. Negative = reduce HP effort (e.g., pellet stove heating), positive = increase HP effort (e.g., door open). Ignored for numeric entities.",
-          "model_input_seed_cool": "Multiplier for numeric entity values. The bias applied is entity_value × gain. Use 1.0 if the entity already outputs °C directly (e.g., a template sensor). Ignored for boolean entities."
+          "model_input_name": "Display name (e.g., 'Solar Proxy', 'Pellet Stove', 'Bunkroom Door').",
+          "model_input_entity": "Entity providing the input value. Binary entities: 1 when on, 0 when off. Numeric entities use their value directly.",
+          "model_input_seed_heat": "Initial coefficient for heating mode from regression or estimate. Negative = reduces HP effort (solar, stove). Positive = increases HP effort (door open).",
+          "model_input_seed_cool": "Initial coefficient for cooling mode. Often similar to heating but may differ.",
+          "model_input_clamp_min": "Minimum allowed coefficient value. Prevents nonsensical learning. Leave empty for no minimum.",
+          "model_input_clamp_max": "Maximum allowed coefficient value. Leave empty for no maximum.",
+          "model_input_lag_tau": "Exponential lag filter time constant in minutes. Use for thermal sources with ramp-up/down (e.g., pellet stove: 30 min). 0 = no filter."
         }
       },
       "model_inputs_edit": {
@@ -230,16 +234,20 @@
         "data": {
           "model_input_name": "Name",
           "model_input_entity": "Entity",
-          "model_input_suppress": "Suppress FF Learning When Active",
-          "model_input_seed_heat": "Default Bias (°C)",
-          "model_input_seed_cool": "Gain"
+          "model_input_seed_heat": "Seed Coefficient (Heating)",
+          "model_input_seed_cool": "Seed Coefficient (Cooling)",
+          "model_input_clamp_min": "Min Coefficient Clamp",
+          "model_input_clamp_max": "Max Coefficient Clamp",
+          "model_input_lag_tau": "Lag Filter (minutes)"
         },
         "data_description": {
-          "model_input_name": "Display name for this disturbance source (e.g., 'Pellet Stove', 'Bunkroom Door').",
-          "model_input_entity": "Entity to watch. Binary sensors use the default bias when on. Numeric sensors use their value × gain as bias in °C.",
-          "model_input_suppress": "Suppress feedforward auto-learning when this entity is active. Prevents the controller from learning bad offsets during atypical conditions.",
-          "model_input_seed_heat": "Bias in °C applied when a boolean entity is 'on'. Negative = reduce HP effort (e.g., pellet stove heating), positive = increase HP effort (e.g., door open). Ignored for numeric entities.",
-          "model_input_seed_cool": "Multiplier for numeric entity values. The bias applied is entity_value × gain. Use 1.0 if the entity already outputs °C directly (e.g., a template sensor). Ignored for boolean entities."
+          "model_input_name": "Display name (e.g., 'Solar Proxy', 'Pellet Stove', 'Bunkroom Door').",
+          "model_input_entity": "Entity providing the input value. Binary entities: 1 when on, 0 when off. Numeric entities use their value directly.",
+          "model_input_seed_heat": "Initial coefficient for heating mode from regression or estimate. Negative = reduces HP effort (solar, stove). Positive = increases HP effort (door open).",
+          "model_input_seed_cool": "Initial coefficient for cooling mode. Often similar to heating but may differ.",
+          "model_input_clamp_min": "Minimum allowed coefficient value. Prevents nonsensical learning. Leave empty for no minimum.",
+          "model_input_clamp_max": "Maximum allowed coefficient value. Leave empty for no maximum.",
+          "model_input_lag_tau": "Exponential lag filter time constant in minutes. Use for thermal sources with ramp-up/down (e.g., pellet stove: 30 min). 0 = no filter."
         }
       },
       "model_inputs_remove": {
