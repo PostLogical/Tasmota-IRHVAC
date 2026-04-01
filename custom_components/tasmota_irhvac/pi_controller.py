@@ -1204,12 +1204,10 @@ class PIController:
                 and self._rls_warmup_done
             )
             if can_learn_rls:
-                # Learn from total need (FF + integral contribution)
-                observed_offset = (
-                    self._hp_setpoint
-                    + (self._pi_ki * self._pi_integral)
-                    - desired_c
-                )
+                # Observe what offset the HP is actually running at.
+                # hp_setpoint already includes FF + P + I contributions.
+                # Don't add ki*integral — that's already baked into hp_setpoint.
+                observed_offset = self._hp_setpoint - desired_c
                 residual = rls.update(x, observed_offset)
                 _LOGGER.debug(
                     "RLS update: observed=%.2f predicted=%.2f residual=%.2f obs_count=%d",
@@ -1225,11 +1223,7 @@ class PIController:
                 and self._is_learning_time_allowed()
             )
             if can_learn_buckets:
-                observed_offset_buckets = (
-                    self._hp_setpoint
-                    + (self._pi_ki * self._pi_integral)
-                    - desired_c
-                )
+                observed_offset_buckets = self._hp_setpoint - desired_c
                 bucket_key = round(self._outdoor_temp / 3) * 3
                 learn_buckets = self._ff_heat_buckets if is_heating else self._ff_cool_buckets
                 old = learn_buckets.get(bucket_key, 0.0)
