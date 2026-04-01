@@ -238,16 +238,38 @@ class RLSModel:
 
     @classmethod
     def from_dict(cls, data, n_inputs, **kwargs):
-        """Restore model from serialized dict."""
+        """Restore model from serialized dict.
+
+        Handles length mismatches when model inputs are added/removed:
+        - If stored beta matches current length: restore exactly
+        - If shorter (inputs added): restore existing, new inputs use seeds
+        - If longer (inputs removed): restore only what fits
+        """
         model = cls(n_inputs, **kwargs)
         if "beta" in data:
             beta = data["beta"]
             if len(beta) == model.n:
+                # Exact match — restore all
                 model.beta = [float(v) for v in beta]
+            elif len(beta) < model.n:
+                # Inputs were added — restore old coefficients, keep seeds for new
+                for i in range(len(beta)):
+                    model.beta[i] = float(beta[i])
+                _LOGGER.info("RLS restore: stored %d coefficients, model needs %d — seeding new inputs",
+                           len(beta), model.n)
+            else:
+                # Inputs were removed — restore what fits
+                for i in range(model.n):
+                    model.beta[i] = float(beta[i])
+                _LOGGER.info("RLS restore: stored %d coefficients, model needs %d — truncating",
+                           len(beta), model.n)
         if "P" in data:
             P = data["P"]
             if len(P) == model.n * model.n:
                 model.P = [float(v) for v in P]
+            else:
+                # Covariance matrix size mismatch — keep initial P (high uncertainty for new inputs)
+                _LOGGER.info("RLS restore: covariance matrix size mismatch, using initial P")
         if "observation_count" in data:
             model.observation_count = int(data["observation_count"])
         return model
@@ -435,29 +457,29 @@ class PIController:
         # Index 0: intercept (seed 0)
         # Index 1: outdoor_delta (seed = configured slope)
         # Index 2+: model inputs in order
-        heat_seeds = [0.0, self._ff_heat_slope]
-        cool_seeds = [0.0, -self._ff_cool_slope]  # Negative: hotter outdoor → lower HP setpoint
-        clamps = [None, (0.0, 2.0)]  # Intercept unclamped, outdoor_delta positive (more cold = more offset)
+        self._heat_seeds = [0.0, self._ff_heat_slope]
+        self._cool_seeds = [0.0, -self._ff_cool_slope]  # Negative: hotter outdoor → lower HP setpoint
+        self._rls_clamps = [None, (0.0, 2.0)]  # Intercept unclamped, outdoor_delta positive
         for m_input in self._model_inputs:
-            heat_seeds.append(float(m_input.get("seed_heat", 0.0)))
-            cool_seeds.append(float(m_input.get("seed_cool", 0.0)))
+            self._heat_seeds.append(float(m_input.get("seed_heat", 0.0)))
+            self._cool_seeds.append(float(m_input.get("seed_cool", 0.0)))
             clamp_min = m_input.get("clamp_min")
             clamp_max = m_input.get("clamp_max")
             if clamp_min is not None and clamp_max is not None:
-                clamps.append((float(clamp_min), float(clamp_max)))
+                self._rls_clamps.append((float(clamp_min), float(clamp_max)))
             else:
-                clamps.append(None)
+                self._rls_clamps.append(None)
 
         # RLS models (separate for heating and cooling)
         self._rls_heat = RLSModel(
             n_inputs=self._n_model_inputs,
-            seed_coefficients=heat_seeds,
-            coeff_clamps=clamps,
+            seed_coefficients=self._heat_seeds,
+            coeff_clamps=self._rls_clamps,
         )
         self._rls_cool = RLSModel(
             n_inputs=self._n_model_inputs,
-            seed_coefficients=cool_seeds,
-            coeff_clamps=clamps,
+            seed_coefficients=self._cool_seeds,
+            coeff_clamps=self._rls_clamps,
         )
 
         # Model input current values and lag filter states
@@ -648,16 +670,20 @@ class PIController:
         if data.ff_bucket_observation_counts:
             self._ff_bucket_observation_counts = data.ff_bucket_observation_counts
         self._integral_convergence = data.integral_convergence
-        # Restore RLS models if available
+        # Restore RLS models if available. Pass seed_coefficients so that
+        # if model inputs changed (different vector length), new inputs get
+        # seeded instead of zeroed.
         if data.rls_heat_model:
             self._rls_heat = RLSModel.from_dict(
                 data.rls_heat_model, self._n_model_inputs,
-                coeff_clamps=self._rls_heat.coeff_clamps,
+                seed_coefficients=self._heat_seeds,
+                coeff_clamps=self._rls_clamps,
             )
         if data.rls_cool_model:
             self._rls_cool = RLSModel.from_dict(
                 data.rls_cool_model, self._n_model_inputs,
-                coeff_clamps=self._rls_cool.coeff_clamps,
+                seed_coefficients=self._cool_seeds,
+                coeff_clamps=self._rls_clamps,
             )
         # Skip warmup if restoring learned models
         if self._rls_heat.observation_count > 0 or self._rls_cool.observation_count > 0:

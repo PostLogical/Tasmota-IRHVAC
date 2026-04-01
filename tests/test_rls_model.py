@@ -189,6 +189,37 @@ class TestRLSSerialization:
         assert restored.P == pytest.approx(model.P, abs=1e-10)
         assert restored.observation_count == model.observation_count
 
+    def test_from_dict_input_added(self):
+        """Adding inputs should preserve old coefficients and seed new ones."""
+        # Old model had 1 input (intercept + outdoor_delta = 2 coefficients)
+        old_model = RLSModel(n_inputs=1, seed_coefficients=[0.5, 0.35])
+        old_model.update([1.0, 10.0], 4.0)  # Learn something
+        old_data = old_model.as_dict()
+
+        # New model has 2 inputs (added solar)
+        restored = RLSModel.from_dict(
+            old_data, n_inputs=2,
+            seed_coefficients=[0.0, 0.3, -4.0],  # Seeds for new model
+        )
+
+        # Old coefficients preserved (intercept and outdoor_delta)
+        assert restored.beta[0] == pytest.approx(old_model.beta[0], abs=0.01)
+        assert restored.beta[1] == pytest.approx(old_model.beta[1], abs=0.01)
+        # New input gets seed value
+        assert restored.beta[2] == pytest.approx(-4.0)
+        # Observation count preserved
+        assert restored.observation_count == 1
+
+    def test_from_dict_input_removed(self):
+        """Removing inputs should preserve remaining coefficients."""
+        old_model = RLSModel(n_inputs=2, seed_coefficients=[0.5, 0.35, -4.0])
+        old_data = old_model.as_dict()
+
+        restored = RLSModel.from_dict(old_data, n_inputs=1)
+
+        assert restored.beta[0] == pytest.approx(0.5)
+        assert restored.beta[1] == pytest.approx(0.35)
+
     def test_from_dict_with_clamps(self):
         """Restored model should accept clamp configuration."""
         model = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.3],
