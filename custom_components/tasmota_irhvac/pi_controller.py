@@ -485,8 +485,9 @@ class PIController:
 
         # RLS learning gate: track integral stability + warmup
         self._prev_integral_for_rls = 0.0
-        self._rls_start_time = time.monotonic()  # Track when RLS was initialized
-        self._rls_warmup_hours = 4.0  # Don't learn for first 4 hours after init/restart
+        self._rls_start_time = time.monotonic()
+        self._rls_warmup_hours = 4.0  # Don't learn for first 4 hours after fresh init
+        self._rls_warmup_done = False  # Set True after warmup or if restored from ExtraStoredData
 
     # ── Shorthand entity access ──────────────────────────────────────
 
@@ -680,6 +681,9 @@ class PIController:
                 data.rls_cool_model, self._n_model_inputs,
                 coeff_clamps=self._rls_cool.coeff_clamps,
             )
+        # Skip warmup if restoring learned models
+        if self._rls_heat.observation_count > 0 or self._rls_cool.observation_count > 0:
+            self._rls_warmup_done = True
         # Restore lag filter states
         if data.lag_filter_states:
             for i, m_input in enumerate(self._model_inputs):
@@ -1187,14 +1191,17 @@ class PIController:
                 abs(self._pi_integral) < 10
                 and abs(self._pi_integral - self._prev_integral_for_rls) < 1.0
             )
-            warmup_elapsed = (now_mono - self._rls_start_time) / 3600.0
+            if not self._rls_warmup_done:
+                warmup_elapsed = (now_mono - self._rls_start_time) / 3600.0
+                if warmup_elapsed >= self._rls_warmup_hours:
+                    self._rls_warmup_done = True
             can_learn_rls = (
                 self._ff_settled_ticks >= 2
                 and self._outdoor_temp is not None
                 and not learning_suppressed
                 and integral_stable
                 and not self._any_model_input_unavailable()
-                and warmup_elapsed >= self._rls_warmup_hours
+                and self._rls_warmup_done
             )
             if can_learn_rls:
                 # Learn from total need (FF + integral contribution)
