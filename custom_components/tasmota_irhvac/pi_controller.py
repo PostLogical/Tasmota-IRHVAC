@@ -982,8 +982,11 @@ class PIController:
             try:
                 self._model_input_values[i] = float(state.state)
             except (ValueError, TypeError):
-                # Binary entity: on=1, off=0
-                self._model_input_values[i] = 1.0 if state.state == "on" else 0.0
+                # Non-numeric: treat as active/inactive
+                # Covers binary_sensor (on/off), climate (heat/cool/off), etc.
+                active_states = {"on", "heat", "cool", "dry", "fan_only",
+                                 "heating", "cooling", "burning", "igniting"}
+                self._model_input_values[i] = 1.0 if state.state in active_states else 0.0
 
     def _any_model_input_unavailable(self):
         """Check if any model input entity is currently unavailable."""
