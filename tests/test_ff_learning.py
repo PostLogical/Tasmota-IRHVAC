@@ -169,7 +169,13 @@ class TestAsymmetricLearning:
 
     @pytest.mark.asyncio
     async def test_undershoot_learns_faster(self):
-        """When room needed MORE offset (undershoot), learn at full alpha."""
+        """When room needed MORE offset (undershoot), learn at full alpha.
+
+        With the pre_decay_total_offset observation, the observed offset is
+        ff_offset + ki*integral. To simulate undershoot, we need a positive
+        integral (room was cold, integral built up) so the total offset
+        exceeds the bucket value.
+        """
         entity = FakeLearningEntity(_make_config())
         pi = entity._pi
 
@@ -177,9 +183,10 @@ class TestAsymmetricLearning:
         seed_value = pi._ff_heat_buckets[bucket_key]
         pi._ff_bucket_first_obs_time[bucket_key] = time.monotonic() - 5 * 3600
 
-        # Observed offset > bucket value → undershoot in heating
+        # Undershoot: integral positive (room was cold, FF was too low)
         _settled_tick(entity, outdoor_temp=0.0)
-        pi._hp_setpoint = seed_value + 22.0 + 2.0  # observed_offset = seed + 2 (more than seed)
+        pi._pi_integral = 2.5  # Positive → room needed more
+        pi._ff_settled_ticks = 5
 
         await pi._pi_tick()
         undershoot_value = pi._ff_heat_buckets[bucket_key]
@@ -187,9 +194,10 @@ class TestAsymmetricLearning:
         # Reset
         pi._ff_heat_buckets[bucket_key] = seed_value
 
-        # Observed offset < bucket value → overshoot in heating
+        # Overshoot: integral negative (room was warm, FF was too high)
         _settled_tick(entity, outdoor_temp=0.0)
-        pi._hp_setpoint = seed_value + 22.0 - 2.0  # observed_offset = seed - 2 (less than seed)
+        pi._pi_integral = -2.5  # Negative → room needed less
+        pi._ff_settled_ticks = 5
 
         await pi._pi_tick()
         overshoot_value = pi._ff_heat_buckets[bucket_key]

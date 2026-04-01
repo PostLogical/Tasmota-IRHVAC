@@ -441,7 +441,7 @@ class PIController:
         # Index 1: outdoor_delta (seed = configured slope)
         # Index 2+: model inputs in order
         heat_seeds = [0.0, self._ff_heat_slope]
-        cool_seeds = [0.0, self._ff_cool_slope]
+        cool_seeds = [0.0, -self._ff_cool_slope]  # Negative: hotter outdoor → lower HP setpoint
         clamps = [None, (-1.0, 0.0)]  # Intercept unclamped, outdoor_delta negative
         for m_input in self._model_inputs:
             heat_seeds.append(float(m_input.get("seed_heat", 0.0)))
@@ -828,7 +828,7 @@ class PIController:
         )
         # Reset RLS models to seed coefficients
         heat_seeds = [0.0, self._ff_heat_slope]
-        cool_seeds = [0.0, self._ff_cool_slope]
+        cool_seeds = [0.0, -self._ff_cool_slope]  # Negative: hotter outdoor → lower HP setpoint
         for m_input in self._model_inputs:
             heat_seeds.append(float(m_input.get("seed_heat", 0.0)))
             cool_seeds.append(float(m_input.get("seed_cool", 0.0)))
@@ -1148,22 +1148,19 @@ class PIController:
         rls = self._rls_heat if is_heating else self._rls_cool
         raw_rls_offset = rls.predict(x)
 
-        # FF overshoot scaling: reduce FF when room overshoots setpoint
-        if is_heating:
-            ff_scale = max(0.0, min(1.0, (desired_c - current_c + self._pi_deadband) / self._pi_deadband))
-        else:
-            ff_scale = max(0.0, min(1.0, (current_c - desired_c + self._pi_deadband) / self._pi_deadband))
-        self._ff_offset = raw_rls_offset * ff_scale
+        # FF is based on external conditions (outdoor, solar, stove), not room temp.
+        # No overshoot scaling — let the PI integral handle room temp deviations.
+        # Scaling FF based on error creates positive feedback oscillation.
+        self._ff_offset = raw_rls_offset
 
         # Legacy bucket FF for parallel comparison
         self._ff_offset_buckets = 0.0
         if self._outdoor_temp is not None:
             bucket_key = round(self._outdoor_temp / 3) * 3
             if is_heating:
-                bucket_ff = self._ff_heat_buckets.get(bucket_key, 0.0)
+                self._ff_offset_buckets = self._ff_heat_buckets.get(bucket_key, 0.0)
             else:
-                bucket_ff = self._ff_cool_buckets.get(bucket_key, 0.0)
-            self._ff_offset_buckets = bucket_ff * ff_scale
+                self._ff_offset_buckets = self._ff_cool_buckets.get(bucket_key, 0.0)
 
         # Disturbance inputs: compute suppress flag (for manual suppress service)
         learning_suppressed = self._manual_ff_suppress
@@ -1184,22 +1181,23 @@ class PIController:
         else:
             effective_weight = self._pi_setpoint_weight
 
-        # Deadband: if error is small, skip P term and decay integral
+        # Deadband: if error is small, skip P term. Integral holds (no decay).
         in_deadband = abs_error < self._pi_deadband
         if in_deadband:
-            self._pi_integral *= 0.9
             self._ff_settled_ticks += 1
-            # RLS learning: update model when settled AND integral is stable
+            # RLS learning: update model when settled AND integral is small and stable.
+            # Integral < 3 ensures FF is providing most of the offset, not the integral.
+            # Rate < 0.5 ensures the integral isn't still converging.
             integral_stable = (
-                abs(self._pi_integral) < 10
-                and abs(self._pi_integral - self._prev_integral_for_rls) < 1.0
+                abs(self._pi_integral) < 3.0
+                and abs(self._pi_integral - self._prev_integral_for_rls) < 0.5
             )
             if not self._rls_warmup_done:
                 warmup_elapsed = (now_mono - self._rls_start_time) / 3600.0
                 if warmup_elapsed >= self._rls_warmup_hours:
                     self._rls_warmup_done = True
             can_learn_rls = (
-                self._ff_settled_ticks >= 2
+                self._ff_settled_ticks >= 4
                 and self._outdoor_temp is not None
                 and not learning_suppressed
                 and integral_stable
@@ -1207,10 +1205,11 @@ class PIController:
                 and self._rls_warmup_done
             )
             if can_learn_rls:
-                # Observe what offset the HP is actually running at.
-                # hp_setpoint already includes FF + P + I contributions.
-                # Don't add ki*integral — that's already baked into hp_setpoint.
-                observed_offset = self._hp_setpoint - desired_c
+                # Observe the total offset being applied:
+                # FF prediction + integral's contribution = what keeps the room at target.
+                # Adaptive ki matches what's used in the actual i_term computation.
+                obs_ki = self._pi_ki * (1.0 + abs(self._pi_integral) / 10.0)
+                observed_offset = self._ff_offset + obs_ki * self._pi_integral
                 residual = rls.update(x, observed_offset)
                 _LOGGER.debug(
                     "RLS update: observed=%.2f predicted=%.2f residual=%.2f obs_count=%d",
@@ -1226,7 +1225,8 @@ class PIController:
                 and self._is_learning_time_allowed()
             )
             if can_learn_buckets:
-                observed_offset_buckets = self._hp_setpoint - desired_c
+                obs_ki_b = self._pi_ki * (1.0 + abs(self._pi_integral) / 10.0)
+                observed_offset_buckets = self._ff_offset + obs_ki_b * self._pi_integral
                 bucket_key = round(self._outdoor_temp / 3) * 3
                 learn_buckets = self._ff_heat_buckets if is_heating else self._ff_cool_buckets
                 old = learn_buckets.get(bucket_key, 0.0)
@@ -1263,10 +1263,12 @@ class PIController:
 
         self._pi_last_error = error
 
-        # Discard stale integral on overshoot recovery
-        if is_heating and self._pi_integral < 0 and error >= -self._pi_deadband:
+        # Overshoot recovery: zero small negative integral in heating (or positive in cooling)
+        # Only when the integral is small — large opposite-sign integral means FF is wrong
+        # and the integral is legitimately compensating. Don't fight it.
+        if is_heating and -3.0 < self._pi_integral < 0 and abs(error) < self._pi_deadband:
             self._pi_integral = 0.0
-        elif is_cooling and self._pi_integral > 0 and error <= self._pi_deadband:
+        elif is_cooling and 0 < self._pi_integral < 3.0 and abs(error) < self._pi_deadband:
             self._pi_integral = 0.0
 
         # Hard safety cap on integral
@@ -1280,15 +1282,22 @@ class PIController:
             + convergence_alpha * abs(self._pi_integral)
         )
 
-        i_term = self._pi_ki * self._pi_integral
+        # Adaptive ki: increase when integral is high (FF is inadequate)
+        # This ensures the system can heat the room even with bad FF coefficients.
+        # Base ki handles fine-tuning when FF is accurate.
+        # Boosted ki fills the gap when FF is wrong.
+        adaptive_ki_boost = 1.0 + abs(self._pi_integral) / 10.0
+        effective_ki = self._pi_ki * adaptive_ki_boost
+
+        i_term = effective_ki * self._pi_integral
         raw_setpoint = desired_c + p_term + i_term + self._ff_offset
         clamped_setpoint = max(self._min_temp_c, min(self._max_temp_c, raw_setpoint))
 
         # Back-calculation anti-windup
-        if self._pi_ki != 0:
+        if effective_ki != 0:
             saturation_error = clamped_setpoint - raw_setpoint
             if abs(saturation_error) > 0.01:
-                kb = 1.0 / self._pi_ki
+                kb = 1.0 / effective_ki
                 self._pi_integral += kb * saturation_error
                 self._pi_integral = max(-50.0, min(50.0, self._pi_integral))
 
