@@ -430,6 +430,9 @@ class PIController:
         self._pi_command_pending = False
         self._pi_tick_running = False
         self._last_send_ir_time = 0.0
+        self._tick_count = 0
+        self._last_setpoint_change_tick = -10  # Allow first change immediately
+        self._last_setpoint_direction = 0
         self._ff_settled_ticks = 0
         self._sensor_unavailable = False
         self._sensor_recovery_pending = False
@@ -717,9 +720,8 @@ class PIController:
         if not self._pi_enabled or self._desired_temp is None:
             return
         e = self._entity
-        # Restore user's desired temp immediately (base handler overwrites with HP setpoint)
+        # Restore user's desired temp (base handler overwrites with HP setpoint)
         e._attr_target_temperature = self._desired_temp
-        e.async_write_ha_state()
         # Echo detection: only process the first echo per command.
         # With dual MQTT topics (tele + stat), we get 2+ echoes.
         # _pi_command_pending is True after we send a command.
@@ -730,15 +732,18 @@ class PIController:
             if self._pi_command_pending:
                 _LOGGER.debug("MQTT echo: first echo (command pending), clearing flag")
                 self._pi_command_pending = False
+                e.async_write_ha_state()
             else:
                 elapsed = time.monotonic() - self._pi_last_tick_time
                 if elapsed >= 5.0:
                     _LOGGER.debug("MQTT echo: external change (elapsed=%.1fs), re-ticking", elapsed)
                     self._hp_setpoint = payload["Temp"]
                     self._desired_temp = e._attr_target_temperature
-                    await self._pi_tick()
+                    await self._pi_tick()  # tick writes state at the end
                 else:
                     _LOGGER.debug("MQTT echo: duplicate ignored (elapsed=%.1fs < 5s)", elapsed)
+        else:
+            e.async_write_ha_state()
 
     async def sensor_changed(self, was_none):
         """Handle temp sensor update."""
@@ -1123,6 +1128,9 @@ class PIController:
             _LOGGER.debug("PI tick: skipping, paused by vendor")
             return
 
+        # Tick counter for anti-oscillation guard
+        self._tick_count += 1
+
         # Time since last tick (for time-normalized integral)
         now_mono = time.monotonic()
         if self._pi_last_tick_time > 0:
@@ -1365,15 +1373,35 @@ class PIController:
         new_setpoint = int(max(self._min_temp_c, min(self._max_temp_c, new_setpoint)))
 
         if new_setpoint != self._hp_setpoint:
-            _LOGGER.info(
-                "PI: error=%.1f P=%.1f I=%.1f FF=%.1f raw=%.1f setpoint %s -> %s",
-                error, p_term, i_term, self._ff_offset, clamped_setpoint,
-                self._hp_setpoint, new_setpoint,
+            # Anti-oscillation: suppress ±1°C reversals while in deadband
+            # (raw setpoint hovering near integer boundary). Require 3 ticks
+            # (~45 min) before allowing a direction change. Monotonic ramps
+            # and large corrections (>1°C or outside deadband) go through immediately.
+            change = new_setpoint - self._hp_setpoint
+            ticks_since = self._tick_count - self._last_setpoint_change_tick
+            is_oscillation = (
+                in_deadband
+                and abs(change) <= 1
+                and change * self._last_setpoint_direction < 0
+                and ticks_since < 3
             )
-            self._hp_setpoint = new_setpoint
-            self._pi_command_pending = True
-            self._last_send_ir_time = time.monotonic()
-            await e.send_ir()
+            if is_oscillation:
+                _LOGGER.debug(
+                    "PI: reversal %s -> %s held (anti-oscillation, %d ticks since last change)",
+                    self._hp_setpoint, new_setpoint, ticks_since,
+                )
+            else:
+                _LOGGER.info(
+                    "PI: error=%.1f P=%.1f I=%.1f FF=%.1f raw=%.1f setpoint %s -> %s",
+                    error, p_term, i_term, self._ff_offset, clamped_setpoint,
+                    self._hp_setpoint, new_setpoint,
+                )
+                self._last_setpoint_direction = change
+                self._last_setpoint_change_tick = self._tick_count
+                self._hp_setpoint = new_setpoint
+                self._pi_command_pending = True
+                self._last_send_ir_time = time.monotonic()
+                await e.send_ir()
         else:
             _LOGGER.debug(
                 "PI: error=%.1f raw=%.1f setpoint=%s (held)",

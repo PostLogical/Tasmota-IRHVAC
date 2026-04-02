@@ -931,12 +931,13 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             for key in self._toggle_list:
                 setattr(self, "_" + key.lower(), "off")
 
-            # Update HA UI and State
-            self.async_schedule_update_ha_state()
-
             # PI controller: restore desired temp over HP setpoint, handle echo
+            # PI handler writes state itself (with corrected target_temperature)
             if self._pi:
                 await self._pi.handle_state_payload(payload)
+            else:
+                # Update HA UI and State
+                self.async_schedule_update_ha_state()
 
             # Check power sensor state
             if (
@@ -1497,4 +1498,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         await mqtt.async_publish(self.hass, self.topic, payload)
 
         # Update HA UI and State
-        self.async_schedule_update_ha_state()
+        # Skip only when PI tick is the caller (it writes state at end of tick).
+        # All other callers (mode changes, presets, manual commands) need the write.
+        if not (self._pi and self._pi._pi_tick_running):
+            self.async_schedule_update_ha_state()

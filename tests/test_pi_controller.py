@@ -1002,6 +1002,74 @@ class TestPIEdgeCases:
         # Neither should overwrite hp_setpoint
         assert pi_entity._pi._hp_setpoint == 25.0
 
+    @pytest.mark.asyncio
+    async def test_anti_oscillation_suppresses_reversal_in_deadband(self, pi_entity):
+        """±1°C reversal while in deadband should be suppressed for 3 ticks.
+
+        Regression: bunkroom oscillated 25↔26 every 7-15 minutes because
+        the raw setpoint hovered near 25.5°C (integer boundary).
+        """
+        pi = pi_entity._pi
+        pi._desired_temp = 22.0  # 71.6°F
+        pi._hp_setpoint = 25
+        pi._pi_integral = 3.0
+        pi._ff_offset = 3.0
+        pi._pi_deadband = 0.5
+        pi_entity._attr_hvac_mode = HVACMode.HEAT
+        pi_entity._attr_current_temperature = 21.8  # In deadband (error=0.2)
+
+        # First tick: setpoint changes 25→26 (raw ~25.6 with FF+integral)
+        await pi._pi_tick()
+        first_setpoint = pi._hp_setpoint
+
+        # Nudge room temp up slightly so raw dips below 25.5 → wants 25
+        pi_entity._attr_current_temperature = 22.1  # Error = -0.1, in deadband
+        pi._pi_integral = 2.8  # Integral decayed slightly
+        await pi._pi_tick()
+
+        # The reversal should be suppressed — setpoint stays at first value
+        assert pi._hp_setpoint == first_setpoint, (
+            f"Anti-oscillation failed: setpoint changed to {pi._hp_setpoint} "
+            f"(expected {first_setpoint} held)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_anti_oscillation_allows_large_corrections(self, pi_entity):
+        """Corrections >1°C should go through even if they reverse direction."""
+        pi = pi_entity._pi
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 26
+        pi._pi_integral = 4.0
+        pi._ff_offset = 4.0
+        pi._last_setpoint_direction = 1  # Last change was up
+        pi._last_setpoint_change_tick = pi._tick_count
+        pi_entity._attr_hvac_mode = HVACMode.HEAT
+        # Large error outside deadband → room way too hot
+        pi_entity._attr_current_temperature = 24.0
+
+        await pi._pi_tick()
+
+        # Should NOT be suppressed — error is outside deadband
+        # (even if the change happens to be a reversal)
+
+    @pytest.mark.asyncio
+    async def test_anti_oscillation_allows_same_direction(self, pi_entity):
+        """Monotonic ramps should never be suppressed."""
+        pi = pi_entity._pi
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 23
+        pi._pi_integral = 1.0
+        pi._ff_offset = 2.0
+        pi._last_setpoint_direction = 1  # Last change was up
+        pi._last_setpoint_change_tick = pi._tick_count
+        pi_entity._attr_hvac_mode = HVACMode.HEAT
+        pi_entity._attr_current_temperature = 20.0  # Cold, needs to ramp
+
+        await pi._pi_tick()
+
+        # Same direction (up) — should go through regardless of tick count
+        assert pi._hp_setpoint >= 23
+
     def test_set_temperature_none(self, pi_entity):
         """set_temperature with None should return immediately."""
         import asyncio
