@@ -264,6 +264,79 @@ class TestDualTopicEcho:
         assert pi._desired_temp == 21.5
         assert entity._attr_target_temperature == 21.5
 
+    @pytest.mark.asyncio
+    async def test_echo_with_wrong_temp_does_not_corrupt_setpoint(self, hass, setup_pi_integration):
+        """Echo with different Temp (e.g. from IR receiver misdecode) must not corrupt hp_setpoint.
+
+        Regression: prior to fix, handle_state_payload unconditionally set
+        _hp_setpoint = payload["Temp"] for every echo, including our own.
+        If the echo had a different Temp (stale echo, IR misdecode, Tasmota rounding),
+        it would corrupt hp_setpoint and the next state write would show the wrong value.
+        """
+        from unittest.mock import AsyncMock, patch
+        import time as _time
+
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        entity._attr_hvac_mode = HVACMode.HEAT
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 25  # PI just computed this
+        pi._pi_command_pending = True
+        pi._pi_last_tick_time = _time.monotonic()
+
+        with patch.object(entity, 'send_ir', new_callable=AsyncMock) as mock_send:
+            # Echo arrives with Temp=22 (wrong — we sent 25)
+            payload = make_mqtt_state_payload({"Temp": 22, "Mode": "Heat"})
+            async_fire_mqtt_message(hass, "tele/irhvac/RESULT", payload)
+            await hass.async_block_till_done()
+
+            # hp_setpoint must remain 25, not be overwritten to 22
+            assert pi._hp_setpoint == 25, (
+                f"hp_setpoint corrupted to {pi._hp_setpoint} by echo with Temp=22"
+            )
+            assert mock_send.call_count == 0
+
+            # Second echo also with wrong Temp
+            async_fire_mqtt_message(hass, "tele/irhvac/RESULT", payload)
+            await hass.async_block_till_done()
+
+            assert pi._hp_setpoint == 25
+            assert mock_send.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_reentrant_tick_blocked_during_send(self, hass, setup_pi_integration):
+        """If _pi_tick is already running (mid-send_ir), a reentrant call should be skipped.
+
+        Simulates: timer tick starts → await send_ir() yields → sensor event
+        fires → tries to call _pi_tick again → should see _pi_tick_running and bail.
+        """
+        from unittest.mock import AsyncMock, patch
+
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 20.0
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 24
+
+        # Simulate a tick already in progress (mid-send_ir await)
+        pi._pi_tick_running = True
+
+        with patch.object(entity, 'send_ir', new_callable=AsyncMock) as mock_send:
+            # This tick should be blocked by reentrancy guard
+            await pi._pi_tick()
+
+            assert mock_send.call_count == 0, (
+                f"Reentrant tick should not send IR, but sent {mock_send.call_count} times"
+            )
+
+        # Clean up
+        pi._pi_tick_running = False
+
 
 class TestIrRecvWrapper:
     """Tests for IrReceived wrapper parsing."""

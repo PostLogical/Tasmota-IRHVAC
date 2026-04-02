@@ -631,6 +631,27 @@ class TestSensorRecovery:
         assert pi_entity._pi._sensor_unavailable is False
         mock_unsub.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_sensor_changed_was_none_but_still_unavailable(self, pi_entity):
+        """was_none=True with sensor still None should not tick or schedule recovery.
+
+        Regression: on startup, sensor transitions from None to 'unavailable',
+        triggering was_none=True. But _attr_current_temperature is still None
+        because the base class can't parse 'unavailable'. The old code ran a
+        tick that immediately scheduled a recovery timer, stacking timers on
+        each rapid-fire sensor event.
+        """
+        pi_entity._attr_current_temperature = None  # Still not valid
+        pi_entity._pi._desired_temp = 72.0
+        pi_entity._pi._sensor_recovery_pending = False
+        old_integral = pi_entity._pi._pi_integral
+
+        await pi_entity._pi._pi_async_sensor_changed(was_none=True)
+
+        # Should return immediately — no tick, no recovery timer
+        assert pi_entity._pi._pi_integral == old_integral
+        assert pi_entity._pi._sensor_recovery_pending is False
+
 
 # ── Event-Driven and Time Normalization Tests ─────────────────────────
 
@@ -924,14 +945,16 @@ class TestPIEdgeCases:
 
     @pytest.mark.asyncio
     async def test_handle_state_payload_command_pending(self, pi_entity):
-        """Echo after PI command should clear pending flag without re-ticking."""
+        """Echo after PI command should clear pending flag without updating hp_setpoint."""
         pi_entity._pi._pi_command_pending = True
         pi_entity._pi._desired_temp = 22.0
-        pi_entity._pi._hp_setpoint = 23.0
+        pi_entity._pi._hp_setpoint = 25.0  # What PI computed
 
-        await pi_entity._pi.handle_state_payload({"Temp": 23, "Power": "On"})
+        await pi_entity._pi.handle_state_payload({"Temp": 22, "Power": "On"})
 
         assert pi_entity._pi._pi_command_pending is False
+        # hp_setpoint should NOT be overwritten by the echo — PI's value is authoritative
+        assert pi_entity._pi._hp_setpoint == 25.0
 
     @pytest.mark.asyncio
     async def test_handle_state_payload_not_pending_reticks(self, pi_entity):
@@ -944,8 +967,40 @@ class TestPIEdgeCases:
 
         await pi_entity._pi.handle_state_payload({"Temp": 25, "Power": "On"})
 
-        # Should have captured hp_setpoint from payload
+        # External change: should have captured hp_setpoint from payload
         assert pi_entity._pi._hp_setpoint == 25 or pi_entity._pi._desired_temp is not None
+
+    @pytest.mark.asyncio
+    async def test_pi_tick_reentrancy_guard(self, pi_entity):
+        """Reentrant _pi_tick call should be skipped."""
+        pi_entity._pi._pi_tick_running = True
+        pi_entity._pi._desired_temp = 22.0
+        pi_entity._attr_current_temperature = 20.0
+        pi_entity._attr_hvac_mode = HVACMode.HEAT
+        old_integral = pi_entity._pi._pi_integral
+
+        await pi_entity._pi._pi_tick()
+
+        # Should have returned immediately without modifying state
+        assert pi_entity._pi._pi_integral == old_integral
+
+    @pytest.mark.asyncio
+    async def test_echo_does_not_corrupt_hp_setpoint_during_send(self, pi_entity):
+        """Echo arriving during send_ir should not overwrite hp_setpoint."""
+        import time
+        pi_entity._pi._desired_temp = 22.0
+        pi_entity._pi._hp_setpoint = 25.0
+        pi_entity._pi._pi_command_pending = True
+        # Simulate recent tick (so second echo falls within 5s cooldown)
+        pi_entity._pi._pi_last_tick_time = time.monotonic()
+
+        # Simulate two echoes (dual MQTT topics) with wrong Temp
+        await pi_entity._pi.handle_state_payload({"Temp": 22, "Power": "On"})
+        await pi_entity._pi.handle_state_payload({"Temp": 22, "Power": "On"})
+
+        # First echo clears pending, second is within 5s cooldown
+        # Neither should overwrite hp_setpoint
+        assert pi_entity._pi._hp_setpoint == 25.0
 
     def test_set_temperature_none(self, pi_entity):
         """set_temperature with None should return immediately."""

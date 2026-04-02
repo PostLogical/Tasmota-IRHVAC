@@ -428,6 +428,8 @@ class PIController:
         self._pi_timer_unsub = None
         self._ff_offset = 0.0
         self._pi_command_pending = False
+        self._pi_tick_running = False
+        self._last_send_ir_time = 0.0
         self._ff_settled_ticks = 0
         self._sensor_unavailable = False
         self._sensor_recovery_pending = False
@@ -715,16 +717,15 @@ class PIController:
         if not self._pi_enabled or self._desired_temp is None:
             return
         e = self._entity
-        # Capture HP setpoint from echo, restore user's desired temp
-        if "Temp" in payload and payload["Temp"] > 0:
-            self._hp_setpoint = payload["Temp"]
+        # Restore user's desired temp immediately (base handler overwrites with HP setpoint)
         e._attr_target_temperature = self._desired_temp
         e.async_write_ha_state()
         # Echo detection: only process the first echo per command.
         # With dual MQTT topics (tele + stat), we get 2+ echoes.
         # _pi_command_pending is True after we send a command.
-        # First echo: clear the flag, don't re-tick.
-        # Second+ echo: flag already False, but we use a cooldown to ignore.
+        # First echo: clear the flag. Don't update _hp_setpoint from our own echo
+        # (we already set it in _pi_tick) to prevent corruption during send_ir await.
+        # Second+ echo: flag already False, use cooldown to ignore.
         if "Temp" in payload and payload["Temp"] > 0:
             if self._pi_command_pending:
                 _LOGGER.debug("MQTT echo: first echo (command pending), clearing flag")
@@ -733,6 +734,7 @@ class PIController:
                 elapsed = time.monotonic() - self._pi_last_tick_time
                 if elapsed >= 5.0:
                     _LOGGER.debug("MQTT echo: external change (elapsed=%.1fs), re-ticking", elapsed)
+                    self._hp_setpoint = payload["Temp"]
                     self._desired_temp = e._attr_target_temperature
                     await self._pi_tick()
                 else:
@@ -1025,6 +1027,10 @@ class PIController:
         if not self._pi_enabled:
             return
         if was_none:
+            # Verify the sensor actually has a numeric value — transitions from
+            # None to 'unavailable' fire was_none=True but aren't real recoveries.
+            if self._entity._attr_current_temperature is None:
+                return
             if self._sensor_recovery_unsub:
                 self._sensor_recovery_unsub()
                 self._sensor_recovery_unsub = None
@@ -1079,6 +1085,7 @@ class PIController:
             _LOGGER.info("PI fallback: setpoint %s -> %s (FF only)", self._hp_setpoint, new_setpoint)
             self._hp_setpoint = new_setpoint
             self._pi_command_pending = True
+            self._last_send_ir_time = time.monotonic()
             await e.send_ir()
         e.async_schedule_update_ha_state()
 
@@ -1086,6 +1093,17 @@ class PIController:
         """PI + feedforward controller tick. Called by timer and sensor events."""
         if not self._pi_enabled:
             return
+        if self._pi_tick_running:
+            _LOGGER.debug("PI tick: skipping, already running (reentrant call)")
+            return
+        self._pi_tick_running = True
+        try:
+            await self._pi_tick_inner(now)
+        finally:
+            self._pi_tick_running = False
+
+    async def _pi_tick_inner(self, now=None):
+        """PI + feedforward controller tick implementation."""
         e = self._entity
         if e._attr_hvac_mode == HVACMode.OFF:
             self._pi_integral = 0.0
@@ -1354,6 +1372,7 @@ class PIController:
             )
             self._hp_setpoint = new_setpoint
             self._pi_command_pending = True
+            self._last_send_ir_time = time.monotonic()
             await e.send_ir()
         else:
             _LOGGER.debug(
