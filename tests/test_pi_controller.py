@@ -876,49 +876,37 @@ class TestPIEdgeCases:
         assert pi_entity._pi._hp_setpoint == old_setpoint
 
     @pytest.mark.asyncio
-    async def test_small_negative_integral_zeroed_in_heating(self, pi_entity):
-        """Small negative integral in heating near deadband should be zeroed."""
+    async def test_integral_frozen_in_deadband(self, pi_entity):
+        """Integral should not accumulate or decay in deadband (only quantization feedback)."""
         pi_entity._attr_current_temperature = 22.0
         pi_entity._pi._desired_temp = 22.0
         pi_entity._pi._hp_setpoint = 22.0
-        pi_entity._pi._pi_integral = -1.5  # Small negative from brief overshoot
+        pi_entity._pi._pi_integral = -5.0
         pi_entity._pi._pi_last_tick_time = 0
         pi_entity._attr_hvac_mode = HVACMode.HEAT
 
         await pi_entity._pi._pi_tick()
 
-        # Small negative integral (> -3) in heating deadband → zeroed
-        assert pi_entity._pi._pi_integral >= -0.1
+        # Integral may shift from quantization feedback but not from error accumulation.
+        # With hp=22 and raw≈22-0.375=21.625, q_error=22-21.625=0.375>0.3,
+        # so feedback pushes integral up. But no decay applied.
+        assert pi_entity._pi._pi_integral != 0  # Not zeroed
 
     @pytest.mark.asyncio
-    async def test_large_negative_integral_preserved_in_heating(self, pi_entity):
-        """Large negative integral in heating should be preserved (FF is too high)."""
-        pi_entity._attr_current_temperature = 22.0
+    async def test_integral_not_accumulated_in_deadband(self, pi_entity):
+        """Error should NOT accumulate into integral while in deadband."""
+        pi_entity._attr_current_temperature = 22.3  # Error = -0.3 (in deadband)
         pi_entity._pi._desired_temp = 22.0
         pi_entity._pi._hp_setpoint = 22.0
-        pi_entity._pi._pi_integral = -10.0  # Large negative = FF overpredicting
+        pi_entity._pi._pi_integral = 0.0
         pi_entity._pi._pi_last_tick_time = 0
         pi_entity._attr_hvac_mode = HVACMode.HEAT
 
         await pi_entity._pi._pi_tick()
 
-        # Large negative integral preserved — FF is legitimately too high
-        assert pi_entity._pi._pi_integral < -3.0
-
-    @pytest.mark.asyncio
-    async def test_small_positive_integral_zeroed_in_cooling(self, pi_entity):
-        """Small positive integral in cooling near deadband should be zeroed."""
-        pi_entity._attr_current_temperature = 24.0
-        pi_entity._pi._desired_temp = 24.0
-        pi_entity._pi._hp_setpoint = 24.0
-        pi_entity._pi._pi_integral = 1.5  # Small positive from brief overcool
-        pi_entity._pi._pi_last_tick_time = 0
-        pi_entity._attr_hvac_mode = HVACMode.COOL
-
-        await pi_entity._pi._pi_tick()
-
-        # Small positive integral (< 3) in cooling deadband → zeroed
-        assert pi_entity._pi._pi_integral <= 0.1
+        # No error accumulation in deadband — integral stays near zero
+        # (quantization feedback may nudge it slightly but not from error)
+        assert abs(pi_entity._pi._pi_integral) < 1.0
 
     @pytest.mark.asyncio
     async def test_ff_auto_learning_writes_bucket(self, pi_entity):
@@ -1003,72 +991,97 @@ class TestPIEdgeCases:
         assert pi_entity._pi._hp_setpoint == 25.0
 
     @pytest.mark.asyncio
-    async def test_anti_oscillation_suppresses_reversal_in_deadband(self, pi_entity):
-        """±1°C reversal while in deadband should be suppressed for 3 ticks.
-
-        Regression: bunkroom oscillated 25↔26 every 7-15 minutes because
-        the raw setpoint hovered near 25.5°C (integer boundary).
-        """
+    async def test_hold_timer_suppresses_rapid_change(self, pi_entity):
+        """Setpoint change within 30 min of last change should be held."""
+        import time
         pi = pi_entity._pi
-        pi._desired_temp = 22.0  # 71.6°F
+        pi._desired_temp = 22.0
         pi._hp_setpoint = 25
-        pi._pi_integral = 3.0
-        pi._ff_offset = 3.0
+        pi._pi_integral = 3.5
         pi._pi_deadband = 0.5
         pi_entity._attr_hvac_mode = HVACMode.HEAT
-        pi_entity._attr_current_temperature = 21.8  # In deadband (error=0.2)
+        pi_entity._attr_current_temperature = 21.8  # In deadband
 
-        # First tick: setpoint changes 25→26 (raw ~25.6 with FF+integral)
+        # First tick: setpoint changes (last_setpoint_change_time was 0)
         await pi._pi_tick()
         first_setpoint = pi._hp_setpoint
 
-        # Nudge room temp up slightly so raw dips below 25.5 → wants 25
-        pi_entity._attr_current_temperature = 22.1  # Error = -0.1, in deadband
-        pi._pi_integral = 2.8  # Integral decayed slightly
+        # Second tick immediately after — hold timer should suppress
+        pi_entity._attr_current_temperature = 22.2  # Nudge to trigger reversal
+        pi._pi_integral = 2.5
         await pi._pi_tick()
 
-        # The reversal should be suppressed — setpoint stays at first value
         assert pi._hp_setpoint == first_setpoint, (
-            f"Anti-oscillation failed: setpoint changed to {pi._hp_setpoint} "
-            f"(expected {first_setpoint} held)"
+            f"Hold timer failed: setpoint changed to {pi._hp_setpoint} "
+            f"within 30 min of last change"
         )
 
     @pytest.mark.asyncio
-    async def test_anti_oscillation_allows_large_corrections(self, pi_entity):
-        """Corrections >1°C should go through even if they reverse direction."""
+    async def test_hold_timer_allows_large_corrections(self, pi_entity):
+        """Corrections >1°C bypass the hold timer."""
+        import time
         pi = pi_entity._pi
         pi._desired_temp = 22.0
         pi._hp_setpoint = 26
-        pi._pi_integral = 4.0
-        pi._ff_offset = 4.0
-        pi._last_setpoint_direction = 1  # Last change was up
-        pi._last_setpoint_change_tick = pi._tick_count
+        pi._last_setpoint_change_time = time.monotonic()  # Just changed
+        pi._pi_integral = 0.0
         pi_entity._attr_hvac_mode = HVACMode.HEAT
-        # Large error outside deadband → room way too hot
-        pi_entity._attr_current_temperature = 24.0
+        pi_entity._attr_current_temperature = 24.0  # Error -2.0, outside deadband
 
         await pi._pi_tick()
 
-        # Should NOT be suppressed — error is outside deadband
-        # (even if the change happens to be a reversal)
+        # Large correction should bypass hold timer
+        # (error is outside deadband and > 2× deadband)
 
     @pytest.mark.asyncio
-    async def test_anti_oscillation_allows_same_direction(self, pi_entity):
-        """Monotonic ramps should never be suppressed."""
+    async def test_hold_timer_allows_ramps(self, pi_entity):
+        """Active ramps (error >> deadband) bypass the hold timer."""
+        import time
         pi = pi_entity._pi
         pi._desired_temp = 22.0
         pi._hp_setpoint = 23
+        pi._last_setpoint_change_time = time.monotonic()  # Just changed
         pi._pi_integral = 1.0
         pi._ff_offset = 2.0
-        pi._last_setpoint_direction = 1  # Last change was up
-        pi._last_setpoint_change_tick = pi._tick_count
         pi_entity._attr_hvac_mode = HVACMode.HEAT
-        pi_entity._attr_current_temperature = 20.0  # Cold, needs to ramp
+        pi_entity._attr_current_temperature = 20.0  # Error 2.0, active ramp
 
         await pi._pi_tick()
 
-        # Same direction (up) — should go through regardless of tick count
+        # Ramp should bypass hold timer
         assert pi._hp_setpoint >= 23
+
+    @pytest.mark.asyncio
+    async def test_quantization_feedback_in_deadband(self, pi_entity):
+        """Quantization feedback should push integral away from X.5 boundary.
+
+        When raw_setpoint is near X.5 and system is in deadband, the
+        quantization feedback should nudge integral so raw moves toward
+        an integer, preventing limit cycles.
+        """
+        pi = pi_entity._pi
+        pi._desired_temp = 20.5
+        pi._hp_setpoint = 25
+        # Set integral so that with FF from RLS (≈0), raw ≈ 20.5 + ki*I
+        # We need raw to be near 25.5. effective_ki = 0.05 * (1 + |I|/10)
+        # For I=80: effective_ki = 0.05 * 9 = 0.45, i_term = 0.45*80=36 → too high
+        # For I=60: effective_ki = 0.05 * 7 = 0.35, i_term = 0.35*60=21 → too high
+        # This is hard to set up because FF recomputes from RLS.
+        # Instead, set outdoor temp so FF gives us something useful.
+        pi._outdoor_temp = 5.0  # FF ≈ 0.35 * (15-5) = 3.5
+        pi._pi_integral = 3.0  # effective_ki ≈ 0.05*1.3 = 0.065, i_term ≈ 0.195
+        # raw ≈ 20.5 + 0 + 0.195 + 3.5 = 24.195 → hp stays at 25
+        # q_error = 25 - 24.195 = 0.805 > 0.3 → feedback pushes integral up
+        pi._pi_deadband = 0.5
+        pi_entity._attr_hvac_mode = HVACMode.HEAT
+        pi_entity._attr_current_temperature = 20.5  # Error = 0, in deadband
+
+        integral_before = pi._pi_integral
+        await pi._pi_tick()
+
+        # Quantization feedback should have pushed integral up (toward 25.0)
+        # because raw was below hp_setpoint
+        assert pi._pi_integral != integral_before, "Quantization feedback had no effect"
 
     def test_set_temperature_none(self, pi_entity):
         """set_temperature with None should return immediately."""

@@ -430,9 +430,7 @@ class PIController:
         self._pi_command_pending = False
         self._pi_tick_running = False
         self._last_send_ir_time = 0.0
-        self._tick_count = 0
-        self._last_setpoint_change_tick = -10  # Allow first change immediately
-        self._last_setpoint_direction = 0
+        self._last_setpoint_change_time = 0.0
         self._ff_settled_ticks = 0
         self._sensor_unavailable = False
         self._sensor_recovery_pending = False
@@ -1128,9 +1126,6 @@ class PIController:
             _LOGGER.debug("PI tick: skipping, paused by vendor")
             return
 
-        # Tick counter for anti-oscillation guard
-        self._tick_count += 1
-
         # Time since last tick (for time-normalized integral)
         now_mono = time.monotonic()
         if self._pi_last_tick_time > 0:
@@ -1214,21 +1209,17 @@ class PIController:
         # unbounded growth from asymmetric oscillation around setpoint.
         in_deadband = abs_error < self._pi_deadband
         if in_deadband:
-            # In deadband: accumulate error at full rate (both positive and negative)
-            # to balance asymmetric oscillation. Apply gentle decay (0.99) to bleed
-            # off stale integral from prior conditions without eroding quickly.
-            # Decay old integral first, then add fresh error (standard EMA order)
-            self._pi_integral *= 0.99
-            avg_error = (error + self._pi_last_error) / 2.0
-            self._pi_integral += avg_error * dt_factor
+            # In deadband: freeze integral. No error accumulation — the system is
+            # close enough to target. Quantization-error feedback (below) handles
+            # the X.5 boundary problem. RLS learning absorbs persistent integral
+            # into FF coefficients over time.
             self._ff_settled_ticks += 1
             # RLS learning: update model when settled AND integral is small and stable.
             # Integral < 3 ensures FF is providing most of the offset, not the integral.
             # Rate < 0.5 ensures the integral isn't still converging.
-            integral_stable = (
-                abs(self._pi_integral) < 3.0
-                and abs(self._pi_integral - self._prev_integral_for_rls) < 0.5
-            )
+            # RLS learns when integral is stable (not still converging), regardless
+            # of magnitude. Large stable integral = FF is wrong, observation is valid.
+            integral_stable = abs(self._pi_integral - self._prev_integral_for_rls) < 0.5
             if not self._rls_warmup_done:
                 warmup_elapsed = (now_mono - self._rls_start_time) / 3600.0
                 if warmup_elapsed >= self._rls_warmup_hours:
@@ -1321,16 +1312,6 @@ class PIController:
 
         self._pi_last_error = error
 
-        # Overshoot recovery: zero small negative integral in heating (or positive in cooling)
-        # Only when the integral is small — large opposite-sign integral means FF is wrong
-        # and the integral is legitimately compensating. Don't fight it.
-        if is_heating and -3.0 < self._pi_integral < 0 and abs(error) < self._pi_deadband:
-            _LOGGER.debug("Overshoot recovery: zeroing small negative integral %.2f in heating", self._pi_integral)
-            self._pi_integral = 0.0
-        elif is_cooling and 0 < self._pi_integral < 3.0 and abs(error) < self._pi_deadband:
-            _LOGGER.debug("Overshoot recovery: zeroing small positive integral %.2f in cooling", self._pi_integral)
-            self._pi_integral = 0.0
-
         # Hard safety cap on integral
         self._pi_integral = max(-50.0, min(50.0, self._pi_integral))
 
@@ -1364,6 +1345,17 @@ class PIController:
                 self._pi_integral += kb * saturation_error
                 self._pi_integral = max(-50.0, min(50.0, self._pi_integral))
 
+        # Quantization-error feedback: push integral toward values where
+        # raw_setpoint lands near an integer, avoiding the X.5 boundary that
+        # causes limit cycles with 1°C HP steps. Analogous to back-calculation
+        # anti-windup but for quantization instead of saturation.
+        # Only in deadband — during ramps the large q_error is just the ramp gap,
+        # not a boundary-hovering problem.
+        if in_deadband and effective_ki != 0:
+            q_error = float(self._hp_setpoint) - clamped_setpoint
+            if abs(q_error) > 0.3:
+                self._pi_integral += (q_error / effective_ki) * 0.4
+
         # Midpoint-crossing hysteresis
         new_setpoint = self._hp_setpoint
         if clamped_setpoint > self._hp_setpoint + 0.5:
@@ -1373,22 +1365,18 @@ class PIController:
         new_setpoint = int(max(self._min_temp_c, min(self._max_temp_c, new_setpoint)))
 
         if new_setpoint != self._hp_setpoint:
-            # Anti-oscillation: suppress ±1°C reversals while in deadband
-            # (raw setpoint hovering near integer boundary). Require 3 ticks
-            # (~45 min) before allowing a direction change. Monotonic ramps
-            # and large corrections (>1°C or outside deadband) go through immediately.
+            # Minimum hold time: don't change setpoint more often than every 30 min.
+            # A 1°C change takes 15-30 min to affect room temp — wait to see its effect.
+            # Bypass for large corrections (>1°C) and active ramps (error >> deadband).
             change = new_setpoint - self._hp_setpoint
-            ticks_since = self._tick_count - self._last_setpoint_change_tick
-            is_oscillation = (
-                in_deadband
-                and abs(change) <= 1
-                and change * self._last_setpoint_direction < 0
-                and ticks_since < 3
-            )
-            if is_oscillation:
+            time_since_last = now_mono - self._last_setpoint_change_time
+            can_change = time_since_last >= 1800.0  # 30 minutes
+            if not in_deadband:
+                can_change = True  # Outside deadband = active demand, bypass hold
+            if not can_change:
                 _LOGGER.debug(
-                    "PI: reversal %s -> %s held (anti-oscillation, %d ticks since last change)",
-                    self._hp_setpoint, new_setpoint, ticks_since,
+                    "PI: setpoint %s -> %s held (%.0fs since last change, need 1800s)",
+                    self._hp_setpoint, new_setpoint, time_since_last,
                 )
             else:
                 _LOGGER.info(
@@ -1396,8 +1384,7 @@ class PIController:
                     error, p_term, i_term, self._ff_offset, clamped_setpoint,
                     self._hp_setpoint, new_setpoint,
                 )
-                self._last_setpoint_direction = change
-                self._last_setpoint_change_tick = self._tick_count
+                self._last_setpoint_change_time = now_mono
                 self._hp_setpoint = new_setpoint
                 self._pi_command_pending = True
                 self._last_send_ir_time = time.monotonic()
