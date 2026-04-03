@@ -70,19 +70,16 @@ class FFLearningSuppressedBinarySensor(BinarySensorEntity):
     @property
     def is_on(self) -> bool:
         """True when FF learning is suppressed."""
-        suppress, _, _ = self._climate._pi._compute_disturbance_effects()
-        return suppress
+        return self._climate._pi._disturbance_suppress_active
 
     @property
     def extra_state_attributes(self):
         """Return details about what is suppressing learning."""
         pi = self._climate._pi
-        suppress, active_entities, total_bias = pi._compute_disturbance_effects()
         return {
             "manual_suppress": pi._manual_ff_suppress,
             "manual_suppress_reason": pi._manual_ff_suppress_reason,
-            "active_entity_suppressors": active_entities,
-            "total_bias": round(total_bias, 2),
+            "active_suppressors": pi._disturbance_active_suppressors,
         }
 
     async def async_added_to_hass(self) -> None:

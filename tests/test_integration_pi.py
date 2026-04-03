@@ -124,9 +124,10 @@ class TestPICompanionSensors:
         entry = await setup_pi_integration()
         entity = get_climate_entity(hass, entry)
 
-        # Manually suppress learning
+        # Manually suppress learning (set both the flag and the state the binary sensor reads)
         entity._pi._manual_ff_suppress = True
         entity._pi._manual_ff_suppress_reason = "testing"
+        entity._pi._disturbance_suppress_active = True
 
         # Fire the FF suppress signal so binary sensor re-reads state
         async_dispatcher_send(

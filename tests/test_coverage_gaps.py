@@ -769,28 +769,16 @@ class TestMqttDelayBranches:
 class TestPILegacyMigration:
     """Cover PI controller legacy key migration in __init__."""
 
-    def test_legacy_suppress_entity_migrated(self):
-        """Old pi_ff_suppress_learning_entity should migrate to disturbance_inputs."""
+    def test_legacy_keys_dont_break_init(self):
+        """Old legacy keys in config should not crash PIController init."""
         from tests.test_pi_controller import FakePIEntity
         config = make_pi_config({
             "pi_ff_suppress_learning_entity": "input_boolean.stove",
-            "pi_disturbance_inputs": [],
-        })
-        entity = FakePIEntity(config)
-        assert len(entity._pi._disturbance_inputs) == 1
-        assert entity._pi._disturbance_inputs[0]["entity_id"] == "input_boolean.stove"
-
-    def test_legacy_bias_entity_migrated(self):
-        """Old pi_ff_bias_entity should migrate to disturbance_inputs."""
-        from tests.test_pi_controller import FakePIEntity
-        config = make_pi_config({
             "pi_ff_bias_entity": "sensor.solar_gain",
             "pi_disturbance_inputs": [],
         })
         entity = FakePIEntity(config)
-        assert len(entity._pi._disturbance_inputs) == 1
-        assert entity._pi._disturbance_inputs[0]["entity_id"] == "sensor.solar_gain"
-        assert entity._pi._disturbance_inputs[0]["suppress_learning"] is False
+        assert entity._pi._pi_enabled is True
 
 
 class TestPISetTempWithMode:
@@ -2011,26 +1999,6 @@ class TestPIFilterModesNone:
         entity = FakePIEntity(config)
         result = entity._pi.filter_hvac_modes(None)
         assert result is None
-
-
-class TestPIDisturbanceSkipEmpty:
-    """Cover pi_controller.py line 482: skip empty entity_id."""
-
-    def test_disturbance_empty_entity_id(self):
-        """Disturbance input with empty entity_id should be skipped."""
-        from tests.test_pi_controller import FakePIEntity
-        config = make_pi_config({
-            "pi_disturbance_inputs": [{
-                "name": "Empty",
-                "entity_id": "",
-                "suppress_learning": True,
-                "default_bias": 0.0,
-                "gain": 1.0,
-            }],
-        })
-        entity = FakePIEntity(config)
-        suppress, suppressors, bias = entity._pi._compute_disturbance_effects()
-        assert suppress is False  # Empty entity_id skipped
 
 
 class TestPISensorFirstAvailable:

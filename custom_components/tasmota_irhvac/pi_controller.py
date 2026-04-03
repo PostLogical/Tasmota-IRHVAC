@@ -34,7 +34,6 @@ from .const import (
     ATTR_PI_INTEGRAL,
     CONF_OUTDOOR_TEMP_SENSOR,
     CONF_PI_DEADBAND,
-    CONF_PI_DISTURBANCE_INPUTS,
     CONF_PI_ENABLED,
     CONF_PI_FF_COOL_REFERENCE,
     CONF_PI_FF_COOL_SLOPE,
@@ -392,34 +391,11 @@ class PIController:
 
         # (Anticipated change entity removed — use model inputs instead)
 
-        # Disturbance inputs (replaces single suppress/bias entities)
-        # Fallback: convert legacy keys if disturbance_inputs is empty (e.g., YAML import)
-        self._disturbance_inputs = config.get(CONF_PI_DISTURBANCE_INPUTS, [])
-        if not self._disturbance_inputs:
-            old_suppress = config.get("pi_ff_suppress_learning_entity", "")
-            old_bias = config.get("pi_ff_bias_entity", "")
-            if old_suppress:
-                self._disturbance_inputs.append({
-                    "name": "Suppress Entity (migrated)",
-                    "entity_id": old_suppress,
-                    "suppress_learning": True,
-                    "default_bias": 0.0,
-                    "gain": 1.0,
-                })
-            if old_bias:
-                self._disturbance_inputs.append({
-                    "name": "Bias Entity (migrated)",
-                    "entity_id": old_bias,
-                    "suppress_learning": False,
-                    "default_bias": 0.0,
-                    "gain": 1.0,
-                })
+        # Learning suppression state (manual service + model input suppress_learning flags)
         self._manual_ff_suppress = False
         self._manual_ff_suppress_reason = ""
-        self._last_disturbance_bias = 0.0
         self._disturbance_suppress_active = False
         self._disturbance_active_suppressors = []
-        self._disturbance_total_bias = 0.0
 
         # PI controller state
         self._desired_temp = entity._attr_target_temperature
@@ -570,17 +546,6 @@ class PIController:
             outdoor_state = self._hass.states.get(self._outdoor_temp_sensor)
             if outdoor_state is not None:
                 self._update_outdoor_temp(outdoor_state)
-
-        # Subscribe to disturbance input entities for real-time updates
-        disturbance_entity_ids = [
-            d["entity_id"] for d in self._disturbance_inputs if d.get("entity_id")
-        ]
-        if disturbance_entity_ids:
-            async_track_state_change_event(
-                self._hass,
-                disturbance_entity_ids,
-                self._async_disturbance_entity_changed,
-            )
 
         # Register sun.sun for night-only learning (legacy bucket learning only)
         if self._ff_learn_night_only:
@@ -864,45 +829,6 @@ class PIController:
         _LOGGER.info("FF models reset to seed values, integral zeroed")
         self._entity.async_schedule_update_ha_state()
 
-    def _compute_disturbance_effects(self):
-        """Compute combined suppress and bias from disturbance inputs.
-
-        Returns (suppress: bool, active_suppressors: list[str], total_bias: float).
-        """
-        suppress = self._manual_ff_suppress
-        active_suppressors = []
-        total_bias = 0.0
-
-        for d_input in self._disturbance_inputs:
-            entity_id = d_input.get("entity_id")
-            if not entity_id:
-                continue
-            state = self._hass.states.get(entity_id)
-            if not state or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
-                continue
-
-            # Try to interpret as numeric first
-            try:
-                value = float(state.state)
-                is_numeric = True
-            except (ValueError, TypeError):
-                is_numeric = False
-
-            if is_numeric:
-                if value != 0:
-                    if d_input.get("suppress_learning"):
-                        suppress = True
-                        active_suppressors.append(entity_id)
-                    total_bias += value * d_input.get("gain", 1.0)
-            else:
-                if state.state == "on":
-                    if d_input.get("suppress_learning"):
-                        suppress = True
-                        active_suppressors.append(entity_id)
-                    total_bias += d_input.get("default_bias", 0.0)
-
-        return suppress, active_suppressors, total_bias
-
     # ── PI Internals ──────────────────────────────────────────────────
 
     @callback
@@ -1010,15 +936,6 @@ class PIController:
     @callback
     def _async_model_input_changed(self, event):
         """Handle model input entity state changes — update binary sensor."""
-        if hasattr(self._entity, "_config_entry_id"):
-            async_dispatcher_send(
-                self._hass,
-                SIGNAL_FF_SUPPRESS_UPDATE.format(self._entity._config_entry_id),
-            )
-
-    @callback
-    def _async_disturbance_entity_changed(self, event):
-        """Handle disturbance input entity state changes — update binary sensor."""
         if hasattr(self._entity, "_config_entry_id"):
             async_dispatcher_send(
                 self._hass,
@@ -1196,7 +1113,6 @@ class PIController:
                 active_suppressors.append(m_input.get("name", f"input_{i}"))
         self._disturbance_suppress_active = learning_suppressed
         self._disturbance_active_suppressors = active_suppressors
-        self._disturbance_total_bias = 0.0  # Bias now handled by model inputs
 
         # Adaptive setpoint weight
         abs_error = abs(error)
