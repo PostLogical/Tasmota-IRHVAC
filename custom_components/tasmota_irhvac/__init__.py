@@ -29,6 +29,22 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     return True
 
 
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Migrate old config entries."""
+    if entry.version == 1 and entry.minor_version < 5:
+        # v1.5: precision/temp_step stored as floats instead of strings
+        new_options = dict(entry.options)
+        changed = False
+        for key in ("precision", "temp_step"):
+            if key in new_options and isinstance(new_options[key], str):
+                new_options[key] = float(new_options[key])
+                changed = True
+        if changed:
+            hass.config_entries.async_update_entry(entry, options=new_options)
+        entry.minor_version = 5
+    return True
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Tasmota IRHVAC from a config entry."""
     hass.data.setdefault(DOMAIN, {})

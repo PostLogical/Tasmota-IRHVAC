@@ -26,6 +26,9 @@
       },
       "set_horizontal_vane": {
         "name": "Set Horizontal Vane"
+      },
+      "save_learned_seeds": {
+        "name": "Save Learned Seeds"
       }
     },
     "binary_sensor": {

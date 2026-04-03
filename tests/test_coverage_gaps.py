@@ -2922,3 +2922,133 @@ class TestAwayPresetSyncsDesiredTemp:
         await entity.async_set_preset_mode(PRESET_NONE)
         assert entity._pi._desired_temp == 22.0
         assert entity._attr_target_temperature == 22.0
+
+
+class TestSaveLearnedSeedsButton:
+    """Cover button.py SaveLearnedSeedsButton."""
+
+    @pytest.mark.asyncio
+    async def test_save_learned_seeds_button_created(self, hass, mqtt_mock, enable_custom_integrations):
+        """Save Learned Seeds button should be created when PI is enabled."""
+        config = make_pi_config()
+        entry = MockConfigEntry(domain=DOMAIN, data=config, title="T", version=1, minor_version=4)
+        entry.add_to_hass(hass)
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        all_buttons = hass.states.async_all("button")
+        save_btn = next((s for s in all_buttons if "save_learned_seeds" in s.entity_id), None)
+        assert save_btn is not None, "Save Learned Seeds button not found"
+
+    @pytest.mark.asyncio
+    async def test_save_learned_seeds_updates_config(self, hass, mqtt_mock, enable_custom_integrations):
+        """Pressing Save Learned Seeds should update config entry options."""
+        config = make_pi_config({
+            "pi_model_inputs": [{
+                "name": "solar",
+                "entity_id": "sensor.solar",
+                "seed_heat": -1.0,
+                "seed_cool": 0.0,
+                "lag_tau": 0,
+            }],
+        })
+        entry = MockConfigEntry(domain=DOMAIN, data=config, title="T", version=1, minor_version=4)
+        entry.add_to_hass(hass)
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        entity = get_climate_entity(hass, entry)
+        if not entity or not entity._pi:
+            pytest.skip("PI entity not created")
+
+        pi = entity._pi
+        # Simulate learned coefficients different from seeds
+        pi._rls_heat.beta = [0.1, 0.42, -3.5]
+        pi._rls_cool.beta = [0.0, -0.42, 0.0]
+        pi._rls_heat.observation_count = 100
+
+        # Find and press the button
+        from custom_components.tasmota_irhvac.button import SaveLearnedSeedsButton
+        buttons = [
+            e for e in hass.data.get("entity_components", {}).get("button", {})
+            if isinstance(e, SaveLearnedSeedsButton)
+        ] if "entity_components" in hass.data else []
+
+        # Press via the entity directly
+        for e_platform in hass.data.get("entity_platform", {}).values():
+            for ep in e_platform:
+                for ent in ep.entities.values():
+                    if hasattr(ent, '_attr_translation_key') and ent._attr_translation_key == "save_learned_seeds":
+                        await ent.async_press()
+                        break
+
+        await hass.async_block_till_done()
+
+        # Check config was updated
+        updated = entry.options
+        assert updated.get("pi_ff_heat_slope") == 0.42
+        inputs = updated.get("pi_model_inputs", [])
+        if inputs:
+            assert inputs[0].get("seed_heat") == -3.5
+
+
+class TestSeedChangeDetection:
+    """Cover pi_controller.py _apply_seed_changes."""
+
+    @pytest.mark.asyncio
+    async def test_seed_change_resets_coefficient(self):
+        """Changed seed should reset coefficient and increase P diagonal."""
+        from tests.test_pi_controller import FakePIEntity
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        # Simulate learned state
+        pi._rls_heat.beta = [0.1, 0.42, ]  # Learned outdoor_delta=0.42
+        pi._rls_heat.beta_seed = [0.0, 0.3]  # Old seed was 0.3
+
+        # New seeds: user changed outdoor_delta seed to 0.5
+        old_seeds = [0.0, 0.3]
+        new_seeds = [0.0, 0.5]
+
+        pi._apply_seed_changes(old_seeds, new_seeds, pi._rls_heat)
+
+        # Coefficient should be reset to new seed
+        assert pi._rls_heat.beta[1] == 0.5
+        assert pi._rls_heat.beta_seed[1] == 0.5
+        # P diagonal should be high (fast re-learning)
+        from custom_components.tasmota_irhvac.const import DEFAULT_RLS_P_INIT
+        assert pi._rls_heat.P[1 * pi._rls_heat.n + 1] == DEFAULT_RLS_P_INIT
+
+    @pytest.mark.asyncio
+    async def test_unchanged_seed_preserves_learned(self):
+        """Unchanged seed should keep learned coefficient."""
+        from tests.test_pi_controller import FakePIEntity
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        pi._rls_heat.beta = [0.1, 0.42]
+        old_P = pi._rls_heat.P[1 * pi._rls_heat.n + 1]
+
+        old_seeds = [0.0, 0.3]
+        new_seeds = [0.0, 0.3]  # Same
+
+        pi._apply_seed_changes(old_seeds, new_seeds, pi._rls_heat)
+
+        assert pi._rls_heat.beta[1] == 0.42  # Preserved
+        assert pi._rls_heat.P[1 * pi._rls_heat.n + 1] == old_P  # Not reset
+
+    @pytest.mark.asyncio
+    async def test_empty_old_seeds_skips(self):
+        """Empty old seeds (first run) should not crash or reset."""
+        from tests.test_pi_controller import FakePIEntity
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        pi._rls_heat.beta = [0.1, 0.42]
+
+        pi._apply_seed_changes([], [0.0, 0.3], pi._rls_heat)
+
+        assert pi._rls_heat.beta[1] == 0.42  # Unchanged

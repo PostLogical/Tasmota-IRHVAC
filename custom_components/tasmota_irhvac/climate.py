@@ -490,11 +490,6 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
     config = {**entry.data, **entry.options}
 
-    # SelectSelector stores precision/temp_step as strings; coerce to float
-    for key in (CONF_PRECISION, CONF_TEMP_STEP):
-        if key in config and isinstance(config[key], str):
-            config[key] = float(config[key])
-
     vendor = config.get(CONF_VENDOR)
     if vendor is None:
         vendor = config.get(CONF_PROTOCOL)

@@ -15,10 +15,14 @@ from homeassistant.components.climate.const import (
     SWING_VERTICAL,
 )
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import CONF_HAS_SET_H, CONF_HAS_SET_V, CONF_IR_ACTIONS, DATA_KEY
+from .const import (
+    CONF_HAS_SET_H, CONF_HAS_SET_V, CONF_IR_ACTIONS, CONF_PI_FF_COOL_SLOPE,
+    CONF_PI_FF_HEAT_SLOPE, CONF_PI_MODEL_INPUTS, DATA_KEY,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -84,6 +88,15 @@ async def async_setup_entry(
                     action=action,
                 )
             )
+
+    # Save Learned Seeds button (PI controller only)
+    if climate_entity._pi and climate_entity._pi._pi_enabled:
+        buttons.append(
+            SaveLearnedSeedsButton(
+                climate_entity=climate_entity,
+                entry=entry,
+            )
+        )
 
     if buttons:
         async_add_entities(buttons)
@@ -182,3 +195,91 @@ class IRActionButton(ButtonEntity):
             await asyncio.sleep(mqtt_delay)
         await mqtt.async_publish(self.hass, irsend_topic, self._ir_code)
         _LOGGER.info("IR action '%s' sent", self._action_name)
+
+
+class SaveLearnedSeedsButton(ButtonEntity):
+    """Button that copies current learned RLS coefficients to config seeds.
+
+    Reads the current beta values from the RLS heat/cool models and writes
+    them back to the config entry as seed values. This protects learned
+    coefficients against data loss on reset or config change.
+    """
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+    _attr_icon = "mdi:content-save-check"
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_translation_key = "save_learned_seeds"
+
+    def __init__(self, climate_entity, entry: ConfigEntry) -> None:
+        """Initialize the button."""
+        self._climate = climate_entity
+        self._entry = entry
+        self._attr_unique_id = f"{climate_entity.unique_id}_save_learned_seeds"
+
+    @property
+    def device_info(self):
+        """Return device info to group with climate entity."""
+        return self._climate.device_info
+
+    @property
+    def available(self) -> bool:
+        """Available when climate entity is available and PI has data."""
+        pi = self._climate._pi
+        return (
+            self._climate.available
+            and pi is not None
+            and pi._rls_heat.observation_count > 0
+        )
+
+    async def async_press(self) -> None:
+        """Copy learned coefficients to config entry seeds."""
+        pi = self._climate._pi
+        if pi is None:
+            return
+
+        heat_beta = pi._rls_heat.beta
+        cool_beta = pi._rls_cool.beta
+
+        # Build updated options
+        new_options = dict(self._entry.options)
+
+        # Outdoor delta slope (beta[1], stored as positive for heat)
+        if len(heat_beta) > 1:
+            new_options[CONF_PI_FF_HEAT_SLOPE] = round(heat_beta[1], 4)
+        if len(cool_beta) > 1:
+            new_options[CONF_PI_FF_COOL_SLOPE] = round(abs(cool_beta[1]), 4)
+
+        # Model input seeds (beta[2+])
+        model_inputs = list(new_options.get(CONF_PI_MODEL_INPUTS, []))
+        for i, m_input in enumerate(model_inputs):
+            beta_idx = i + 2  # 0=intercept, 1=outdoor_delta, 2+=model inputs
+            updated = dict(m_input)
+            if beta_idx < len(heat_beta):
+                updated["seed_heat"] = round(heat_beta[beta_idx], 4)
+            if beta_idx < len(cool_beta):
+                updated["seed_cool"] = round(cool_beta[beta_idx], 4)
+            model_inputs[i] = updated
+
+        new_options[CONF_PI_MODEL_INPUTS] = model_inputs
+
+        # Update config entry (triggers reload via OptionsFlowWithReload)
+        self.hass.config_entries.async_update_entry(
+            self._entry, options=new_options,
+        )
+
+        # Update beta_seed and internal seeds so Bayesian ridge anchors to
+        # saved values and seed change detection doesn't flag the save.
+        for i in range(min(len(heat_beta), len(pi._heat_seeds), pi._rls_heat.n)):
+            pi._heat_seeds[i] = round(heat_beta[i], 4)
+            pi._rls_heat.beta_seed[i] = round(heat_beta[i], 4)
+        for i in range(min(len(cool_beta), len(pi._cool_seeds), pi._rls_cool.n)):
+            pi._cool_seeds[i] = round(cool_beta[i], 4)
+            pi._rls_cool.beta_seed[i] = round(cool_beta[i], 4)
+
+        _LOGGER.info(
+            "Saved learned seeds: heat_slope=%.4f, cool_slope=%.4f, inputs=%s",
+            new_options.get(CONF_PI_FF_HEAT_SLOPE, 0),
+            new_options.get(CONF_PI_FF_COOL_SLOPE, 0),
+            [(m.get("name"), m.get("seed_heat"), m.get("seed_cool")) for m in model_inputs],
+        )

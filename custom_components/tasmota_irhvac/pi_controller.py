@@ -298,6 +298,8 @@ class PIExtraStoredData(ExtraStoredData):
     rls_heat_model: dict = dataclasses.field(default_factory=dict)
     rls_cool_model: dict = dataclasses.field(default_factory=dict)
     lag_filter_states: dict = dataclasses.field(default_factory=dict)
+    heat_seeds_at_learn: list = dataclasses.field(default_factory=list)
+    cool_seeds_at_learn: list = dataclasses.field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize to JSON-compatible dict."""
@@ -312,6 +314,8 @@ class PIExtraStoredData(ExtraStoredData):
             "rls_heat_model": self.rls_heat_model,
             "rls_cool_model": self.rls_cool_model,
             "lag_filter_states": self.lag_filter_states,
+            "heat_seeds_at_learn": self.heat_seeds_at_learn,
+            "cool_seeds_at_learn": self.cool_seeds_at_learn,
         }
 
     @classmethod
@@ -332,6 +336,8 @@ class PIExtraStoredData(ExtraStoredData):
                 rls_heat_model=restored.get("rls_heat_model", {}),
                 rls_cool_model=restored.get("rls_cool_model", {}),
                 lag_filter_states=restored.get("lag_filter_states", {}),
+                heat_seeds_at_learn=restored.get("heat_seeds_at_learn", []),
+                cool_seeds_at_learn=restored.get("cool_seeds_at_learn", []),
             )
         except (KeyError, ValueError, TypeError, AttributeError):
             return None
@@ -630,6 +636,8 @@ class PIController:
             rls_heat_model=self._rls_heat.as_dict(),
             rls_cool_model=self._rls_cool.as_dict(),
             lag_filter_states=lag_states,
+            heat_seeds_at_learn=list(self._heat_seeds),
+            cool_seeds_at_learn=list(self._cool_seeds),
         )
 
     def restore_extra_stored_data(self, data: PIExtraStoredData) -> None:
@@ -659,6 +667,11 @@ class PIController:
                 seed_coefficients=self._cool_seeds,
                 coeff_clamps=self._rls_clamps,
             )
+        # Seed change detection: if user edited a seed since last save,
+        # reset that coefficient to the new seed and increase its uncertainty.
+        # Coefficients with unchanged seeds keep their learned values.
+        self._apply_seed_changes(data.heat_seeds_at_learn, self._heat_seeds, self._rls_heat)
+        self._apply_seed_changes(data.cool_seeds_at_learn, self._cool_seeds, self._rls_cool)
         # Skip warmup if restoring learned models
         if self._rls_heat.observation_count > 0 or self._rls_cool.observation_count > 0:
             self._rls_warmup_done = True
@@ -668,6 +681,27 @@ class PIController:
                 key = m_input.get("name", str(i))
                 if key in data.lag_filter_states:
                     self._model_input_filtered[i] = float(data.lag_filter_states[key])
+
+    def _apply_seed_changes(self, old_seeds, new_seeds, rls_model):
+        """Detect seed changes and selectively reset affected coefficients.
+
+        Compares seeds stored at last persist with current config seeds.
+        For each coefficient where the seed changed, reset to new seed
+        and increase P diagonal (high uncertainty → fast re-learning).
+        """
+        if not old_seeds:
+            return  # No stored seeds (first run or pre-seed-detection data)
+        for i in range(min(len(old_seeds), len(new_seeds), rls_model.n)):
+            if abs(old_seeds[i] - new_seeds[i]) > 0.001:
+                old_val = rls_model.beta[i]
+                rls_model.beta[i] = new_seeds[i]
+                rls_model.beta_seed[i] = new_seeds[i]
+                # Increase uncertainty for this coefficient → fast re-learning
+                rls_model.P[i * rls_model.n + i] = DEFAULT_RLS_P_INIT
+                _LOGGER.info(
+                    "Seed changed for coefficient %d: %.4f → %.4f (learned was %.4f, reset)",
+                    i, old_seeds[i], new_seeds[i], old_val,
+                )
 
     async def set_temperature(self, temperature, hvac_mode=None):
         """Handle temperature set when PI is active."""

@@ -207,12 +207,21 @@ _TEMP_STEP_SELECTOR = SelectSelector(
 )
 
 
-def _stringify_floats(data: dict) -> dict:
-    """Ensure SelectSelector numeric keys are stored as strings for UI consistency."""
+def _coerce_floats(data: dict) -> dict:
+    """Coerce SelectSelector string values to float for numeric keys."""
     for key in _FLOAT_KEYS:
-        if key in data and not isinstance(data[key], str):
-            data[key] = str(data[key])
+        if key in data and isinstance(data[key], str):
+            data[key] = float(data[key])
     return data
+
+
+def _stringify_for_ui(data: dict) -> dict:
+    """Convert stored float values to strings for SelectSelector suggested values."""
+    out = dict(data)
+    for key in _FLOAT_KEYS:
+        if key in out and not isinstance(out[key], str):
+            out[key] = str(out[key])
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -379,7 +388,7 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Tasmota IRHVAC."""
 
     VERSION = 1
-    MINOR_VERSION = 4  # Model inputs with RLS (replaces disturbance inputs)
+    MINOR_VERSION = 5  # precision/temp_step stored as floats (was strings)
 
     def __init__(self):
         """Initialize the config flow."""
@@ -693,7 +702,7 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._abort_if_unique_id_configured()
 
         data = {k: v for k, v in self._user_input.items() if k in DATA_KEYS}
-        options = _stringify_floats(
+        options = _coerce_floats(
             {k: v for k, v in self._user_input.items() if k not in DATA_KEYS}
         )
 
@@ -750,7 +759,7 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._abort_if_unique_id_configured()
 
         data = {k: v for k, v in import_data.items() if k in DATA_KEYS}
-        options = _stringify_floats(
+        options = _coerce_floats(
             {k: v for k, v in import_data.items() if k not in DATA_KEYS}
         )
 
@@ -848,13 +857,14 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
         """Temperature options."""
         if user_input is not None:
             return self.async_create_entry(
-                data=_stringify_floats({**self.config_entry.options, **user_input})
+                data=_coerce_floats({**self.config_entry.options, **user_input})
             )
 
         return self.async_show_form(
             step_id="temperature",
             data_schema=self.add_suggested_values_to_schema(
-                OPTIONS_TEMPERATURE_SCHEMA, self.config_entry.options
+                OPTIONS_TEMPERATURE_SCHEMA,
+                _stringify_for_ui(self.config_entry.options),
             ),
         )
 
