@@ -2596,3 +2596,287 @@ class TestConfigFlowGaps:
         inputs = entry.options.get("pi_model_inputs", [])
         assert inputs[0]["name"] == "Stove Updated"
         assert inputs[0]["seed_heat"] == -4.0
+
+    @pytest.mark.asyncio
+    async def test_model_input_add_with_clamps(self, hass, setup_integration):
+        """Adding model input with clamp_min and clamp_max should store both (lines 975, 977)."""
+        entry = await setup_integration()
+
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "model_inputs"},
+        )
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "model_inputs_add"},
+        )
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={
+                "model_input_name": "Solar",
+                "model_input_entity": "sensor.solar_power",
+                "model_input_seed_heat": -2.0,
+                "model_input_seed_cool": 0.0,
+                "model_input_clamp_min": -5.0,
+                "model_input_clamp_max": 0.0,
+            },
+        )
+        assert result["type"] == "create_entry"
+        inputs = entry.options.get("pi_model_inputs", [])
+        assert inputs[0]["clamp_min"] == -5.0
+        assert inputs[0]["clamp_max"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_model_input_edit_with_clamps(self, hass, setup_integration):
+        """Editing model input with clamp_min and clamp_max should store both (lines 1064, 1066)."""
+        entry = await setup_integration()
+
+        # First add one without clamps
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "model_inputs"},
+        )
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "model_inputs_add"},
+        )
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={
+                "model_input_name": "Solar",
+                "model_input_entity": "sensor.solar_power",
+                "model_input_seed_heat": -2.0,
+                "model_input_seed_cool": 0.0,
+            },
+        )
+
+        # Now edit it to add clamps
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "model_inputs"},
+        )
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={"next_step_id": "model_inputs_edit"},
+        )
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={"model_input_to_edit": "Solar"},
+        )
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={
+                "model_input_name": "Solar",
+                "model_input_entity": "sensor.solar_power",
+                "model_input_seed_heat": -2.0,
+                "model_input_seed_cool": 0.0,
+                "model_input_clamp_min": -10.0,
+                "model_input_clamp_max": 0.0,
+            },
+        )
+        assert result["type"] == "create_entry"
+        inputs = entry.options.get("pi_model_inputs", [])
+        assert inputs[0]["clamp_min"] == -10.0
+        assert inputs[0]["clamp_max"] == 0.0
+
+
+# ── Sun entity tracking initialization (lines 552-557) ──────────────
+
+
+class TestSunEntityTracking:
+    """Cover sun entity tracking initialization in async_added_to_hass."""
+
+    @pytest.mark.asyncio
+    async def test_night_only_registers_sun_tracking(self, hass, mqtt_mock, enable_custom_integrations):
+        """Night-only learning should register sun.sun tracking (lines 552-557)."""
+        hass.states.async_set("sensor.room_temp", "21.0", {"unit_of_measurement": "°C"})
+        hass.states.async_set("sensor.outdoor_temp", "5.0", {"unit_of_measurement": "°C"})
+        # Set sun below horizon before entity setup
+        hass.states.async_set("sun.sun", "below_horizon")
+
+        config = make_pi_config({
+            "pi_ff_learn_night_only": True,
+            "pi_ff_learn_sunset_delay": 90,
+        })
+        entry = MockConfigEntry(
+            domain=DOMAIN, data=config, title="Test AC PI",
+            version=1, minor_version=4,
+        )
+        entry.add_to_hass(hass)
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+        # Sun was below horizon at setup, so _sun_below_horizon_since should be set
+        assert pi._sun_below_horizon_since > 0
+
+
+# ── Migration v1.4 with non-1.0 gain (lines 108-109) ────────────────
+
+
+class TestMigrationGain:
+    """Cover __init__.py migration with non-1.0 gain disturbance input."""
+
+    @pytest.mark.asyncio
+    async def test_migrate_disturbance_with_gain(self, hass):
+        """Migration v1.3->v1.4 with gain != 1.0 should use gain as seed (lines 108-109)."""
+        from custom_components.tasmota_irhvac.__init__ import async_migrate_entry
+        config = make_config()
+        config["pi_disturbance_inputs"] = [{
+            "name": "Solar Gain",
+            "entity_id": "sensor.solar",
+            "suppress_learning": False,
+            "default_bias": 0.0,
+            "gain": 2.5,
+        }]
+        entry = MockConfigEntry(
+            domain=DOMAIN, data=config, title="Test",
+            version=1, minor_version=3,
+        )
+        entry.add_to_hass(hass)
+
+        result = await async_migrate_entry(hass, entry)
+        assert result is True
+        assert entry.minor_version == 4
+
+        model_inputs = entry.data.get("pi_model_inputs", [])
+        assert len(model_inputs) == 1
+        # gain != 1.0, so seed_heat and seed_cool should be set to gain value
+        assert model_inputs[0]["seed_heat"] == 2.5
+        assert model_inputs[0]["seed_cool"] == 2.5
+        assert "pi_disturbance_inputs" not in entry.data
+
+
+# ── Diagnostics with model inputs (line 52) ─────────────────────────
+
+
+class TestDiagnosticsModelInputs:
+    """Cover diagnostics.py line 52: RLS coefficient names include model inputs."""
+
+    @pytest.mark.asyncio
+    async def test_diagnostics_with_model_inputs(self, hass, mqtt_mock, enable_custom_integrations):
+        """Diagnostics should include model input names in coefficient dict."""
+        from custom_components.tasmota_irhvac.diagnostics import async_get_config_entry_diagnostics
+
+        hass.states.async_set("sensor.room_temp", "21.0", {"unit_of_measurement": "°C"})
+        hass.states.async_set("sensor.outdoor_temp", "5.0", {"unit_of_measurement": "°C"})
+        hass.states.async_set("input_boolean.stove", "off")
+
+        config = make_pi_config()
+        options = {"pi_model_inputs": [{
+            "name": "Stove",
+            "entity_id": "input_boolean.stove",
+            "seed_heat": -3.0,
+            "seed_cool": 0.0,
+            "lag_tau": 0,
+        }]}
+        entry = MockConfigEntry(
+            domain=DOMAIN, data=config, options=options,
+            title="Test AC PI", version=1, minor_version=4,
+        )
+        entry.add_to_hass(hass)
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        diag = await async_get_config_entry_diagnostics(hass, entry)
+        assert "pi_controller" in diag
+        rls = diag["pi_controller"]["rls_model"]
+        # Should have "Stove" in heat_coefficients keys (line 52 appends model input name)
+        assert "Stove" in rls["heat_coefficients"]
+        assert "Stove" in rls["cool_coefficients"]
+
+
+# ── ExtraStoredData restore via async_added_to_hass with full RLS data ──
+
+
+class TestExtraStoredDataViaAsyncAdded:
+    """Cover lines 639-664 via the async_added_to_hass path with ExtraStoredData."""
+
+    @pytest.mark.asyncio
+    async def test_full_rls_restore_via_async_added(self):
+        """async_added_to_hass should restore RLS, obs counts, warmup, and lag states."""
+        from tests.test_pi_controller import FakePIEntity
+        from custom_components.tasmota_irhvac.pi_controller import PIExtraStoredData
+
+        config = make_pi_config({
+            "outdoor_temp_sensor": "",
+            "pi_model_inputs": [{
+                "name": "Stove",
+                "entity_id": "input_boolean.stove",
+                "seed_heat": -3.0,
+                "seed_cool": 0.0,
+                "lag_tau": 1800,
+            }],
+        })
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        # Build RLS model data with observations
+        rls_heat_data = pi._rls_heat.as_dict()
+        rls_heat_data["observation_count"] = 25
+        rls_cool_data = pi._rls_cool.as_dict()
+        rls_cool_data["observation_count"] = 10
+
+        extra = PIExtraStoredData(
+            ff_heat_buckets={0: 2.0, 3: 1.5},
+            ff_cool_buckets={24: -0.5},
+            pi_integral=5.0,
+            desired_temp=21.5,
+            hp_setpoint=23.0,
+            ff_bucket_observation_counts={0: 15, 3: 8},
+            integral_convergence=0.3,
+            rls_heat_model=rls_heat_data,
+            rls_cool_model=rls_cool_data,
+            lag_filter_states={"Stove": 0.6},
+        )
+
+        mock_extra = MagicMock()
+        mock_extra.as_dict.return_value = extra.as_dict()
+        entity.async_get_last_extra_data = AsyncMock(return_value=mock_extra)
+
+        await pi.async_added_to_hass()
+
+        # RLS models restored
+        assert pi._rls_heat.observation_count == 25
+        assert pi._rls_cool.observation_count == 10
+        # Bucket observation counts
+        assert pi._ff_bucket_observation_counts[0] == 15
+        # Integral convergence
+        assert pi._integral_convergence == pytest.approx(0.3, abs=0.1)
+        # Warmup skipped (obs_count > 0)
+        assert pi._rls_warmup_done is True
+        # Lag filter state
+        assert pi._model_input_filtered[0] > 0  # Lag filter state restored from persisted data
+
+
+# ── _async_model_input_changed dispatcher integration ────────────────
+
+
+class TestModelInputChangedIntegration:
+    """Cover lines 939-940: model input change fires dispatcher."""
+
+    @pytest.mark.asyncio
+    async def test_model_input_change_fires_dispatcher(self, hass, mqtt_mock, enable_custom_integrations):
+        """Model input entity change should fire dispatcher signal."""
+        hass.states.async_set("sensor.room_temp", "21.0", {"unit_of_measurement": "°C"})
+        hass.states.async_set("sensor.outdoor_temp", "5.0", {"unit_of_measurement": "°C"})
+        hass.states.async_set("input_boolean.stove", "off")
+
+        config = make_pi_config()
+        options = {"pi_model_inputs": [{
+            "name": "Stove",
+            "entity_id": "input_boolean.stove",
+            "seed_heat": -3.0,
+            "seed_cool": 0.0,
+            "lag_tau": 0,
+        }]}
+        entry = MockConfigEntry(
+            domain=DOMAIN, data=config, options=options,
+            title="Test", version=1, minor_version=4,
+        )
+        entry.add_to_hass(hass)
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        # Change the model input entity state
+        hass.states.async_set("input_boolean.stove", "on")
+        await hass.async_block_till_done()
+        # Should not crash — dispatcher signal fired

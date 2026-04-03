@@ -264,3 +264,75 @@ class TestRLSLagFilter:
 
         filtered = alpha * raw + (1.0 - alpha) * filtered
         assert 0.0 < filtered < 1.0  # Partially decayed
+
+
+class TestRLSSeedPadding:
+    """Tests for RLSModel seed coefficient padding (line 132)."""
+
+    def test_seed_shorter_than_n_inputs(self):
+        """When seed_coefficients is shorter than n_inputs+1, beta should be padded with 0.0."""
+        # 3 inputs means n = 4 (intercept + 3), but only provide 2 seeds
+        model = RLSModel(n_inputs=3, seed_coefficients=[1.0, 0.5])
+        assert len(model.beta) == 4
+        assert model.beta[0] == 1.0
+        assert model.beta[1] == 0.5
+        assert model.beta[2] == 0.0  # Padded
+        assert model.beta[3] == 0.0  # Padded
+
+    def test_seed_empty_list(self):
+        """Empty seed list should be padded to full length."""
+        model = RLSModel(n_inputs=2, seed_coefficients=[])
+        assert len(model.beta) == 3
+        assert all(b == 0.0 for b in model.beta)
+
+    def test_seed_one_shorter(self):
+        """Seed missing just one element should pad exactly one zero."""
+        model = RLSModel(n_inputs=2, seed_coefficients=[0.5, 0.3])
+        assert len(model.beta) == 3
+        assert model.beta[0] == 0.5
+        assert model.beta[1] == 0.3
+        assert model.beta[2] == 0.0
+
+
+class TestRLSZeroDenominator:
+    """Tests for RLS update returning early when denominator is zero (line 186)."""
+
+    def test_update_zero_vector(self):
+        """Update with all-zero feature vector should return residual without updating."""
+        model = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.0], p_init=0.0)
+        # With P=0 and x=0, denom = lambda + x'Px = lambda + 0
+        # We need denom == 0, so set lambda_base such that lam computes to 0.
+        # Actually, with p_init=0 the P matrix is all zeros, so Px = [0,0], xPx = 0.
+        # lam = lambda_base - (lambda_base - lambda_min) * blend
+        # With residual = y - 0 = y, abs_residual/threshold >= 1 → blend = 1 → lam = lambda_min
+        # So denom = lambda_min + 0 = lambda_min. Need lambda_min = 0.
+        model2 = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.0],
+                          p_init=0.0, lambda_base=0.0, lambda_min=0.0)
+        beta_before = list(model2.beta)
+        residual = model2.update([0.0, 0.0], 5.0)
+        # Should return residual without modifying beta
+        assert residual == 5.0
+        assert model2.beta == beta_before
+        assert model2.observation_count == 0  # Should not increment
+
+
+class TestRLSGetCoefficients:
+    """Tests for get_coefficients method (line 224)."""
+
+    def test_get_coefficients_returns_dict(self):
+        """get_coefficients should return a dict mapping index to value."""
+        model = RLSModel(n_inputs=2, seed_coefficients=[1.0, 0.3, -2.0])
+        coeffs = model.get_coefficients()
+        assert isinstance(coeffs, dict)
+        assert coeffs[0] == pytest.approx(1.0)
+        assert coeffs[1] == pytest.approx(0.3)
+        assert coeffs[2] == pytest.approx(-2.0)
+        assert len(coeffs) == 3
+
+    def test_get_coefficients_after_update(self):
+        """get_coefficients should reflect updated values."""
+        model = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.3])
+        model.update([1.0, 10.0], 5.0)
+        coeffs = model.get_coefficients()
+        # After update, coefficients should have changed from seeds
+        assert coeffs[0] != 0.0 or coeffs[1] != 0.3

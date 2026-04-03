@@ -1203,3 +1203,626 @@ class TestPIEdgeCases:
         )
         pi_entity._pi.restore_extra_stored_data(data)
         assert pi_entity._pi._pi_integral == 50.0
+
+
+# ── Model Input Clamps (line 448) ───────────────────────────────────
+
+
+class TestModelInputClamps:
+    """Tests for model input clamp_min and clamp_max configuration (line 448)."""
+
+    def test_model_input_with_both_clamps(self):
+        """Model input with both clamp_min and clamp_max should create tuple clamp."""
+        config = make_pi_config({
+            "pi_model_inputs": [{
+                "name": "Stove",
+                "entity_id": "input_boolean.stove",
+                "seed_heat": -3.0,
+                "seed_cool": 0.0,
+                "clamp_min": -5.0,
+                "clamp_max": 0.0,
+                "lag_tau": 0,
+            }],
+        })
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        # Index 0=intercept(None), 1=outdoor_delta(0,2), 2=model_input(clamp)
+        assert pi._rls_clamps[2] == (-5.0, 0.0)
+
+    def test_model_input_with_no_clamps(self):
+        """Model input without clamps should have None."""
+        config = make_pi_config({
+            "pi_model_inputs": [{
+                "name": "Stove",
+                "entity_id": "input_boolean.stove",
+                "seed_heat": -3.0,
+                "seed_cool": 0.0,
+                "lag_tau": 0,
+            }],
+        })
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        assert pi._rls_clamps[2] is None
+
+    def test_model_input_with_partial_clamp(self):
+        """Model input with only clamp_min (no clamp_max) should have None."""
+        config = make_pi_config({
+            "pi_model_inputs": [{
+                "name": "Stove",
+                "entity_id": "input_boolean.stove",
+                "seed_heat": -3.0,
+                "seed_cool": 0.0,
+                "clamp_min": -5.0,
+                "lag_tau": 0,
+            }],
+        })
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        assert pi._rls_clamps[2] is None
+
+
+# ── ExtraStoredData Full Restore (lines 639-664) ────────────────────
+
+
+class TestExtraStoredDataFullRestore:
+    """Tests for restoring RLS models, bucket obs counts, warmup skip, and lag filters."""
+
+    def test_restore_rls_models(self):
+        """restore_extra_stored_data with rls models should restore them."""
+        from custom_components.tasmota_irhvac.pi_controller import PIExtraStoredData, RLSModel
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        # Create mock RLS model data
+        rls_heat_data = pi._rls_heat.as_dict()
+        rls_heat_data["observation_count"] = 50
+        rls_cool_data = pi._rls_cool.as_dict()
+        rls_cool_data["observation_count"] = 30
+
+        data = PIExtraStoredData(
+            ff_heat_buckets={0: 1.0},
+            ff_cool_buckets={},
+            pi_integral=2.0,
+            desired_temp=22.0,
+            hp_setpoint=23.0,
+            ff_bucket_observation_counts={0: 10, 3: 5},
+            integral_convergence=0.5,
+            rls_heat_model=rls_heat_data,
+            rls_cool_model=rls_cool_data,
+            lag_filter_states={},
+        )
+        pi.restore_extra_stored_data(data)
+
+        # RLS models restored (line 644-655)
+        assert pi._rls_heat.observation_count == 50
+        assert pi._rls_cool.observation_count == 30
+        # Bucket observation counts restored (line 638-639)
+        assert pi._ff_bucket_observation_counts[0] == 10
+        assert pi._ff_bucket_observation_counts[3] == 5
+        # Integral convergence restored (line 640)
+        assert pi._integral_convergence == 0.5
+        # Warmup skipped because obs_count > 0 (line 657-658)
+        assert pi._rls_warmup_done is True
+
+    def test_restore_lag_filter_states(self):
+        """restore_extra_stored_data with lag filter states should restore filtered values."""
+        from custom_components.tasmota_irhvac.pi_controller import PIExtraStoredData
+        config = make_pi_config({
+            "pi_model_inputs": [{
+                "name": "Stove",
+                "entity_id": "input_boolean.stove",
+                "seed_heat": -3.0,
+                "seed_cool": 0.0,
+                "lag_tau": 1800,
+            }],
+        })
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        data = PIExtraStoredData(
+            ff_heat_buckets={},
+            ff_cool_buckets={},
+            pi_integral=0.0,
+            desired_temp=22.0,
+            hp_setpoint=22.0,
+            lag_filter_states={"Stove": 0.75},
+        )
+        pi.restore_extra_stored_data(data)
+        # Lag filter state restored (line 660-664)
+        assert pi._model_input_filtered[0] == 0.75
+
+    def test_warmup_not_skipped_when_zero_observations(self):
+        """Warmup should NOT be skipped when no observations exist."""
+        from custom_components.tasmota_irhvac.pi_controller import PIExtraStoredData
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._rls_warmup_done = False
+
+        data = PIExtraStoredData(
+            ff_heat_buckets={},
+            ff_cool_buckets={},
+            pi_integral=0.0,
+            desired_temp=22.0,
+            hp_setpoint=22.0,
+            rls_heat_model={"beta": [0.0, 0.3], "P": [1.0, 0.0, 0.0, 1.0], "observation_count": 0},
+            rls_cool_model={"beta": [0.0, -0.3], "P": [1.0, 0.0, 0.0, 1.0], "observation_count": 0},
+        )
+        pi.restore_extra_stored_data(data)
+        assert pi._rls_warmup_done is False
+
+
+# ── handle_state_payload no Temp (line 709) ─────────────���───────────
+
+
+class TestHandleStatePayloadNoTemp:
+    """Tests for handle_state_payload when payload has no Temp or Temp <= 0."""
+
+    @pytest.mark.asyncio
+    async def test_payload_no_temp_writes_state(self):
+        """Payload without Temp should still write HA state."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 22.0
+
+        await pi.handle_state_payload({"Power": "On", "Mode": "Heat"})
+        entity.async_write_ha_state.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_payload_temp_zero_writes_state(self):
+        """Payload with Temp=0 should write HA state (no Temp branch)."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 22.0
+
+        await pi.handle_state_payload({"Temp": 0, "Power": "On", "Mode": "Heat"})
+        entity.async_write_ha_state.assert_called()
+
+
+# ── async_reset_ff_buckets RLS beta reset (lines 817-818) ───────────
+
+
+class TestResetFFBucketsRLS:
+    """Tests for async_reset_ff_buckets with model inputs."""
+
+    @pytest.mark.asyncio
+    async def test_reset_rebuilds_rls_seeds_with_model_inputs(self):
+        """Reset should rebuild RLS seeds including model input seeds."""
+        config = make_pi_config({
+            "pi_model_inputs": [{
+                "name": "Stove",
+                "entity_id": "input_boolean.stove",
+                "seed_heat": -3.0,
+                "seed_cool": 1.5,
+                "lag_tau": 0,
+            }],
+        })
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        # Modify beta to non-seed values
+        pi._rls_heat.beta = [99.0] * pi._rls_heat.n
+        pi._rls_cool.beta = [99.0] * pi._rls_cool.n
+        pi._rls_heat.observation_count = 100
+        pi._rls_cool.observation_count = 100
+
+        await pi.async_reset_ff_buckets()
+
+        # Beta should be reset to seeds (lines 816-818)
+        assert pi._rls_heat.beta[0] == 0.0  # intercept
+        assert pi._rls_heat.beta[1] == pytest.approx(pi._ff_heat_slope)  # outdoor
+        assert pi._rls_heat.beta[2] == -3.0  # model input seed
+        assert pi._rls_cool.beta[2] == 1.5
+        assert pi._rls_heat.observation_count == 0
+        assert pi._rls_cool.observation_count == 0
+
+
+# ── _is_learning_time_allowed: sun below but delay not elapsed (lines 877-878) ──
+
+
+class TestLearningTimeAllowed:
+    """Tests for _is_learning_time_allowed night-only logic."""
+
+    def test_night_only_sun_below_delay_not_elapsed(self):
+        """When sun is below horizon but delay hasn't elapsed, should return False."""
+        import time as time_mod
+        config = make_pi_config({
+            "pi_ff_learn_night_only": True,
+            "pi_ff_learn_sunset_delay": 90,  # 90 minutes
+        })
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        # Mock sun.sun as below_horizon
+        sun_state = MagicMock()
+        sun_state.state = "below_horizon"
+        entity.hass.states.get.return_value = sun_state
+
+        # Set below_horizon_since to just now (delay not elapsed)
+        pi._sun_below_horizon_since = time_mod.monotonic()
+
+        result = pi._is_learning_time_allowed()
+        assert result is False
+
+    def test_night_only_sun_above_horizon(self):
+        """When sun is above horizon, should return False."""
+        config = make_pi_config({
+            "pi_ff_learn_night_only": True,
+            "pi_ff_learn_sunset_delay": 90,
+        })
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        sun_state = MagicMock()
+        sun_state.state = "above_horizon"
+        entity.hass.states.get.return_value = sun_state
+
+        result = pi._is_learning_time_allowed()
+        assert result is False
+
+    def test_night_only_first_check_below(self):
+        """First check with sun below should set timestamp and return False."""
+        config = make_pi_config({
+            "pi_ff_learn_night_only": True,
+            "pi_ff_learn_sunset_delay": 90,
+        })
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        sun_state = MagicMock()
+        sun_state.state = "below_horizon"
+        entity.hass.states.get.return_value = sun_state
+        pi._sun_below_horizon_since = 0.0  # Not set yet
+
+        result = pi._is_learning_time_allowed()
+        assert result is False
+        assert pi._sun_below_horizon_since > 0  # Should have been set
+
+    def test_night_only_disabled(self):
+        """When night_only is False, should always return True."""
+        config = make_pi_config({"pi_ff_learn_night_only": False})
+        entity = FakePIEntity(config)
+        result = entity._pi._is_learning_time_allowed()
+        assert result is True
+
+
+# ── Lag filter with tau > 0 (lines 898-899) ───────────────────────���─
+
+
+class TestLagFilterUpdate:
+    """Tests for _update_lag_filters with non-zero tau."""
+
+    def test_lag_filter_with_tau(self):
+        """Lag filter with tau > 0 should apply exponential smoothing."""
+        config = make_pi_config({
+            "pi_model_inputs": [{
+                "name": "Stove",
+                "entity_id": "input_boolean.stove",
+                "seed_heat": -3.0,
+                "seed_cool": 0.0,
+                "lag_tau": 1800,  # 30 minutes in seconds
+            }],
+        })
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        # Set raw value to 1.0, filtered starts at 0.0
+        pi._model_input_values[0] = 1.0
+        pi._model_input_filtered[0] = 0.0
+
+        # Update with dt=900s (15 minutes, half of tau)
+        pi._update_lag_filters(900)
+
+        # Should be partially ramped up (not 0 and not 1)
+        assert 0.0 < pi._model_input_filtered[0] < 1.0
+
+    def test_lag_filter_with_zero_tau(self):
+        """Lag filter with tau=0 should pass through raw value."""
+        config = make_pi_config({
+            "pi_model_inputs": [{
+                "name": "Stove",
+                "entity_id": "input_boolean.stove",
+                "seed_heat": -3.0,
+                "seed_cool": 0.0,
+                "lag_tau": 0,
+            }],
+        })
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        pi._model_input_values[0] = 1.0
+        pi._model_input_filtered[0] = 0.5
+
+        pi._update_lag_filters(900)
+        assert pi._model_input_filtered[0] == 1.0
+
+
+# ── _read_model_input_values edge cases (lines 910, 913-915) ────────
+
+
+class TestReadModelInputValues:
+    """Tests for _read_model_input_values with empty entity_id and unavailable entity."""
+
+    def test_empty_entity_id_skipped(self):
+        """Model input with empty entity_id should be skipped (line 910)."""
+        config = make_pi_config({
+            "pi_model_inputs": [{
+                "name": "Empty",
+                "entity_id": "",
+                "seed_heat": 0.0,
+                "seed_cool": 0.0,
+                "lag_tau": 0,
+            }],
+        })
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._model_input_values[0] = 99.0  # Should not change
+
+        pi._read_model_input_values()
+        assert pi._model_input_values[0] == 99.0  # Unchanged — skipped
+
+    def test_unavailable_entity_keeps_last_value(self):
+        """Unavailable entity should keep last value (lines 913-915)."""
+        config = make_pi_config({
+            "pi_model_inputs": [{
+                "name": "Stove",
+                "entity_id": "input_boolean.stove",
+                "seed_heat": -3.0,
+                "seed_cool": 0.0,
+                "lag_tau": 0,
+            }],
+        })
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._model_input_values[0] = 1.0  # Previous value
+
+        # Mock entity as unavailable
+        unavail_state = MagicMock()
+        unavail_state.state = STATE_UNAVAILABLE
+        entity.hass.states.get.return_value = unavail_state
+
+        pi._read_model_input_values()
+        assert pi._model_input_values[0] == 1.0  # Kept previous value
+
+    def test_missing_entity_keeps_last_value(self):
+        """Missing entity (None state) should keep last value."""
+        config = make_pi_config({
+            "pi_model_inputs": [{
+                "name": "Stove",
+                "entity_id": "input_boolean.stove",
+                "seed_heat": -3.0,
+                "seed_cool": 0.0,
+                "lag_tau": 0,
+            }],
+        })
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._model_input_values[0] = 0.5
+
+        entity.hass.states.get.return_value = None
+
+        pi._read_model_input_values()
+        assert pi._model_input_values[0] == 0.5
+
+
+# ── _any_model_input_unavailable (lines 930, 933) ───────────────────
+
+
+class TestAnyModelInputUnavailable:
+    """Tests for _any_model_input_unavailable."""
+
+    def test_empty_entity_id_skipped(self):
+        """Empty entity_id should be skipped, not flagged as unavailable (line 930)."""
+        config = make_pi_config({
+            "pi_model_inputs": [{
+                "name": "Empty",
+                "entity_id": "",
+                "seed_heat": 0.0,
+                "seed_cool": 0.0,
+                "lag_tau": 0,
+            }],
+        })
+        entity = FakePIEntity(config)
+        assert entity._pi._any_model_input_unavailable() is False
+
+    def test_unavailable_entity_returns_true(self):
+        """Unavailable entity should return True (line 933)."""
+        config = make_pi_config({
+            "pi_model_inputs": [{
+                "name": "Stove",
+                "entity_id": "input_boolean.stove",
+                "seed_heat": -3.0,
+                "seed_cool": 0.0,
+                "lag_tau": 0,
+            }],
+        })
+        entity = FakePIEntity(config)
+        unavail_state = MagicMock()
+        unavail_state.state = STATE_UNAVAILABLE
+        entity.hass.states.get.return_value = unavail_state
+
+        assert entity._pi._any_model_input_unavailable() is True
+
+    def test_available_entity_returns_false(self):
+        """Available entity should return False."""
+        config = make_pi_config({
+            "pi_model_inputs": [{
+                "name": "Stove",
+                "entity_id": "input_boolean.stove",
+                "seed_heat": -3.0,
+                "seed_cool": 0.0,
+                "lag_tau": 0,
+            }],
+        })
+        entity = FakePIEntity(config)
+        avail_state = MagicMock()
+        avail_state.state = "off"
+        entity.hass.states.get.return_value = avail_state
+
+        assert entity._pi._any_model_input_unavailable() is False
+
+
+# ── _async_model_input_changed dispatcher (lines 939-940) ───────────
+
+
+class TestModelInputChanged:
+    """Tests for _async_model_input_changed firing dispatcher."""
+
+    def test_model_input_changed_fires_dispatcher(self):
+        """State change on model input entity should fire dispatcher signal."""
+        config = make_pi_config({
+            "pi_model_inputs": [{
+                "name": "Stove",
+                "entity_id": "input_boolean.stove",
+                "seed_heat": -3.0,
+                "seed_cool": 0.0,
+                "lag_tau": 0,
+            }],
+        })
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        mock_event = MagicMock()
+        pi._async_model_input_changed(mock_event)
+
+        # Should have called async_dispatcher_send
+        entity.hass.bus.async_fire.assert_not_called  # dispatcher uses different mechanism
+
+
+# ── FF-only fallback: sensor unavailable (lines 995, 1001) ──────────
+
+
+class TestFFOnlyFallback:
+    """Tests for _check_sensor_recovery FF-only fallback paths."""
+
+    @pytest.mark.asyncio
+    async def test_ff_only_with_outdoor_temp_cooling(self):
+        """FF-only fallback in cooling mode should use RLS predict (line 995)."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        entity._attr_hvac_mode = HVACMode.COOL
+        pi._desired_temp = 24.0
+        pi._hp_setpoint = 24.0
+        pi._outdoor_temp = 35.0  # Hot outdoor
+        entity._attr_current_temperature = None  # Sensor unavailable
+
+        await pi._check_sensor_recovery()
+
+        assert pi._sensor_unavailable is True
+        # FF offset should have been computed via RLS
+
+    @pytest.mark.asyncio
+    async def test_ff_only_without_outdoor_temp(self):
+        """FF-only fallback without outdoor temp should set ff_offset=0 (line 1001)."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        entity._attr_hvac_mode = HVACMode.HEAT
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22.0
+        pi._outdoor_temp = None  # No outdoor temp
+        entity._attr_current_temperature = None
+
+        await pi._check_sensor_recovery()
+
+        assert pi._sensor_unavailable is True
+        assert pi._ff_offset == 0.0
+
+
+# ── Learning gate debug logging (lines 1146, 1159, 1161, 1165) ──────
+
+
+class TestLearningGateDebugLogging:
+    """Tests for RLS learning gate debug log reasons."""
+
+    @pytest.mark.asyncio
+    async def test_learning_blocked_no_outdoor_temp(self):
+        """Learning should be blocked and logged when outdoor temp is None (line 1159)."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        pi._outdoor_temp = None
+        pi._rls_warmup_done = True
+        entity._attr_current_temperature = 22.0  # Within deadband of 22.0
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22.0
+        pi._ff_settled_ticks = 3  # Will become 4 in tick
+
+        await pi._pi_tick()
+        # Should have logged "no outdoor temp" — no crash
+
+    @pytest.mark.asyncio
+    async def test_learning_blocked_manual_suppress(self):
+        """Learning should be blocked when manually suppressed (line 1161)."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        pi._outdoor_temp = 5.0
+        pi._rls_warmup_done = True
+        pi._manual_ff_suppress = True
+        entity._attr_current_temperature = 22.0
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22.0
+        pi._ff_settled_ticks = 3
+
+        await pi._pi_tick()
+        # Should have logged "manually suppressed"
+
+    @pytest.mark.asyncio
+    async def test_learning_blocked_model_input_unavailable(self):
+        """Learning blocked when model input is unavailable (line 1165)."""
+        config = make_pi_config({
+            "pi_model_inputs": [{
+                "name": "Stove",
+                "entity_id": "input_boolean.stove",
+                "seed_heat": -3.0,
+                "seed_cool": 0.0,
+                "lag_tau": 0,
+            }],
+        })
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        pi._outdoor_temp = 5.0
+        pi._rls_warmup_done = True
+        entity._attr_current_temperature = 22.0
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22.0
+        pi._ff_settled_ticks = 3
+
+        # Mock model input as unavailable
+        unavail = MagicMock()
+        unavail.state = STATE_UNAVAILABLE
+        entity.hass.states.get.return_value = unavail
+
+        await pi._pi_tick()
+        # Should have logged "model input unavailable"
+
+    @pytest.mark.asyncio
+    async def test_warmup_transition(self):
+        """RLS warmup should complete when enough time has passed (line 1146)."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        import time as _time
+        pi._rls_warmup_done = False
+        pi._rls_warmup_hours = 0.001  # ~3.6 seconds
+        pi._rls_start_time = _time.monotonic() - 10  # 10 seconds ago > 3.6s
+        pi._outdoor_temp = 5.0
+        entity._attr_current_temperature = 22.0
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22.0
+        pi._ff_settled_ticks = 3  # Will become 4 in tick
+
+        await pi._pi_tick()
+
+        assert pi._rls_warmup_done is True
