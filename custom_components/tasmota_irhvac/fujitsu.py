@@ -243,9 +243,9 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
             self._economy = False
             self._min_heat = False
             self._powerful = False
-            self._attr_preset_mode = PRESET_NONE
             if self._pi: self._pi.pi_resume()
-            await self.send_ir()
+            # Delegate to parent for AWAY→NONE handling and send_ir
+            await super().async_set_preset_mode(preset_mode)
             return
 
         # PRESET_AWAY and others: delegate to parent

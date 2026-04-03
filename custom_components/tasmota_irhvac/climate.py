@@ -836,9 +836,9 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             if "Temp" in payload:
                 if payload["Temp"] > 0:
                     if self.power_mode == STATE_OFF and self._ignore_off_temp:
-                        self._attr_target_temperature = (
-                            self._attr_target_temperature
-                        )
+                        pass  # Keep existing target temp
+                    elif self._pi:
+                        pass  # PI handler manages target temp separately
                     else:
                         self._attr_target_temperature = payload["Temp"]
             if "Celsius" in payload:
@@ -1352,9 +1352,13 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             self._is_away = True
             self._saved_target_temp = self._attr_target_temperature
             self._attr_target_temperature = self._away_temp
+            if self._pi:
+                self._pi._desired_temp = self._away_temp
         elif preset_mode == PRESET_NONE and self._is_away:
             self._is_away = False
             self._attr_target_temperature = self._saved_target_temp
+            if self._pi:
+                self._pi._desired_temp = self._saved_target_temp
         self._attr_preset_mode = PRESET_AWAY if self._is_away else PRESET_NONE
         await self.send_ir()
 

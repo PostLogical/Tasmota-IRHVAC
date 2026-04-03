@@ -679,34 +679,42 @@ class PIController:
         e.async_schedule_update_ha_state()
 
     async def handle_state_payload(self, payload):
-        """Handle MQTT state echo. Call after base class processes payload."""
-        if not self._pi_enabled or self._desired_temp is None:
+        """Handle MQTT state echo. Call after base class processes payload.
+
+        Base handler no longer overwrites _attr_target_temperature when PI is
+        active, so we don't need to restore it. Just handle echo detection and
+        external (remote) temp changes.
+        """
+        if not self._pi_enabled or self._desired_temp is None or self._pi_paused:
             return
         e = self._entity
-        # Restore user's desired temp (base handler overwrites with HP setpoint)
-        e._attr_target_temperature = self._desired_temp
-        # Echo detection: only process the first echo per command.
-        # With dual MQTT topics (tele + stat), we get 2+ echoes.
-        # _pi_command_pending is True after we send a command.
-        # First echo: clear the flag. Don't update _hp_setpoint from our own echo
-        # (we already set it in _pi_tick) to prevent corruption during send_ir await.
-        # Second+ echo: flag already False, use cooldown to ignore.
-        if "Temp" in payload and payload["Temp"] > 0:
-            if self._pi_command_pending:
-                _LOGGER.debug("MQTT echo: first echo (command pending), clearing flag")
-                self._pi_command_pending = False
-                e.async_write_ha_state()
-            else:
-                elapsed = time.monotonic() - self._last_send_ir_time
-                if elapsed >= 5.0:
-                    _LOGGER.debug("MQTT echo: external change (elapsed=%.1fs since last send), re-ticking", elapsed)
-                    self._hp_setpoint = payload["Temp"]
-                    self._desired_temp = e._attr_target_temperature
-                    await self._pi_tick()  # tick writes state at the end
-                else:
-                    _LOGGER.debug("MQTT echo: duplicate ignored (elapsed=%.1fs < 5s)", elapsed)
-        else:
+        if "Temp" not in payload or payload["Temp"] <= 0:
             e.async_write_ha_state()
+            return
+        reported_temp = payload["Temp"]
+        elapsed = time.monotonic() - self._last_send_ir_time
+        if self._pi_command_pending or elapsed < 2.0:
+            # Our echo (pending flag) or duplicate from second MQTT topic (<2s).
+            # With dual topics (tele + stat), 2-4 echoes arrive within ~500ms.
+            # Clear pending on first, ignore the rest.
+            if self._pi_command_pending:
+                _LOGGER.debug("MQTT echo: own echo (pending), clearing flag")
+                self._pi_command_pending = False
+            else:
+                _LOGGER.debug("MQTT echo: duplicate ignored (%.1fs since send)", elapsed)
+            e.async_write_ha_state()
+        elif elapsed >= 5.0:
+            # External change (physical remote or another system).
+            # The remote sets a room temp target, not an HP setpoint offset.
+            # Update desired_temp and let PI compute the correct HP setpoint.
+            _LOGGER.info("MQTT echo: external change (%.1fs since send), new desired=%s", elapsed, reported_temp)
+            self._desired_temp = reported_temp
+            e._attr_target_temperature = reported_temp
+            self._pi_integral = 0.0
+            await self._pi_tick()  # tick computes HP setpoint and writes state
+        else:
+            # Echo in 2-5s window — ambiguous, treat as duplicate
+            _LOGGER.debug("MQTT echo: late duplicate ignored (%.1fs since send)", elapsed)
 
     async def sensor_changed(self, was_none):
         """Handle temp sensor update."""

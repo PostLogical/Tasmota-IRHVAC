@@ -10,7 +10,11 @@ import pytest
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from homeassistant.components.climate.const import HVACMode, SWING_BOTH, SWING_HORIZONTAL, SWING_OFF, SWING_VERTICAL
+from homeassistant.components.climate import ClimateEntityFeature
+from homeassistant.components.climate.const import (
+    HVACMode, PRESET_AWAY, PRESET_NONE,
+    SWING_BOTH, SWING_HORIZONTAL, SWING_OFF, SWING_VERTICAL,
+)
 from homeassistant.const import STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN, UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
@@ -2880,3 +2884,41 @@ class TestModelInputChangedIntegration:
         hass.states.async_set("input_boolean.stove", "on")
         await hass.async_block_till_done()
         # Should not crash — dispatcher signal fired
+
+
+class TestAwayPresetSyncsDesiredTemp:
+    """Cover climate.py lines 1356, 1361: AWAY preset syncs PI _desired_temp."""
+
+    @pytest.mark.asyncio
+    async def test_away_preset_updates_desired_temp(self, hass, mqtt_mock, enable_custom_integrations):
+        """AWAY preset should update PI's _desired_temp to away_temp."""
+        config = make_pi_config()
+        entry = MockConfigEntry(
+            domain=DOMAIN, data=config, title="T", version=1, minor_version=4,
+            options={"away_temp": 16},
+        )
+        entry.add_to_hass(hass)
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        entity = get_climate_entity(hass, entry)
+        if not entity or not entity._pi:
+            pytest.skip("PI entity not created")
+
+        # Set up desired temp and ensure AWAY is supported
+        entity._pi._desired_temp = 22.0
+        entity._attr_target_temperature = 22.0
+        entity._away_temp = 16.0
+        entity._is_away = False
+        entity._attr_preset_modes = [PRESET_NONE, PRESET_AWAY]
+        entity._support_flags = entity._support_flags | ClimateEntityFeature.PRESET_MODE
+
+        # Activate AWAY — should sync desired_temp to away_temp
+        await entity.async_set_preset_mode(PRESET_AWAY)
+        assert entity._pi._desired_temp == 16.0
+        assert entity._attr_target_temperature == 16.0
+
+        # Deactivate AWAY — should restore desired_temp
+        await entity.async_set_preset_mode(PRESET_NONE)
+        assert entity._pi._desired_temp == 22.0
+        assert entity._attr_target_temperature == 22.0

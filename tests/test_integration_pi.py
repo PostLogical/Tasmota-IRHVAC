@@ -194,10 +194,13 @@ class TestPIMQTTEcho:
         entity = get_climate_entity(hass, entry)
         pi = entity._pi
 
-        # User sets desired temp
+        import time as _time
+        # User sets desired temp, PI sends command
         pi._desired_temp = 21.5
         entity._attr_target_temperature = 21.5
         entity._attr_hvac_mode = HVACMode.HEAT
+        pi._pi_command_pending = True
+        pi._last_send_ir_time = _time.monotonic()
 
         # HP echoes back a different temp (its whole-°C setpoint)
         payload = make_mqtt_state_payload({"Temp": 24, "Mode": "Heat"})

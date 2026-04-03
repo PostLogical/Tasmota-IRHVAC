@@ -249,10 +249,12 @@ class TestDualTopicEcho:
         entity = get_climate_entity(hass, entry)
         pi = entity._pi
 
+        import time as _time
         entity._attr_hvac_mode = HVACMode.HEAT
         pi._desired_temp = 21.5
         entity._attr_target_temperature = 21.5
         pi._pi_command_pending = True
+        pi._last_send_ir_time = _time.monotonic()
 
         # Two echoes back to back
         payload = make_mqtt_state_payload({"Temp": 24, "Mode": "Heat"})
@@ -338,6 +340,46 @@ class TestDualTopicEcho:
 
         # Clean up
         pi._pi_tick_running = False
+
+    @pytest.mark.asyncio
+    async def test_physical_remote_change_updates_desired_and_reticks(self, hass, setup_pi_integration):
+        """Physical remote setting a temp should update desired_temp and send correct HP setpoint.
+
+        When someone uses the physical remote to set 22°C, the blaster captures the IR
+        and echoes it via MQTT. The PI should:
+        1. Recognize it as external change (>5s since last send)
+        2. Set desired_temp = 22
+        3. Re-tick to compute HP setpoint = 22 + FF_offset
+        4. Send the corrected HP setpoint via IR
+        """
+        from unittest.mock import AsyncMock, patch
+
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 20.0
+        pi._desired_temp = 20.0
+        pi._hp_setpoint = 24
+        pi._pi_command_pending = False
+        pi._last_send_ir_time = 0  # Long ago — so echo is external
+
+        with patch.object(entity, 'send_ir', new_callable=AsyncMock) as mock_send:
+            # Physical remote sets 22°C — blaster captures and echoes
+            payload = make_mqtt_state_payload({"Temp": 22, "Mode": "Heat"})
+            async_fire_mqtt_message(hass, "tele/irhvac/RESULT", payload)
+            await hass.async_block_till_done()
+
+            # desired_temp should now be 22 (from the remote)
+            assert pi._desired_temp == 22.0, (
+                f"desired_temp not updated from remote: {pi._desired_temp}"
+            )
+            # PI should have re-ticked and sent a corrected setpoint
+            # (22 + FF offset, which will be > 22 in heating mode)
+            assert mock_send.call_count >= 1, (
+                "PI should have sent a corrected HP setpoint after remote change"
+            )
 
 
 class TestIrRecvWrapper:

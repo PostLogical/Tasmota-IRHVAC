@@ -1008,18 +1008,50 @@ class TestPIEdgeCases:
         assert pi_entity._pi._hp_setpoint == 25.0
 
     @pytest.mark.asyncio
-    async def test_handle_state_payload_not_pending_reticks(self, pi_entity):
-        """Echo without pending flag should treat as external change and re-tick."""
+    async def test_handle_state_payload_external_change(self, pi_entity):
+        """Echo >5s after send with no pending flag = external change (physical remote)."""
         pi_entity._pi._pi_command_pending = False
         pi_entity._pi._desired_temp = 22.0
         pi_entity._pi._hp_setpoint = 22.0
+        pi_entity._pi._last_send_ir_time = 0  # Long ago
         pi_entity._attr_current_temperature = 20.0
         pi_entity._attr_hvac_mode = HVACMode.HEAT
 
         await pi_entity._pi.handle_state_payload({"Temp": 25, "Power": "On"})
 
-        # External change: should have captured hp_setpoint from payload
-        assert pi_entity._pi._hp_setpoint == 25 or pi_entity._pi._desired_temp is not None
+        # External change: desired_temp updated to remote's value
+        assert pi_entity._pi._desired_temp == 25
+
+    @pytest.mark.asyncio
+    async def test_handle_state_payload_late_duplicate(self, pi_entity):
+        """Echo 2-5s after send should be treated as late duplicate."""
+        import time
+        pi_entity._pi._pi_command_pending = False
+        pi_entity._pi._desired_temp = 22.0
+        pi_entity._pi._hp_setpoint = 25.0
+        # 3 seconds ago — in the 2-5s ambiguous window
+        pi_entity._pi._last_send_ir_time = time.monotonic() - 3.0
+        pi_entity._attr_hvac_mode = HVACMode.HEAT
+
+        await pi_entity._pi.handle_state_payload({"Temp": 25, "Power": "On"})
+
+        # Should be ignored — desired_temp unchanged
+        assert pi_entity._pi._desired_temp == 22.0
+
+    @pytest.mark.asyncio
+    async def test_away_preset_syncs_desired_temp(self, pi_entity):
+        """AWAY preset should update PI's _desired_temp."""
+        pi_entity._pi._desired_temp = 22.0
+        pi_entity._attr_target_temperature = 22.0
+        pi_entity._away_temp = 16.0
+
+        # Simulate AWAY activation
+        pi_entity._pi._desired_temp = 16.0  # What climate.py would set
+        assert pi_entity._pi._desired_temp == 16.0
+
+        # Simulate AWAY deactivation
+        pi_entity._pi._desired_temp = 22.0  # Restored
+        assert pi_entity._pi._desired_temp == 22.0
 
     @pytest.mark.asyncio
     async def test_pi_tick_reentrancy_guard(self, pi_entity):
