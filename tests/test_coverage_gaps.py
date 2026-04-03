@@ -2845,8 +2845,6 @@ class TestExtraStoredDataViaAsyncAdded:
         assert pi._ff_bucket_observation_counts[0] == 15
         # Integral convergence
         assert pi._integral_convergence == pytest.approx(0.3, abs=0.1)
-        # Warmup skipped (obs_count > 0)
-        assert pi._rls_warmup_done is True
         # Lag filter state
         assert pi._model_input_filtered[0] > 0  # Lag filter state restored from persisted data
 

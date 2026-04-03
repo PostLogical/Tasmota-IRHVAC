@@ -1335,8 +1335,6 @@ class TestExtraStoredDataFullRestore:
         assert pi._ff_bucket_observation_counts[3] == 5
         # Integral convergence restored (line 640)
         assert pi._integral_convergence == 0.5
-        # Warmup skipped because obs_count > 0 (line 657-658)
-        assert pi._rls_warmup_done is True
 
     def test_restore_lag_filter_states(self):
         """restore_extra_stored_data with lag filter states should restore filtered values."""
@@ -1364,26 +1362,6 @@ class TestExtraStoredDataFullRestore:
         pi.restore_extra_stored_data(data)
         # Lag filter state restored (line 660-664)
         assert pi._model_input_filtered[0] == 0.75
-
-    def test_warmup_not_skipped_when_zero_observations(self):
-        """Warmup should NOT be skipped when no observations exist."""
-        from custom_components.tasmota_irhvac.pi_controller import PIExtraStoredData
-        config = make_pi_config()
-        entity = FakePIEntity(config)
-        pi = entity._pi
-        pi._rls_warmup_done = False
-
-        data = PIExtraStoredData(
-            ff_heat_buckets={},
-            ff_cool_buckets={},
-            pi_integral=0.0,
-            desired_temp=22.0,
-            hp_setpoint=22.0,
-            rls_heat_model={"beta": [0.0, 0.3], "P": [1.0, 0.0, 0.0, 1.0], "observation_count": 0},
-            rls_cool_model={"beta": [0.0, -0.3], "P": [1.0, 0.0, 0.0, 1.0], "observation_count": 0},
-        )
-        pi.restore_extra_stored_data(data)
-        assert pi._rls_warmup_done is False
 
 
 # ── handle_state_payload no Temp (line 709) ─────────────���───────────
@@ -1839,23 +1817,3 @@ class TestLearningGateDebugLogging:
         await pi._pi_tick()
         # Should have logged "model input unavailable"
 
-    @pytest.mark.asyncio
-    async def test_warmup_transition(self):
-        """RLS warmup should complete when enough time has passed (line 1146)."""
-        config = make_pi_config()
-        entity = FakePIEntity(config)
-        pi = entity._pi
-
-        import time as _time
-        pi._rls_warmup_done = False
-        pi._rls_warmup_hours = 0.001  # ~3.6 seconds
-        pi._rls_start_time = _time.monotonic() - 10  # 10 seconds ago > 3.6s
-        pi._outdoor_temp = 5.0
-        entity._attr_current_temperature = 22.0
-        pi._desired_temp = 22.0
-        pi._hp_setpoint = 22.0
-        pi._ff_settled_ticks = 3  # Will become 4 in tick
-
-        await pi._pi_tick()
-
-        assert pi._rls_warmup_done is True

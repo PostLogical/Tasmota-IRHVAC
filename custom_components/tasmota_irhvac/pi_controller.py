@@ -488,11 +488,8 @@ class PIController:
         # Integral convergence tracking (EMA of abs(integral) over ~24hr)
         self._integral_convergence = 0.0
 
-        # RLS learning gate: track integral stability + warmup
+        # RLS learning gate: track integral stability
         self._prev_integral_for_rls = 0.0
-        self._rls_start_time = time.monotonic()
-        self._rls_warmup_hours = 4.0  # Don't learn for first 4 hours after fresh init
-        self._rls_warmup_done = False  # Set True after warmup or if restored from ExtraStoredData
 
     # ── Shorthand entity access ──────────────────────────────────────
 
@@ -672,9 +669,6 @@ class PIController:
         # Coefficients with unchanged seeds keep their learned values.
         self._apply_seed_changes(data.heat_seeds_at_learn, self._heat_seeds, self._rls_heat)
         self._apply_seed_changes(data.cool_seeds_at_learn, self._cool_seeds, self._rls_cool)
-        # Skip warmup if restoring learned models
-        if self._rls_heat.observation_count > 0 or self._rls_cool.observation_count > 0:
-            self._rls_warmup_done = True
         # Restore lag filter states
         if data.lag_filter_states:
             for i, m_input in enumerate(self._model_inputs):
@@ -1135,11 +1129,18 @@ class PIController:
         # Build feature vector and predict FF offset via RLS model
         x = self._build_feature_vector(outdoor_delta)
         rls = self._rls_heat if is_heating else self._rls_cool
-        raw_rls_offset = rls.predict(x)
+        seeds = self._heat_seeds if is_heating else self._cool_seeds
 
-        # FF is based on external conditions (outdoor, solar, stove), not room temp.
-        # The PI integral handles room temp deviations from target.
-        self._ff_offset = raw_rls_offset
+        # Blend seed prediction with RLS prediction based on observation count.
+        # Early RLS estimates are unstable (large P matrix gives each observation
+        # outsized influence). Linear blend from pure seeds to pure RLS over
+        # MIN_RLS_OBS observations prevents discontinuities when transitioning
+        # from prior knowledge to learned coefficients.
+        MIN_RLS_OBS = 10
+        seed_offset = sum(s * xi for s, xi in zip(seeds, x))
+        rls_offset = rls.predict(x)
+        alpha = min(rls.observation_count / MIN_RLS_OBS, 1.0)
+        self._ff_offset = (1.0 - alpha) * seed_offset + alpha * rls_offset
 
         # Legacy bucket FF for parallel comparison
         self._ff_offset_buckets = 0.0
@@ -1182,17 +1183,12 @@ class PIController:
             # RLS learns when integral is stable (not still converging), regardless
             # of magnitude. Large stable integral = FF is wrong, observation is valid.
             integral_stable = abs(self._pi_integral - self._prev_integral_for_rls) < 0.5
-            if not self._rls_warmup_done:
-                warmup_elapsed = (now_mono - self._rls_start_time) / 3600.0
-                if warmup_elapsed >= self._rls_warmup_hours:
-                    self._rls_warmup_done = True
             can_learn_rls = (
                 self._ff_settled_ticks >= 4
                 and self._outdoor_temp is not None
                 and not learning_suppressed
                 and integral_stable
                 and not self._any_model_input_unavailable()
-                and self._rls_warmup_done
             )
             if not can_learn_rls and self._ff_settled_ticks == 4:
                 # Log why learning was blocked (once, at the gate threshold)
@@ -1205,8 +1201,6 @@ class PIController:
                     reasons.append(f"integral not stable (|I|={abs(self._pi_integral):.1f}, rate={abs(self._pi_integral - self._prev_integral_for_rls):.2f})")
                 if self._any_model_input_unavailable():
                     reasons.append("model input unavailable")
-                if not self._rls_warmup_done:
-                    reasons.append("warmup not complete")
                 if reasons:
                     _LOGGER.debug("RLS learning blocked: %s", ", ".join(reasons))
             if can_learn_rls:
