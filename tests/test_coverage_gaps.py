@@ -2965,20 +2965,22 @@ class TestSaveLearnedSeedsButton:
         pi._rls_cool.beta = [0.0, -0.42, 0.0]
         pi._rls_heat.observation_count = 100
 
-        # Find and press the button
+        # Find and press the button via entity_platform registry
         from custom_components.tasmota_irhvac.button import SaveLearnedSeedsButton
-        buttons = [
-            e for e in hass.data.get("entity_components", {}).get("button", {})
-            if isinstance(e, SaveLearnedSeedsButton)
-        ] if "entity_components" in hass.data else []
-
-        # Press via the entity directly
-        for e_platform in hass.data.get("entity_platform", {}).values():
-            for ep in e_platform:
+        pressed = False
+        for platforms in hass.data.get("entity_platform", {}).values():
+            for ep in platforms:
                 for ent in ep.entities.values():
-                    if hasattr(ent, '_attr_translation_key') and ent._attr_translation_key == "save_learned_seeds":
+                    if isinstance(ent, SaveLearnedSeedsButton):
                         await ent.async_press()
+                        pressed = True
                         break
+                if pressed:
+                    break
+            if pressed:
+                break
+        if not pressed:
+            pytest.fail("SaveLearnedSeedsButton not found in entity platforms")
 
         await hass.async_block_till_done()
 
@@ -3014,9 +3016,11 @@ class TestSeedChangeDetection:
         # Coefficient should be reset to new seed
         assert pi._rls_heat.beta[1] == 0.5
         assert pi._rls_heat.beta_seed[1] == 0.5
-        # P diagonal should be high (fast re-learning)
+        # P diagonal should be reset using scaled initialization
         from custom_components.tasmota_irhvac.const import DEFAULT_RLS_P_INIT
-        assert pi._rls_heat.P[1 * pi._rls_heat.n + 1] == DEFAULT_RLS_P_INIT
+        scale = pi._rls_heat.feature_scales[1]
+        expected_p = DEFAULT_RLS_P_INIT / max(scale * scale, 0.01)
+        assert pi._rls_heat.P[1 * pi._rls_heat.n + 1] == pytest.approx(expected_p)
 
     @pytest.mark.asyncio
     async def test_unchanged_seed_preserves_learned(self):

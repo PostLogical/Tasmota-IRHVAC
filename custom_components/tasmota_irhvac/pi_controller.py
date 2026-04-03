@@ -41,6 +41,8 @@ from .const import (
     CONF_PI_FF_HEAT_SLOPE,
     CONF_PI_FF_LEARN_NIGHT_ONLY,
     CONF_PI_FF_LEARN_SUNSET_DELAY,
+    CONF_PI_KD,
+    CONF_PI_KD_FILTER_N,
     CONF_PI_KI,
     CONF_PI_KP,
     CONF_PI_MIN_INTERVAL,
@@ -56,6 +58,8 @@ from .const import (
     DEFAULT_PI_FF_HEAT_SLOPE,
     DEFAULT_PI_FF_LEARN_NIGHT_ONLY,
     DEFAULT_PI_FF_LEARN_SUNSET_DELAY,
+    DEFAULT_PI_KD,
+    DEFAULT_PI_KD_FILTER_N,
     DEFAULT_PI_KI,
     DEFAULT_PI_KP,
     DEFAULT_PI_MIN_INTERVAL,
@@ -64,7 +68,6 @@ from .const import (
     DEFAULT_RLS_LAMBDA_BASE,
     DEFAULT_RLS_LAMBDA_MIN,
     DEFAULT_RLS_P_INIT,
-    DEFAULT_RLS_RESIDUAL_THRESHOLD,
     SIGNAL_FF_SUPPRESS_UPDATE,
     SIGNAL_PI_UPDATE,
 )
@@ -103,8 +106,8 @@ class RLSModel:
                  lambda_min=DEFAULT_RLS_LAMBDA_MIN,
                  delta=DEFAULT_RLS_DELTA,
                  p_init=DEFAULT_RLS_P_INIT,
-                 residual_threshold=DEFAULT_RLS_RESIDUAL_THRESHOLD,
-                 coeff_clamps=None):
+                 coeff_clamps=None,
+                 feature_scales=None):
         """Initialize RLS model.
 
         Args:
@@ -113,16 +116,18 @@ class RLSModel:
                               Length n_inputs + 1. Defaults to zeros.
             lambda_base: Base forgetting factor (0.99-0.999).
             lambda_min: Minimum λ when residuals are large.
-            delta: Ridge regularization constant.
-            p_init: Initial covariance diagonal value.
-            residual_threshold: Residual magnitude for max forgetting speed.
+            delta: Covariance regularization constant (added to P diagonal
+                   each step to prevent covariance windup).
+            p_init: Base initial covariance diagonal value.
             coeff_clamps: List of (min, max) tuples per coefficient, or None.
+            feature_scales: Typical magnitude of each feature [1, scale₁, ...].
+                           Used to scale P initialization so all dimensions
+                           have balanced learning rates. Defaults to all 1.0.
         """
         self.n = n_inputs + 1  # +1 for intercept
         self.lambda_base = lambda_base
         self.lambda_min = lambda_min
         self.delta = delta
-        self.residual_threshold = residual_threshold
 
         # Coefficient vector β (intercept + n_inputs)
         if seed_coefficients is not None:
@@ -133,13 +138,21 @@ class RLSModel:
         else:
             self.beta = [0.0] * self.n
 
-        # Seed values for Bayesian ridge (anchor point during ambiguous data)
+        # Seed values (retained for blend and seed change detection)
         self.beta_seed = list(self.beta)
 
+        # Feature scales for P initialization (retained for seed change reset)
+        self.feature_scales = feature_scales or [1.0] * self.n
+        while len(self.feature_scales) < self.n:
+            self.feature_scales.append(1.0)
+
         # Covariance matrix P (n × n, stored as flat list row-major)
+        # Scale each diagonal by inverse feature magnitude squared so all
+        # dimensions have balanced initial learning rates.
         self.P = [0.0] * (self.n * self.n)
         for i in range(self.n):
-            self.P[i * self.n + i] = p_init
+            scale = self.feature_scales[i]
+            self.P[i * self.n + i] = p_init / max(scale * scale, 0.01)
 
         # Coefficient clamps: [(min, max), ...] for each coefficient
         self.coeff_clamps = coeff_clamps or [None] * self.n
@@ -174,49 +187,52 @@ class RLSModel:
         y_pred = self.predict(x)
         residual = y - y_pred
 
-        # Variable forgetting factor
-        abs_residual = abs(residual)
-        blend = min(abs_residual / self.residual_threshold, 1.0)
+        # Kalman gain: K = P·x / (λ + x'·P·x)
+        Px = [sum(self.P[i * n + j] * x[j] for j in range(n)) for i in range(n)]
+        xPx = sum(x[i] * Px[i] for i in range(n))
+
+        # Variable forgetting factor based on normalized residual.
+        # When residual^2 >> expected prediction variance (xPx), the model
+        # is surprised → decrease λ for faster adaptation. When residuals
+        # are within expected variance, keep λ high for stability.
+        normalized_sq = (residual * residual) / max(xPx, 0.01)
+        blend = min(normalized_sq / 9.0, 1.0)  # 9 = 3-sigma threshold squared
         lam = self.lambda_base - (self.lambda_base - self.lambda_min) * blend
 
-        # Kalman gain: K = P·x / (λ + x'·P·x)
-        # Compute P·x
-        Px = [sum(self.P[i * n + j] * x[j] for j in range(n)) for i in range(n)]
-        # Compute x'·P·x
-        xPx = sum(x[i] * Px[i] for i in range(n))
         denom = lam + xPx
         if denom == 0:
             return residual
         K = [Px[i] / denom for i in range(n)]
 
-        # Update coefficients: β = β + K·residual - δ·(β - β_seed)
-        # The seed anchor term pulls coefficients toward their seed values
-        # during ambiguous (collinear) data, preventing drift. With clear
-        # independent data, K·residual dominates and learning proceeds normally.
+        # Update coefficients: standard RLS (no ad-hoc beta penalty).
+        # Seed anchoring comes from initial conditions and the delta*I
+        # term in the P update, which prevents covariance collapse.
         for i in range(n):
-            self.beta[i] += K[i] * residual - self.delta * (self.beta[i] - self.beta_seed[i])
+            self.beta[i] += K[i] * residual
 
-        # Apply coefficient clamps
+        # Apply coefficient clamps with P projection.
+        # When a coefficient hits a boundary, zero its row/col in P
+        # so the estimator knows this dimension is constrained.
         for i in range(n):
             clamp = self.coeff_clamps[i] if i < len(self.coeff_clamps) else None
             if clamp is not None:
                 lo, hi = clamp
+                unclamped = self.beta[i]
                 self.beta[i] = max(lo, min(hi, self.beta[i]))
+                if self.beta[i] != unclamped:
+                    for j in range(n):
+                        self.P[i * n + j] = 0.0
+                        self.P[j * n + i] = 0.0
+                    self.P[i * n + i] = self.delta
 
         # Update covariance: P = (P - K·x'·P) / λ + δ·I
-        # Compute K·x' (outer product) then K·x'·P
         new_P = [0.0] * (n * n)
         for i in range(n):
             for j in range(n):
-                # (P - K·x'·P)[i][j] = P[i][j] - K[i] * (x' · P[:,j])
-                # x' · P[:,j] = sum(x[k] * P[k*n+j] for k in range(n)) = Px transposed
-                # Actually: K·x'·P = K_i * sum(x_k * P_kj) = K_i * Px_j... no.
-                # K·x' is outer product: (K·x')[i][j] = K[i] * x[j]
-                # (K·x'·P)[i][j] = sum_k K[i]*x[k]*P[k][j] = K[i] * sum_k x[k]*P[k][j]
                 col_j = sum(x[k] * self.P[k * n + j] for k in range(n))
                 new_P[i * n + j] = (self.P[i * n + j] - K[i] * col_j) / lam
 
-        # Add ridge regularization: P += δ·I
+        # Regularization: prevent covariance windup by adding δ·I each step
         for i in range(n):
             new_P[i * n + i] += self.delta
 
@@ -379,10 +395,12 @@ class PIController:
             entity._max_temp, entity._attr_temperature_unit, UnitOfTemperature.CELSIUS
         )
 
-        # PI controller config
+        # PID controller config
         self._pi_enabled = config.get(CONF_PI_ENABLED, DEFAULT_PI_ENABLED)
         self._pi_kp = config.get(CONF_PI_KP, DEFAULT_PI_KP)
         self._pi_ki = config.get(CONF_PI_KI, DEFAULT_PI_KI)
+        self._pi_kd = config.get(CONF_PI_KD, DEFAULT_PI_KD)
+        self._pi_kd_filter_n = config.get(CONF_PI_KD_FILTER_N, DEFAULT_PI_KD_FILTER_N)
         self._pi_min_interval = config.get(CONF_PI_MIN_INTERVAL, DEFAULT_PI_MIN_INTERVAL)
         self._pi_deadband = config.get(CONF_PI_DEADBAND, DEFAULT_PI_DEADBAND)
         self._pi_setpoint_weight = config.get(CONF_PI_SETPOINT_WEIGHT, DEFAULT_PI_SETPOINT_WEIGHT)
@@ -426,6 +444,8 @@ class PIController:
         self._pi_paused = False
         self._pi_last_tick_time = 0.0
         self._pi_last_error = 0.0
+        self._pi_d_filtered = 0.0    # Filtered derivative term
+        self._pi_last_measurement = None  # Previous temperature measurement for derivative
 
         # Feedforward buckets (legacy, kept for parallel comparison)
         self._ff_heat_buckets = _seed_buckets(self._ff_heat_reference, self._ff_heat_slope)
@@ -461,16 +481,24 @@ class PIController:
             else:
                 self._rls_clamps.append(None)
 
+        # Feature scales for balanced P initialization.
+        # intercept=1.0, outdoor_delta typical ~10, model inputs ~0.5
+        self._feature_scales = [1.0, 10.0]
+        for m_input in self._model_inputs:
+            self._feature_scales.append(float(m_input.get("typical_value", 0.5)))
+
         # RLS models (separate for heating and cooling)
         self._rls_heat = RLSModel(
             n_inputs=self._n_model_inputs,
             seed_coefficients=self._heat_seeds,
             coeff_clamps=self._rls_clamps,
+            feature_scales=self._feature_scales,
         )
         self._rls_cool = RLSModel(
             n_inputs=self._n_model_inputs,
             seed_coefficients=self._cool_seeds,
             coeff_clamps=self._rls_clamps,
+            feature_scales=self._feature_scales,
         )
 
         # Model input current values and lag filter states
@@ -520,7 +548,7 @@ class PIController:
             if old_state is not None:
                 attrs = old_state.attributes
                 if attrs.get(ATTR_PI_INTEGRAL) is not None:
-                    self._pi_integral = max(-50, min(50, float(attrs[ATTR_PI_INTEGRAL])))
+                    self._pi_integral = float(attrs[ATTR_PI_INTEGRAL])
                 if attrs.get(ATTR_DESIRED_TEMP) is not None:
                     self._desired_temp = float(attrs[ATTR_DESIRED_TEMP])
                 if attrs.get(ATTR_HP_SETPOINT) is not None:
@@ -641,7 +669,7 @@ class PIController:
         """Restore PI data from ExtraStoredData."""
         self._ff_heat_buckets = data.ff_heat_buckets
         self._ff_cool_buckets = data.ff_cool_buckets
-        self._pi_integral = max(-50, min(50, data.pi_integral))
+        self._pi_integral = data.pi_integral
         if data.desired_temp is not None:
             self._desired_temp = data.desired_temp
         if data.hp_setpoint is not None:
@@ -690,8 +718,9 @@ class PIController:
                 old_val = rls_model.beta[i]
                 rls_model.beta[i] = new_seeds[i]
                 rls_model.beta_seed[i] = new_seeds[i]
-                # Increase uncertainty for this coefficient → fast re-learning
-                rls_model.P[i * rls_model.n + i] = DEFAULT_RLS_P_INIT
+                # Reset P for this coefficient using scaled initialization
+                scale = rls_model.feature_scales[i] if i < len(rls_model.feature_scales) else 1.0
+                rls_model.P[i * rls_model.n + i] = DEFAULT_RLS_P_INIT / max(scale * scale, 0.01)
                 _LOGGER.info(
                     "Seed changed for coefficient %d: %.4f → %.4f (learned was %.4f, reset)",
                     i, old_seeds[i], new_seeds[i], old_val,
@@ -775,6 +804,7 @@ class PIController:
         return {
             ATTR_HP_SETPOINT: self._hp_setpoint,
             ATTR_PI_INTEGRAL: round(self._pi_integral, 3),
+            "d_term": round(self._pi_d_filtered, 3),
             ATTR_DESIRED_TEMP: self._desired_temp,
             ATTR_FF_OFFSET: round(self._ff_offset, 2),
             "ff_offset_buckets": round(self._ff_offset_buckets, 2),
@@ -860,11 +890,16 @@ class PIController:
             cool_seeds.append(float(m_input.get("seed_cool", 0.0)))
         self._rls_heat.beta = heat_seeds + [0.0] * (self._rls_heat.n - len(heat_seeds))
         self._rls_cool.beta = cool_seeds + [0.0] * (self._rls_cool.n - len(cool_seeds))
-        # Reset covariance to initial uncertainty
+        # Reset covariance to scaled initial uncertainty
         for i in range(self._rls_heat.n):
             for j in range(self._rls_heat.n):
-                self._rls_heat.P[i * self._rls_heat.n + j] = DEFAULT_RLS_P_INIT if i == j else 0.0
-                self._rls_cool.P[i * self._rls_cool.n + j] = DEFAULT_RLS_P_INIT if i == j else 0.0
+                if i == j:
+                    scale = self._feature_scales[i] if i < len(self._feature_scales) else 1.0
+                    val = DEFAULT_RLS_P_INIT / max(scale * scale, 0.01)
+                else:
+                    val = 0.0
+                self._rls_heat.P[i * self._rls_heat.n + j] = val
+                self._rls_cool.P[i * self._rls_cool.n + j] = val
         self._rls_heat.observation_count = 0
         self._rls_cool.observation_count = 0
         self._pi_integral = 0.0
@@ -1107,7 +1142,19 @@ class PIController:
         )
         error = desired_c - current_c
 
-        # PI only operates in explicit HEAT, COOL, or DRY modes
+        # Filtered derivative on measurement (not error — avoids derivative kick).
+        # D(s) = -Kd * s / (1 + Tf*s) where Tf = Kd/N.
+        # Discrete: D[n] = (Tf/(Tf+dt))*D[n-1] - (Kd/(Tf+dt))*(y[n]-y[n-1])
+        if self._pi_last_measurement is not None and dt_seconds > 0:
+            td = self._pi_kd  # derivative time constant (minutes, used as gain)
+            tf = td / max(self._pi_kd_filter_n, 1)  # filter time (minutes)
+            dt_min = dt_seconds / 60.0  # convert to minutes for consistency with Kd units
+            alpha_d = tf / (tf + dt_min)
+            dy = current_c - self._pi_last_measurement
+            self._pi_d_filtered = alpha_d * self._pi_d_filtered - (td / (tf + dt_min)) * dy
+        self._pi_last_measurement = current_c
+
+        # PID only operates in explicit HEAT, COOL, or DRY modes
         is_heating = e._attr_hvac_mode == HVACMode.HEAT
         is_cooling = e._attr_hvac_mode in (HVACMode.COOL, HVACMode.DRY)
         if not is_heating and not is_cooling:
@@ -1163,15 +1210,7 @@ class PIController:
         self._disturbance_suppress_active = learning_suppressed
         self._disturbance_active_suppressors = active_suppressors
 
-        # Adaptive setpoint weight
         abs_error = abs(error)
-        if abs_error > self._pi_deadband * 4:
-            effective_weight = 1.0
-        elif abs_error > self._pi_deadband:
-            blend = (abs_error - self._pi_deadband) / (self._pi_deadband * 3)
-            effective_weight = self._pi_setpoint_weight + blend * (1.0 - self._pi_setpoint_weight)
-        else:
-            effective_weight = self._pi_setpoint_weight
 
         # Deadband: if error is small, skip P term and freeze integral.
         in_deadband = abs_error < self._pi_deadband
@@ -1204,8 +1243,10 @@ class PIController:
                 if reasons:
                     _LOGGER.debug("RLS learning blocked: %s", ", ".join(reasons))
             if can_learn_rls:
-                obs_ki = self._pi_ki * (1.0 + abs(self._pi_integral) / 10.0)
-                observed_offset = self._ff_offset + obs_ki * self._pi_integral
+                # Observe what actually worked: the HP setpoint that achieved
+                # the target temperature. This directly measures the needed
+                # offset without coupling to integral state or ki.
+                observed_offset = float(self._hp_setpoint) - desired_c
                 beta_before = list(rls.beta)
                 residual = rls.update(x, observed_offset)
                 _LOGGER.debug(
@@ -1230,8 +1271,7 @@ class PIController:
                 and self._is_learning_time_allowed()
             )
             if can_learn_buckets:
-                obs_ki_b = self._pi_ki * (1.0 + abs(self._pi_integral) / 10.0)
-                observed_offset_buckets = self._ff_offset + obs_ki_b * self._pi_integral
+                observed_offset_buckets = float(self._hp_setpoint) - desired_c
                 bucket_key = round(self._outdoor_temp / 3) * 3
                 learn_buckets = self._ff_heat_buckets if is_heating else self._ff_cool_buckets
                 old = learn_buckets.get(bucket_key, 0.0)
@@ -1261,15 +1301,14 @@ class PIController:
             p_term = 0.0
         else:
             self._ff_settled_ticks = 0
-            p_error = effective_weight * (desired_c - current_c)
-            p_term = self._pi_kp * p_error
+            # Setpoint weighting: reduce P-term to prevent overshoot while
+            # integral drives steady-state accuracy. Standard 2-DOF technique
+            # (Astrom & Hagglund). b < 1 reduces proportional kick.
+            p_term = self._pi_kp * self._pi_setpoint_weight * error
             avg_error = (error + self._pi_last_error) / 2.0
             self._pi_integral += avg_error * dt_factor
 
         self._pi_last_error = error
-
-        # Hard safety cap on integral
-        self._pi_integral = max(-50.0, min(50.0, self._pi_integral))
 
         # Update integral convergence metric (EMA of abs(integral), ~24hr time constant)
         # With 15-min ticks, 96 ticks/day → alpha ≈ 1/96 ≈ 0.01
@@ -1279,43 +1318,28 @@ class PIController:
             + convergence_alpha * abs(self._pi_integral)
         )
 
-        # Adaptive ki: increase when integral is high (FF is inadequate)
-        # This ensures the system can heat the room even with bad FF coefficients.
-        # Base ki handles fine-tuning when FF is accurate.
-        # Boosted ki fills the gap when FF is wrong.
-        adaptive_ki_boost = 1.0 + abs(self._pi_integral) / 10.0
-        effective_ki = self._pi_ki * adaptive_ki_boost
-
-        i_term = effective_ki * self._pi_integral
-        if adaptive_ki_boost > 1.5:
-            _LOGGER.debug("Adaptive ki boost: %.1fx (integral=%.1f, effective_ki=%.3f)",
-                         adaptive_ki_boost, self._pi_integral, effective_ki)
-        raw_setpoint = desired_c + p_term + i_term + self._ff_offset
+        i_term = self._pi_ki * self._pi_integral
+        d_term = self._pi_d_filtered
+        raw_setpoint = desired_c + p_term + i_term + d_term + self._ff_offset
         clamped_setpoint = max(self._min_temp_c, min(self._max_temp_c, raw_setpoint))
 
-        # Conditional anti-windup: stop integral from growing in the saturated direction.
-        # Don't actively push integral back (back-calculation with kb=1/ki is too aggressive
-        # with adaptive ki — a 0.4°C saturation error was shifting integral by 5+ units).
-        if clamped_setpoint != raw_setpoint and effective_ki != 0:
+        # Conditional anti-windup: stop integral from growing in the saturated
+        # direction. Freeze at the value that would produce the clamped output.
+        if clamped_setpoint != raw_setpoint and self._pi_ki != 0:
             if raw_setpoint > clamped_setpoint and self._pi_integral > 0:
-                # Saturated high, positive integral making it worse → freeze
-                max_i = (clamped_setpoint - desired_c - p_term - self._ff_offset) / effective_ki
+                max_i = (clamped_setpoint - desired_c - p_term - self._ff_offset) / self._pi_ki
                 self._pi_integral = min(self._pi_integral, max_i)
             elif raw_setpoint < clamped_setpoint and self._pi_integral < 0:
-                # Saturated low, negative integral making it worse → freeze
-                min_i = (clamped_setpoint - desired_c - p_term - self._ff_offset) / effective_ki
+                min_i = (clamped_setpoint - desired_c - p_term - self._ff_offset) / self._pi_ki
                 self._pi_integral = max(self._pi_integral, min_i)
 
         # Quantization-error feedback: push integral toward values where
         # raw_setpoint lands near an integer, avoiding the X.5 boundary that
-        # causes limit cycles with 1°C HP steps. Analogous to back-calculation
-        # anti-windup but for quantization instead of saturation.
-        # Only in deadband — during ramps the large q_error is just the ramp gap,
-        # not a boundary-hovering problem.
-        if in_deadband and effective_ki != 0:
+        # causes limit cycles with 1°C HP steps.
+        if in_deadband and self._pi_ki != 0:
             q_error = float(self._hp_setpoint) - clamped_setpoint
             if abs(q_error) > 0.3:
-                self._pi_integral += (q_error / effective_ki) * 0.4
+                self._pi_integral += (q_error / self._pi_ki) * 0.4
 
         # Midpoint-crossing hysteresis
         new_setpoint = self._hp_setpoint
@@ -1341,8 +1365,8 @@ class PIController:
                 )
             else:
                 _LOGGER.info(
-                    "PI: error=%.1f P=%.1f I=%.1f FF=%.1f raw=%.1f setpoint %s -> %s",
-                    error, p_term, i_term, self._ff_offset, clamped_setpoint,
+                    "PI: error=%.1f P=%.1f I=%.1f D=%.1f FF=%.1f raw=%.1f setpoint %s -> %s",
+                    error, p_term, i_term, d_term, self._ff_offset, clamped_setpoint,
                     self._hp_setpoint, new_setpoint,
                 )
                 self._last_setpoint_change_time = now_mono

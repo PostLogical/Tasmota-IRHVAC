@@ -151,26 +151,25 @@ class TestRLSVariableForgetting:
     """Tests for variable forgetting factor."""
 
     def test_small_residual_slow_forgetting(self):
-        """When model predicts well, forgetting should be slow (λ near base)."""
+        """When model predicts well (small normalized residual), λ stays near base."""
         model = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.3],
-                        lambda_base=0.999, lambda_min=0.995, residual_threshold=3.0)
+                        lambda_base=0.999, lambda_min=0.995)
 
-        # Good prediction: residual ≈ 0
+        # Good prediction: residual ≈ 0, so normalized_sq / 9 ≈ 0 → λ ≈ lambda_base
         x = [1.0, 10.0]
-        y = 3.0  # Matches prediction
+        y = 3.0  # Matches prediction well (0 + 0.3*10 = 3.0)
         residual = model.update(x, y)
         assert abs(residual) < 0.1
 
     def test_large_residual_fast_forgetting(self):
-        """When model predicts poorly, forgetting should be faster."""
+        """When model predicts poorly (large normalized residual), λ drops toward min."""
         model = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.3],
-                        lambda_base=0.999, lambda_min=0.995, residual_threshold=3.0)
+                        lambda_base=0.999, lambda_min=0.995)
 
         x = [1.0, 10.0]
-        # Bad prediction: residual = 7.0 (>> threshold of 3)
+        # Bad prediction: predicted = 0 + 0.3*10 = 3.0, observed = 10.0 → residual = 7.0
         residual = model.update(x, 10.0)
         assert abs(residual) > 5.0  # Model was way off
-        # Second update should converge faster due to lower λ
 
 
 class TestRLSSerialization:

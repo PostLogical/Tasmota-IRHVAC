@@ -226,18 +226,6 @@ class TestPIMath:
         assert integral_after_2 > integral_after_1
 
     @pytest.mark.asyncio
-    async def test_integral_capped_at_50(self, pi_entity):
-        """Integral should never exceed ±50."""
-        pi_entity._pi._pi_integral = 100.0
-        pi_entity._attr_current_temperature = 20.0  # °C
-        pi_entity._pi._desired_temp = 22.0  # °C
-        pi_entity._pi._hp_setpoint = 22.0
-
-        await pi_entity._pi._pi_tick()
-
-        assert pi_entity._pi._pi_integral <= 50.0
-        assert pi_entity._pi._pi_integral >= -50.0
-
     @pytest.mark.asyncio
     async def test_setpoint_clamped_to_range(self, pi_entity):
         """HP setpoint should be clamped to °C limits (16-30)."""
@@ -332,19 +320,21 @@ class TestPIMath:
 
     @pytest.mark.asyncio
     async def test_adaptive_setpoint_weight(self, pi_entity):
-        """Adaptive weight should blend to b=1 for large errors, b=configured near deadband."""
-        pi_entity._pi._pi_setpoint_weight = 0.0  # Configured weight
-        # Large error (>4x deadband of 0.5°C = 2.0°C): adaptive weight should be ~1.0
-        pi_entity._attr_current_temperature = 19.0  # °C, well below desired
-        pi_entity._pi._desired_temp = 22.0  # °C, error = 3.0°C
+        """2-DOF setpoint weight: p_term = kp * b * error."""
+        pi_entity._pi._pi_setpoint_weight = 0.5  # b = 0.5
+        pi_entity._pi._pi_kp = 1.5
+        pi_entity._pi._pi_ki = 0.0  # No integral to simplify
+        pi_entity._attr_current_temperature = 19.0  # °C
+        pi_entity._pi._desired_temp = 22.0  # °C, error = 3.0
         pi_entity._pi._hp_setpoint = 22.0
         pi_entity._pi._pi_integral = 0.0
+        pi_entity._pi._ff_offset = 0.0
 
         await pi_entity._pi._pi_tick()
 
-        # With adaptive weight, large error → effective_weight≈1.0
-        # P = Kp * weight * (desired - current) = positive → setpoint goes UP
-        assert pi_entity._pi._hp_setpoint > 22.0
+        # p_term = kp * b * error = 1.5 * 0.5 * 3.0 = 2.25
+        # setpoint = desired + p_term = 22 + 2.25 = 24.25
+        assert pi_entity._pi._hp_setpoint == pytest.approx(24.0, abs=0.5)
 
     @pytest.mark.asyncio
     async def test_2dof_p_term_correct_formula(self, pi_entity):
@@ -1224,8 +1214,8 @@ class TestPIEdgeCases:
         assert pi_entity._pi._desired_temp == 22.0
         assert pi_entity._pi._hp_setpoint == 23.0
 
-    def test_restore_extra_stored_data_clamps_integral(self, pi_entity):
-        """restore_extra_stored_data should clamp integral to ±50."""
+    def test_restore_extra_stored_data_preserves_integral(self, pi_entity):
+        """restore_extra_stored_data should preserve integral without clamping."""
         from custom_components.tasmota_irhvac.pi_controller import PIExtraStoredData
         data = PIExtraStoredData(
             ff_heat_buckets={},
@@ -1235,7 +1225,7 @@ class TestPIEdgeCases:
             hp_setpoint=None,
         )
         pi_entity._pi.restore_extra_stored_data(data)
-        assert pi_entity._pi._pi_integral == 50.0
+        assert pi_entity._pi._pi_integral == 100.0
 
 
 # ── Model Input Clamps (line 448) ───────────────────────────────────

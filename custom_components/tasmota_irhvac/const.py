@@ -190,6 +190,8 @@ CONF_PRESET_MODES_LIST = "supported_preset_modes"
 CONF_PI_ENABLED = "pi_enabled"
 CONF_PI_KP = "pi_kp"
 CONF_PI_KI = "pi_ki"
+CONF_PI_KD = "pi_kd"
+CONF_PI_KD_FILTER_N = "pi_kd_filter_n"
 CONF_PI_MIN_INTERVAL = "pi_min_interval"
 CONF_PI_DEADBAND = "pi_deadband"
 CONF_OUTDOOR_TEMP_SENSOR = "outdoor_temp_sensor"
@@ -207,10 +209,12 @@ CONF_PI_FF_ANTICIPATED_CHANGE_ENTITY = "pi_ff_anticipated_change_entity"
 CONF_PI_FF_ANTICIPATED_CHANGE_GAIN = "pi_ff_anticipated_change_gain"
 CONF_PI_MODEL_INPUTS = "pi_model_inputs"
 
-# PI controller defaults
+# PID controller defaults
 DEFAULT_PI_ENABLED = False
 DEFAULT_PI_KP = 1.0
-DEFAULT_PI_KI = 0.05
+DEFAULT_PI_KI = 0.08
+DEFAULT_PI_KD = 1.0              # Derivative gain (minutes). SIMC suggests 0.5-2.0 for our plant.
+DEFAULT_PI_KD_FILTER_N = 8       # Derivative filter coefficient: Tf = Td/N. Higher N = less filtering.
 DEFAULT_PI_MIN_INTERVAL = 900
 DEFAULT_PI_DEADBAND = 0.5
 DEFAULT_PI_FF_HEAT_REFERENCE = 15.0
@@ -227,9 +231,8 @@ DEFAULT_PI_FF_ALPHA_OVERSHOOT_RATIO = 0.25  # learn at alpha*ratio when overshoo
 # RLS model defaults
 DEFAULT_RLS_LAMBDA_BASE = 0.999  # Base forgetting factor (~10 day effective memory)
 DEFAULT_RLS_LAMBDA_MIN = 0.995   # Minimum λ when residuals are large
-DEFAULT_RLS_DELTA = 0.001        # Ridge regularization
-DEFAULT_RLS_P_INIT = 1.0         # Initial covariance diagonal (lower = trust seeds more)
-DEFAULT_RLS_RESIDUAL_THRESHOLD = 3.0  # °C, for variable forgetting factor
+DEFAULT_RLS_DELTA = 0.001        # Covariance regularization (added to P diagonal each step)
+DEFAULT_RLS_P_INIT = 10.0        # Base initial covariance diagonal (scaled per feature)
 
 # PI controller extra state attributes
 ATTR_HP_SETPOINT = "hp_setpoint"
