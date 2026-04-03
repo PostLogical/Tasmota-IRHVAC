@@ -1042,7 +1042,8 @@ class TestPIEdgeCases:
         pi_entity._pi._desired_temp = 22.0
         pi_entity._pi._hp_setpoint = 25.0
         pi_entity._pi._pi_command_pending = True
-        # Simulate recent tick (so second echo falls within 5s cooldown)
+        # Simulate recent send (so second echo falls within 5s cooldown)
+        pi_entity._pi._last_send_ir_time = time.monotonic()
         pi_entity._pi._pi_last_tick_time = time.monotonic()
 
         # Simulate two echoes (dual MQTT topics) with wrong Temp

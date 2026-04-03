@@ -219,8 +219,9 @@ class TestDualTopicEcho:
         pi._hp_setpoint = 24
         pi._pi_command_pending = True  # We just sent a command
 
-        # Ensure last tick time is recent (simulates a tick just ran)
+        # Ensure send time is recent (simulates we just sent a command)
         import time as _time
+        pi._last_send_ir_time = _time.monotonic()
         pi._pi_last_tick_time = _time.monotonic()
 
         # Patch send_ir to track calls
@@ -284,6 +285,7 @@ class TestDualTopicEcho:
         pi._desired_temp = 22.0
         pi._hp_setpoint = 25  # PI just computed this
         pi._pi_command_pending = True
+        pi._last_send_ir_time = _time.monotonic()
         pi._pi_last_tick_time = _time.monotonic()
 
         with patch.object(entity, 'send_ir', new_callable=AsyncMock) as mock_send:

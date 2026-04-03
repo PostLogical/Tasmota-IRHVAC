@@ -697,9 +697,9 @@ class PIController:
                 self._pi_command_pending = False
                 e.async_write_ha_state()
             else:
-                elapsed = time.monotonic() - self._pi_last_tick_time
+                elapsed = time.monotonic() - self._last_send_ir_time
                 if elapsed >= 5.0:
-                    _LOGGER.debug("MQTT echo: external change (elapsed=%.1fs), re-ticking", elapsed)
+                    _LOGGER.debug("MQTT echo: external change (elapsed=%.1fs since last send), re-ticking", elapsed)
                     self._hp_setpoint = payload["Temp"]
                     self._desired_temp = e._attr_target_temperature
                     await self._pi_tick()  # tick writes state at the end
