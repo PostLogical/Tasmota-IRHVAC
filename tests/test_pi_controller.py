@@ -505,6 +505,69 @@ class TestFeedforward:
         # Bucket should NOT have been updated
         assert pi_entity._pi._ff_heat_buckets[0] == old_bucket
 
+    @pytest.mark.asyncio
+    async def test_model_input_suppress_learning_blocks_rls(self, pi_entity):
+        """Model input with suppress_learning=True blocks RLS when active."""
+        pi = pi_entity._pi
+        pi._model_inputs = [{
+            "name": "pellet_stove",
+            "entity_id": "sensor.stove",
+            "seed_heat": -3.0,
+            "seed_cool": 0.0,
+            "suppress_learning": True,
+        }]
+        pi._model_input_values = [1.0]  # Stove is active
+        pi._model_input_filtered = [1.0]
+        pi._outdoor_temp = 5.0
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22.0
+        pi._ff_settled_ticks = 10  # Well settled
+        pi._rls_warmup_done = True
+        pi_entity._attr_current_temperature = 22.0  # In deadband
+        pi_entity._attr_hvac_mode = HVACMode.HEAT
+
+        old_obs_count = pi._rls_heat.observation_count
+        await pi._pi_tick()
+
+        # RLS should NOT have learned — stove with suppress_learning is active
+        assert pi._rls_heat.observation_count == old_obs_count
+        assert pi._disturbance_suppress_active is True
+
+    @pytest.mark.asyncio
+    async def test_model_input_suppress_learning_allows_when_inactive(self, pi_entity):
+        """Model input with suppress_learning=True allows RLS when inactive."""
+        pi = pi_entity._pi
+        pi._model_inputs = [{
+            "name": "pellet_stove",
+            "entity_id": "sensor.stove",
+            "seed_heat": -3.0,
+            "seed_cool": 0.0,
+            "suppress_learning": True,
+        }]
+        pi._model_input_values = [0.0]  # Stove is OFF
+        pi._model_input_filtered = [0.0]
+        pi._outdoor_temp = 5.0
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22.0
+        pi._pi_integral = 0.5  # Small, stable
+        pi._prev_integral_for_rls = 0.5
+        pi._ff_settled_ticks = 10
+        pi._rls_warmup_done = True
+        pi_entity._attr_current_temperature = 22.0  # In deadband
+        pi_entity._attr_hvac_mode = HVACMode.HEAT
+
+        # Mock stove entity as "off" so _read_model_input_values and
+        # _any_model_input_unavailable work correctly
+        mock_state = MagicMock()
+        mock_state.state = "off"
+        pi_entity.hass.states.get.return_value = mock_state
+
+        old_obs_count = pi._rls_heat.observation_count
+        await pi._pi_tick()
+
+        # RLS SHOULD have learned — stove is off, suppress doesn't apply
+        assert pi._rls_heat.observation_count > old_obs_count
+
 
 # ── Pause/Resume Tests ────────────────────────────────────────────────
 

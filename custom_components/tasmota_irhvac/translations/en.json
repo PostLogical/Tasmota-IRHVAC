@@ -209,7 +209,8 @@
           "model_input_seed_cool": "Seed Coefficient (Cooling)",
           "model_input_clamp_min": "Min Coefficient Clamp",
           "model_input_clamp_max": "Max Coefficient Clamp",
-          "model_input_lag_tau": "Lag Filter (minutes)"
+          "model_input_lag_tau": "Lag Filter (minutes)",
+          "model_input_suppress_learning": "Suppress Learning When Active"
         },
         "data_description": {
           "model_input_name": "Display name (e.g., 'Solar Proxy', 'Pellet Stove', 'Bunkroom Door').",
@@ -218,7 +219,8 @@
           "model_input_seed_cool": "Initial coefficient for cooling mode. Often similar to heating but may differ.",
           "model_input_clamp_min": "Minimum allowed coefficient value. Prevents nonsensical learning. Leave empty for no minimum.",
           "model_input_clamp_max": "Maximum allowed coefficient value. Leave empty for no maximum.",
-          "model_input_lag_tau": "Exponential lag filter time constant in minutes. Use for thermal sources with ramp-up/down (e.g., pellet stove: 30 min). 0 = no filter."
+          "model_input_lag_tau": "Exponential lag filter time constant in minutes. Use for thermal sources with ramp-up/down (e.g., pellet stove: 30 min). 0 = no filter.",
+          "model_input_suppress_learning": "Block FF coefficient learning while this input is active. Use for heat sources that dominate the HP (e.g., pellet stove in living room) to prevent coefficient contamination."
         }
       },
       "model_inputs_edit": {
@@ -238,7 +240,8 @@
           "model_input_seed_cool": "Seed Coefficient (Cooling)",
           "model_input_clamp_min": "Min Coefficient Clamp",
           "model_input_clamp_max": "Max Coefficient Clamp",
-          "model_input_lag_tau": "Lag Filter (minutes)"
+          "model_input_lag_tau": "Lag Filter (minutes)",
+          "model_input_suppress_learning": "Suppress Learning When Active"
         },
         "data_description": {
           "model_input_name": "Display name (e.g., 'Solar Proxy', 'Pellet Stove', 'Bunkroom Door').",
@@ -247,7 +250,8 @@
           "model_input_seed_cool": "Initial coefficient for cooling mode. Often similar to heating but may differ.",
           "model_input_clamp_min": "Minimum allowed coefficient value. Prevents nonsensical learning. Leave empty for no minimum.",
           "model_input_clamp_max": "Maximum allowed coefficient value. Leave empty for no maximum.",
-          "model_input_lag_tau": "Exponential lag filter time constant in minutes. Use for thermal sources with ramp-up/down (e.g., pellet stove: 30 min). 0 = no filter."
+          "model_input_lag_tau": "Exponential lag filter time constant in minutes. Use for thermal sources with ramp-up/down (e.g., pellet stove: 30 min). 0 = no filter.",
+          "model_input_suppress_learning": "Block FF coefficient learning while this input is active. Use for heat sources that dominate the HP (e.g., pellet stove in living room) to prevent coefficient contamination."
         }
       },
       "model_inputs_remove": {

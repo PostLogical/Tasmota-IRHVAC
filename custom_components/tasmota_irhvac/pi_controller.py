@@ -1185,11 +1185,15 @@ class PIController:
             else:
                 self._ff_offset_buckets = self._ff_cool_buckets.get(bucket_key, 0.0)
 
-        # Disturbance inputs: compute suppress flag (for manual suppress service)
+        # Learning suppression: manual service + per-input suppress_learning flag
         learning_suppressed = self._manual_ff_suppress
         active_suppressors = []
         if self._manual_ff_suppress:
             active_suppressors.append("manual")
+        for i, m_input in enumerate(self._model_inputs):
+            if m_input.get("suppress_learning") and self._model_input_values[i] > 0.5:
+                learning_suppressed = True
+                active_suppressors.append(m_input.get("name", f"input_{i}"))
         self._disturbance_suppress_active = learning_suppressed
         self._disturbance_active_suppressors = active_suppressors
         self._disturbance_total_bias = 0.0  # Bias now handled by model inputs

@@ -967,6 +967,7 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
                 "seed_heat": float(user_input.get("model_input_seed_heat", 0.0)),
                 "seed_cool": float(user_input.get("model_input_seed_cool", 0.0)),
                 "lag_tau": float(user_input.get("model_input_lag_tau", 0.0)) * 60,  # min → sec
+                "suppress_learning": bool(user_input.get("model_input_suppress_learning", False)),
             }
             clamp_min = user_input.get("model_input_clamp_min")
             clamp_max = user_input.get("model_input_clamp_max")
@@ -1013,6 +1014,7 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
                             unit_of_measurement="min",
                         )
                     ),
+                    vol.Optional("model_input_suppress_learning", default=False): BooleanSelector(),
                 }
             ),
         )
@@ -1054,6 +1056,7 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
                 "seed_heat": float(user_input.get("model_input_seed_heat", 0.0)),
                 "seed_cool": float(user_input.get("model_input_seed_cool", 0.0)),
                 "lag_tau": float(user_input.get("model_input_lag_tau", 0.0)) * 60,
+                "suppress_learning": bool(user_input.get("model_input_suppress_learning", False)),
             }
             clamp_min = user_input.get("model_input_clamp_min")
             clamp_max = user_input.get("model_input_clamp_max")
@@ -1093,6 +1096,7 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
                             NumberSelectorConfig(min=0, max=120, step=5, mode=NumberSelectorMode.BOX,
                                                 unit_of_measurement="min")
                         ),
+                        vol.Optional("model_input_suppress_learning", default=False): BooleanSelector(),
                     }
                 ),
                 {
@@ -1103,6 +1107,7 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
                     "model_input_clamp_min": existing.get("clamp_min"),
                     "model_input_clamp_max": existing.get("clamp_max"),
                     "model_input_lag_tau": existing.get("lag_tau", 0) / 60,  # sec → min for display
+                    "model_input_suppress_learning": existing.get("suppress_learning", False),
                 },
             ),
         )
