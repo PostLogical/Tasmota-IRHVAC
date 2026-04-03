@@ -1495,6 +1495,14 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         if float(self._mqtt_delay) != float(DEFAULT_MQTT_DELAY):
             await asyncio.sleep(float(self._mqtt_delay))
 
+        import traceback
+        caller = "".join(traceback.format_stack()[-4:-1])
+        _LOGGER.debug(
+            "send_ir: Temp=%s Power=%s Mode=%s topic=%s\n  caller:\n%s",
+            payload_data["Temp"], payload_data["Power"], payload_data["Mode"],
+            self.topic, caller,
+        )
+
         await mqtt.async_publish(self.hass, self.topic, payload)
 
         # Update HA UI and State
