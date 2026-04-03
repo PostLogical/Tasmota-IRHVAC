@@ -133,6 +133,9 @@ class RLSModel:
         else:
             self.beta = [0.0] * self.n
 
+        # Seed values for Bayesian ridge (anchor point during ambiguous data)
+        self.beta_seed = list(self.beta)
+
         # Covariance matrix P (n × n, stored as flat list row-major)
         self.P = [0.0] * (self.n * self.n)
         for i in range(self.n):
@@ -186,9 +189,12 @@ class RLSModel:
             return residual
         K = [Px[i] / denom for i in range(n)]
 
-        # Update coefficients: β = β + K·residual
+        # Update coefficients: β = β + K·residual - δ·(β - β_seed)
+        # The seed anchor term pulls coefficients toward their seed values
+        # during ambiguous (collinear) data, preventing drift. With clear
+        # independent data, K·residual dominates and learning proceeds normally.
         for i in range(n):
-            self.beta[i] += K[i] * residual
+            self.beta[i] += K[i] * residual - self.delta * (self.beta[i] - self.beta_seed[i])
 
         # Apply coefficient clamps
         for i in range(n):

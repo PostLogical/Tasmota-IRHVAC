@@ -336,3 +336,70 @@ class TestRLSGetCoefficients:
         coeffs = model.get_coefficients()
         # After update, coefficients should have changed from seeds
         assert coeffs[0] != 0.0 or coeffs[1] != 0.3
+
+
+class TestRLSBayesianRidge:
+    """Tests for Bayesian ridge anchoring toward seeds."""
+
+    def test_seed_anchor_resists_drift(self):
+        """With ambiguous data, coefficients should stay near seeds.
+
+        Two correlated inputs (simulating outdoor_delta and outdoor_rate both
+        tracking the same trend) should not cause one to absorb the other's
+        credit when Bayesian ridge is active.
+        """
+        # Seeds: intercept=0, outdoor_delta=0.35, outdoor_rate=0.28
+        model = RLSModel(n_inputs=2, seed_coefficients=[0.0, 0.35, 0.28])
+
+        import random
+        random.seed(42)
+
+        # Feed correlated data: rate ≈ -0.5 * delta (both from same trend)
+        for _ in range(100):
+            delta = random.uniform(5, 15)
+            rate = -0.5 * delta + random.gauss(0, 0.5)  # Correlated!
+            x = [1.0, delta, rate]
+            y = 0.35 * delta + 0.28 * rate  # True relationship
+            model.update(x, y)
+
+        # With Bayesian ridge, neither coefficient should collapse to zero
+        assert model.beta[1] > 0.1, f"outdoor_delta collapsed to {model.beta[1]}"
+        assert abs(model.beta[2]) > 0.05, f"outdoor_rate collapsed to {model.beta[2]}"
+
+    def test_clear_data_overrides_seed(self):
+        """With clear independent data, RLS should learn true values even if seeds are wrong."""
+        # Wrong seeds
+        model = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.1])
+
+        import random
+        random.seed(42)
+
+        # Clear data: true relationship is 0.5, not 0.1
+        for _ in range(200):
+            outdoor = random.uniform(0, 20)
+            x = [1.0, outdoor]
+            y = 0.5 * outdoor + random.gauss(0, 0.1)
+            model.update(x, y)
+
+        # Should learn close to true value despite wrong seed
+        assert model.beta[1] == pytest.approx(0.5, abs=0.1)
+
+    def test_beta_seed_stored_at_init(self):
+        """beta_seed should be set from seed_coefficients at init."""
+        model = RLSModel(n_inputs=2, seed_coefficients=[0.5, 0.35, -4.0])
+        assert model.beta_seed == [0.5, 0.35, -4.0]
+
+    def test_beta_seed_preserved_after_from_dict(self):
+        """from_dict should preserve beta_seed from current seeds, not stored beta."""
+        model = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.35])
+        # Learn something different
+        for _ in range(50):
+            model.update([1.0, 10.0], 5.0)
+        data = model.as_dict()
+
+        # Restore with same seeds
+        restored = RLSModel.from_dict(data, n_inputs=1, seed_coefficients=[0.0, 0.35])
+        # beta should be learned value
+        assert restored.beta[1] != 0.35
+        # beta_seed should be the seed, not the learned value
+        assert restored.beta_seed == [0.0, 0.35]
