@@ -1124,19 +1124,13 @@ class PIController:
         else:
             effective_weight = self._pi_setpoint_weight
 
-        # Deadband: if error is small, skip P term.
-        # Integral still accumulates error in deadband (at reduced rate) to prevent
-        # unbounded growth from asymmetric oscillation around setpoint.
+        # Deadband: if error is small, skip P term and freeze integral.
         in_deadband = abs_error < self._pi_deadband
         if in_deadband:
-            # In deadband: freeze integral. No error accumulation — the system is
-            # close enough to target. Quantization-error feedback (below) handles
-            # the X.5 boundary problem. RLS learning absorbs persistent integral
-            # into FF coefficients over time.
+            # Freeze integral — system is close enough to target.
+            # Quantization-error feedback (below) handles the X.5 boundary.
+            # RLS learning absorbs persistent integral into FF over time.
             self._ff_settled_ticks += 1
-            # RLS learning: update model when settled AND integral is small and stable.
-            # Integral < 3 ensures FF is providing most of the offset, not the integral.
-            # Rate < 0.5 ensures the integral isn't still converging.
             # RLS learns when integral is stable (not still converging), regardless
             # of magnitude. Large stable integral = FF is wrong, observation is valid.
             integral_stable = abs(self._pi_integral - self._prev_integral_for_rls) < 0.5
@@ -1257,13 +1251,18 @@ class PIController:
         raw_setpoint = desired_c + p_term + i_term + self._ff_offset
         clamped_setpoint = max(self._min_temp_c, min(self._max_temp_c, raw_setpoint))
 
-        # Back-calculation anti-windup
-        if effective_ki != 0:
-            saturation_error = clamped_setpoint - raw_setpoint
-            if abs(saturation_error) > 0.01:
-                kb = 1.0 / effective_ki
-                self._pi_integral += kb * saturation_error
-                self._pi_integral = max(-50.0, min(50.0, self._pi_integral))
+        # Conditional anti-windup: stop integral from growing in the saturated direction.
+        # Don't actively push integral back (back-calculation with kb=1/ki is too aggressive
+        # with adaptive ki — a 0.4°C saturation error was shifting integral by 5+ units).
+        if clamped_setpoint != raw_setpoint and effective_ki != 0:
+            if raw_setpoint > clamped_setpoint and self._pi_integral > 0:
+                # Saturated high, positive integral making it worse → freeze
+                max_i = (clamped_setpoint - desired_c - p_term - self._ff_offset) / effective_ki
+                self._pi_integral = min(self._pi_integral, max_i)
+            elif raw_setpoint < clamped_setpoint and self._pi_integral < 0:
+                # Saturated low, negative integral making it worse → freeze
+                min_i = (clamped_setpoint - desired_c - p_term - self._ff_offset) / effective_ki
+                self._pi_integral = max(self._pi_integral, min_i)
 
         # Quantization-error feedback: push integral toward values where
         # raw_setpoint lands near an integer, avoiding the X.5 boundary that
