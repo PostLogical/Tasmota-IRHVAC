@@ -1,7 +1,7 @@
 {
   "domain": "tasmota_irhvac",
   "name": "Tasmota IRHVAC",
-  "version": "0.15.2-rls-rework-beta",
+  "version": "0.15.3-rls-rework-beta",
   "config_flow": true,
   "documentation": "https://github.com/PostLogical/Tasmota-IRHVAC",
   "issue_tracker": "https://github.com/PostLogical/Tasmota-IRHVAC/issues",
