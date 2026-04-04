@@ -1066,8 +1066,10 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         if self._pi:
             import traceback
             _LOGGER.info(
-                "async_set_temperature: temp=%s unit=%s max=%s kwargs=%s\n  caller:\n%s",
-                temperature, self.temperature_unit, self.max_temp, kwargs,
+                "async_set_temperature: temp=%s unit=%s max=%s "
+                "BEFORE target=%s desired=%s kwargs=%s\n  caller:\n%s",
+                temperature, self.temperature_unit, self.max_temp,
+                self._attr_target_temperature, self._pi._desired_temp, kwargs,
                 "".join(traceback.format_stack()[-5:-1]),
             )
             await self._pi.set_temperature(temperature, hvac_mode)

@@ -770,12 +770,23 @@ class PIController:
         """Handle MQTT state echo. Call after base class processes payload.
 
         Base handler no longer overwrites _attr_target_temperature when PI is
-        active, so we don't need to restore it. Just handle echo detection and
-        external (remote) temp changes.
+        active, so we don't need to restore it. But we defensively ensure
+        _attr_target_temperature always matches _desired_temp — other code
+        paths (Fujitsu preset restore, state writes during concurrent echoes)
+        could corrupt it, and HA's frontend reads it for +/- temperature
+        increments.
         """
         if not self._pi_enabled or self._desired_temp is None or self._pi_paused:
             return
         e = self._entity
+        # Defensive: always ensure _attr_target_temperature matches desired_temp.
+        # If anything corrupted it, this corrects it before the state write below.
+        if e._attr_target_temperature != self._desired_temp:
+            _LOGGER.warning(
+                "MQTT echo: target_temp MISMATCH — target=%s desired=%s, restoring",
+                e._attr_target_temperature, self._desired_temp,
+            )
+            e._attr_target_temperature = self._desired_temp
         if "Temp" not in payload or payload["Temp"] <= 0:
             e.async_write_ha_state()
             return
