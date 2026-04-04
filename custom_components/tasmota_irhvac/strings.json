@@ -452,7 +452,8 @@
     "model_input": {
       "entry_type": "Model Input",
       "abort": {
-        "already_configured": "A model input for this entity already exists."
+        "already_configured": "A model input for this entity already exists.",
+        "reconfigure_successful": "Model input updated successfully."
       },
       "initiate_flow": {
         "user": "Add model input"
@@ -504,7 +505,8 @@
     "supplemental_source": {
       "entry_type": "Supplemental Heat Source",
       "abort": {
-        "already_configured": "A supplemental source for this entity already exists."
+        "already_configured": "A supplemental source for this entity already exists.",
+        "reconfigure_successful": "Supplemental source updated successfully."
       },
       "initiate_flow": {
         "user": "Add supplemental source"
@@ -520,7 +522,7 @@
             "seed_cool": "Cool Mode Seed Coefficient",
             "failure_threshold": "Failure Threshold (seconds)",
             "recovery_margin": "Recovery Margin (°C)",
-            "auto_model_input": "Auto-create Model Input"
+            "auto_model_input": "Include in Feedforward Model"
           },
           "data_description": {
             "name": "Display name (e.g., 'Pellet Stove', 'Oil Boiler Zone 1').",
@@ -529,7 +531,7 @@
             "seed_cool": "Estimated HP setpoint reduction in cooling mode when this source is active.",
             "failure_threshold": "Seconds the room must stay below HP desired before the HP assists. Default 900 (15 minutes).",
             "recovery_margin": "Degrees above desired before HP defers again after assisting. Prevents oscillation.",
-            "auto_model_input": "Automatically create a model input for feedforward prediction."
+            "auto_model_input": "Use this source as an input to the feedforward model. The HP will account for this source's thermal contribution when predicting the needed setpoint."
           }
         },
         "reconfigure": {
@@ -542,7 +544,7 @@
             "seed_cool": "Cool Mode Seed Coefficient",
             "failure_threshold": "Failure Threshold (seconds)",
             "recovery_margin": "Recovery Margin (°C)",
-            "auto_model_input": "Auto-create Model Input"
+            "auto_model_input": "Include in Feedforward Model"
           }
         }
       }
