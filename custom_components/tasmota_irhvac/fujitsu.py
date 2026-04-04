@@ -165,7 +165,11 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
                 self._attr_preset_mode = PRESET_MIN_HEAT
                 self.power_mode = "on"
                 self._attr_hvac_mode = HVACMode.HEAT
-                self._attr_target_temperature = 10  # 10°C / 50°F
+                from homeassistant.util.unit_conversion import TemperatureConverter
+                from homeassistant.const import UnitOfTemperature
+                self._attr_target_temperature = TemperatureConverter.convert(
+                    10, UnitOfTemperature.CELSIUS, self.temperature_unit
+                )
                 if self._pi: self._pi.pi_pause()
                 if self._pi: self._pi.pi_reset_integral()
                 self._econo = "off"
@@ -224,7 +228,11 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
                 self.power_mode = "on"
                 self._min_heat = True
                 self._attr_hvac_mode = HVACMode.HEAT
-                self._attr_target_temperature = 10  # 10°C / 50°F
+                from homeassistant.util.unit_conversion import TemperatureConverter
+                from homeassistant.const import UnitOfTemperature
+                self._attr_target_temperature = TemperatureConverter.convert(
+                    10, UnitOfTemperature.CELSIUS, self.temperature_unit
+                )
                 if self._pi: self._pi.pi_pause()
                 if self._pi: self._pi.pi_reset_integral()
                 self._econo = "off"

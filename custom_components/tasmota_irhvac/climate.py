@@ -607,11 +607,23 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         self._attr_unique_id = config.get(CONF_UNIQUE_ID)
         self._attr_name = config.get(CONF_NAME)
         self._attr_should_poll = False
-        self._attr_temperature_unit = (
+        # Entity temperature unit = HA system unit (what the user sees).
+        # celsius_mode only controls the IR protocol encoding, not the HA-facing unit.
+        self._attr_temperature_unit = hass.config.units.temperature_unit
+        self._celsius_unit = (
             UnitOfTemperature.CELSIUS
             if self._celsius.lower() == "on"
             else UnitOfTemperature.FAHRENHEIT
         )
+        # Convert config temps from IR unit (celsius_mode) to entity unit (system)
+        if self._celsius_unit != self._attr_temperature_unit:
+            for attr in ("_min_temp", "_max_temp", "_def_target_temp",
+                         "_saved_target_temp", "_away_temp"):
+                val = getattr(self, attr, None)
+                if val is not None:
+                    setattr(self, attr, TemperatureConverter.convert(
+                        val, self._celsius_unit, self._attr_temperature_unit
+                    ))
         self._attr_hvac_mode = config.get(CONF_INITIAL_OPERATION_MODE)
         self._attr_target_temperature_step = config[CONF_TEMP_STEP]
         self._attr_hvac_modes = config[CONF_MODES_LIST]
@@ -851,11 +863,13 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                     elif self._pi:
                         pass  # PI handler manages target temp separately
                     else:
-                        _LOGGER.info(
-                            "BASE HANDLER: setting target_temp=%s (was %s)",
-                            payload["Temp"], self._attr_target_temperature,
-                        )
-                        self._attr_target_temperature = payload["Temp"]
+                        # Convert from IR unit (celsius_mode) to entity unit (system)
+                        temp = payload["Temp"]
+                        if self._celsius_unit != self._attr_temperature_unit:
+                            temp = TemperatureConverter.convert(
+                                temp, self._celsius_unit, self._attr_temperature_unit
+                            )
+                        self._attr_target_temperature = temp
             if "Celsius" in payload:
                 self._celsius = payload["Celsius"].lower()
             if "Quiet" in payload:
@@ -1080,13 +1094,11 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
 
         # PI controller handles its own setpoint logic
         if self._pi:
-            import traceback
             _LOGGER.info(
                 "async_set_temperature: temp=%s unit=%s max=%s "
-                "BEFORE target=%s desired=%s kwargs=%s\n  caller:\n%s",
+                "BEFORE target=%s desired=%s",
                 temperature, self.temperature_unit, self.max_temp,
-                self._attr_target_temperature, self._pi._desired_temp, kwargs,
-                "".join(traceback.format_stack()[-5:-1]),
+                self._attr_target_temperature, self._pi._desired_temp,
             )
             await self._pi.set_temperature(temperature, hvac_mode)
             _LOGGER.info(
@@ -1452,10 +1464,16 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             self.power_mode = STATE_ON
 
     def _get_ir_temp(self):
-        """Return temperature for IR payload."""
+        """Return temperature for IR payload (in celsius_mode unit)."""
         if self._pi and self._attr_hvac_mode != HVACMode.OFF:
             return self._pi.get_ir_temp()
-        return round(self._attr_target_temperature / self._temp_precision) * self._temp_precision
+        # Convert from entity unit (system) to IR unit (celsius_mode)
+        temp = self._attr_target_temperature
+        if self._celsius_unit != self._attr_temperature_unit:
+            temp = TemperatureConverter.convert(
+                temp, self._attr_temperature_unit, self._celsius_unit
+            )
+        return round(temp / self._temp_precision) * self._temp_precision
 
     async def send_ir(self):
         """Send the payload to tasmota mqtt topic."""

@@ -431,8 +431,17 @@ class PIController:
         self._disturbance_active_suppressors = []
 
         # PI controller state
+        # _desired_temp is in entity unit (system); _hp_setpoint is always °C (for IR)
         self._desired_temp = entity._attr_target_temperature
-        self._hp_setpoint = entity._attr_target_temperature
+        self._hp_setpoint = (
+            TemperatureConverter.convert(
+                entity._attr_target_temperature,
+                entity._attr_temperature_unit,
+                UnitOfTemperature.CELSIUS,
+            )
+            if entity._attr_target_temperature is not None
+            else None
+        )
         self._pi_integral = 0.0
         self._pi_timer_unsub = None
         self._ff_offset = 0.0
@@ -580,8 +589,10 @@ class PIController:
                     }
                 _LOGGER.debug("PI: restored from state attributes (legacy)")
 
-        # Fallback: sync with restored _attr_target_temperature
-        if self._desired_temp is None and e._attr_target_temperature is not None:
+        # Always sync _desired_temp from _attr_target_temperature (which HA
+        # restores correctly in the entity's current unit). Stored _desired_temp
+        # from attrs/ExtraStoredData may be in a stale unit after migration.
+        if e._attr_target_temperature is not None:
             self._desired_temp = e._attr_target_temperature
         if self._hp_setpoint is None and e._attr_target_temperature is not None:
             self._hp_setpoint = TemperatureConverter.convert(
@@ -823,10 +834,17 @@ class PIController:
             else:
                 # External change (physical remote or another system).
                 # The remote sets a room temp target, not an HP setpoint offset.
-                # Update desired_temp and let PI compute the correct HP setpoint.
-                _LOGGER.info("MQTT echo: external change (%.1fs since send), new desired=%s", elapsed, reported_temp)
-                self._desired_temp = reported_temp
-                e._attr_target_temperature = reported_temp
+                # Convert from IR unit (celsius_mode) to entity unit (system).
+                desired_in_entity_unit = TemperatureConverter.convert(
+                    reported_temp, e._celsius_unit, e.temperature_unit
+                )
+                _LOGGER.info(
+                    "MQTT echo: external change (%.1fs since send), "
+                    "reported=%s -> desired=%s",
+                    elapsed, reported_temp, desired_in_entity_unit,
+                )
+                self._desired_temp = desired_in_entity_unit
+                e._attr_target_temperature = desired_in_entity_unit
                 self._pi_integral = 0.0
                 await self._pi_tick()  # tick computes HP setpoint and writes state
         else:
