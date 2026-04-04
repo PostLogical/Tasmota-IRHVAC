@@ -634,7 +634,12 @@ class PIController:
                 timedelta(seconds=self._pi_min_interval),
             )
             if e._attr_current_temperature is not None:
-                await self._pi_tick()
+                # Delay initial tick by 5s to avoid burst of IR sends
+                # on restart when all sensors come online together.
+                @callback
+                def _deferred_initial_tick(_now):
+                    self._hass.async_create_task(self._pi_tick())
+                async_call_later(self._hass, 5, _deferred_initial_tick)
             else:
                 _LOGGER.debug("PI: skipping initial tick, waiting for sensor")
 
@@ -1043,6 +1048,13 @@ class PIController:
                 self._sensor_unavailable = False
             else:
                 _LOGGER.debug("PI: temp sensor just became available, running immediate tick")
+            # Guard against multiple sensors coming online simultaneously
+            # (e.g., temp + humidity both fire was_none=True within milliseconds).
+            # Allow recovery tick only if no tick ran in the last 2 seconds.
+            elapsed = time.monotonic() - self._pi_last_tick_time
+            if elapsed < 2.0:
+                _LOGGER.debug("PI: skipping recovery tick, another ran %.1fs ago", elapsed)
+                return
             await self._pi_tick()
             return
 
