@@ -516,6 +516,12 @@ class PIController:
         # Integral convergence tracking (EMA of abs(integral) over ~24hr)
         self._integral_convergence = 0.0
 
+        # Performance metrics (running accumulators, reset daily)
+        self._itae_accumulator = 0.0      # Σ(tick * |effective_error|)
+        self._itae_tick_count = 0         # ticks since last reset
+        self._comfort_violation_hours = 0.0  # hours spent >1°C from setpoint
+        self._setpoint_changes_today = 0  # setpoint change count since reset
+
         # RLS learning gate: track integral stability
         self._prev_integral_for_rls = 0.0
 
@@ -1318,6 +1324,13 @@ class PIController:
             + convergence_alpha * abs(self._pi_integral)
         )
 
+        # Performance metrics accumulation
+        self._itae_tick_count += 1
+        effective_error = max(0.0, abs_error - self._pi_deadband)
+        self._itae_accumulator += self._itae_tick_count * effective_error
+        if abs_error > 1.0:
+            self._comfort_violation_hours += dt_seconds / 3600.0
+
         i_term = self._pi_ki * self._pi_integral
         d_term = self._pi_d_filtered
         raw_setpoint = desired_c + p_term + i_term + d_term + self._ff_offset
@@ -1371,6 +1384,7 @@ class PIController:
                 )
                 self._last_setpoint_change_time = now_mono
                 self._hp_setpoint = new_setpoint
+                self._setpoint_changes_today += 1
                 self._pi_command_pending = True
                 self._last_send_ir_time = time.monotonic()
                 await e.send_ir()

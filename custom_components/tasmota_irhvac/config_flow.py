@@ -88,6 +88,8 @@ from .const import (
     CONF_PI_FF_HEAT_SLOPE,
     CONF_PI_DISTURBANCE_INPUTS,
     CONF_PI_FF_SUPPRESS_LEARNING_ENTITY,
+    CONF_PI_KD,
+    CONF_PI_KD_FILTER_N,
     CONF_PI_KI,
     CONF_PI_KP,
     CONF_PI_MIN_INTERVAL,
@@ -113,6 +115,8 @@ from .const import (
     DEFAULT_PI_FF_COOL_SLOPE,
     DEFAULT_PI_FF_HEAT_REFERENCE,
     DEFAULT_PI_FF_HEAT_SLOPE,
+    DEFAULT_PI_KD,
+    DEFAULT_PI_KD_FILTER_N,
     DEFAULT_PI_KI,
     DEFAULT_PI_KP,
     DEFAULT_PI_MIN_INTERVAL,
@@ -351,6 +355,12 @@ OPTIONS_PI_CONTROLLER_SCHEMA = vol.Schema(
         ),
         vol.Optional(CONF_PI_KI, default=DEFAULT_PI_KI): NumberSelector(
             NumberSelectorConfig(min=0, max=5, step=0.01, mode=NumberSelectorMode.BOX)
+        ),
+        vol.Optional(CONF_PI_KD, default=DEFAULT_PI_KD): NumberSelector(
+            NumberSelectorConfig(min=0, max=10, step=0.1, mode=NumberSelectorMode.BOX)
+        ),
+        vol.Optional(CONF_PI_KD_FILTER_N, default=DEFAULT_PI_KD_FILTER_N): NumberSelector(
+            NumberSelectorConfig(min=1, max=20, step=1, mode=NumberSelectorMode.BOX)
         ),
         vol.Optional(CONF_PI_MIN_INTERVAL, default=DEFAULT_PI_MIN_INTERVAL): NumberSelector(
             NumberSelectorConfig(min=60, max=3600, step=60, mode=NumberSelectorMode.BOX)
@@ -652,6 +662,16 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_PI_KI, default=DEFAULT_PI_KI
                     ): NumberSelector(
                         NumberSelectorConfig(min=0, max=5, step=0.01, mode=NumberSelectorMode.BOX)
+                    ),
+                    vol.Optional(
+                        CONF_PI_KD, default=DEFAULT_PI_KD
+                    ): NumberSelector(
+                        NumberSelectorConfig(min=0, max=10, step=0.1, mode=NumberSelectorMode.BOX)
+                    ),
+                    vol.Optional(
+                        CONF_PI_KD_FILTER_N, default=DEFAULT_PI_KD_FILTER_N
+                    ): NumberSelector(
+                        NumberSelectorConfig(min=1, max=20, step=1, mode=NumberSelectorMode.BOX)
                     ),
                     vol.Optional(
                         CONF_PI_MIN_INTERVAL, default=DEFAULT_PI_MIN_INTERVAL

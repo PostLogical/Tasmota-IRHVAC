@@ -90,6 +90,36 @@ PI_SENSOR_DESCRIPTIONS: tuple[TasmotaIrhvacPISensorDescription, ...] = (
         entity_category=EntityCategory.DIAGNOSTIC,
         suggested_display_precision=2,
     ),
+    TasmotaIrhvacPISensorDescription(
+        key="itae",
+        translation_key="itae",
+        climate_attr="_itae_accumulator",
+        device_class=None,
+        native_unit_of_measurement=None,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        suggested_display_precision=1,
+    ),
+    TasmotaIrhvacPISensorDescription(
+        key="comfort_violation_hours",
+        translation_key="comfort_violation_hours",
+        climate_attr="_comfort_violation_hours",
+        device_class=None,
+        native_unit_of_measurement="h",
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        suggested_display_precision=2,
+    ),
+    TasmotaIrhvacPISensorDescription(
+        key="setpoint_changes_today",
+        translation_key="setpoint_changes_today",
+        climate_attr="_setpoint_changes_today",
+        device_class=None,
+        native_unit_of_measurement=None,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        suggested_display_precision=0,
+    ),
 )
 
 
