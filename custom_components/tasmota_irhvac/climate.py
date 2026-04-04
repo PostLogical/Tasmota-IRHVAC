@@ -490,6 +490,22 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
     config = {**entry.data, **entry.options}
 
+    # Build model_inputs and supplemental_sources from subentries (if available)
+    # Falls back to options-based list for pre-subentry config entries.
+    if hasattr(entry, "subentries") and entry.subentries:
+        from .const import SUBENTRY_MODEL_INPUT, SUBENTRY_SUPPLEMENTAL_SOURCE, CONF_PI_MODEL_INPUTS
+        model_inputs_from_subentries = [
+            dict(sub.data) for sub in entry.subentries.values()
+            if sub.subentry_type == SUBENTRY_MODEL_INPUT
+        ]
+        supplemental_sources = [
+            dict(sub.data) for sub in entry.subentries.values()
+            if sub.subentry_type == SUBENTRY_SUPPLEMENTAL_SOURCE
+        ]
+        if model_inputs_from_subentries:
+            config[CONF_PI_MODEL_INPUTS] = model_inputs_from_subentries
+        config["pi_supplemental_sources"] = supplemental_sources
+
     vendor = config.get(CONF_VENDOR)
     if vendor is None:
         vendor = config.get(CONF_PROTOCOL)

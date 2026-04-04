@@ -209,6 +209,23 @@ CONF_PI_FF_ANTICIPATED_CHANGE_ENTITY = "pi_ff_anticipated_change_entity"
 CONF_PI_FF_ANTICIPATED_CHANGE_GAIN = "pi_ff_anticipated_change_gain"
 CONF_PI_MODEL_INPUTS = "pi_model_inputs"
 
+# Subentry types
+SUBENTRY_MODEL_INPUT = "model_input"
+SUBENTRY_SUPPLEMENTAL_SOURCE = "supplemental_source"
+
+# Supplemental source config keys
+CONF_SUPPLEMENTAL_NAME = "name"
+CONF_SUPPLEMENTAL_ENTITY = "entity_id"
+CONF_SUPPLEMENTAL_SEED = "seed_heat"
+CONF_SUPPLEMENTAL_FAILURE_THRESHOLD = "failure_threshold"
+CONF_SUPPLEMENTAL_RECOVERY_MARGIN = "recovery_margin"
+CONF_SUPPLEMENTAL_AUTO_MODEL_INPUT = "auto_model_input"
+
+# Supplemental source defaults
+DEFAULT_SUPPLEMENTAL_FAILURE_THRESHOLD = 900  # 15 minutes
+DEFAULT_SUPPLEMENTAL_RECOVERY_MARGIN = 0.3    # °C
+DEFAULT_SUPPLEMENTAL_SEED = -3.0              # Typical pellet stove offset
+
 # PID controller defaults
 DEFAULT_PI_ENABLED = False
 DEFAULT_PI_KP = 1.0

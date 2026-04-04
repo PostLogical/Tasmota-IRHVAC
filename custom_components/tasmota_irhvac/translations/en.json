@@ -447,5 +447,96 @@
       "title": "Temperature sensor not found",
       "description": "The climate entity is configured with temperature sensor `{entity_id}`, but this entity does not exist. PI control and accurate temperature display require this sensor."
     }
+  },
+  "config_subentries": {
+    "model_input": {
+      "entry_type": "Model Input",
+      "initiate_flow": {
+        "user": "Add model input"
+      },
+      "step": {
+        "user": {
+          "title": "Add Model Input",
+          "description": "Add a sensor or entity that affects room temperature (e.g., solar proxy, pellet stove, door sensor).",
+          "data": {
+            "name": "Name",
+            "entity_id": "Entity",
+            "seed_heat": "Heat Seed Coefficient",
+            "seed_cool": "Cool Seed Coefficient",
+            "clamp_min": "Coefficient Min Clamp",
+            "clamp_max": "Coefficient Max Clamp",
+            "lag_tau": "Lag Filter (seconds)",
+            "suppress_learning": "Suppress Learning",
+            "typical_value": "Typical Value"
+          },
+          "data_description": {
+            "name": "Display name for this input.",
+            "entity_id": "The sensor or entity to read values from.",
+            "seed_heat": "Initial coefficient for heating mode. Negative = this input reduces needed HP offset.",
+            "seed_cool": "Initial coefficient for cooling mode.",
+            "clamp_min": "Minimum allowed coefficient value (physical bound).",
+            "clamp_max": "Maximum allowed coefficient value (physical bound).",
+            "lag_tau": "Exponential smoothing time constant in seconds. 0 = no filtering.",
+            "suppress_learning": "Prevent RLS from updating this coefficient (use seed only).",
+            "typical_value": "Typical magnitude of this input's value (for P matrix scaling)."
+          }
+        },
+        "reconfigure": {
+          "title": "Edit Model Input",
+          "description": "Modify settings for this model input.",
+          "data": {
+            "name": "Name",
+            "entity_id": "Entity",
+            "seed_heat": "Heat Seed Coefficient",
+            "seed_cool": "Cool Seed Coefficient",
+            "clamp_min": "Coefficient Min Clamp",
+            "clamp_max": "Coefficient Max Clamp",
+            "lag_tau": "Lag Filter (seconds)",
+            "suppress_learning": "Suppress Learning",
+            "typical_value": "Typical Value"
+          }
+        }
+      }
+    },
+    "supplemental_source": {
+      "entry_type": "Supplemental Heat Source",
+      "initiate_flow": {
+        "user": "Add supplemental source"
+      },
+      "step": {
+        "user": {
+          "title": "Add Supplemental Heat Source",
+          "description": "Add a heat source with its own thermostat (e.g., pellet stove, oil boiler zone). The HP will defer to this source when it is active.",
+          "data": {
+            "name": "Name",
+            "entity_id": "Climate Entity",
+            "seed_heat": "HP Offset Seed",
+            "failure_threshold": "Failure Threshold (seconds)",
+            "recovery_margin": "Recovery Margin (°C)",
+            "auto_model_input": "Auto-create Model Input"
+          },
+          "data_description": {
+            "name": "Display name (e.g., 'Pellet Stove', 'Oil Boiler Zone 1').",
+            "entity_id": "The climate entity of the supplemental heat source.",
+            "seed_heat": "Estimated HP setpoint reduction when this source is active (negative, e.g., -3.0).",
+            "failure_threshold": "Seconds the room must stay below HP desired before the HP assists. Default 900 (15 minutes).",
+            "recovery_margin": "Degrees above desired before HP defers again after assisting. Prevents oscillation.",
+            "auto_model_input": "Automatically create a model input for feedforward prediction."
+          }
+        },
+        "reconfigure": {
+          "title": "Edit Supplemental Source",
+          "description": "Modify settings for this supplemental heat source.",
+          "data": {
+            "name": "Name",
+            "entity_id": "Climate Entity",
+            "seed_heat": "HP Offset Seed",
+            "failure_threshold": "Failure Threshold (seconds)",
+            "recovery_margin": "Recovery Margin (°C)",
+            "auto_model_input": "Auto-create Model Input"
+          }
+        }
+      }
+    }
   }
 }

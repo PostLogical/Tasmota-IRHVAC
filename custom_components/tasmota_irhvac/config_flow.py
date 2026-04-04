@@ -20,7 +20,12 @@ from homeassistant.components.climate.const import (
     SWING_OFF,
     SWING_VERTICAL,
 )
-from homeassistant.config_entries import OptionsFlowWithReload
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigSubentryFlow,
+    OptionsFlowWithReload,
+    SubentryFlowResult,
+)
 from homeassistant.const import (
     CONF_NAME,
     PRECISION_HALVES,
@@ -95,6 +100,17 @@ from .const import (
     CONF_PI_MIN_INTERVAL,
     CONF_PI_SETPOINT_WEIGHT,
     CONF_PI_MODEL_INPUTS,
+    CONF_SUPPLEMENTAL_AUTO_MODEL_INPUT,
+    CONF_SUPPLEMENTAL_ENTITY,
+    CONF_SUPPLEMENTAL_FAILURE_THRESHOLD,
+    CONF_SUPPLEMENTAL_NAME,
+    CONF_SUPPLEMENTAL_RECOVERY_MARGIN,
+    CONF_SUPPLEMENTAL_SEED,
+    DEFAULT_SUPPLEMENTAL_FAILURE_THRESHOLD,
+    DEFAULT_SUPPLEMENTAL_RECOVERY_MARGIN,
+    DEFAULT_SUPPLEMENTAL_SEED,
+    SUBENTRY_MODEL_INPUT,
+    SUBENTRY_SUPPLEMENTAL_SOURCE,
     DEFAULT_COMMAND_TOPIC,
     DEFAULT_CONF_BEEP,
     DEFAULT_CONF_CELSIUS,
@@ -399,6 +415,17 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
     MINOR_VERSION = 5  # precision/temp_step stored as floats (was strings)
+
+    @classmethod
+    @callback
+    def async_get_supported_subentry_types(
+        cls, config_entry: ConfigEntry
+    ) -> dict[str, type[ConfigSubentryFlow]]:
+        """Return subentry types supported by this config entry."""
+        return {
+            SUBENTRY_MODEL_INPUT: ModelInputSubentryFlow,
+            SUBENTRY_SUPPLEMENTAL_SOURCE: SupplementalSourceSubentryFlow,
+        }
 
     def __init__(self):
         """Initialize the config flow."""
@@ -1259,5 +1286,198 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
                         )
                     ),
                 }
+            ),
+        )
+
+
+# ── Subentry Flows ────────────────────────────────────────────────────────
+
+
+class ModelInputSubentryFlow(ConfigSubentryFlow):
+    """Handle adding/editing a model input subentry."""
+
+    async def async_step_user(
+        self, user_input: dict | None = None
+    ) -> SubentryFlowResult:
+        """Add a new model input."""
+        if user_input is not None:
+            return self.async_create_entry(
+                title=user_input.get("name", "Model Input"),
+                data=user_input,
+                unique_id=user_input.get("entity_id"),
+            )
+
+        return self.async_show_form(
+            step_id="user",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("name"): TextSelector(),
+                    vol.Required("entity_id"): EntitySelector(
+                        EntitySelectorConfig(domain=["sensor", "binary_sensor", "input_boolean", "input_number", "climate"])
+                    ),
+                    vol.Optional("seed_heat", default=0.0): NumberSelector(
+                        NumberSelectorConfig(min=-20, max=20, step=0.01, mode=NumberSelectorMode.BOX)
+                    ),
+                    vol.Optional("seed_cool", default=0.0): NumberSelector(
+                        NumberSelectorConfig(min=-20, max=20, step=0.01, mode=NumberSelectorMode.BOX)
+                    ),
+                    vol.Optional("clamp_min"): NumberSelector(
+                        NumberSelectorConfig(min=-50, max=50, step=0.1, mode=NumberSelectorMode.BOX)
+                    ),
+                    vol.Optional("clamp_max"): NumberSelector(
+                        NumberSelectorConfig(min=-50, max=50, step=0.1, mode=NumberSelectorMode.BOX)
+                    ),
+                    vol.Optional("lag_tau", default=0): NumberSelector(
+                        NumberSelectorConfig(min=0, max=7200, step=60, mode=NumberSelectorMode.BOX)
+                    ),
+                    vol.Optional("suppress_learning", default=False): BooleanSelector(),
+                    vol.Optional("typical_value", default=0.5): NumberSelector(
+                        NumberSelectorConfig(min=0.01, max=100, step=0.01, mode=NumberSelectorMode.BOX)
+                    ),
+                }
+            ),
+        )
+
+    async def async_step_reconfigure(
+        self, user_input: dict | None = None
+    ) -> SubentryFlowResult:
+        """Edit an existing model input."""
+        subentry = self._get_reconfigure_subentry()
+
+        if user_input is not None:
+            return self.async_update_reload_and_abort(
+                self._get_entry(),
+                subentry,
+                data=user_input,
+                title=user_input.get("name", subentry.title),
+            )
+
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=self.add_suggested_values_to_schema(
+                vol.Schema(
+                    {
+                        vol.Required("name"): TextSelector(),
+                        vol.Required("entity_id"): EntitySelector(
+                            EntitySelectorConfig(domain=["sensor", "binary_sensor", "input_boolean", "input_number", "climate"])
+                        ),
+                        vol.Optional("seed_heat", default=0.0): NumberSelector(
+                            NumberSelectorConfig(min=-20, max=20, step=0.01, mode=NumberSelectorMode.BOX)
+                        ),
+                        vol.Optional("seed_cool", default=0.0): NumberSelector(
+                            NumberSelectorConfig(min=-20, max=20, step=0.01, mode=NumberSelectorMode.BOX)
+                        ),
+                        vol.Optional("clamp_min"): NumberSelector(
+                            NumberSelectorConfig(min=-50, max=50, step=0.1, mode=NumberSelectorMode.BOX)
+                        ),
+                        vol.Optional("clamp_max"): NumberSelector(
+                            NumberSelectorConfig(min=-50, max=50, step=0.1, mode=NumberSelectorMode.BOX)
+                        ),
+                        vol.Optional("lag_tau", default=0): NumberSelector(
+                            NumberSelectorConfig(min=0, max=7200, step=60, mode=NumberSelectorMode.BOX)
+                        ),
+                        vol.Optional("suppress_learning", default=False): BooleanSelector(),
+                        vol.Optional("typical_value", default=0.5): NumberSelector(
+                            NumberSelectorConfig(min=0.01, max=100, step=0.01, mode=NumberSelectorMode.BOX)
+                        ),
+                    }
+                ),
+                dict(subentry.data),
+            ),
+        )
+
+
+class SupplementalSourceSubentryFlow(ConfigSubentryFlow):
+    """Handle adding/editing a supplemental heat source subentry."""
+
+    async def async_step_user(
+        self, user_input: dict | None = None
+    ) -> SubentryFlowResult:
+        """Add a new supplemental source."""
+        if user_input is not None:
+            return self.async_create_entry(
+                title=user_input.get(CONF_SUPPLEMENTAL_NAME, "Supplemental Source"),
+                data=user_input,
+                unique_id=user_input.get(CONF_SUPPLEMENTAL_ENTITY),
+            )
+
+        return self.async_show_form(
+            step_id="user",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_SUPPLEMENTAL_NAME): TextSelector(),
+                    vol.Required(CONF_SUPPLEMENTAL_ENTITY): EntitySelector(
+                        EntitySelectorConfig(domain=["climate"])
+                    ),
+                    vol.Optional(
+                        CONF_SUPPLEMENTAL_SEED, default=DEFAULT_SUPPLEMENTAL_SEED
+                    ): NumberSelector(
+                        NumberSelectorConfig(min=-20, max=0, step=0.1, mode=NumberSelectorMode.BOX)
+                    ),
+                    vol.Optional(
+                        CONF_SUPPLEMENTAL_FAILURE_THRESHOLD,
+                        default=DEFAULT_SUPPLEMENTAL_FAILURE_THRESHOLD,
+                    ): NumberSelector(
+                        NumberSelectorConfig(min=60, max=7200, step=60, mode=NumberSelectorMode.BOX)
+                    ),
+                    vol.Optional(
+                        CONF_SUPPLEMENTAL_RECOVERY_MARGIN,
+                        default=DEFAULT_SUPPLEMENTAL_RECOVERY_MARGIN,
+                    ): NumberSelector(
+                        NumberSelectorConfig(min=0.1, max=3.0, step=0.1, mode=NumberSelectorMode.BOX)
+                    ),
+                    vol.Optional(
+                        CONF_SUPPLEMENTAL_AUTO_MODEL_INPUT, default=True
+                    ): BooleanSelector(),
+                }
+            ),
+        )
+
+    async def async_step_reconfigure(
+        self, user_input: dict | None = None
+    ) -> SubentryFlowResult:
+        """Edit an existing supplemental source."""
+        subentry = self._get_reconfigure_subentry()
+
+        if user_input is not None:
+            return self.async_update_reload_and_abort(
+                self._get_entry(),
+                subentry,
+                data=user_input,
+                title=user_input.get(CONF_SUPPLEMENTAL_NAME, subentry.title),
+            )
+
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=self.add_suggested_values_to_schema(
+                vol.Schema(
+                    {
+                        vol.Required(CONF_SUPPLEMENTAL_NAME): TextSelector(),
+                        vol.Required(CONF_SUPPLEMENTAL_ENTITY): EntitySelector(
+                            EntitySelectorConfig(domain=["climate"])
+                        ),
+                        vol.Optional(
+                            CONF_SUPPLEMENTAL_SEED, default=DEFAULT_SUPPLEMENTAL_SEED
+                        ): NumberSelector(
+                            NumberSelectorConfig(min=-20, max=0, step=0.1, mode=NumberSelectorMode.BOX)
+                        ),
+                        vol.Optional(
+                            CONF_SUPPLEMENTAL_FAILURE_THRESHOLD,
+                            default=DEFAULT_SUPPLEMENTAL_FAILURE_THRESHOLD,
+                        ): NumberSelector(
+                            NumberSelectorConfig(min=60, max=7200, step=60, mode=NumberSelectorMode.BOX)
+                        ),
+                        vol.Optional(
+                            CONF_SUPPLEMENTAL_RECOVERY_MARGIN,
+                            default=DEFAULT_SUPPLEMENTAL_RECOVERY_MARGIN,
+                        ): NumberSelector(
+                            NumberSelectorConfig(min=0.1, max=3.0, step=0.1, mode=NumberSelectorMode.BOX)
+                        ),
+                        vol.Optional(
+                            CONF_SUPPLEMENTAL_AUTO_MODEL_INPUT, default=True
+                        ): BooleanSelector(),
+                    }
+                ),
+                dict(subentry.data),
             ),
         )

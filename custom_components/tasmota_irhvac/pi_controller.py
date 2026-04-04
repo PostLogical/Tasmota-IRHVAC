@@ -450,6 +450,14 @@ class PIController:
         self._pi_d_filtered = 0.0    # Filtered derivative term
         self._pi_last_measurement = None  # Previous temperature measurement for derivative
 
+        # Supplemental heat source selector/override control
+        self._supplemental_sources = config.get("pi_supplemental_sources", [])
+        self._tracking_mode = False          # True = HP defers to supplemental
+        self._tracking_sources: list[str] = []  # Names of active overriding sources
+        self._supplemental_failure_start: float | None = None
+        self._supplemental_assist_active = False
+        self._supplemental_last_override = False  # Edge detection
+
         # Feedforward buckets (legacy, kept for parallel comparison)
         self._ff_heat_buckets = _seed_buckets(self._ff_heat_reference, self._ff_heat_slope)
         self._ff_cool_buckets = _seed_buckets(
@@ -851,6 +859,9 @@ class PIController:
             ATTR_HP_SETPOINT: self._hp_setpoint,
             ATTR_PI_INTEGRAL: round(self._pi_integral, 3),
             "d_term": round(self._pi_d_filtered, 3),
+            "tracking_mode": self._tracking_mode,
+            "tracking_sources": self._tracking_sources,
+            "supplemental_assist": self._supplemental_assist_active,
             ATTR_DESIRED_TEMP: self._desired_temp,
             ATTR_FF_OFFSET: round(self._ff_offset, 2),
             "ff_offset_buckets": round(self._ff_offset_buckets, 2),
@@ -951,6 +962,99 @@ class PIController:
         self._pi_integral = 0.0
         _LOGGER.info("FF models reset to seed values, integral zeroed")
         self._entity.async_schedule_update_ha_state()
+
+    # ── Supplemental Source Override/Selector ────────────────────────
+
+    def _evaluate_supplemental_override(self, error_c, now_mono):
+        """Evaluate whether supplemental sources are active and update tracking mode.
+
+        Implements override/selector control pattern:
+        - When supplemental is active: HP enters tracking mode (computes but doesn't send IR)
+        - When supplemental can't keep up: HP assists (sends IR alongside supplemental)
+        - When supplemental stops: bumpless transfer (HP resumes with current integral)
+
+        Returns True if the HP should send IR commands, False if tracking.
+        """
+        if not self._supplemental_sources:
+            return True  # No supplemental sources configured, HP always active
+
+        active_sources = []
+        for source in self._supplemental_sources:
+            entity_id = source.get("entity_id", "")
+            if not entity_id:
+                continue
+            state = self._hass.states.get(entity_id)
+            if state is None or state.state in ("unavailable", "unknown"):
+                continue
+            # Climate entity in heat or cool mode = supplemental is managing the room
+            if state.state in ("heat", "cool"):
+                active_sources.append(source.get("name", entity_id))
+
+        was_tracking = self._tracking_mode
+
+        if not active_sources:
+            # No supplemental active → HP is in charge
+            self._tracking_mode = False
+            self._tracking_sources = []
+            self._supplemental_failure_start = None
+            self._supplemental_assist_active = False
+
+            if was_tracking:
+                _LOGGER.info(
+                    "Supplemental override ended (sources: %s). HP resuming with integral=%.2f, setpoint=%s",
+                    self._tracking_sources if self._tracking_sources else "none",
+                    self._pi_integral, self._hp_setpoint,
+                )
+                # Bumpless transfer: clear hold timer so first IR send isn't blocked
+                self._last_setpoint_change_time = 0.0
+            return True  # HP active
+
+        # At least one supplemental is active
+        self._tracking_sources = active_sources
+
+        # Failure detection: is the supplemental keeping up?
+        min_threshold = min(
+            s.get("failure_threshold", 900) for s in self._supplemental_sources
+            if s.get("name", "") in active_sources
+        ) if active_sources else 900
+
+        recovery_margin = min(
+            s.get("recovery_margin", 0.3) for s in self._supplemental_sources
+            if s.get("name", "") in active_sources
+        ) if active_sources else 0.3
+
+        if error_c > self._pi_deadband:
+            # Room is below desired
+            if self._supplemental_failure_start is None:
+                self._supplemental_failure_start = now_mono
+            time_below = now_mono - self._supplemental_failure_start
+            if time_below >= min_threshold:
+                if not self._supplemental_assist_active:
+                    _LOGGER.info(
+                        "Supplemental can't keep up (%.0fs below desired). HP assisting.",
+                        time_below,
+                    )
+                self._supplemental_assist_active = True
+        else:
+            if error_c < -recovery_margin:
+                # Room above desired + margin → supplemental caught up
+                if self._supplemental_assist_active:
+                    _LOGGER.info("Supplemental recovered. HP deferring again.")
+                self._supplemental_assist_active = False
+            self._supplemental_failure_start = None
+
+        if self._supplemental_assist_active:
+            self._tracking_mode = False  # HP active (assisting)
+        else:
+            self._tracking_mode = True   # HP tracking (deferred)
+
+        if self._tracking_mode and not was_tracking:
+            _LOGGER.info(
+                "Supplemental override started: %s. HP entering tracking mode.",
+                ", ".join(active_sources),
+            )
+
+        return not self._tracking_mode
 
     # ── PI Internals ──────────────────────────────────────────────────
 
@@ -1195,6 +1299,10 @@ class PIController:
         )
         error = desired_c - current_c
 
+        # Evaluate supplemental heat source override (selector control)
+        now_mono = time.monotonic()
+        hp_should_send_ir = self._evaluate_supplemental_override(error, now_mono)
+
         # Filtered derivative on measurement (not error — avoids derivative kick).
         # D(s) = -Kd * s / (1 + Tf*s) where Tf = Kd/N.
         # Discrete: D[n] = (Tf/(Tf+dt))*D[n-1] - (Kd/(Tf+dt))*(y[n]-y[n-1])
@@ -1281,6 +1389,8 @@ class PIController:
                 and not learning_suppressed
                 and integral_stable
                 and not self._any_model_input_unavailable()
+                and not self._tracking_mode
+                and not self._supplemental_assist_active
             )
             if not can_learn_rls and self._ff_settled_ticks == 4:
                 # Log why learning was blocked (once, at the gate threshold)
@@ -1322,6 +1432,8 @@ class PIController:
                 and self._outdoor_temp is not None
                 and not learning_suppressed
                 and self._is_learning_time_allowed()
+                and not self._tracking_mode
+                and not self._supplemental_assist_active
             )
             if can_learn_buckets:
                 observed_offset_buckets = float(self._hp_setpoint) - desired_c
@@ -1371,12 +1483,13 @@ class PIController:
             + convergence_alpha * abs(self._pi_integral)
         )
 
-        # Performance metrics accumulation
-        self._itae_tick_count += 1
-        effective_error = max(0.0, abs_error - self._pi_deadband)
-        self._itae_accumulator += self._itae_tick_count * effective_error
-        if abs_error > 1.0:
-            self._comfort_violation_hours += dt_seconds / 3600.0
+        # Performance metrics accumulation (paused during tracking — HP not responsible)
+        if not self._tracking_mode:
+            self._itae_tick_count += 1
+            effective_error = max(0.0, abs_error - self._pi_deadband)
+            self._itae_accumulator += self._itae_tick_count * effective_error
+            if abs_error > 1.0:
+                self._comfort_violation_hours += dt_seconds / 3600.0
 
         i_term = self._pi_ki * self._pi_integral
         d_term = self._pi_d_filtered
@@ -1424,17 +1537,24 @@ class PIController:
                     self._hp_setpoint, new_setpoint, time_since_last,
                 )
             else:
-                _LOGGER.info(
-                    "PI: error=%.1f P=%.1f I=%.1f D=%.1f FF=%.1f raw=%.1f setpoint %s -> %s",
-                    error, p_term, i_term, d_term, self._ff_offset, clamped_setpoint,
-                    self._hp_setpoint, new_setpoint,
-                )
-                self._last_setpoint_change_time = now_mono
                 self._hp_setpoint = new_setpoint
-                self._setpoint_changes_today += 1
-                self._pi_command_pending = True
-                self._last_send_ir_time = time.monotonic()
-                await e.send_ir()
+                if not hp_should_send_ir:
+                    # Tracking mode: update internal setpoint but don't send IR
+                    _LOGGER.debug(
+                        "PI tracking: setpoint %s -> %s (IR suppressed, override by %s)",
+                        self._hp_setpoint, new_setpoint, ", ".join(self._tracking_sources),
+                    )
+                else:
+                    _LOGGER.info(
+                        "PI: error=%.1f P=%.1f I=%.1f D=%.1f FF=%.1f raw=%.1f setpoint %s -> %s",
+                        error, p_term, i_term, d_term, self._ff_offset, clamped_setpoint,
+                        self._hp_setpoint, new_setpoint,
+                    )
+                    self._last_setpoint_change_time = now_mono
+                    self._setpoint_changes_today += 1
+                    self._pi_command_pending = True
+                    self._last_send_ir_time = time.monotonic()
+                    await e.send_ir()
         else:
             _LOGGER.debug(
                 "PI: error=%.1f raw=%.1f setpoint=%s (held)",
