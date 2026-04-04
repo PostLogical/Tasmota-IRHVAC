@@ -479,7 +479,33 @@ class PIController:
         # Model inputs (replaces disturbance inputs for RLS)
         # Each: {"name": str, "entity_id": str, "seed_heat": float, "seed_cool": float,
         #         "clamp_min": float, "clamp_max": float, "lag_tau": float (seconds)}
-        self._model_inputs = config.get(CONF_PI_MODEL_INPUTS, [])
+        self._model_inputs = list(config.get(CONF_PI_MODEL_INPUTS, []))
+
+        # Auto-generate model inputs from supplemental sources with auto_model_input=true.
+        # These use the supplemental's climate entity as a binary signal (heat/cool=1, else=0).
+        # The PI controller reads the entity state each tick to update the value.
+        self._supplemental_auto_inputs = []
+        for source in self._supplemental_sources:
+            if not source.get("auto_model_input", True):
+                continue
+            entity_id = source.get("entity_id", "")
+            name = source.get("name", entity_id)
+            # Check if user already has a manual model input for this entity
+            existing = any(m.get("entity_id") == entity_id for m in self._model_inputs)
+            if existing:
+                _LOGGER.debug("Supplemental %s: skipping auto model input (manual input exists)", name)
+                continue
+            auto_input = {
+                "name": f"{name} (auto)",
+                "entity_id": entity_id,
+                "seed_heat": float(source.get("seed_heat", -3.0)),
+                "seed_cool": float(source.get("seed_cool", 0.0)),
+                "lag_tau": 0,
+                "suppress_learning": True,  # Learning deferred per research
+                "_auto_supplemental": True,  # Internal flag for signal generation
+            }
+            self._model_inputs.append(auto_input)
+            self._supplemental_auto_inputs.append(auto_input)
         # Outdoor delta is always the first model input (index 1, after intercept)
         # Other model inputs follow in order of _model_inputs list
         self._n_model_inputs = 1 + len(self._model_inputs)  # outdoor_delta + configured inputs
