@@ -2291,15 +2291,35 @@ class TestConfigFlowEmptyRedirects:
     """Cover config flow empty edit/remove redirect lines."""
 
     @pytest.mark.asyncio
-    async def test_disturbance_edit_empty_redirects(self, hass, setup_integration):
-        """Disturbance edit with no inputs should redirect to menu."""
+    async def test_model_input_subentry_add(self, hass, setup_integration):
+        """Model input can be added via subentry flow."""
         entry = await setup_integration()
-        result = await hass.config_entries.options.async_init(entry.entry_id)
-        result = await hass.config_entries.options.async_configure(
-            result["flow_id"], user_input={"next_step_id": "model_inputs"},
+        # Initiate subentry flow for model_input
+        result = await hass.config_entries.subentries.async_init(
+            (entry.entry_id, "model_input"),
+            context={"source": "user"},
         )
-        # Menu only shows add when empty
-        assert result["type"] == FlowResultType.MENU
+        assert result["type"] == FlowResultType.FORM
+        assert result["step_id"] == "user"
+
+        # Submit the form
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            user_input={
+                "name": "Test Solar",
+                "entity_id": "sensor.solar_proxy",
+                "seed_heat": -2.0,
+                "seed_cool": 1.0,
+            },
+        )
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+        # Verify subentry was created
+        model_subs = [
+            s for s in entry.subentries.values()
+            if s.subentry_type == "model_input"
+        ]
+        assert len(model_subs) >= 1
+        assert model_subs[-1].title == "Test Solar"
 
     @pytest.mark.asyncio
     async def test_ir_actions_remove_empty_redirects(self, hass, setup_integration):
@@ -2538,147 +2558,35 @@ class TestConfigFlowGaps:
         assert result["type"] == FlowResultType.MENU
 
     @pytest.mark.asyncio
-    async def test_options_disturbance_remove_empty(self, hass, setup_integration):
-        """Disturbance remove with no inputs should redirect to menu."""
-        entry = await setup_integration()
-        result = await hass.config_entries.options.async_init(entry.entry_id)
-        result = await hass.config_entries.options.async_configure(
-            result["flow_id"], user_input={"next_step_id": "model_inputs"},
-        )
-        # Menu should only show "add" when empty
-        assert result["type"] == FlowResultType.MENU
-
-    @pytest.mark.asyncio
-    async def test_disturbance_edit_flow(self, hass, setup_integration):
-        """Disturbance edit flow should allow editing an existing input."""
+    async def test_model_input_subentry_add_with_clamps(self, hass, setup_integration):
+        """Adding model input via subentry with clamp_min/clamp_max should store both."""
         entry = await setup_integration()
 
-        # First add one
-        result = await hass.config_entries.options.async_init(entry.entry_id)
-        result = await hass.config_entries.options.async_configure(
-            result["flow_id"], user_input={"next_step_id": "model_inputs"},
+        result = await hass.config_entries.subentries.async_init(
+            (entry.entry_id, "model_input"),
+            context={"source": "user"},
         )
-        result = await hass.config_entries.options.async_configure(
-            result["flow_id"], user_input={"next_step_id": "model_inputs_add"},
-        )
-        result = await hass.config_entries.options.async_configure(
+        assert result["type"] == FlowResultType.FORM
+
+        result = await hass.config_entries.subentries.async_configure(
             result["flow_id"],
             user_input={
-                "model_input_name": "Stove",
-                "model_input_entity": "input_boolean.stove",
-                "model_input_seed_heat": -3.2,
-                "model_input_seed_cool": 0.0,
+                "name": "Solar",
+                "entity_id": "sensor.solar_power",
+                "seed_heat": -2.0,
+                "seed_cool": 0.0,
+                "clamp_min": -5.0,
+                "clamp_max": 0.0,
             },
         )
-
-        # Now edit it
-        result = await hass.config_entries.options.async_init(entry.entry_id)
-        result = await hass.config_entries.options.async_configure(
-            result["flow_id"], user_input={"next_step_id": "model_inputs"},
-        )
-        result = await hass.config_entries.options.async_configure(
-            result["flow_id"], user_input={"next_step_id": "model_inputs_edit"},
-        )
-        assert result["step_id"] == "model_inputs_edit"
-
-        result = await hass.config_entries.options.async_configure(
-            result["flow_id"],
-            user_input={"model_input_to_edit": "Stove"},
-        )
-        assert result["step_id"] == "model_inputs_edit_form"
-
-        result = await hass.config_entries.options.async_configure(
-            result["flow_id"],
-            user_input={
-                "model_input_name": "Stove Updated",
-                "model_input_entity": "input_boolean.stove",
-                "model_input_seed_heat": -4.0,
-                "model_input_seed_cool": 0.0,
-            },
-        )
-        assert result["type"] == "create_entry"
-        inputs = entry.options.get("pi_model_inputs", [])
-        assert inputs[0]["name"] == "Stove Updated"
-        assert inputs[0]["seed_heat"] == -4.0
-
-    @pytest.mark.asyncio
-    async def test_model_input_add_with_clamps(self, hass, setup_integration):
-        """Adding model input with clamp_min and clamp_max should store both (lines 975, 977)."""
-        entry = await setup_integration()
-
-        result = await hass.config_entries.options.async_init(entry.entry_id)
-        result = await hass.config_entries.options.async_configure(
-            result["flow_id"], user_input={"next_step_id": "model_inputs"},
-        )
-        result = await hass.config_entries.options.async_configure(
-            result["flow_id"], user_input={"next_step_id": "model_inputs_add"},
-        )
-        result = await hass.config_entries.options.async_configure(
-            result["flow_id"],
-            user_input={
-                "model_input_name": "Solar",
-                "model_input_entity": "sensor.solar_power",
-                "model_input_seed_heat": -2.0,
-                "model_input_seed_cool": 0.0,
-                "model_input_clamp_min": -5.0,
-                "model_input_clamp_max": 0.0,
-            },
-        )
-        assert result["type"] == "create_entry"
-        inputs = entry.options.get("pi_model_inputs", [])
-        assert inputs[0]["clamp_min"] == -5.0
-        assert inputs[0]["clamp_max"] == 0.0
-
-    @pytest.mark.asyncio
-    async def test_model_input_edit_with_clamps(self, hass, setup_integration):
-        """Editing model input with clamp_min and clamp_max should store both (lines 1064, 1066)."""
-        entry = await setup_integration()
-
-        # First add one without clamps
-        result = await hass.config_entries.options.async_init(entry.entry_id)
-        result = await hass.config_entries.options.async_configure(
-            result["flow_id"], user_input={"next_step_id": "model_inputs"},
-        )
-        result = await hass.config_entries.options.async_configure(
-            result["flow_id"], user_input={"next_step_id": "model_inputs_add"},
-        )
-        result = await hass.config_entries.options.async_configure(
-            result["flow_id"],
-            user_input={
-                "model_input_name": "Solar",
-                "model_input_entity": "sensor.solar_power",
-                "model_input_seed_heat": -2.0,
-                "model_input_seed_cool": 0.0,
-            },
-        )
-
-        # Now edit it to add clamps
-        result = await hass.config_entries.options.async_init(entry.entry_id)
-        result = await hass.config_entries.options.async_configure(
-            result["flow_id"], user_input={"next_step_id": "model_inputs"},
-        )
-        result = await hass.config_entries.options.async_configure(
-            result["flow_id"], user_input={"next_step_id": "model_inputs_edit"},
-        )
-        result = await hass.config_entries.options.async_configure(
-            result["flow_id"],
-            user_input={"model_input_to_edit": "Solar"},
-        )
-        result = await hass.config_entries.options.async_configure(
-            result["flow_id"],
-            user_input={
-                "model_input_name": "Solar",
-                "model_input_entity": "sensor.solar_power",
-                "model_input_seed_heat": -2.0,
-                "model_input_seed_cool": 0.0,
-                "model_input_clamp_min": -10.0,
-                "model_input_clamp_max": 0.0,
-            },
-        )
-        assert result["type"] == "create_entry"
-        inputs = entry.options.get("pi_model_inputs", [])
-        assert inputs[0]["clamp_min"] == -10.0
-        assert inputs[0]["clamp_max"] == 0.0
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+        model_subs = [
+            s for s in entry.subentries.values()
+            if s.subentry_type == "model_input"
+        ]
+        assert len(model_subs) >= 1
+        assert model_subs[-1].data["clamp_min"] == -5.0
+        assert model_subs[-1].data["clamp_max"] == 0.0
 
 
 # ── Sun entity tracking initialization (lines 552-557) ──────────────

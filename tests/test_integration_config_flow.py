@@ -305,18 +305,6 @@ class TestOptionsFlowSubSteps:
         assert result["type"] == FlowResultType.CREATE_ENTRY
 
     @pytest.mark.asyncio
-    async def test_options_model_inputs_menu(self, hass, setup_integration):
-        """Disturbance inputs should show a management menu."""
-        entry = await setup_integration()
-        result = await hass.config_entries.options.async_init(entry.entry_id)
-        result = await hass.config_entries.options.async_configure(
-            result["flow_id"],
-            user_input={"next_step_id": "model_inputs"},
-        )
-        # Shows menu with add/edit/remove options
-        assert result["type"] == FlowResultType.MENU
-
-    @pytest.mark.asyncio
     async def test_options_ir_actions_menu(self, hass, setup_integration):
         """IR actions should show a management menu."""
         entry = await setup_integration()
@@ -328,89 +316,38 @@ class TestOptionsFlowSubSteps:
         assert result["type"] == FlowResultType.MENU
 
 
-class TestDisturbanceInputsFlow:
-    """Tests for disturbance inputs add/remove in options flow."""
+class TestDisturbanceInputsSubentryFlow:
+    """Tests for disturbance inputs via subentry flow."""
 
     @pytest.mark.asyncio
     async def test_add_disturbance_input(self, hass, setup_integration):
-        """Adding a disturbance input should save to options."""
+        """Adding a model input via subentry should create a subentry."""
         entry = await setup_integration()
 
-        # Navigate to model_inputs menu → add
-        result = await hass.config_entries.options.async_init(entry.entry_id)
-        result = await hass.config_entries.options.async_configure(
-            result["flow_id"],
-            user_input={"next_step_id": "model_inputs"},
-        )
-        assert result["type"] == FlowResultType.MENU
-
-        result = await hass.config_entries.options.async_configure(
-            result["flow_id"],
-            user_input={"next_step_id": "model_inputs_add"},
+        result = await hass.config_entries.subentries.async_init(
+            (entry.entry_id, "model_input"),
+            context={"source": "user"},
         )
         assert result["type"] == FlowResultType.FORM
-        assert result["step_id"] == "model_inputs_add"
+        assert result["step_id"] == "user"
 
-        # Submit add form
-        result = await hass.config_entries.options.async_configure(
+        result = await hass.config_entries.subentries.async_configure(
             result["flow_id"],
             user_input={
-                "model_input_name": "Test Stove",
-                "model_input_entity": "input_boolean.stove",
-                "model_input_seed_heat": -3.2,
-                "model_input_seed_cool": 0.0,
+                "name": "Test Stove",
+                "entity_id": "input_boolean.stove",
+                "seed_heat": -3.2,
+                "seed_cool": 0.0,
             },
         )
         assert result["type"] == FlowResultType.CREATE_ENTRY
-        inputs = entry.options.get("pi_model_inputs", [])
-        assert len(inputs) == 1
-        assert inputs[0]["name"] == "Test Stove"
-
-    @pytest.mark.asyncio
-    async def test_add_then_remove_disturbance_input(self, hass, setup_integration):
-        """Add a disturbance input, then remove it via options flow."""
-        entry = await setup_integration()
-
-        # First add one
-        result = await hass.config_entries.options.async_init(entry.entry_id)
-        result = await hass.config_entries.options.async_configure(
-            result["flow_id"],
-            user_input={"next_step_id": "model_inputs"},
-        )
-        result = await hass.config_entries.options.async_configure(
-            result["flow_id"],
-            user_input={"next_step_id": "model_inputs_add"},
-        )
-        result = await hass.config_entries.options.async_configure(
-            result["flow_id"],
-            user_input={
-                "model_input_name": "Stove",
-                "model_input_entity": "input_boolean.stove",
-                "model_input_seed_heat": -3.2,
-                "model_input_seed_cool": 0.0,
-            },
-        )
-        assert result["type"] == FlowResultType.CREATE_ENTRY
-        assert len(entry.options.get("pi_model_inputs", [])) == 1
-
-        # Now remove it
-        result = await hass.config_entries.options.async_init(entry.entry_id)
-        result = await hass.config_entries.options.async_configure(
-            result["flow_id"],
-            user_input={"next_step_id": "model_inputs"},
-        )
-        result = await hass.config_entries.options.async_configure(
-            result["flow_id"],
-            user_input={"next_step_id": "model_inputs_remove"},
-        )
-        assert result["step_id"] == "model_inputs_remove"
-
-        result = await hass.config_entries.options.async_configure(
-            result["flow_id"],
-            user_input={"model_inputs_to_remove": ["Stove"]},
-        )
-        assert result["type"] == FlowResultType.CREATE_ENTRY
-        assert len(entry.options.get("pi_model_inputs", [])) == 0
+        model_subs = [
+            s for s in entry.subentries.values()
+            if s.subentry_type == "model_input"
+        ]
+        assert len(model_subs) >= 1
+        assert model_subs[-1].title == "Test Stove"
+        assert model_subs[-1].data["seed_heat"] == -3.2
 
 
 class TestIRActionsFlow:
