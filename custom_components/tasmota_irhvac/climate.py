@@ -835,6 +835,10 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                     elif self._pi:
                         pass  # PI handler manages target temp separately
                     else:
+                        _LOGGER.info(
+                            "BASE HANDLER: setting target_temp=%s (was %s)",
+                            payload["Temp"], self._attr_target_temperature,
+                        )
                         self._attr_target_temperature = payload["Temp"]
             if "Celsius" in payload:
                 self._celsius = payload["Celsius"].lower()
@@ -1060,7 +1064,18 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
 
         # PI controller handles its own setpoint logic
         if self._pi:
+            import traceback
+            _LOGGER.info(
+                "async_set_temperature: temp=%s unit=%s max=%s kwargs=%s\n  caller:\n%s",
+                temperature, self.temperature_unit, self.max_temp, kwargs,
+                "".join(traceback.format_stack()[-5:-1]),
+            )
             await self._pi.set_temperature(temperature, hvac_mode)
+            _LOGGER.info(
+                "async_set_temperature AFTER: desired=%s target=%s hp=%s integral=%s",
+                self._pi._desired_temp, self._attr_target_temperature,
+                self._pi._hp_setpoint, self._pi._pi_integral,
+            )
             return
 
         if hvac_mode is not None:

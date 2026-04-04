@@ -781,6 +781,11 @@ class PIController:
             return
         reported_temp = payload["Temp"]
         elapsed = time.monotonic() - self._last_send_ir_time
+        _LOGGER.info(
+            "MQTT echo entry: reported=%s hp=%s desired=%s target=%s pending=%s elapsed=%.1f",
+            reported_temp, self._hp_setpoint, self._desired_temp,
+            e._attr_target_temperature, self._pi_command_pending, elapsed,
+        )
         if self._pi_command_pending or elapsed < 2.0:
             # Our echo (pending flag) or duplicate from second MQTT topic (<2s).
             # With dual topics (tele + stat), 2-4 echoes arrive within ~500ms.
