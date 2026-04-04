@@ -424,7 +424,7 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Tasmota IRHVAC."""
 
     VERSION = 1
-    MINOR_VERSION = 5  # precision/temp_step stored as floats (was strings)
+    MINOR_VERSION = 6  # model_inputs migrated to subentries
 
     @classmethod
     @callback

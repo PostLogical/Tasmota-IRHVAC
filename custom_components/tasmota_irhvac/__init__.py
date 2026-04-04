@@ -129,7 +129,31 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.config_entries.async_update_entry(
             entry, data=new_data, options=new_options, minor_version=4, version=1,
         )
-        _LOGGER.info("Migrated config entry to version %s.%s", entry.version, entry.minor_version)
+        _LOGGER.info("Migrated config entry to version 1.4")
+
+    # v1.6: Migrate model_inputs from options list → subentries
+    if entry.version == 1 and entry.minor_version < 6:
+        from .const import SUBENTRY_MODEL_INPUT, CONF_PI_MODEL_INPUTS
+        from homeassistant.config_entries import ConfigSubentry
+        model_inputs = list(entry.options.get(CONF_PI_MODEL_INPUTS, []))
+        if model_inputs:
+            for m_input in model_inputs:
+                subentry = ConfigSubentry(
+                    data=m_input,
+                    subentry_type=SUBENTRY_MODEL_INPUT,
+                    title=m_input.get("name", "Model Input"),
+                    unique_id=m_input.get("entity_id"),
+                )
+                hass.config_entries.async_add_subentry(entry, subentry)
+            new_options = {k: v for k, v in entry.options.items() if k != CONF_PI_MODEL_INPUTS}
+            hass.config_entries.async_update_entry(
+                entry, options=new_options, minor_version=6, version=1,
+            )
+            _LOGGER.info("Migrated %d model inputs to subentries", len(model_inputs))
+        else:
+            hass.config_entries.async_update_entry(
+                entry, minor_version=6, version=1,
+            )
 
     return True
 
@@ -166,9 +190,14 @@ def _check_config_issues(hass: HomeAssistant, entry: ConfigEntry) -> None:
     else:
         ir.async_delete_issue(hass, DOMAIN, outdoor_issue_id)
 
-    # Check model input entities
-    from .const import CONF_PI_MODEL_INPUTS
-    model_inputs = config.get(CONF_PI_MODEL_INPUTS, [])
+    # Check model input entities (from options or subentries)
+    from .const import CONF_PI_MODEL_INPUTS, SUBENTRY_MODEL_INPUT
+    model_inputs = list(config.get(CONF_PI_MODEL_INPUTS, []))
+    if hasattr(entry, "subentries"):
+        model_inputs.extend(
+            dict(sub.data) for sub in entry.subentries.values()
+            if sub.subentry_type == SUBENTRY_MODEL_INPUT
+        )
     if pi_enabled:
         for m_input in model_inputs:
             entity_id = m_input.get("entity_id", "")

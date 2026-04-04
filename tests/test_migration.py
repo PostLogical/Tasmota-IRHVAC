@@ -35,7 +35,7 @@ class TestConfigMigration:
 
         result = await async_migrate_entry(hass, entry)
         assert result is True
-        assert entry.minor_version == 4
+        assert entry.minor_version == 6
 
         # v1.2→v1.3 migrated suppress/bias to disturbance_inputs
         # v1.3→v1.4 migrated disturbance_inputs to model_inputs
@@ -67,7 +67,7 @@ class TestConfigMigration:
 
         result = await async_migrate_entry(hass, entry)
         assert result is True
-        assert entry.minor_version == 4
+        assert entry.minor_version == 6
 
         # v1.2→v1.3→v1.4: disturbance_inputs migrated to model_inputs
         model_inputs = entry.data.get("pi_model_inputs", [])
@@ -97,7 +97,7 @@ class TestConfigMigration:
 
         result = await async_migrate_entry(hass, entry)
         assert result is True
-        assert entry.minor_version == 4
+        assert entry.minor_version == 6
         model_inputs = entry.data.get("pi_model_inputs", [])
         assert len(model_inputs) == 1
         assert model_inputs[0]["entity_id"] == "input_boolean.stove"
@@ -119,7 +119,7 @@ class TestConfigMigration:
 
         result = await async_migrate_entry(hass, entry)
         assert result is True
-        assert entry.minor_version == 4
+        assert entry.minor_version == 6
 
     @pytest.mark.asyncio
     async def test_migrate_empty_entities(self, hass):

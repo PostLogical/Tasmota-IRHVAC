@@ -2739,8 +2739,10 @@ class TestMigrationGain:
 
         result = await async_migrate_entry(hass, entry)
         assert result is True
-        assert entry.minor_version == 4
+        assert entry.minor_version == 6
 
+        # After migration, model_inputs are in subentries (removed from data/options)
+        # But the v1.4 migration puts them in data first, then v1.6 moves to subentries
         model_inputs = entry.data.get("pi_model_inputs", [])
         assert len(model_inputs) == 1
         # gain != 1.0, so seed_heat and seed_cool should be set to gain value
