@@ -204,6 +204,15 @@ _ON_OFF_SELECTOR = SelectSelectorConfig(
     options=["off", "on"], mode=SelectSelectorMode.DROPDOWN
 )
 
+# IR protocol temperature unit (stored as "on"/"off" for Tasmota compatibility)
+_IR_TEMP_UNIT_SELECTOR = SelectSelectorConfig(
+    options=[
+        {"value": "on", "label": "Celsius (°C)"},
+        {"value": "off", "label": "Fahrenheit (°F)"},
+    ],
+    mode=SelectSelectorMode.DROPDOWN,
+)
+
 _PRECISION_SELECTOR = SelectSelector(
     SelectSelectorConfig(
         options=[
@@ -269,7 +278,7 @@ OPTIONS_TEMPERATURE_SCHEMA = vol.Schema(
         ),
         vol.Optional(CONF_PRECISION): _PRECISION_SELECTOR,
         vol.Optional(CONF_TEMP_STEP): _TEMP_STEP_SELECTOR,
-        vol.Optional(CONF_CELSIUS): SelectSelector(_ON_OFF_SELECTOR),
+        vol.Optional(CONF_CELSIUS): SelectSelector(_IR_TEMP_UNIT_SELECTOR),
         vol.Optional(CONF_AWAY_TEMP): NumberSelector(
             NumberSelectorConfig(min=0, max=50, step=1, mode=NumberSelectorMode.BOX)
         ),
@@ -508,7 +517,7 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ): _TEMP_STEP_SELECTOR,
                     vol.Optional(
                         CONF_CELSIUS, default=DEFAULT_CONF_CELSIUS
-                    ): SelectSelector(_ON_OFF_SELECTOR),
+                    ): SelectSelector(_IR_TEMP_UNIT_SELECTOR),
                     vol.Optional(CONF_AWAY_TEMP): NumberSelector(
                         NumberSelectorConfig(
                             min=0, max=50, step=1, mode=NumberSelectorMode.BOX
