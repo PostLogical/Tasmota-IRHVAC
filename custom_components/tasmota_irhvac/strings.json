@@ -510,7 +510,8 @@
           "data": {
             "name": "Name",
             "entity_id": "Climate Entity",
-            "seed_heat": "HP Offset Seed",
+            "seed_heat": "Heat Mode Seed Coefficient",
+            "seed_cool": "Cool Mode Seed Coefficient",
             "failure_threshold": "Failure Threshold (seconds)",
             "recovery_margin": "Recovery Margin (°C)",
             "auto_model_input": "Auto-create Model Input"
@@ -518,7 +519,8 @@
           "data_description": {
             "name": "Display name (e.g., 'Pellet Stove', 'Oil Boiler Zone 1').",
             "entity_id": "The climate entity of the supplemental heat source.",
-            "seed_heat": "Estimated HP setpoint reduction when this source is active (negative, e.g., -3.0).",
+            "seed_heat": "Estimated HP setpoint reduction in heating mode when this source is active (negative, e.g., -3.0).",
+            "seed_cool": "Estimated HP setpoint reduction in cooling mode when this source is active.",
             "failure_threshold": "Seconds the room must stay below HP desired before the HP assists. Default 900 (15 minutes).",
             "recovery_margin": "Degrees above desired before HP defers again after assisting. Prevents oscillation.",
             "auto_model_input": "Automatically create a model input for feedforward prediction."
@@ -530,7 +532,8 @@
           "data": {
             "name": "Name",
             "entity_id": "Climate Entity",
-            "seed_heat": "HP Offset Seed",
+            "seed_heat": "Heat Mode Seed Coefficient",
+            "seed_cool": "Cool Mode Seed Coefficient",
             "failure_threshold": "Failure Threshold (seconds)",
             "recovery_margin": "Recovery Margin (°C)",
             "auto_model_input": "Auto-create Model Input"

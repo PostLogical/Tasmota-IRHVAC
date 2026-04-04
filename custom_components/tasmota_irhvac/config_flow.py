@@ -105,7 +105,8 @@ from .const import (
     CONF_SUPPLEMENTAL_FAILURE_THRESHOLD,
     CONF_SUPPLEMENTAL_NAME,
     CONF_SUPPLEMENTAL_RECOVERY_MARGIN,
-    CONF_SUPPLEMENTAL_SEED,
+    CONF_SUPPLEMENTAL_SEED_COOL,
+    CONF_SUPPLEMENTAL_SEED_HEAT,
     DEFAULT_SUPPLEMENTAL_FAILURE_THRESHOLD,
     DEFAULT_SUPPLEMENTAL_RECOVERY_MARGIN,
     DEFAULT_SUPPLEMENTAL_SEED,
@@ -1419,9 +1420,14 @@ class SupplementalSourceSubentryFlow(ConfigSubentryFlow):
                         EntitySelectorConfig(domain=["climate"])
                     ),
                     vol.Optional(
-                        CONF_SUPPLEMENTAL_SEED, default=DEFAULT_SUPPLEMENTAL_SEED
+                        CONF_SUPPLEMENTAL_SEED_HEAT, default=DEFAULT_SUPPLEMENTAL_SEED
                     ): NumberSelector(
-                        NumberSelectorConfig(min=-20, max=0, step=0.1, mode=NumberSelectorMode.BOX)
+                        NumberSelectorConfig(min=-20, max=20, step=0.1, mode=NumberSelectorMode.BOX)
+                    ),
+                    vol.Optional(
+                        CONF_SUPPLEMENTAL_SEED_COOL, default=0.0
+                    ): NumberSelector(
+                        NumberSelectorConfig(min=-20, max=20, step=0.1, mode=NumberSelectorMode.BOX)
                     ),
                     vol.Optional(
                         CONF_SUPPLEMENTAL_FAILURE_THRESHOLD,
@@ -1466,9 +1472,14 @@ class SupplementalSourceSubentryFlow(ConfigSubentryFlow):
                             EntitySelectorConfig(domain=["climate"])
                         ),
                         vol.Optional(
-                            CONF_SUPPLEMENTAL_SEED, default=DEFAULT_SUPPLEMENTAL_SEED
+                            CONF_SUPPLEMENTAL_SEED_HEAT, default=DEFAULT_SUPPLEMENTAL_SEED
                         ): NumberSelector(
-                            NumberSelectorConfig(min=-20, max=0, step=0.1, mode=NumberSelectorMode.BOX)
+                            NumberSelectorConfig(min=-20, max=20, step=0.1, mode=NumberSelectorMode.BOX)
+                        ),
+                        vol.Optional(
+                            CONF_SUPPLEMENTAL_SEED_COOL, default=0.0
+                        ): NumberSelector(
+                            NumberSelectorConfig(min=-20, max=20, step=0.1, mode=NumberSelectorMode.BOX)
                         ),
                         vol.Optional(
                             CONF_SUPPLEMENTAL_FAILURE_THRESHOLD,
