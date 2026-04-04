@@ -792,14 +792,19 @@ class PIController:
                 _LOGGER.debug("MQTT echo: duplicate ignored (%.1fs since send)", elapsed)
             e.async_write_ha_state()
         elif elapsed >= 5.0:
-            # External change (physical remote or another system).
-            # The remote sets a room temp target, not an HP setpoint offset.
-            # Update desired_temp and let PI compute the correct HP setpoint.
-            _LOGGER.info("MQTT echo: external change (%.1fs since send), new desired=%s", elapsed, reported_temp)
-            self._desired_temp = reported_temp
-            e._attr_target_temperature = reported_temp
-            self._pi_integral = 0.0
-            await self._pi_tick()  # tick computes HP setpoint and writes state
+            if reported_temp == self._hp_setpoint:
+                # Tasmota confirming current state (periodic telemetry or status report).
+                # Not an external change — just ignore.
+                _LOGGER.debug("MQTT echo: telemetry confirms current setpoint %s", reported_temp)
+            else:
+                # External change (physical remote or another system).
+                # The remote sets a room temp target, not an HP setpoint offset.
+                # Update desired_temp and let PI compute the correct HP setpoint.
+                _LOGGER.info("MQTT echo: external change (%.1fs since send), new desired=%s", elapsed, reported_temp)
+                self._desired_temp = reported_temp
+                e._attr_target_temperature = reported_temp
+                self._pi_integral = 0.0
+                await self._pi_tick()  # tick computes HP setpoint and writes state
         else:
             # Echo in 2-5s window — ambiguous, treat as duplicate
             _LOGGER.debug("MQTT echo: late duplicate ignored (%.1fs since send)", elapsed)
