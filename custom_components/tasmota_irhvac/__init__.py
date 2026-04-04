@@ -137,12 +137,19 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         from homeassistant.config_entries import ConfigSubentry
         model_inputs = list(entry.options.get(CONF_PI_MODEL_INPUTS, []))
         if model_inputs:
+            existing_ids = {
+                sub.unique_id for sub in entry.subentries.values()
+                if sub.subentry_type == SUBENTRY_MODEL_INPUT and sub.unique_id
+            }
             for m_input in model_inputs:
+                entity_id = m_input.get("entity_id", "")
+                if entity_id in existing_ids:
+                    continue
                 subentry = ConfigSubentry(
                     data=m_input,
                     subentry_type=SUBENTRY_MODEL_INPUT,
                     title=m_input.get("name", "Model Input"),
-                    unique_id=m_input.get("entity_id"),
+                    unique_id=entity_id or None,
                 )
                 hass.config_entries.async_add_subentry(entry, subentry)
             new_options = {k: v for k, v in entry.options.items() if k != CONF_PI_MODEL_INPUTS}
