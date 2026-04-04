@@ -202,7 +202,7 @@ def _make_sim_config(seed_factor=1.0, **overrides):
     true_slope = 0.35
     config = {
         "pi_kp": 1.0,
-        "pi_ki": 0.08,
+        "pi_ki": 0.15,
         "pi_deadband": 0.5,
         "pi_ff_heat_slope": true_slope * seed_factor,
         "pi_ff_cool_slope": true_slope * seed_factor,

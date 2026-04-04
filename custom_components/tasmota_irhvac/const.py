@@ -212,8 +212,8 @@ CONF_PI_MODEL_INPUTS = "pi_model_inputs"
 # PID controller defaults
 DEFAULT_PI_ENABLED = False
 DEFAULT_PI_KP = 1.0
-DEFAULT_PI_KI = 0.08
-DEFAULT_PI_KD = 1.0              # Derivative gain (minutes). SIMC suggests 0.5-2.0 for our plant.
+DEFAULT_PI_KI = 0.15             # Optimized via parameter sweep across 73 scenarios
+DEFAULT_PI_KD = 0.0              # D available but defaults off; sweep showed marginal benefit in simulation
 DEFAULT_PI_KD_FILTER_N = 8       # Derivative filter coefficient: Tf = Td/N. Higher N = less filtering.
 DEFAULT_PI_MIN_INTERVAL = 900
 DEFAULT_PI_DEADBAND = 0.5
@@ -221,7 +221,7 @@ DEFAULT_PI_FF_HEAT_REFERENCE = 15.0
 DEFAULT_PI_FF_HEAT_SLOPE = 0.3
 DEFAULT_PI_FF_COOL_REFERENCE = 25.0
 DEFAULT_PI_FF_COOL_SLOPE = 0.3
-DEFAULT_PI_SETPOINT_WEIGHT = 0.5  # Adaptive: full P for large errors, weighted near setpoint
+DEFAULT_PI_SETPOINT_WEIGHT = 0.3  # 2-DOF: p_term = kp * b * error. Lower b reduces overshoot.
 DEFAULT_PI_FF_LEARN_NIGHT_ONLY = True
 DEFAULT_PI_FF_LEARN_SUNSET_DELAY = 90  # minutes after sunset before learning starts
 DEFAULT_PI_FF_ANTICIPATED_CHANGE_GAIN = 0.5
