@@ -589,10 +589,8 @@ class PIController:
                     }
                 _LOGGER.debug("PI: restored from state attributes (legacy)")
 
-        # Always sync _desired_temp from _attr_target_temperature (which HA
-        # restores correctly in the entity's current unit). Stored _desired_temp
-        # from attrs/ExtraStoredData may be in a stale unit after migration.
-        if e._attr_target_temperature is not None:
+        # Fallback: sync with restored _attr_target_temperature
+        if self._desired_temp is None and e._attr_target_temperature is not None:
             self._desired_temp = e._attr_target_temperature
         if self._hp_setpoint is None and e._attr_target_temperature is not None:
             self._hp_setpoint = TemperatureConverter.convert(

@@ -94,6 +94,7 @@ class FakePIEntity:
 
     _attr_hvac_modes = [HVACMode.HEAT, HVACMode.COOL, HVACMode.AUTO, HVACMode.OFF]
     _attr_temperature_unit = UnitOfTemperature.CELSIUS
+    _celsius_unit = UnitOfTemperature.CELSIUS
     _temp_precision = 1.0
 
     def __init__(self, config):
