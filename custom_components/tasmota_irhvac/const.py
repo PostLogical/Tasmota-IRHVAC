@@ -213,7 +213,7 @@ CONF_PI_MODEL_INPUTS = "pi_model_inputs"
 DEFAULT_PI_ENABLED = False
 DEFAULT_PI_KP = 1.0
 DEFAULT_PI_KI = 0.15             # Optimized via parameter sweep across 73 scenarios
-DEFAULT_PI_KD = 0.0              # D available but defaults off; sweep showed marginal benefit in simulation
+DEFAULT_PI_KD = 0.5              # Replay on real sensor data showed kd=0.5 reduces reversals
 DEFAULT_PI_KD_FILTER_N = 8       # Derivative filter coefficient: Tf = Td/N. Higher N = less filtering.
 DEFAULT_PI_MIN_INTERVAL = 900
 DEFAULT_PI_DEADBAND = 0.5
