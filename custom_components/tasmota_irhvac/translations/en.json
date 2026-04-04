@@ -451,6 +451,9 @@
   "config_subentries": {
     "model_input": {
       "entry_type": "Model Input",
+      "abort": {
+        "already_configured": "A model input for this entity already exists."
+      },
       "initiate_flow": {
         "user": "Add model input"
       },
@@ -500,6 +503,9 @@
     },
     "supplemental_source": {
       "entry_type": "Supplemental Heat Source",
+      "abort": {
+        "already_configured": "A supplemental source for this entity already exists."
+      },
       "initiate_flow": {
         "user": "Add supplemental source"
       },

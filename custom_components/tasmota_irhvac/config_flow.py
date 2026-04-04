@@ -1109,10 +1109,17 @@ class ModelInputSubentryFlow(ConfigSubentryFlow):
     ) -> SubentryFlowResult:
         """Add a new model input."""
         if user_input is not None:
+            entity_id = user_input.get("entity_id", "")
+            # Check for duplicate entity_id across model input subentries
+            entry = self._get_entry()
+            for sub in entry.subentries.values():
+                if (sub.subentry_type == SUBENTRY_MODEL_INPUT
+                        and sub.unique_id == entity_id):
+                    return self.async_abort(reason="already_configured")
             return self.async_create_entry(
                 title=user_input.get("name", "Model Input"),
                 data=user_input,
-                unique_id=user_input.get("entity_id"),
+                unique_id=entity_id,
             )
 
         return self.async_show_form(
@@ -1203,10 +1210,17 @@ class SupplementalSourceSubentryFlow(ConfigSubentryFlow):
     ) -> SubentryFlowResult:
         """Add a new supplemental source."""
         if user_input is not None:
+            entity_id = user_input.get(CONF_SUPPLEMENTAL_ENTITY, "")
+            # Check for duplicate entity_id across supplemental subentries
+            entry = self._get_entry()
+            for sub in entry.subentries.values():
+                if (sub.subentry_type == SUBENTRY_SUPPLEMENTAL_SOURCE
+                        and sub.unique_id == entity_id):
+                    return self.async_abort(reason="already_configured")
             return self.async_create_entry(
                 title=user_input.get(CONF_SUPPLEMENTAL_NAME, "Supplemental Source"),
                 data=user_input,
-                unique_id=user_input.get(CONF_SUPPLEMENTAL_ENTITY),
+                unique_id=entity_id,
             )
 
         return self.async_show_form(
