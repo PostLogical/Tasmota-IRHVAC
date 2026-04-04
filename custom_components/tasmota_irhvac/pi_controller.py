@@ -316,6 +316,7 @@ class PIExtraStoredData(ExtraStoredData):
     lag_filter_states: dict = dataclasses.field(default_factory=dict)
     heat_seeds_at_learn: list = dataclasses.field(default_factory=list)
     cool_seeds_at_learn: list = dataclasses.field(default_factory=list)
+    ki_at_save: float = 0.0
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize to JSON-compatible dict."""
@@ -332,6 +333,7 @@ class PIExtraStoredData(ExtraStoredData):
             "lag_filter_states": self.lag_filter_states,
             "heat_seeds_at_learn": self.heat_seeds_at_learn,
             "cool_seeds_at_learn": self.cool_seeds_at_learn,
+            "ki_at_save": self.ki_at_save,
         }
 
     @classmethod
@@ -354,6 +356,7 @@ class PIExtraStoredData(ExtraStoredData):
                 lag_filter_states=restored.get("lag_filter_states", {}),
                 heat_seeds_at_learn=restored.get("heat_seeds_at_learn", []),
                 cool_seeds_at_learn=restored.get("cool_seeds_at_learn", []),
+                ki_at_save=float(restored.get("ki_at_save", 0.0)),
             )
         except (KeyError, ValueError, TypeError, AttributeError):
             return None
@@ -674,13 +677,24 @@ class PIController:
             lag_filter_states=lag_states,
             heat_seeds_at_learn=list(self._heat_seeds),
             cool_seeds_at_learn=list(self._cool_seeds),
+            ki_at_save=self._pi_ki,
         )
 
     def restore_extra_stored_data(self, data: PIExtraStoredData) -> None:
         """Restore PI data from ExtraStoredData."""
         self._ff_heat_buckets = data.ff_heat_buckets
         self._ff_cool_buckets = data.ff_cool_buckets
-        self._pi_integral = data.pi_integral
+        # Scale integral if ki changed since last save, so the I-term
+        # contribution (ki * integral) stays the same magnitude.
+        if data.ki_at_save > 0 and data.ki_at_save != self._pi_ki:
+            scale = data.ki_at_save / self._pi_ki
+            _LOGGER.info(
+                "PI: scaling integral %.2f by %.2f (ki changed %.3f → %.3f)",
+                data.pi_integral, scale, data.ki_at_save, self._pi_ki,
+            )
+            self._pi_integral = data.pi_integral * scale
+        else:
+            self._pi_integral = data.pi_integral
         if data.desired_temp is not None:
             self._desired_temp = data.desired_temp
         if data.hp_setpoint is not None:
