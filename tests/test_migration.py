@@ -6,6 +6,9 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.tasmota_irhvac.const import DOMAIN
 from custom_components.tasmota_irhvac.__init__ import async_migrate_entry
+from custom_components.tasmota_irhvac.config_flow import TasmotaIrhvacConfigFlow
+
+CURRENT_MINOR = TasmotaIrhvacConfigFlow.MINOR_VERSION
 
 from .conftest import make_config
 
@@ -35,7 +38,7 @@ class TestConfigMigration:
 
         result = await async_migrate_entry(hass, entry)
         assert result is True
-        assert entry.minor_version == 11
+        assert entry.minor_version == CURRENT_MINOR
 
         # v1.2→v1.3 migrated suppress/bias to disturbance_inputs
         # v1.3→v1.4 migrated disturbance_inputs to model_inputs
@@ -67,7 +70,7 @@ class TestConfigMigration:
 
         result = await async_migrate_entry(hass, entry)
         assert result is True
-        assert entry.minor_version == 11
+        assert entry.minor_version == CURRENT_MINOR
 
         # v1.2→v1.3→v1.4: disturbance_inputs migrated to model_inputs
         model_inputs = entry.data.get("pi_model_inputs", [])
@@ -97,7 +100,7 @@ class TestConfigMigration:
 
         result = await async_migrate_entry(hass, entry)
         assert result is True
-        assert entry.minor_version == 11
+        assert entry.minor_version == CURRENT_MINOR
         model_inputs = entry.data.get("pi_model_inputs", [])
         assert len(model_inputs) == 1
         assert model_inputs[0]["entity_id"] == "input_boolean.stove"
@@ -119,7 +122,7 @@ class TestConfigMigration:
 
         result = await async_migrate_entry(hass, entry)
         assert result is True
-        assert entry.minor_version == 11
+        assert entry.minor_version == CURRENT_MINOR
 
     @pytest.mark.asyncio
     async def test_migrate_empty_entities(self, hass):

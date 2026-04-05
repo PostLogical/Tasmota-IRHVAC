@@ -2631,6 +2631,7 @@ class TestMigrationGain:
     async def test_migrate_disturbance_with_gain(self, hass):
         """Migration v1.3->v1.4 with gain != 1.0 should use gain as seed (lines 108-109)."""
         from custom_components.tasmota_irhvac.__init__ import async_migrate_entry
+        from custom_components.tasmota_irhvac.config_flow import TasmotaIrhvacConfigFlow
         config = make_config()
         config["pi_disturbance_inputs"] = [{
             "name": "Solar Gain",
@@ -2647,7 +2648,7 @@ class TestMigrationGain:
 
         result = await async_migrate_entry(hass, entry)
         assert result is True
-        assert entry.minor_version == 11
+        assert entry.minor_version == TasmotaIrhvacConfigFlow.MINOR_VERSION
 
         # After migration, model_inputs are in subentries (removed from data/options)
         # But the v1.4 migration puts them in data first, then v1.6 moves to subentries

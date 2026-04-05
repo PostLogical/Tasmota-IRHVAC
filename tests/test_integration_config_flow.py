@@ -9,6 +9,7 @@ from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.tasmota_irhvac.const import DOMAIN
+from custom_components.tasmota_irhvac.config_flow import TasmotaIrhvacConfigFlow
 
 from .conftest import make_config, make_pi_config
 
@@ -440,4 +441,4 @@ class TestMigration:
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
 
-        assert entry.minor_version == 11
+        assert entry.minor_version == TasmotaIrhvacConfigFlow.MINOR_VERSION
