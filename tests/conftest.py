@@ -26,7 +26,7 @@ def make_config(overrides=None):
         "target_temp": 22,
         "precision": 1.0,
         "temp_step": 1.0,
-        "celsius_mode": "on",
+        "ir_protocol_unit": "celsius",
         "initial_operation_mode": "off",
         "keep_mode_when_off": False,
         "ignore_off_temp": False,

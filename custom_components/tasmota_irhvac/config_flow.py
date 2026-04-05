@@ -53,6 +53,7 @@ from .const import (
     CONF_CELSIUS,
     CONF_CLEAN,
     CONF_COMMAND_TOPIC,
+    CONF_IR_PROTOCOL_UNIT,
     CONF_ECONO,
     CONF_EXCLUSIVE_GROUP_VENDOR,
     CONF_FAN_LIST,
@@ -114,6 +115,7 @@ from .const import (
     DEFAULT_CONF_BEEP,
     DEFAULT_CONF_CELSIUS,
     DEFAULT_CONF_CLEAN,
+    DEFAULT_IR_PROTOCOL_UNIT,
     DEFAULT_CONF_ECONO,
     DEFAULT_CONF_FILTER,
     DEFAULT_CONF_KEEP_MODE,
@@ -205,11 +207,11 @@ _ON_OFF_SELECTOR = SelectSelectorConfig(
     options=["off", "on"], mode=SelectSelectorMode.DROPDOWN
 )
 
-# IR protocol temperature unit (stored as "on"/"off" for Tasmota compatibility)
+# IR protocol temperature unit — what unit the AC's IR protocol uses
 _IR_TEMP_UNIT_SELECTOR = SelectSelectorConfig(
     options=[
-        {"value": "on", "label": "Celsius (°C)"},
-        {"value": "off", "label": "Fahrenheit (°F)"},
+        {"value": "celsius", "label": "Celsius (°C)"},
+        {"value": "fahrenheit", "label": "Fahrenheit (°F)"},
     ],
     mode=SelectSelectorMode.DROPDOWN,
 )
@@ -284,7 +286,7 @@ OPTIONS_TEMPERATURE_SCHEMA = vol.Schema(
         ),
         vol.Optional(CONF_PRECISION): _PRECISION_SELECTOR,
         vol.Optional(CONF_TEMP_STEP): _TEMP_STEP_SELECTOR,
-        vol.Optional(CONF_CELSIUS): SelectSelector(_IR_TEMP_UNIT_SELECTOR),
+        vol.Optional(CONF_IR_PROTOCOL_UNIT): SelectSelector(_IR_TEMP_UNIT_SELECTOR),
         vol.Optional(CONF_AWAY_TEMP): NumberSelector(
             NumberSelectorConfig(min=0, max=120, step=1, mode=NumberSelectorMode.BOX)
         ),
@@ -522,7 +524,7 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_TEMP_STEP, default=str(PRECISION_WHOLE)
                     ): _TEMP_STEP_SELECTOR,
                     vol.Optional(
-                        CONF_CELSIUS, default=DEFAULT_CONF_CELSIUS
+                        CONF_IR_PROTOCOL_UNIT, default=DEFAULT_IR_PROTOCOL_UNIT
                     ): SelectSelector(_IR_TEMP_UNIT_SELECTOR),
                     vol.Optional(CONF_AWAY_TEMP): NumberSelector(
                         NumberSelectorConfig(

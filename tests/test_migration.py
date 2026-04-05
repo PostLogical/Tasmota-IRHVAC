@@ -23,13 +23,10 @@ class TestMigrationV1:
         """Temps stored in °C should convert to °F for a °F system."""
         hass.config.units = US_CUSTOMARY_SYSTEM
 
-        config = make_config({
-            "celsius_mode": "on",
-            "min_temp": 16,
-            "max_temp": 30,
-            "target_temp": 22,
-            "away_temp": 16,
-        })
+        config = make_config({"min_temp": 16, "max_temp": 30, "target_temp": 22, "away_temp": 16})
+        # Simulate pre-migration config with legacy celsius_mode key
+        config["celsius_mode"] = "on"
+        config.pop("ir_protocol_unit", None)
         entry = MockConfigEntry(
             domain=DOMAIN, data={}, options=config,
             title="Test", version=1, minor_version=1,
@@ -50,12 +47,9 @@ class TestMigrationV1:
         """Temps on a °C system with celsius_mode=on should not change."""
         hass.config.units = METRIC_SYSTEM
 
-        config = make_config({
-            "celsius_mode": "on",
-            "min_temp": 16,
-            "max_temp": 30,
-            "target_temp": 22,
-        })
+        config = make_config({"min_temp": 16, "max_temp": 30, "target_temp": 22})
+        config["celsius_mode"] = "on"
+        config.pop("ir_protocol_unit", None)
         entry = MockConfigEntry(
             domain=DOMAIN, data={}, options=config,
             title="Test", version=1, minor_version=1,
@@ -72,7 +66,9 @@ class TestMigrationV1:
         """away_temp=None should not crash the migration."""
         hass.config.units = US_CUSTOMARY_SYSTEM
 
-        config = make_config({"celsius_mode": "on", "away_temp": None})
+        config = make_config({"away_temp": None})
+        config["celsius_mode"] = "on"
+        config.pop("ir_protocol_unit", None)
         entry = MockConfigEntry(
             domain=DOMAIN, data={}, options=config,
             title="Test", version=1, minor_version=1,
@@ -89,8 +85,10 @@ class TestMigrationV1:
         config = make_config({
             "quiet": "Off",
             "turbo": "On",
-            "celsius_mode": "On",
         })
+        # Inject legacy celsius_mode key (pre-migration)
+        config["celsius_mode"] = "On"
+        config.pop("ir_protocol_unit", None)
         entry = MockConfigEntry(
             domain=DOMAIN, data={}, options=config,
             title="Test", version=1, minor_version=1,
@@ -101,7 +99,38 @@ class TestMigrationV1:
         assert result is True
         assert entry.options["quiet"] == "off"
         assert entry.options["turbo"] == "on"
-        assert entry.options["celsius_mode"] == "on"
+
+    @pytest.mark.asyncio
+    async def test_celsius_mode_renamed_to_ir_protocol_unit(self, hass):
+        """celsius_mode 'on'/'off' should become ir_protocol_unit 'celsius'/'fahrenheit'."""
+        config = make_config()
+        config["celsius_mode"] = "on"
+        config.pop("ir_protocol_unit", None)
+        entry = MockConfigEntry(
+            domain=DOMAIN, data={}, options=config,
+            title="Test", version=1, minor_version=1,
+        )
+        entry.add_to_hass(hass)
+
+        result = await async_migrate_entry(hass, entry)
+        assert result is True
+        assert "celsius_mode" not in entry.options
+        assert entry.options["ir_protocol_unit"] == "celsius"
+
+    @pytest.mark.asyncio
+    async def test_celsius_mode_off_becomes_fahrenheit(self, hass):
+        config = make_config()
+        config["celsius_mode"] = "off"
+        config.pop("ir_protocol_unit", None)
+        entry = MockConfigEntry(
+            domain=DOMAIN, data={}, options=config,
+            title="Test", version=1, minor_version=1,
+        )
+        entry.add_to_hass(hass)
+
+        result = await async_migrate_entry(hass, entry)
+        assert result is True
+        assert entry.options["ir_protocol_unit"] == "fahrenheit"
 
     @pytest.mark.asyncio
     async def test_precision_coerced_from_string(self, hass):

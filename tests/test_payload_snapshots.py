@@ -249,8 +249,8 @@ class TestPayloadTemperature:
     """Verify Temp and Celsius fields."""
 
     @pytest.mark.asyncio
-    async def test_celsius_mode(self, hass, setup_integration):
-        entry = await setup_integration({"celsius_mode": "on"})
+    async def test_ir_protocol_unit_celsius(self, hass, setup_integration):
+        entry = await setup_integration({"ir_protocol_unit": "celsius"})
         entity = get_climate_entity(hass, entry)
         entity._attr_hvac_mode = HVACMode.HEAT
         entity.power_mode = STATE_ON

@@ -583,7 +583,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         self._turbo = cfg.turbo
         self._econo = cfg.econo
         self._model = cfg.model
-        self._celsius = cfg.celsius_mode
+        self._ir_protocol_unit = cfg.ir_protocol_unit  # "celsius" or "fahrenheit"
         self._light = cfg.light
         self._filter = cfg.filter
         self._clean = cfg.clean
@@ -613,11 +613,11 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         self._attr_name = cfg.name
         self._attr_should_poll = False
         # Entity temperature unit = HA system unit (what the user sees).
-        # celsius_mode only controls the IR protocol encoding, not the HA-facing unit.
+        # _ir_temp_unit is the unit the IR protocol speaks (for Tasmota payloads).
         self._attr_temperature_unit = hass.config.units.temperature_unit
-        self._celsius_unit = (
+        self._ir_temp_unit = (
             UnitOfTemperature.CELSIUS
-            if self._celsius.lower() == "on"
+            if self._ir_protocol_unit == "celsius"
             else UnitOfTemperature.FAHRENHEIT
         )
         # Config temps are stored in system unit after v1.7 migration.
@@ -904,7 +904,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                 if payload["Temp"] > 0:
                     # Sanity check: reject impossible temps (no HVAC uses 0-50°C range)
                     temp_c = TemperatureConverter.convert(
-                        payload["Temp"], self._celsius_unit, UnitOfTemperature.CELSIUS
+                        payload["Temp"], self._ir_temp_unit, UnitOfTemperature.CELSIUS
                     )
                     if temp_c < 0 or temp_c > 50:
                         _LOGGER.warning(
@@ -918,13 +918,16 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                     else:
                         # Convert from IR unit (celsius_mode) to entity unit (system)
                         temp = payload["Temp"]
-                        if self._celsius_unit != self._attr_temperature_unit:
+                        if self._ir_temp_unit != self._attr_temperature_unit:
                             temp = TemperatureConverter.convert(
-                                temp, self._celsius_unit, self._attr_temperature_unit
+                                temp, self._ir_temp_unit, self._attr_temperature_unit
                             )
                         self._attr_target_temperature = temp
             if "Celsius" in payload:
-                self._celsius = payload["Celsius"].lower()
+                # Tasmota reports "On"/"Off" for Celsius field; map to our format
+                self._ir_protocol_unit = (
+                    "celsius" if payload["Celsius"].lower() == "on" else "fahrenheit"
+                )
             if "Quiet" in payload:
                 self._quiet = payload["Quiet"].lower()
             if "Turbo" in payload:
@@ -1051,7 +1054,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             self._attr_hvac_mode = restore.hvac_mode
         if restore.target_temperature is not None:
             temp = restore.target_temperature
-            if self._celsius_unit != self._attr_temperature_unit:
+            if self._ir_temp_unit != self._attr_temperature_unit:
                 temp = TemperatureConverter.convert(
                     temp, UnitOfTemperature.CELSIUS,
                     self._attr_temperature_unit,
@@ -1610,21 +1613,21 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             return self._controller.get_ir_temp()
         # Convert from entity unit (system) to IR unit (celsius_mode)
         temp = self._attr_target_temperature
-        if self._celsius_unit != self._attr_temperature_unit:
+        if self._ir_temp_unit != self._attr_temperature_unit:
             temp = TemperatureConverter.convert(
-                temp, self._attr_temperature_unit, self._celsius_unit
+                temp, self._attr_temperature_unit, self._ir_temp_unit
             )
         temp = round(temp / self._temp_precision) * self._temp_precision
         # Safety clamp: no residential HVAC accepts temps outside 0-50°C
         temp_c = (
-            temp if self._celsius_unit == UnitOfTemperature.CELSIUS
+            temp if self._ir_temp_unit == UnitOfTemperature.CELSIUS
             else TemperatureConverter.convert(temp, UnitOfTemperature.FAHRENHEIT, UnitOfTemperature.CELSIUS)
         )
         if temp_c < 0 or temp_c > 50:
             _LOGGER.error("IR temp %.1f°C out of safe range, clamping", temp_c)
             temp_c = max(0, min(50, temp_c))
             temp = (
-                temp_c if self._celsius_unit == UnitOfTemperature.CELSIUS
+                temp_c if self._ir_temp_unit == UnitOfTemperature.CELSIUS
                 else TemperatureConverter.convert(temp_c, UnitOfTemperature.CELSIUS, UnitOfTemperature.FAHRENHEIT)
             )
         return temp
@@ -1665,7 +1668,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             "Model": self._model,
             "Power": self.power_mode,
             "Mode": self._last_on_mode if self._keep_mode else self._attr_hvac_mode,
-            "Celsius": self._celsius,
+            "Celsius": "on" if self._ir_protocol_unit == "celsius" else "off",
             "Temp": self._get_ir_temp(),
             "FanSpeed": fan_speed,
             "SwingV": self._swingv,

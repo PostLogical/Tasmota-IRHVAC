@@ -17,6 +17,7 @@ from .const import (
     CONF_BEEP,
     CONF_CELSIUS,
     CONF_CLEAN,
+    CONF_IR_PROTOCOL_UNIT,
     CONF_COMMAND_TOPIC,
     CONF_ECONO,
     CONF_FAN_LIST,
@@ -52,11 +53,8 @@ from .const import (
     CONF_TURBO,
     CONF_VENDOR,
     DEFAULT_CONF_BEEP,
-    DEFAULT_CONF_CELSIUS,
     DEFAULT_CONF_CLEAN,
-    DEFAULT_CONF_BEEP,
-    DEFAULT_CONF_CELSIUS,
-    DEFAULT_CONF_CLEAN,
+    DEFAULT_IR_PROTOCOL_UNIT,
     DEFAULT_CONF_ECONO,
     DEFAULT_CONF_FILTER,
     DEFAULT_CONF_KEEP_MODE,
@@ -71,6 +69,19 @@ from .const import (
     DEFAULT_MQTT_DELAY,
     DEFAULT_TARGET_TEMP,
 )
+
+
+def _parse_ir_protocol_unit(config: dict) -> str:
+    """Parse IR protocol unit from config, handling legacy celsius_mode format."""
+    # New key takes priority
+    val = config.get(CONF_IR_PROTOCOL_UNIT)
+    if val is not None:
+        return val  # Already "celsius" or "fahrenheit"
+    # Fall back to legacy celsius_mode ("on"/"off")
+    legacy = config.get(CONF_CELSIUS, "on")
+    if isinstance(legacy, str) and legacy.lower() in ("on", "celsius"):
+        return "celsius"
+    return "fahrenheit"
 
 
 @dataclass(frozen=True)
@@ -97,7 +108,7 @@ class IrhvacConfig:
     target_temp: float
     precision: float
     temp_step: float
-    celsius_mode: str  # "on" or "off" — IR protocol encoding unit
+    ir_protocol_unit: str  # "celsius" or "fahrenheit" — IR encoding unit
     away_temp: float | None
     ignore_off_temp: bool
 
@@ -165,7 +176,7 @@ class IrhvacConfig:
             target_temp=float(config.get(CONF_TARGET_TEMP, DEFAULT_TARGET_TEMP)),
             precision=float(config.get(CONF_PRECISION, 1.0)),
             temp_step=float(config.get(CONF_TEMP_STEP, 1.0)),
-            celsius_mode=config.get(CONF_CELSIUS, DEFAULT_CONF_CELSIUS),
+            ir_protocol_unit=_parse_ir_protocol_unit(config),
             away_temp=config.get(CONF_AWAY_TEMP),
             ignore_off_temp=config.get(CONF_IGNORE_OFF_TEMP, DEFAULT_IGNORE_OFF_TEMP),
             # Modes & features

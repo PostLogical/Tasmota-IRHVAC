@@ -656,7 +656,7 @@ class PIController:
             # Physical remote: someone pointed a remote at the unit.
             # Update desired_temp to match what they set.
             reported_c = TemperatureConverter.convert(
-                reported_temp, e._celsius_unit, UnitOfTemperature.CELSIUS
+                reported_temp, e._ir_temp_unit, UnitOfTemperature.CELSIUS
             )
             if reported_c < 0 or reported_c > 50:
                 _LOGGER.warning(
@@ -666,7 +666,7 @@ class PIController:
                 e.async_write_ha_state()
                 return
             desired_in_entity_unit = TemperatureConverter.convert(
-                reported_temp, e._celsius_unit, e.temperature_unit
+                reported_temp, e._ir_temp_unit, e.temperature_unit
             )
             _LOGGER.info(
                 "MQTT echo: physical remote detected (IrReceived), "
@@ -693,7 +693,7 @@ class PIController:
             # Could be failed IR send or drift. Track actual HP state;
             # PI will correct on next tick. Never overwrite desired_temp.
             reported_c = TemperatureConverter.convert(
-                reported_temp, e._celsius_unit, UnitOfTemperature.CELSIUS
+                reported_temp, e._ir_temp_unit, UnitOfTemperature.CELSIUS
             )
             if reported_c < 0 or reported_c > 50:
                 _LOGGER.warning(

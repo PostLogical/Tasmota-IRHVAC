@@ -27,7 +27,7 @@ def _make_f_entity(config):
     entity.hass = MagicMock()
     entity._attr_hvac_mode = HVACMode.HEAT
     entity._attr_temperature_unit = UnitOfTemperature.FAHRENHEIT
-    entity._celsius_unit = UnitOfTemperature.CELSIUS
+    entity._ir_temp_unit = UnitOfTemperature.CELSIUS
     entity._attr_current_temperature = 69.8  # 21°C
     entity._attr_target_temperature = 71.6   # 22°C
     entity._temp_sensor = "sensor.room_temp"
