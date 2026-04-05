@@ -252,7 +252,12 @@ def _stringify_for_ui(data: dict) -> dict:
     out = dict(data)
     for key in _FLOAT_KEYS:
         if key in out and not isinstance(out[key], str):
-            out[key] = str(out[key])
+            val = out[key]
+            # SelectSelector options use "1" not "1.0" — strip trailing .0
+            if isinstance(val, float) and val == int(val):
+                out[key] = str(int(val))
+            else:
+                out[key] = str(val)
     return out
 
 
@@ -426,7 +431,7 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Tasmota IRHVAC."""
 
     VERSION = 1
-    MINOR_VERSION = 10  # control params always °C; user-facing temps in system unit
+    MINOR_VERSION = 11  # control params always °C; user-facing temps in system unit
 
     @classmethod
     @callback
@@ -914,9 +919,11 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
     async def async_step_temperature(self, user_input=None):
         """Temperature options."""
         if user_input is not None:
-            return self.async_create_entry(
-                data=_coerce_floats({**self.config_entry.options, **user_input})
-            )
+            merged = _coerce_floats({**self.config_entry.options, **user_input})
+            # Remove optional keys the user cleared (not in user_input)
+            if CONF_AWAY_TEMP not in user_input:
+                merged.pop(CONF_AWAY_TEMP, None)
+            return self.async_create_entry(data=merged)
 
         return self.async_show_form(
             step_id="temperature",

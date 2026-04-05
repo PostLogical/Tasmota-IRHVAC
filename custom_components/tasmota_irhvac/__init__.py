@@ -279,6 +279,38 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 entry, minor_version=10, version=1,
             )
 
+    # v1.11: Fix user-facing temps (min/max/target) also corrupted by v1.9.
+    # v1.9 applied °C→°F absolute conversion to values already stored in °F.
+    if entry.version == 1 and entry.minor_version < 11:
+        if hass.config.units.temperature_unit == UnitOfTemperature.FAHRENHEIT:
+            new_options = {**entry.options}
+            new_data = {**entry.data}
+            changed = False
+
+            for store in (new_data, new_options):
+                for key in ("min_temp", "max_temp", "target_temp"):
+                    val = store.get(key)
+                    if val is not None and val > 120:
+                        store[key] = round((val - 32) / 1.8, 1)
+                        changed = True
+
+            if changed:
+                _LOGGER.info(
+                    "v1.11 migration: reverted corrupted min/max/target temps for %s",
+                    entry.title,
+                )
+            hass.config_entries.async_update_entry(
+                entry,
+                data=new_data,
+                options=new_options,
+                minor_version=11,
+                version=1,
+            )
+        else:
+            hass.config_entries.async_update_entry(
+                entry, minor_version=11, version=1,
+            )
+
     return True
 
 
