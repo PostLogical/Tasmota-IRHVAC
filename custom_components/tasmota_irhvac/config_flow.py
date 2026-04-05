@@ -269,19 +269,19 @@ OPTIONS_MQTT_SCHEMA = vol.Schema(
 OPTIONS_TEMPERATURE_SCHEMA = vol.Schema(
     {
         vol.Optional(CONF_MIN_TEMP): NumberSelector(
-            NumberSelectorConfig(min=0, max=50, step=1, mode=NumberSelectorMode.BOX)
+            NumberSelectorConfig(min=0, max=120, step=1, mode=NumberSelectorMode.BOX)
         ),
         vol.Optional(CONF_MAX_TEMP): NumberSelector(
-            NumberSelectorConfig(min=0, max=50, step=1, mode=NumberSelectorMode.BOX)
+            NumberSelectorConfig(min=0, max=120, step=1, mode=NumberSelectorMode.BOX)
         ),
         vol.Optional(CONF_TARGET_TEMP): NumberSelector(
-            NumberSelectorConfig(min=0, max=50, step=1, mode=NumberSelectorMode.BOX)
+            NumberSelectorConfig(min=0, max=120, step=1, mode=NumberSelectorMode.BOX)
         ),
         vol.Optional(CONF_PRECISION): _PRECISION_SELECTOR,
         vol.Optional(CONF_TEMP_STEP): _TEMP_STEP_SELECTOR,
         vol.Optional(CONF_CELSIUS): SelectSelector(_IR_TEMP_UNIT_SELECTOR),
         vol.Optional(CONF_AWAY_TEMP): NumberSelector(
-            NumberSelectorConfig(min=0, max=50, step=1, mode=NumberSelectorMode.BOX)
+            NumberSelectorConfig(min=0, max=120, step=1, mode=NumberSelectorMode.BOX)
         ),
         vol.Optional(CONF_IGNORE_OFF_TEMP): BooleanSelector(),
     }
@@ -404,7 +404,7 @@ OPTIONS_PI_CONTROLLER_SCHEMA = vol.Schema(
             NumberSelectorConfig(min=0, max=5, step=0.01, mode=NumberSelectorMode.BOX)
         ),
         vol.Optional(CONF_PI_FF_COOL_REFERENCE, default=DEFAULT_PI_FF_COOL_REFERENCE): NumberSelector(
-            NumberSelectorConfig(min=0, max=60, step=0.5, mode=NumberSelectorMode.BOX)
+            NumberSelectorConfig(min=0, max=140, step=0.5, mode=NumberSelectorMode.BOX)
         ),
         vol.Optional(CONF_PI_FF_COOL_SLOPE, default=DEFAULT_PI_FF_COOL_SLOPE): NumberSelector(
             NumberSelectorConfig(min=0, max=5, step=0.01, mode=NumberSelectorMode.BOX)
@@ -424,7 +424,7 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Tasmota IRHVAC."""
 
     VERSION = 1
-    MINOR_VERSION = 6  # model_inputs migrated to subentries
+    MINOR_VERSION = 7  # config temps migrated from celsius_mode to system unit
 
     @classmethod
     @callback
@@ -736,7 +736,7 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Optional(
                         CONF_PI_FF_COOL_REFERENCE, default=DEFAULT_PI_FF_COOL_REFERENCE
                     ): NumberSelector(
-                        NumberSelectorConfig(min=0, max=60, step=0.5, mode=NumberSelectorMode.BOX)
+                        NumberSelectorConfig(min=0, max=140, step=0.5, mode=NumberSelectorMode.BOX)
                     ),
                     vol.Optional(
                         CONF_PI_FF_COOL_SLOPE, default=DEFAULT_PI_FF_COOL_SLOPE

@@ -440,4 +440,4 @@ class TestMigration:
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
 
-        assert entry.minor_version == 6
+        assert entry.minor_version == 7

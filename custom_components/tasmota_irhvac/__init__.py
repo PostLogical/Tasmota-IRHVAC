@@ -4,7 +4,7 @@ import asyncio
 import logging
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import ATTR_ENTITY_ID
+from homeassistant.const import ATTR_ENTITY_ID, UnitOfTemperature
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.event import async_call_later
@@ -160,6 +160,38 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         else:
             hass.config_entries.async_update_entry(
                 entry, minor_version=6, version=1,
+            )
+
+    # v1.7: Convert stored config temps from celsius_mode unit to system unit.
+    # Previously, temps were stored in celsius_mode unit and converted at runtime
+    # on every boot. This caused double-conversion when user edited values via UI
+    # (saved in system unit, then reconverted on next boot as if still celsius_mode).
+    if entry.version == 1 and entry.minor_version < 7:
+        from homeassistant.util.unit_conversion import TemperatureConverter
+        celsius_mode = entry.options.get("celsius_mode", entry.data.get("celsius_mode", "on"))
+        celsius_unit = (
+            UnitOfTemperature.CELSIUS if celsius_mode.lower() == "on"
+            else UnitOfTemperature.FAHRENHEIT
+        )
+        system_unit = hass.config.units.temperature_unit
+        if celsius_unit != system_unit:
+            temp_keys = ("min_temp", "max_temp", "target_temp", "away_temp")
+            new_options = {**entry.options}
+            new_data = {**entry.data}
+            for store in (new_data, new_options):
+                for key in temp_keys:
+                    if key in store and store[key] is not None:
+                        old_val = store[key]
+                        store[key] = round(TemperatureConverter.convert(
+                            float(old_val), celsius_unit, system_unit
+                        ), 1)
+            hass.config_entries.async_update_entry(
+                entry, data=new_data, options=new_options, minor_version=7, version=1,
+            )
+            _LOGGER.info("Migrated config temps from %s to %s", celsius_unit, system_unit)
+        else:
+            hass.config_entries.async_update_entry(
+                entry, minor_version=7, version=1,
             )
 
     return True

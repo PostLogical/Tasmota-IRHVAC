@@ -615,15 +615,8 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             if self._celsius.lower() == "on"
             else UnitOfTemperature.FAHRENHEIT
         )
-        # Convert config temps from IR unit (celsius_mode) to entity unit (system)
-        if self._celsius_unit != self._attr_temperature_unit:
-            for attr in ("_min_temp", "_max_temp", "_def_target_temp",
-                         "_saved_target_temp", "_away_temp"):
-                val = getattr(self, attr, None)
-                if val is not None:
-                    setattr(self, attr, TemperatureConverter.convert(
-                        val, self._celsius_unit, self._attr_temperature_unit
-                    ))
+        # Config temps are stored in system unit after v1.7 migration.
+        # No runtime conversion needed.
         self._attr_hvac_mode = config.get(CONF_INITIAL_OPERATION_MODE)
         self._attr_target_temperature_step = config[CONF_TEMP_STEP]
         self._attr_hvac_modes = config[CONF_MODES_LIST]
