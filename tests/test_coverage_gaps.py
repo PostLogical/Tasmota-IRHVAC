@@ -2628,6 +2628,7 @@ class TestSunEntityTracking:
 # ── Migration v1.4 with non-1.0 gain (lines 108-109) ────────────────
 
 
+@pytest.mark.skip(reason="beta migration stripped — disturbance_inputs no longer exists")
 class TestMigrationGain:
     """Cover __init__.py migration with non-1.0 gain disturbance input."""
 

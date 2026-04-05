@@ -28,26 +28,19 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     return True
 
 
-async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Migrate old config entries."""
-    if entry.version == 1 and entry.minor_version < 5:
-        # v1.5: precision/temp_step stored as floats instead of strings
-        new_options = dict(entry.options)
-        changed = False
-        for key in ("precision", "temp_step"):
-            if key in new_options and isinstance(new_options[key], str):
-                new_options[key] = float(new_options[key])
-                changed = True
-        if changed:
-            hass.config_entries.async_update_entry(entry, options=new_options)
-        entry.minor_version = 5
-    return True
-
-
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Tasmota IRHVAC from a config entry."""
     hass.data.setdefault(DOMAIN, {})
     hass.data.setdefault(DATA_KEY, {})
+
+    # Silver tier: raise ConfigEntryNotReady if MQTT isn't available yet.
+    # HA will auto-retry setup with exponential backoff.
+    try:
+        from homeassistant.components import mqtt
+        await mqtt.async_wait_for_mqtt_client(hass)
+    except Exception as err:
+        from homeassistant.exceptions import ConfigEntryNotReady
+        raise ConfigEntryNotReady("MQTT not available") from err
 
     _register_services(hass)
 
@@ -65,109 +58,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 
+MINOR_VERSION = 3
+
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Migrate config entry to current version."""
+    """Migrate config entry to current version.
+
+    Clean migration chain for upstream (post config-flow).
+    Beta migrations (v1.2–v1.6, v1.9–v1.11) stripped.
+    """
     _LOGGER.debug("Migrating config entry from version %s.%s", entry.version, entry.minor_version)
 
-    if entry.version == 1:
-        new_data = {**entry.data}
-        new_options = {**entry.options}
+    if entry.version != 1:
+        return True
 
-        if entry.minor_version < 2:
-            # v1.2: Added pi_ff_bias_entity and pi_setpoint_weight
-            new_data.setdefault("pi_ff_bias_entity", "")
-            new_data.setdefault("pi_setpoint_weight", 1.0)
-            new_options.setdefault("pi_ff_bias_entity", "")
-            new_options.setdefault("pi_setpoint_weight", 1.0)
+    new_data = {**entry.data}
+    new_options = {**entry.options}
 
-        if entry.minor_version < 3:
-            # v1.3: Migrate suppress/bias entities → disturbance_inputs list
-            for store in (new_data, new_options):
-                disturbance_inputs = store.get("pi_disturbance_inputs", [])
-                old_suppress = store.pop("pi_ff_suppress_learning_entity", "")
-                old_bias = store.pop("pi_ff_bias_entity", "")
-                if old_suppress:
-                    disturbance_inputs.append({
-                        "name": "Suppress Entity (migrated)",
-                        "entity_id": old_suppress,
-                        "suppress_learning": True,
-                        "default_bias": 0.0,
-                        "gain": 1.0,
-                    })
-                if old_bias:
-                    disturbance_inputs.append({
-                        "name": "Bias Entity (migrated)",
-                        "entity_id": old_bias,
-                        "suppress_learning": False,
-                        "default_bias": 0.0,
-                        "gain": 1.0,
-                    })
-                store["pi_disturbance_inputs"] = disturbance_inputs
-
-        if entry.minor_version < 4:
-            # v1.4: Migrate disturbance_inputs → model_inputs
-            for store in (new_data, new_options):
-                disturbance_inputs = store.pop("pi_disturbance_inputs", [])
-                model_inputs = store.get("pi_model_inputs", [])
-                for d_input in disturbance_inputs:
-                    model_input = {
-                        "name": d_input.get("name", "Migrated Input"),
-                        "entity_id": d_input.get("entity_id", ""),
-                        "seed_heat": float(d_input.get("default_bias", 0.0)),
-                        "seed_cool": float(d_input.get("default_bias", 0.0)),
-                        "lag_tau": 0,
-                    }
-                    gain = d_input.get("gain", 1.0)
-                    if gain != 1.0:
-                        # Old gain was a multiplier on entity value; approximate as seed
-                        model_input["seed_heat"] = float(gain)
-                        model_input["seed_cool"] = float(gain)
-                    model_inputs.append(model_input)
-                store["pi_model_inputs"] = model_inputs
-
-        hass.config_entries.async_update_entry(
-            entry, data=new_data, options=new_options, minor_version=4, version=1,
-        )
-        _LOGGER.info("Migrated config entry to version 1.4")
-
-    # v1.6: Migrate model_inputs from options list → subentries
-    if entry.version == 1 and entry.minor_version < 6:
-        from .const import SUBENTRY_MODEL_INPUT, CONF_PI_MODEL_INPUTS
-        from homeassistant.config_entries import ConfigSubentry
-        model_inputs = list(entry.options.get(CONF_PI_MODEL_INPUTS, []))
-        if model_inputs:
-            existing_ids = {
-                sub.unique_id for sub in entry.subentries.values()
-                if sub.subentry_type == SUBENTRY_MODEL_INPUT and sub.unique_id
-            }
-            for m_input in model_inputs:
-                entity_id = m_input.get("entity_id", "")
-                if entity_id in existing_ids:
-                    continue
-                subentry = ConfigSubentry(
-                    data=m_input,
-                    subentry_type=SUBENTRY_MODEL_INPUT,
-                    title=m_input.get("name", "Model Input"),
-                    unique_id=entity_id or None,
-                )
-                hass.config_entries.async_add_subentry(entry, subentry)
-            new_options = {k: v for k, v in entry.options.items() if k != CONF_PI_MODEL_INPUTS}
-            hass.config_entries.async_update_entry(
-                entry, options=new_options, minor_version=6, version=1,
-            )
-            _LOGGER.info("Migrated %d model inputs to subentries", len(model_inputs))
-        else:
-            hass.config_entries.async_update_entry(
-                entry, minor_version=6, version=1,
-            )
-
-    # v1.7: Convert stored config temps from celsius_mode unit to system unit.
-    # Previously, temps were stored in celsius_mode unit and converted at runtime
-    # on every boot. This caused double-conversion when user edited values via UI
-    # (saved in system unit, then reconverted on next boot as if still celsius_mode).
-    if entry.version == 1 and entry.minor_version < 7:
+    # v1.2: Convert stored config temps from celsius_mode unit to system unit.
+    # Config flow stores temps in celsius_mode unit; entity expects system unit.
+    # Without this, double-conversion occurs when user edits via UI.
+    if entry.minor_version < 2:
         from homeassistant.util.unit_conversion import TemperatureConverter
-        celsius_mode = entry.options.get("celsius_mode", entry.data.get("celsius_mode", "on"))
+        celsius_mode = new_options.get("celsius_mode", new_data.get("celsius_mode", "on"))
         celsius_unit = (
             UnitOfTemperature.CELSIUS if celsius_mode.lower() == "on"
             else UnitOfTemperature.FAHRENHEIT
@@ -175,8 +87,6 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         system_unit = hass.config.units.temperature_unit
         if celsius_unit != system_unit:
             temp_keys = ("min_temp", "max_temp", "target_temp", "away_temp")
-            new_options = {**entry.options}
-            new_data = {**entry.data}
             for store in (new_data, new_options):
                 for key in temp_keys:
                     if key in store and store[key] is not None:
@@ -184,132 +94,30 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         store[key] = round(TemperatureConverter.convert(
                             float(old_val), celsius_unit, system_unit
                         ), 1)
-            hass.config_entries.async_update_entry(
-                entry, data=new_data, options=new_options, minor_version=7, version=1,
-            )
             _LOGGER.info("Migrated config temps from %s to %s", celsius_unit, system_unit)
-        else:
-            hass.config_entries.async_update_entry(
-                entry, minor_version=7, version=1,
-            )
 
-    # v1.8: Normalize on/off toggle values to lowercase.
-    # Tasmota sends "On"/"Off" (capitalized) but our selectors expect "on"/"off".
-    if entry.version == 1 and entry.minor_version < 8:
+    # v1.3: Normalize on/off toggle values to lowercase.
+    # Tasmota sends "On"/"Off" (capitalized) but selectors expect "on"/"off".
+    if entry.minor_version < 3:
         toggle_keys = (
             "celsius_mode", "beep", "turbo", "quiet", "econo",
             "light", "filter", "clean", "sleep", "swingv", "swingh",
         )
-        new_options = {**entry.options}
-        new_data = {**entry.data}
         for store in (new_data, new_options):
             for key in toggle_keys:
                 if key in store and isinstance(store[key], str):
                     store[key] = store[key].lower()
-        hass.config_entries.async_update_entry(
-            entry, data=new_data, options=new_options, minor_version=8, version=1,
-        )
 
-    # v1.9 was removed — it incorrectly converted deadband/FF refs that were
-    # already at correct values. Bump version to skip it on future installs.
-    if entry.version == 1 and entry.minor_version < 9:
-        hass.config_entries.async_update_entry(
-            entry, minor_version=9, version=1,
-        )
+    # Coerce precision/temp_step to float (config flow may store as string)
+    for store in (new_data, new_options):
+        for key in ("precision", "temp_step"):
+            if key in store and isinstance(store[key], str):
+                store[key] = float(store[key])
 
-    # v1.10: Revert values corrupted by v1.9 back to °C.
-    # v1.9 applied °C→°F conversion to control params that should always be °C.
-    # Only affects °F systems (°C systems were never converted).
-    if entry.version == 1 and entry.minor_version < 10:
-        if hass.config.units.temperature_unit == UnitOfTemperature.FAHRENHEIT:
-            new_options = {**entry.options}
-            new_data = {**entry.data}
-            changed = False
-
-            for store in (new_data, new_options):
-                # Detect if v1.9 actually corrupted this store by checking
-                # FF refs — if either is > 40, v1.9 applied °C→°F absolute
-                # conversion. Fresh installs/post-gut upgrades will have
-                # refs at defaults (15, 25) which are ≤ 40.
-                hr = store.get("pi_ff_heat_reference")
-                cr = store.get("pi_ff_cool_reference")
-                was_corrupted = (
-                    (hr is not None and hr > 40)
-                    or (cr is not None and cr > 40)
-                )
-
-                if was_corrupted:
-                    # Deadband: v1.9 delta-converted (×1.8).
-                    db = store.get("pi_deadband")
-                    if db is not None:
-                        store["pi_deadband"] = round(db / 1.8, 4)
-                        changed = True
-
-                    # FF refs: v1.9 absolute-converted (×1.8+32).
-                    for key in ("pi_ff_heat_reference", "pi_ff_cool_reference"):
-                        val = store.get(key)
-                        if val is not None:
-                            store[key] = round((val - 32) / 1.8, 4)
-                            changed = True
-
-                    # away_temp: may have been multi-converted. Reverse
-                    # until value is in a reasonable °F range (≤120).
-                    at = store.get("away_temp")
-                    if at is not None and at > 120:
-                        while at > 120:
-                            at = (at - 32) / 1.8
-                        store["away_temp"] = round(at, 1)
-                        changed = True
-
-            if changed:
-                _LOGGER.info(
-                    "v1.10 migration: reverted corrupted °F values to °C for %s",
-                    entry.title,
-                )
-            hass.config_entries.async_update_entry(
-                entry,
-                data=new_data,
-                options=new_options,
-                minor_version=10,
-                version=1,
-            )
-        else:
-            hass.config_entries.async_update_entry(
-                entry, minor_version=10, version=1,
-            )
-
-    # v1.11: Fix user-facing temps (min/max/target) also corrupted by v1.9.
-    # v1.9 applied °C→°F absolute conversion to values already stored in °F.
-    if entry.version == 1 and entry.minor_version < 11:
-        if hass.config.units.temperature_unit == UnitOfTemperature.FAHRENHEIT:
-            new_options = {**entry.options}
-            new_data = {**entry.data}
-            changed = False
-
-            for store in (new_data, new_options):
-                for key in ("min_temp", "max_temp", "target_temp"):
-                    val = store.get(key)
-                    if val is not None and val > 120:
-                        store[key] = round((val - 32) / 1.8, 1)
-                        changed = True
-
-            if changed:
-                _LOGGER.info(
-                    "v1.11 migration: reverted corrupted min/max/target temps for %s",
-                    entry.title,
-                )
-            hass.config_entries.async_update_entry(
-                entry,
-                data=new_data,
-                options=new_options,
-                minor_version=11,
-                version=1,
-            )
-        else:
-            hass.config_entries.async_update_entry(
-                entry, minor_version=11, version=1,
-            )
-
+    hass.config_entries.async_update_entry(
+        entry, data=new_data, options=new_options,
+        minor_version=MINOR_VERSION, version=1,
+    )
     return True
 
 
