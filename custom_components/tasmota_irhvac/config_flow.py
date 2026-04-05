@@ -15,6 +15,8 @@ from homeassistant.components.climate.const import (
     FAN_OFF,
     FAN_ON,
     HVACMode,
+    PRESET_BOOST,
+    PRESET_ECO,
     SWING_BOTH,
     SWING_HORIZONTAL,
     SWING_OFF,
@@ -157,11 +159,7 @@ from .const import (
     CONF_HAS_SET_V,
     CONF_IR_ACTIONS,
     CONF_PRESET_MODES_LIST,
-    PRESET_ECONO,
     PRESET_MIN_HEAT,
-    PRESET_POWERFUL,
-    PRESET_SET_H,
-    PRESET_SET_V,
     TOGGLE_ALL_LIST,
 )
 
@@ -580,8 +578,8 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ): SelectSelector(
                         SelectSelectorConfig(
                             options=[
-                                PRESET_POWERFUL,
-                                PRESET_ECONO,
+                                PRESET_BOOST,
+                                PRESET_ECO,
                                 PRESET_MIN_HEAT,
                             ],
                             multiple=True,

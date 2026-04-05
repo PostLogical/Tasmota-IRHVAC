@@ -25,11 +25,8 @@ from homeassistant.components.climate.const import (
 
 from pytest_homeassistant_custom_component.common import async_fire_mqtt_message
 
-from custom_components.tasmota_irhvac.const import (
-    PRESET_ECONO,
-    PRESET_MIN_HEAT,
-    PRESET_POWERFUL,
-)
+from homeassistant.components.climate.const import PRESET_BOOST, PRESET_ECO
+from custom_components.tasmota_irhvac.const import PRESET_MIN_HEAT
 from custom_components.tasmota_irhvac.fujitsu import (
     FUJITSU_DATA_ECONO,
     FUJITSU_DATA_MIN_HEAT,
@@ -86,7 +83,7 @@ class TestFujitsu56BitDetection:
         async_fire_mqtt_message(hass, "tele/irhvac/RESULT", payload)
         await hass.async_block_till_done()
 
-        assert entity._attr_preset_mode == PRESET_POWERFUL
+        assert entity._attr_preset_mode == PRESET_BOOST
         assert entity._powerful is True
 
     @pytest.mark.asyncio
@@ -100,7 +97,7 @@ class TestFujitsu56BitDetection:
         async_fire_mqtt_message(hass, "tele/irhvac/RESULT", payload)
         await hass.async_block_till_done()
 
-        assert entity._attr_preset_mode == PRESET_ECONO
+        assert entity._attr_preset_mode == PRESET_ECO
         assert entity._economy is True
 
     @pytest.mark.asyncio
@@ -201,10 +198,10 @@ class TestFujitsuPresets:
         entity = get_climate_entity(hass, entry)
         entity._attr_hvac_mode = HVACMode.HEAT
 
-        await entity.async_set_preset_mode(PRESET_POWERFUL)
+        await entity.async_set_preset_mode(PRESET_BOOST)
 
         assert entity._powerful is True
-        assert entity._attr_preset_mode == PRESET_POWERFUL
+        assert entity._attr_preset_mode == PRESET_BOOST
 
     @pytest.mark.asyncio
     async def test_activate_econo(self, hass, setup_integration):
@@ -213,10 +210,10 @@ class TestFujitsuPresets:
         entity = get_climate_entity(hass, entry)
         entity._attr_hvac_mode = HVACMode.HEAT
 
-        await entity.async_set_preset_mode(PRESET_ECONO)
+        await entity.async_set_preset_mode(PRESET_ECO)
 
         assert entity._economy is True
-        assert entity._attr_preset_mode == PRESET_ECONO
+        assert entity._attr_preset_mode == PRESET_ECO
 
     @pytest.mark.asyncio
     async def test_activate_min_heat(self, hass, setup_integration):
@@ -255,10 +252,10 @@ class TestFujitsuPresets:
         entity = get_climate_entity(hass, entry)
         entity._attr_hvac_mode = HVACMode.HEAT
 
-        await entity.async_set_preset_mode(PRESET_ECONO)
+        await entity.async_set_preset_mode(PRESET_ECO)
         assert entity._economy is True
 
-        await entity.async_set_preset_mode(PRESET_POWERFUL)
+        await entity.async_set_preset_mode(PRESET_BOOST)
         assert entity._economy is False
         assert entity._powerful is True
 

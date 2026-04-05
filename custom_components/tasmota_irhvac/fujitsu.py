@@ -17,11 +17,8 @@ from homeassistant.core import callback
 from homeassistant.helpers.event import async_call_later
 
 from .climate import TasmotaIrhvac
-from .const import (
-    PRESET_ECONO,
-    PRESET_MIN_HEAT,
-    PRESET_POWERFUL,
-)
+from homeassistant.components.climate.const import PRESET_BOOST, PRESET_ECO
+from .const import PRESET_MIN_HEAT
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -69,10 +66,10 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
             if preset == PRESET_MIN_HEAT:
                 self._min_heat = True
                 if self._pi: self._pi.pi_pause()
-            elif preset == PRESET_ECONO:
+            elif preset == PRESET_ECO:
                 self._economy = True
                 if self._pi: self._pi.pi_pause()
-            elif preset == PRESET_POWERFUL:
+            elif preset == PRESET_BOOST:
                 self._powerful = True
                 if self._pi: self._pi.pi_pause()
 
@@ -112,11 +109,11 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
             self._economy = False
             if self._pi: self._pi.pi_resume()
         if self._turbo == "on":
-            self._attr_preset_mode = PRESET_POWERFUL
+            self._attr_preset_mode = PRESET_BOOST
             self._powerful = True
             if self._pi: self._pi.pi_pause()
         if self._econo == "on":
-            self._attr_preset_mode = PRESET_ECONO
+            self._attr_preset_mode = PRESET_ECO
             self._economy = True
             if self._pi: self._pi.pi_pause()
         if self._clean == "on":
@@ -140,11 +137,11 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
             if bits == 56:
                 if data == FUJITSU_DATA_POWERFUL:
                     self._powerful = True
-                    self._attr_preset_mode = PRESET_POWERFUL
+                    self._attr_preset_mode = PRESET_BOOST
                     if self._pi: self._pi.pi_pause()
                 elif data == FUJITSU_DATA_ECONO:
                     self._economy = True
-                    self._attr_preset_mode = PRESET_ECONO
+                    self._attr_preset_mode = PRESET_ECO
                     if self._pi: self._pi.pi_pause()
                 elif data == FUJITSU_DATA_SET_V:
                     # Physical remote set vertical vane — update swing state
@@ -192,17 +189,17 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
             if self._pi: self._pi.pi_resume()
 
         if (
-            preset_mode != PRESET_ECONO
+            preset_mode != PRESET_ECO
             and self._economy
         ):
             await self._send_raw_ir(FUJITSU_IR_ECONO)
             self._economy = False
 
-        if preset_mode == PRESET_POWERFUL:
+        if preset_mode == PRESET_BOOST:
             if not self._powerful:
                 await self._send_raw_ir(FUJITSU_IR_POWERFUL)
                 self._powerful = True
-                self._attr_preset_mode = PRESET_POWERFUL
+                self._attr_preset_mode = PRESET_BOOST
                 if self._pi: self._pi.pi_pause()
                 if self._powerful_timer_unsub:
                     self._powerful_timer_unsub()
@@ -212,11 +209,11 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
             self.async_schedule_update_ha_state()
             return
 
-        elif preset_mode == PRESET_ECONO:
+        elif preset_mode == PRESET_ECO:
             if not self._economy:
                 await self._send_raw_ir(FUJITSU_IR_ECONO)
                 self._economy = True
-                self._attr_preset_mode = PRESET_ECONO
+                self._attr_preset_mode = PRESET_ECO
                 if self._pi: self._pi.pi_pause()
             self.async_schedule_update_ha_state()
             return
@@ -263,7 +260,7 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
     def _clear_powerful(self, _now=None):
         """Auto-clear Powerful preset after timeout."""
         self._powerful = False
-        if self._attr_preset_mode == PRESET_POWERFUL:
+        if self._attr_preset_mode == PRESET_BOOST:
             self._attr_preset_mode = PRESET_NONE
         self._powerful_timer_unsub = None
         if self._pi: self._pi.pi_resume()

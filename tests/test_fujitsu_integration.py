@@ -20,11 +20,8 @@ from homeassistant.const import STATE_ON
 
 from pytest_homeassistant_custom_component.common import async_fire_mqtt_message
 
-from custom_components.tasmota_irhvac.const import (
-    PRESET_ECONO,
-    PRESET_MIN_HEAT,
-    PRESET_POWERFUL,
-)
+from homeassistant.components.climate.const import PRESET_BOOST, PRESET_ECO
+from custom_components.tasmota_irhvac.const import PRESET_MIN_HEAT
 from custom_components.tasmota_irhvac.vendors.fujitsu import (
     FUJITSU_DATA_ECONO,
     FUJITSU_DATA_MIN_HEAT,
@@ -104,13 +101,13 @@ class TestFujitsuPresetIntegration:
         with patch(
             "homeassistant.components.mqtt.async_publish", new_callable=AsyncMock
         ) as mock_pub:
-            await entity.async_set_preset_mode(PRESET_POWERFUL)
+            await entity.async_set_preset_mode(PRESET_BOOST)
 
             # Should have sent the raw IR code (not a regular IRHVAC payload)
             calls = [c[0][2] for c in mock_pub.await_args_list]
             assert any(FUJITSU_IR_POWERFUL in str(c) for c in calls)
 
-        assert entity._attr_preset_mode == PRESET_POWERFUL
+        assert entity._attr_preset_mode == PRESET_BOOST
 
     @pytest.mark.asyncio
     async def test_econo_sends_raw_ir(self, hass, setup_integration):
@@ -122,12 +119,12 @@ class TestFujitsuPresetIntegration:
         with patch(
             "homeassistant.components.mqtt.async_publish", new_callable=AsyncMock
         ) as mock_pub:
-            await entity.async_set_preset_mode(PRESET_ECONO)
+            await entity.async_set_preset_mode(PRESET_ECO)
 
             calls = [c[0][2] for c in mock_pub.await_args_list]
             assert any(FUJITSU_IR_ECONO in str(c) for c in calls)
 
-        assert entity._attr_preset_mode == PRESET_ECONO
+        assert entity._attr_preset_mode == PRESET_ECO
 
     @pytest.mark.asyncio
     async def test_min_heat_forces_heat_mode(self, hass, setup_integration):
@@ -158,8 +155,8 @@ class TestFujitsuPresetIntegration:
         with patch(
             "homeassistant.components.mqtt.async_publish", new_callable=AsyncMock
         ):
-            await entity.async_set_preset_mode(PRESET_ECONO)
-        assert entity._attr_preset_mode == PRESET_ECONO
+            await entity.async_set_preset_mode(PRESET_ECO)
+        assert entity._attr_preset_mode == PRESET_ECO
 
         # Now clear it
         with patch(
@@ -203,7 +200,7 @@ class TestFujitsuStateReceive:
         )
         await hass.async_block_till_done()
 
-        assert entity._attr_preset_mode == PRESET_POWERFUL
+        assert entity._attr_preset_mode == PRESET_BOOST
 
     @pytest.mark.asyncio
     async def test_econo_flag_sets_econo_preset(self, hass, setup_integration):
@@ -216,7 +213,7 @@ class TestFujitsuStateReceive:
         )
         await hass.async_block_till_done()
 
-        assert entity._attr_preset_mode == PRESET_ECONO
+        assert entity._attr_preset_mode == PRESET_ECO
 
     @pytest.mark.asyncio
     async def test_power_off_clears_presets(self, hass, setup_integration):
@@ -229,7 +226,7 @@ class TestFujitsuStateReceive:
             _fujitsu_mqtt_payload({"Turbo": "On"}),
         )
         await hass.async_block_till_done()
-        assert entity._attr_preset_mode == PRESET_POWERFUL
+        assert entity._attr_preset_mode == PRESET_BOOST
 
         # Power off should clear it
         async_fire_mqtt_message(
@@ -257,6 +254,6 @@ class TestFujitsuStateReceive:
         )
         await hass.async_block_till_done()
 
-        assert entity._attr_preset_mode == PRESET_POWERFUL
+        assert entity._attr_preset_mode == PRESET_BOOST
         # Temp should be restored to pre-56bit value, not the garbage 0
         assert entity._attr_target_temperature == 22

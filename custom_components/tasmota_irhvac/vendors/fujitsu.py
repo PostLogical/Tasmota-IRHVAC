@@ -16,6 +16,8 @@ from typing import Awaitable, Callable
 
 from homeassistant.components.climate.const import (
     HVACMode,
+    PRESET_BOOST,
+    PRESET_ECO,
     PRESET_NONE,
     SWING_BOTH,
     SWING_HORIZONTAL,
@@ -23,7 +25,7 @@ from homeassistant.components.climate.const import (
     SWING_VERTICAL,
 )
 
-from ..const import PRESET_ECONO, PRESET_MIN_HEAT, PRESET_POWERFUL
+from ..const import PRESET_MIN_HEAT
 from . import register
 from .base import (
     EntityState,
@@ -106,8 +108,8 @@ class FujitsuHandler(VendorHandler):
                 {"beep", "turbo", "quiet", "econo", "light"}
             ),
             extra_preset_modes=(
-                PRESET_POWERFUL,
-                PRESET_ECONO,
+                PRESET_BOOST,
+                PRESET_ECO,
                 PRESET_MIN_HEAT,
             ),
             has_raw_ir=True,
@@ -124,9 +126,9 @@ class FujitsuHandler(VendorHandler):
     def on_restore_state(self, restored_preset: str | None) -> None:
         if restored_preset == PRESET_MIN_HEAT:
             self._min_heat = True
-        elif restored_preset == PRESET_ECONO:
+        elif restored_preset == PRESET_ECO:
             self._economy = True
-        elif restored_preset == PRESET_POWERFUL:
+        elif restored_preset == PRESET_BOOST:
             self._powerful = True
 
     # ── State processing ─────────────────────────────────────────────
@@ -165,10 +167,10 @@ class FujitsuHandler(VendorHandler):
         # Map hardware flags to presets
         if turbo.lower() == "on":
             self._powerful = True
-            self._active_preset = PRESET_POWERFUL
+            self._active_preset = PRESET_BOOST
         if econo.lower() == "on":
             self._economy = True
-            self._active_preset = PRESET_ECONO
+            self._active_preset = PRESET_ECO
         if clean.lower() == "on":
             self._min_heat = True
             self._active_preset = PRESET_MIN_HEAT
@@ -188,10 +190,10 @@ class FujitsuHandler(VendorHandler):
         if decode.bits == 56:
             if decode.data == FUJITSU_DATA_POWERFUL:
                 self._powerful = True
-                self._active_preset = PRESET_POWERFUL
+                self._active_preset = PRESET_BOOST
             elif decode.data == FUJITSU_DATA_ECONO:
                 self._economy = True
-                self._active_preset = PRESET_ECONO
+                self._active_preset = PRESET_ECO
             elif decode.data == FUJITSU_DATA_SET_V:
                 self._apply_vane_set_v()
             elif decode.data == FUJITSU_DATA_SET_H:
@@ -271,10 +273,10 @@ class FujitsuHandler(VendorHandler):
         # Exit active presets before entering a new one
         await self._exit_active_presets(preset_mode, send_raw_ir)
 
-        if preset_mode == PRESET_POWERFUL:
+        if preset_mode == PRESET_BOOST:
             return await self._enter_powerful(send_raw_ir)
 
-        if preset_mode == PRESET_ECONO:
+        if preset_mode == PRESET_ECO:
             return await self._enter_econo(send_raw_ir)
 
         if preset_mode == PRESET_MIN_HEAT:
@@ -298,7 +300,7 @@ class FujitsuHandler(VendorHandler):
             await asyncio.sleep(1)  # HP needs time to process STOP
             self._min_heat = False
 
-        if new_preset != PRESET_ECONO and self._economy:
+        if new_preset != PRESET_ECO and self._economy:
             await send_raw_ir(FUJITSU_IR_ECONO)  # Toggle off
             self._economy = False
 
@@ -309,7 +311,7 @@ class FujitsuHandler(VendorHandler):
         if not self._powerful:
             await send_raw_ir(FUJITSU_IR_POWERFUL)
             self._powerful = True
-        self._active_preset = PRESET_POWERFUL
+        self._active_preset = PRESET_BOOST
         return PresetResult(
             timer_request=TimerRequest(
                 delay_seconds=POWERFUL_TIMEOUT_SECONDS,
@@ -324,7 +326,7 @@ class FujitsuHandler(VendorHandler):
         if not self._economy:
             await send_raw_ir(FUJITSU_IR_ECONO)
             self._economy = True
-        self._active_preset = PRESET_ECONO
+        self._active_preset = PRESET_ECO
         return PresetResult()
 
     async def _enter_min_heat(
@@ -358,7 +360,7 @@ class FujitsuHandler(VendorHandler):
     def on_timer(self, callback_id: str) -> None:
         if callback_id == "clear_powerful":
             self._powerful = False
-            if self._active_preset == PRESET_POWERFUL:
+            if self._active_preset == PRESET_BOOST:
                 self._active_preset = PRESET_NONE
 
     # ── Properties the entity reads ──────────────────────────────────

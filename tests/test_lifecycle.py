@@ -18,10 +18,8 @@ from homeassistant.const import STATE_ON
 
 from pytest_homeassistant_custom_component.common import async_fire_mqtt_message
 
-from custom_components.tasmota_irhvac.const import (
-    DATA_KEY,
-    PRESET_POWERFUL,
-)
+from homeassistant.components.climate.const import PRESET_BOOST
+from custom_components.tasmota_irhvac.const import DATA_KEY
 from custom_components.tasmota_irhvac.controller_protocol import ControllerHook, NullController
 from custom_components.tasmota_irhvac.pi_controller import PIController
 from custom_components.tasmota_irhvac.vendors.base import VendorHandler
@@ -198,7 +196,7 @@ class TestVendorHandlerLifecycle:
         )
         await hass.async_block_till_done()
 
-        assert entity._attr_preset_mode == PRESET_POWERFUL
+        assert entity._attr_preset_mode == PRESET_BOOST
 
     @pytest.mark.asyncio
     async def test_default_handler_for_unknown_vendor(self, hass, setup_integration):

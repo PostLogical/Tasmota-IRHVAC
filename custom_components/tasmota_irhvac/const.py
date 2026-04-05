@@ -167,12 +167,8 @@ TOGGLE_ALL_LIST = [
 
 STATE_MODE_LIST = ["StoreOnly", "SendStore"]
 
-# Fujitsu preset modes
-PRESET_POWERFUL = "Powerful"
-PRESET_MIN_HEAT = "Min Heat"
-PRESET_ECONO = "Economy"
-PRESET_SET_V = "Set Vertical"
-PRESET_SET_H = "Set Horizontal"
+# Fujitsu preset modes (Min Heat has no HA standard equivalent)
+PRESET_MIN_HEAT = "min_heat"
 
 # Vane button config
 CONF_HAS_SET_V = "has_set_vertical_vane"

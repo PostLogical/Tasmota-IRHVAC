@@ -12,11 +12,8 @@ from homeassistant.components.climate.const import (
     SWING_VERTICAL,
 )
 
-from custom_components.tasmota_irhvac.const import (
-    PRESET_ECONO,
-    PRESET_MIN_HEAT,
-    PRESET_POWERFUL,
-)
+from homeassistant.components.climate.const import PRESET_BOOST, PRESET_ECO
+from custom_components.tasmota_irhvac.const import PRESET_MIN_HEAT
 from custom_components.tasmota_irhvac.vendors.base import EntityState, IRDecode
 from custom_components.tasmota_irhvac.vendors.fujitsu import (
     FUJITSU_DATA_ECONO,
@@ -70,8 +67,8 @@ def _model3_decode(data: str, bits: int = 56) -> IRDecode:
 class TestFujitsuCapabilities:
     def test_extra_presets(self):
         caps = FujitsuHandler.capabilities()
-        assert PRESET_POWERFUL in caps.extra_preset_modes
-        assert PRESET_ECONO in caps.extra_preset_modes
+        assert PRESET_BOOST in caps.extra_preset_modes
+        assert PRESET_ECO in caps.extra_preset_modes
         assert PRESET_MIN_HEAT in caps.extra_preset_modes
 
     def test_has_raw_ir(self):
@@ -105,13 +102,13 @@ class TestFujitsuRestore:
 
     def test_restore_econo(self):
         h = FujitsuHandler()
-        h.on_restore_state(PRESET_ECONO)
+        h.on_restore_state(PRESET_ECO)
         assert h._economy is True
         assert h.should_pause_controller is True
 
     def test_restore_powerful(self):
         h = FujitsuHandler()
-        h.on_restore_state(PRESET_POWERFUL)
+        h.on_restore_state(PRESET_BOOST)
         assert h._powerful is True
         assert h.should_pause_controller is True
 
@@ -135,7 +132,7 @@ class TestFujitsuFlagMapping:
         decode = _decode(irhvac={"Power": "On", "Turbo": "on"})
         h.pre_state_processing(decode, _entity_state())
         h.post_state_processing(decode)
-        assert h.active_preset == PRESET_POWERFUL
+        assert h.active_preset == PRESET_BOOST
         assert h.should_pause_controller is True
 
     def test_econo_maps_to_economy(self):
@@ -143,7 +140,7 @@ class TestFujitsuFlagMapping:
         decode = _decode(irhvac={"Power": "On", "Econo": "on"})
         h.pre_state_processing(decode, _entity_state())
         h.post_state_processing(decode)
-        assert h.active_preset == PRESET_ECONO
+        assert h.active_preset == PRESET_ECO
         assert h.should_pause_controller is True
 
     def test_clean_maps_to_min_heat(self):
@@ -187,7 +184,7 @@ class TestFujitsu56Bit:
         h.pre_state_processing(decode, state)
         h.post_state_processing(decode)
 
-        assert h.active_preset == PRESET_POWERFUL
+        assert h.active_preset == PRESET_BOOST
         assert h.should_pause_controller is True
         assert h.state_restore is not None
         assert h.state_restore.hvac_mode == HVACMode.COOL  # restored
@@ -199,7 +196,7 @@ class TestFujitsu56Bit:
         h.pre_state_processing(decode, state)
         h.post_state_processing(decode)
 
-        assert h.active_preset == PRESET_ECONO
+        assert h.active_preset == PRESET_ECO
         assert h.state_restore is not None
 
     def test_min_heat_detected(self):
@@ -304,11 +301,11 @@ class TestFujitsuPresets:
         send = AsyncMock()
         state = _entity_state()
 
-        result = await h.handle_preset(PRESET_POWERFUL, state, send)
+        result = await h.handle_preset(PRESET_BOOST, state, send)
 
         assert result is not None
         send.assert_awaited_once_with(FUJITSU_IR_POWERFUL)
-        assert h.active_preset == PRESET_POWERFUL
+        assert h.active_preset == PRESET_BOOST
         assert h.should_pause_controller is True
         assert result.timer_request is not None
         assert result.timer_request.delay_seconds == POWERFUL_TIMEOUT_SECONDS
@@ -321,21 +318,21 @@ class TestFujitsuPresets:
         h._powerful = True
         send = AsyncMock()
 
-        await h.handle_preset(PRESET_POWERFUL, _entity_state(), send)
+        await h.handle_preset(PRESET_BOOST, _entity_state(), send)
 
         send.assert_not_awaited()
-        assert h.active_preset == PRESET_POWERFUL
+        assert h.active_preset == PRESET_BOOST
 
     @pytest.mark.asyncio
     async def test_econo_sends_ir(self):
         h = FujitsuHandler()
         send = AsyncMock()
 
-        result = await h.handle_preset(PRESET_ECONO, _entity_state(), send)
+        result = await h.handle_preset(PRESET_ECO, _entity_state(), send)
 
         assert result is not None
         send.assert_awaited_once_with(FUJITSU_IR_ECONO)
-        assert h.active_preset == PRESET_ECONO
+        assert h.active_preset == PRESET_ECO
         assert h.should_pause_controller is True
 
     @pytest.mark.asyncio
@@ -389,7 +386,7 @@ class TestFujitsuPresets:
         h._min_heat = True
         send = AsyncMock()
 
-        await h.handle_preset(PRESET_POWERFUL, _entity_state(), send)
+        await h.handle_preset(PRESET_BOOST, _entity_state(), send)
 
         calls = [c.args[0] for c in send.await_args_list]
         assert calls == [FUJITSU_IR_STOP, FUJITSU_IR_POWERFUL]
@@ -401,7 +398,7 @@ class TestFujitsuPresets:
         h._economy = True
         send = AsyncMock()
 
-        await h.handle_preset(PRESET_POWERFUL, _entity_state(), send)
+        await h.handle_preset(PRESET_BOOST, _entity_state(), send)
 
         calls = [c.args[0] for c in send.await_args_list]
         assert calls == [FUJITSU_IR_ECONO, FUJITSU_IR_POWERFUL]
@@ -413,7 +410,7 @@ class TestFujitsuPresets:
         h._economy = True
         send = AsyncMock()
 
-        await h.handle_preset(PRESET_ECONO, _entity_state(), send)
+        await h.handle_preset(PRESET_ECO, _entity_state(), send)
 
         send.assert_not_awaited()
         assert h._economy is True
@@ -426,7 +423,7 @@ class TestFujitsuTimer:
     def test_clear_powerful(self):
         h = FujitsuHandler()
         h._powerful = True
-        h._active_preset = PRESET_POWERFUL
+        h._active_preset = PRESET_BOOST
 
         h.on_timer("clear_powerful")
 
