@@ -223,8 +223,8 @@ set_swingv:
             - StoreOnly
             - SendStore
 
-reset_ff_buckets:
-  description: Reset feedforward buckets to seed values from config slopes. Also zeros the PI integral.
+reset_ff_seeds:
+  description: Reset feedforward RLS models to seed values from config slopes. Also zeros the PI integral.
   target:
     entity:
       integration: tasmota_irhvac

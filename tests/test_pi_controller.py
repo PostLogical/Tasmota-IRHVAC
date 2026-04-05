@@ -14,70 +14,14 @@ from pytest_homeassistant_custom_component.common import (
 
 from custom_components.tasmota_irhvac.const import (
     ATTR_DESIRED_TEMP,
-    ATTR_FF_HEAT_BUCKETS,
-    ATTR_FF_COOL_BUCKETS,
     ATTR_FF_OFFSET,
     ATTR_HP_SETPOINT,
     ATTR_PI_INTEGRAL,
     DOMAIN,
 )
-from custom_components.tasmota_irhvac.pi_controller import PIController, _seed_buckets
+from custom_components.tasmota_irhvac.pi_controller import PIController
 
 from .conftest import make_pi_config
-
-
-# ── Seed Buckets ──────────────────────────────────────────────────────
-
-
-class TestSeedBuckets:
-    """Tests for _seed_buckets function."""
-
-    def test_heating_at_reference(self):
-        """At reference temp, offset should be zero."""
-        buckets = _seed_buckets(15.0, 0.3)
-        assert buckets[15] == 0.0
-
-    def test_heating_below_reference(self):
-        """Below reference, offset should be positive (more heating needed)."""
-        buckets = _seed_buckets(15.0, 0.3)
-        assert buckets[0] == pytest.approx(4.5)  # 15 * 0.3
-        assert buckets[-30] == pytest.approx(13.5)  # 45 * 0.3
-
-    def test_heating_above_reference(self):
-        """Above reference, no additional heating needed."""
-        buckets = _seed_buckets(15.0, 0.3)
-        assert buckets[18] == 0.0
-        assert buckets[45] == 0.0
-
-    def test_cooling_at_reference(self):
-        """At reference temp, offset should be zero."""
-        buckets = _seed_buckets(25.0, 0.3, is_cooling=True)
-        assert buckets[24] == 0.0  # Closest bucket below 25
-
-    def test_cooling_above_reference(self):
-        """Above reference, offset should be negative (more cooling needed)."""
-        buckets = _seed_buckets(25.0, 0.3, is_cooling=True)
-        assert buckets[30] == pytest.approx(-1.5)  # 5 * -0.3
-
-    def test_cooling_below_reference(self):
-        """Below reference, no additional cooling needed."""
-        buckets = _seed_buckets(25.0, 0.3, is_cooling=True)
-        assert buckets[21] == 0.0
-
-    def test_bucket_keys_are_3c_steps(self):
-        """Buckets should be keyed in 3°C steps from -30 to 45."""
-        buckets = _seed_buckets(15.0, 0.3)
-        keys = sorted(buckets.keys())
-        assert keys[0] == -30
-        assert keys[-1] == 45
-        for i in range(1, len(keys)):
-            assert keys[i] - keys[i - 1] == 3
-
-    def test_different_slopes(self):
-        """Different slopes should produce proportionally different offsets."""
-        b1 = _seed_buckets(15.0, 0.3)
-        b2 = _seed_buckets(15.0, 0.6)
-        assert b2[0] == pytest.approx(b1[0] * 2)
 
 
 # ── PI Math Tests ─────────────────────────────────────────────────────
@@ -501,11 +445,7 @@ class TestFeedforward:
         mock_state.state = "on"
         pi_entity.hass.states.get.return_value = mock_state
 
-        old_bucket = pi_entity._pi._ff_heat_buckets[0]
         await pi_entity._pi._pi_tick()
-
-        # Bucket should NOT have been updated
-        assert pi_entity._pi._ff_heat_buckets[0] == old_bucket
 
     @pytest.mark.asyncio
     async def test_model_input_suppress_learning_blocks_rls(self, pi_entity):
@@ -982,20 +922,18 @@ class TestPIEdgeCases:
         pi_entity._pi._hp_setpoint = 23.0
         pi_entity._pi._pi_integral = 0.0
         pi_entity._pi._pi_last_tick_time = 0
-        pi_entity._pi._outdoor_temp = 0.0  # Bucket key = 0
+        pi_entity._pi._outdoor_temp = 0.0
         pi_entity._pi._ff_settled_ticks = 0
         pi_entity._attr_hvac_mode = HVACMode.HEAT
 
-        old_bucket = pi_entity._pi._ff_heat_buckets.get(0, 0.0)
+        old_obs_count = pi_entity._pi._rls_heat.observation_count
 
-        # Tick 1: enter deadband, settled_ticks increments
-        await pi_entity._pi._pi_tick()
-        # Tick 2: still in deadband, settled_ticks >= 2 → learning writes bucket
-        await pi_entity._pi._pi_tick()
+        # Tick multiple times to settle into deadband and trigger RLS learning
+        for _ in range(5):
+            await pi_entity._pi._pi_tick()
 
-        # Bucket should have been updated via EMA
-        new_bucket = pi_entity._pi._ff_heat_buckets.get(0, 0.0)
-        assert new_bucket != old_bucket or pi_entity._pi._ff_settled_ticks >= 2
+        # RLS should have learned (observation count increased)
+        assert pi_entity._pi._rls_heat.observation_count > old_obs_count or pi_entity._pi._ff_settled_ticks >= 4
 
     @pytest.mark.asyncio
     async def test_handle_state_payload_command_pending(self, pi_entity):
@@ -1218,16 +1156,12 @@ class TestPIEdgeCases:
         """restore_extra_stored_data should populate PI state."""
         from custom_components.tasmota_irhvac.pi_controller import PIExtraStoredData
         data = PIExtraStoredData(
-            ff_heat_buckets={0: 1.5, 3: 2.0},
-            ff_cool_buckets={24: -0.5},
             pi_integral=7.5,
             desired_temp=22.0,
             hp_setpoint=23.0,
         )
         pi_entity._pi.restore_extra_stored_data(data)
 
-        assert pi_entity._pi._ff_heat_buckets[0] == 1.5
-        assert pi_entity._pi._ff_cool_buckets[24] == -0.5
         assert pi_entity._pi._pi_integral == 7.5
         assert pi_entity._pi._desired_temp == 22.0
         assert pi_entity._pi._hp_setpoint == 23.0
@@ -1236,8 +1170,6 @@ class TestPIEdgeCases:
         """restore_extra_stored_data should preserve integral without clamping."""
         from custom_components.tasmota_irhvac.pi_controller import PIExtraStoredData
         data = PIExtraStoredData(
-            ff_heat_buckets={},
-            ff_cool_buckets={},
             pi_integral=100.0,
             desired_temp=None,
             hp_setpoint=None,
@@ -1306,7 +1238,7 @@ class TestModelInputClamps:
 
 
 class TestExtraStoredDataFullRestore:
-    """Tests for restoring RLS models, bucket obs counts, warmup skip, and lag filters."""
+    """Tests for restoring RLS models and lag filters."""
 
     def test_restore_rls_models(self):
         """restore_extra_stored_data with rls models should restore them."""
@@ -1322,12 +1254,9 @@ class TestExtraStoredDataFullRestore:
         rls_cool_data["observation_count"] = 30
 
         data = PIExtraStoredData(
-            ff_heat_buckets={0: 1.0},
-            ff_cool_buckets={},
             pi_integral=2.0,
             desired_temp=22.0,
             hp_setpoint=23.0,
-            ff_bucket_observation_counts={0: 10, 3: 5},
             integral_convergence=0.5,
             rls_heat_model=rls_heat_data,
             rls_cool_model=rls_cool_data,
@@ -1335,13 +1264,10 @@ class TestExtraStoredDataFullRestore:
         )
         pi.restore_extra_stored_data(data)
 
-        # RLS models restored (line 644-655)
+        # RLS models restored
         assert pi._rls_heat.observation_count == 50
         assert pi._rls_cool.observation_count == 30
-        # Bucket observation counts restored (line 638-639)
-        assert pi._ff_bucket_observation_counts[0] == 10
-        assert pi._ff_bucket_observation_counts[3] == 5
-        # Integral convergence restored (line 640)
+        # Integral convergence restored
         assert pi._integral_convergence == 0.5
 
     def test_restore_lag_filter_states(self):
@@ -1360,8 +1286,6 @@ class TestExtraStoredDataFullRestore:
         pi = entity._pi
 
         data = PIExtraStoredData(
-            ff_heat_buckets={},
-            ff_cool_buckets={},
             pi_integral=0.0,
             desired_temp=22.0,
             hp_setpoint=22.0,
@@ -1401,11 +1325,11 @@ class TestHandleStatePayloadNoTemp:
         entity.async_write_ha_state.assert_called()
 
 
-# ── async_reset_ff_buckets RLS beta reset (lines 817-818) ───────────
+# ── async_reset_ff_seeds RLS beta reset ──────────────────────────────
 
 
-class TestResetFFBucketsRLS:
-    """Tests for async_reset_ff_buckets with model inputs."""
+class TestResetFFSeedsRLS:
+    """Tests for async_reset_ff_seeds with model inputs."""
 
     @pytest.mark.asyncio
     async def test_reset_rebuilds_rls_seeds_with_model_inputs(self):
@@ -1428,7 +1352,7 @@ class TestResetFFBucketsRLS:
         pi._rls_heat.observation_count = 100
         pi._rls_cool.observation_count = 100
 
-        await pi.async_reset_ff_buckets()
+        await pi.async_reset_ff_seeds()
 
         # Beta should be reset to seeds (lines 816-818)
         assert pi._rls_heat.beta[0] == 0.0  # intercept
@@ -1437,75 +1361,6 @@ class TestResetFFBucketsRLS:
         assert pi._rls_cool.beta[2] == 1.5
         assert pi._rls_heat.observation_count == 0
         assert pi._rls_cool.observation_count == 0
-
-
-# ── _is_learning_time_allowed: sun below but delay not elapsed (lines 877-878) ──
-
-
-class TestLearningTimeAllowed:
-    """Tests for _is_learning_time_allowed night-only logic."""
-
-    def test_night_only_sun_below_delay_not_elapsed(self):
-        """When sun is below horizon but delay hasn't elapsed, should return False."""
-        import time as time_mod
-        config = make_pi_config({
-            "pi_ff_learn_night_only": True,
-            "pi_ff_learn_sunset_delay": 90,  # 90 minutes
-        })
-        entity = FakePIEntity(config)
-        pi = entity._pi
-
-        # Mock sun.sun as below_horizon
-        sun_state = MagicMock()
-        sun_state.state = "below_horizon"
-        entity.hass.states.get.return_value = sun_state
-
-        # Set below_horizon_since to just now (delay not elapsed)
-        pi._sun_below_horizon_since = time_mod.monotonic()
-
-        result = pi._is_learning_time_allowed()
-        assert result is False
-
-    def test_night_only_sun_above_horizon(self):
-        """When sun is above horizon, should return False."""
-        config = make_pi_config({
-            "pi_ff_learn_night_only": True,
-            "pi_ff_learn_sunset_delay": 90,
-        })
-        entity = FakePIEntity(config)
-        pi = entity._pi
-
-        sun_state = MagicMock()
-        sun_state.state = "above_horizon"
-        entity.hass.states.get.return_value = sun_state
-
-        result = pi._is_learning_time_allowed()
-        assert result is False
-
-    def test_night_only_first_check_below(self):
-        """First check with sun below should set timestamp and return False."""
-        config = make_pi_config({
-            "pi_ff_learn_night_only": True,
-            "pi_ff_learn_sunset_delay": 90,
-        })
-        entity = FakePIEntity(config)
-        pi = entity._pi
-
-        sun_state = MagicMock()
-        sun_state.state = "below_horizon"
-        entity.hass.states.get.return_value = sun_state
-        pi._sun_below_horizon_since = 0.0  # Not set yet
-
-        result = pi._is_learning_time_allowed()
-        assert result is False
-        assert pi._sun_below_horizon_since > 0  # Should have been set
-
-    def test_night_only_disabled(self):
-        """When night_only is False, should always return True."""
-        config = make_pi_config({"pi_ff_learn_night_only": False})
-        entity = FakePIEntity(config)
-        result = entity._pi._is_learning_time_allowed()
-        assert result is True
 
 
 # ── Lag filter with tau > 0 (lines 898-899) ───────────────────────���─

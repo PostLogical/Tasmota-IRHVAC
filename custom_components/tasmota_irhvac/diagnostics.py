@@ -66,7 +66,6 @@ async def async_get_config_entry_diagnostics(
             "integral": round(pi._pi_integral, 3),
             "integral_convergence": round(pi._integral_convergence, 2),
             "ff_offset": round(pi._ff_offset, 2),
-            "ff_offset_buckets": round(pi._ff_offset_buckets, 2),
             "outdoor_temp": pi._outdoor_temp,
             "sensor_unavailable": pi._sensor_unavailable,
             "sensor_recovery_pending": pi._sensor_recovery_pending,
@@ -87,14 +86,6 @@ async def async_get_config_entry_diagnostics(
                 "cool_observation_count": pi._rls_cool.observation_count,
                 "learning_suppressed": pi._manual_ff_suppress,
                 "manual_suppress_reason": pi._manual_ff_suppress_reason,
-            },
-            "legacy_buckets": {
-                "ff_heat_buckets": {
-                    str(k): round(v, 2) for k, v in pi._ff_heat_buckets.items()
-                },
-                "ff_cool_buckets": {
-                    str(k): round(v, 2) for k, v in pi._ff_cool_buckets.items()
-                },
             },
         }
 

@@ -196,8 +196,6 @@ CONF_PI_FF_HEAT_SLOPE = "pi_ff_heat_slope"
 CONF_PI_FF_COOL_REFERENCE = "pi_ff_cool_reference"
 CONF_PI_FF_COOL_SLOPE = "pi_ff_cool_slope"
 CONF_PI_SETPOINT_WEIGHT = "pi_setpoint_weight"
-CONF_PI_FF_LEARN_NIGHT_ONLY = "pi_ff_learn_night_only"
-CONF_PI_FF_LEARN_SUNSET_DELAY = "pi_ff_learn_sunset_delay"
 CONF_PI_MODEL_INPUTS = "pi_model_inputs"
 
 # Subentry types
@@ -231,11 +229,6 @@ DEFAULT_PI_FF_HEAT_SLOPE = 0.3
 DEFAULT_PI_FF_COOL_REFERENCE = 25.0
 DEFAULT_PI_FF_COOL_SLOPE = 0.3
 DEFAULT_PI_SETPOINT_WEIGHT = 0.3  # 2-DOF: p_term = kp * b * error. Lower b reduces overshoot.
-DEFAULT_PI_FF_LEARN_NIGHT_ONLY = True
-DEFAULT_PI_FF_LEARN_SUNSET_DELAY = 90  # minutes after sunset before learning starts
-DEFAULT_PI_FF_ANTICIPATED_CHANGE_GAIN = 0.5
-DEFAULT_PI_FF_ALPHA = 0.05  # EMA learning rate (was 0.2)
-DEFAULT_PI_FF_ALPHA_OVERSHOOT_RATIO = 0.25  # learn at alpha*ratio when overshooting
 
 # RLS model defaults
 DEFAULT_RLS_LAMBDA_BASE = 0.999  # Base forgetting factor (~10 day effective memory)
@@ -248,8 +241,6 @@ ATTR_HP_SETPOINT = "hp_setpoint"
 ATTR_PI_INTEGRAL = "pi_integral"
 ATTR_DESIRED_TEMP = "desired_temp"
 ATTR_FF_OFFSET = "ff_offset"
-ATTR_FF_HEAT_BUCKETS = "ff_heat_buckets"
-ATTR_FF_COOL_BUCKETS = "ff_cool_buckets"
 
 # Dispatcher signals (format with entry_id)
 SIGNAL_PI_UPDATE = "tasmota_irhvac_pi_update_{}"

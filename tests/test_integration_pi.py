@@ -222,8 +222,6 @@ class TestExtraStoredData:
     def test_round_trip(self):
         """Serialize and deserialize PIExtraStoredData."""
         data = PIExtraStoredData(
-            ff_heat_buckets={-6: 1.5, 0: 0.8, 6: 0.3},
-            ff_cool_buckets={24: -0.5, 30: -1.2},
             pi_integral=5.67,
             desired_temp=22.0,
             hp_setpoint=23.0,
@@ -232,8 +230,6 @@ class TestExtraStoredData:
         restored = PIExtraStoredData.from_dict(serialized)
 
         assert restored is not None
-        assert restored.ff_heat_buckets == {-6: 1.5, 0: 0.8, 6: 0.3}
-        assert restored.ff_cool_buckets == {24: -0.5, 30: -1.2}
         assert restored.pi_integral == 5.67
         assert restored.desired_temp == 22.0
         assert restored.hp_setpoint == 23.0
@@ -241,8 +237,22 @@ class TestExtraStoredData:
     def test_from_dict_invalid_returns_none(self):
         """Invalid data should return None, not crash."""
         assert PIExtraStoredData.from_dict({}) is None
-        assert PIExtraStoredData.from_dict({"ff_heat_buckets": "bad"}) is None
+        assert PIExtraStoredData.from_dict({"pi_integral": "bad"}) is None
         assert PIExtraStoredData.from_dict(None) is None
+
+    def test_from_dict_with_legacy_bucket_fields(self):
+        """Old stored data with bucket fields should load gracefully."""
+        legacy_data = {
+            "ff_heat_buckets": {"0": 1.5},
+            "ff_cool_buckets": {},
+            "pi_integral": 3.0,
+            "desired_temp": 22.0,
+            "hp_setpoint": 23.0,
+            "ff_bucket_observation_counts": {"0": 5},
+        }
+        restored = PIExtraStoredData.from_dict(legacy_data)
+        assert restored is not None
+        assert restored.pi_integral == 3.0
 
     @pytest.mark.asyncio
     async def test_entity_provides_extra_stored_data(self, hass, setup_pi_integration):
@@ -253,5 +263,4 @@ class TestExtraStoredData:
         data = entity.extra_restore_state_data
         assert data is not None
         assert isinstance(data, PIExtraStoredData)
-        assert hasattr(data, "ff_heat_buckets")
         assert hasattr(data, "pi_integral")

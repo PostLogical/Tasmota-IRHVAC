@@ -69,8 +69,6 @@ from .const import (
     ATTR_BEEP,
     ATTR_CLEAN,
     ATTR_ECONO,
-    ATTR_FF_COOL_BUCKETS,
-    ATTR_FF_HEAT_BUCKETS,
     ATTR_FILTERS,
     ATTR_LAST_ON_MODE,
     ATTR_LIGHT,
@@ -437,8 +435,8 @@ SERVICE_TO_METHOD = {
         "method": "async_set_swingh",
         "schema": SERVICE_SCHEMA_SET_SWINGH,
     },
-    "reset_ff_buckets": {
-        "method": "async_reset_ff_buckets",
+    "reset_ff_seeds": {
+        "method": "async_reset_ff_seeds",
         "schema": IRHVAC_SERVICE_SCHEMA,
     },
     "suppress_ff_learning": {
@@ -1592,9 +1590,9 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
 
     # ── PI service delegations (called by SERVICE_TO_METHOD handler) ──
 
-    async def async_reset_ff_buckets(self):
-        """Reset feedforward buckets to seed values."""
-        await self._controller.async_reset_ff_buckets()
+    async def async_reset_ff_seeds(self):
+        """Reset feedforward RLS models to seed values."""
+        await self._controller.async_reset_ff_seeds()
 
     async def async_suppress_ff_learning(self, reason=""):
         """Manually suppress FF learning."""

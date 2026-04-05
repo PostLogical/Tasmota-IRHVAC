@@ -27,8 +27,6 @@ import math
 
 from .const import (
     ATTR_DESIRED_TEMP,
-    ATTR_FF_COOL_BUCKETS,
-    ATTR_FF_HEAT_BUCKETS,
     ATTR_FF_OFFSET,
     ATTR_HP_SETPOINT,
     ATTR_PI_INTEGRAL,
@@ -39,8 +37,6 @@ from .const import (
     CONF_PI_FF_COOL_SLOPE,
     CONF_PI_FF_HEAT_REFERENCE,
     CONF_PI_FF_HEAT_SLOPE,
-    CONF_PI_FF_LEARN_NIGHT_ONLY,
-    CONF_PI_FF_LEARN_SUNSET_DELAY,
     CONF_PI_KD,
     CONF_PI_KD_FILTER_N,
     CONF_PI_KI,
@@ -50,14 +46,10 @@ from .const import (
     CONF_PI_SETPOINT_WEIGHT,
     DEFAULT_PI_DEADBAND,
     DEFAULT_PI_ENABLED,
-    DEFAULT_PI_FF_ALPHA,
-    DEFAULT_PI_FF_ALPHA_OVERSHOOT_RATIO,
     DEFAULT_PI_FF_COOL_REFERENCE,
     DEFAULT_PI_FF_COOL_SLOPE,
     DEFAULT_PI_FF_HEAT_REFERENCE,
     DEFAULT_PI_FF_HEAT_SLOPE,
-    DEFAULT_PI_FF_LEARN_NIGHT_ONLY,
-    DEFAULT_PI_FF_LEARN_SUNSET_DELAY,
     DEFAULT_PI_KD,
     DEFAULT_PI_KD_FILTER_N,
     DEFAULT_PI_KI,
@@ -74,34 +66,17 @@ from .rls_model import RLSModel
 _LOGGER = logging.getLogger(__name__)
 
 
-def _seed_buckets(reference, slope, is_cooling=False):
-    """Seed feedforward buckets from a linear approximation (legacy, kept for parallel comparison)."""
-    buckets = {}
-    for bucket_temp in range(-30, 48, 3):
-        if is_cooling:
-            delta = max(0, bucket_temp - reference)
-            buckets[bucket_temp] = -slope * delta
-        else:
-            delta = max(0, reference - bucket_temp)
-            buckets[bucket_temp] = slope * delta
-    return buckets
-
-
-
 @dataclasses.dataclass
 class PIExtraStoredData(ExtraStoredData):
     """PI controller data persisted via RestoreEntity's ExtraStoredData mechanism.
 
-    Stores FF buckets, integral, desired_temp, and hp_setpoint so they survive
+    Stores RLS models, integral, desired_temp, and hp_setpoint so they survive
     restarts without bloating the recorder DB on every state write.
     """
 
-    ff_heat_buckets: dict[int, float]
-    ff_cool_buckets: dict[int, float]
     pi_integral: float
     desired_temp: float | None
     hp_setpoint: float | None
-    ff_bucket_observation_counts: dict[int, int] = dataclasses.field(default_factory=dict)
     integral_convergence: float = 0.0
     rls_heat_model: dict = dataclasses.field(default_factory=dict)
     rls_cool_model: dict = dataclasses.field(default_factory=dict)
@@ -113,12 +88,9 @@ class PIExtraStoredData(ExtraStoredData):
     def as_dict(self) -> dict[str, Any]:
         """Serialize to JSON-compatible dict."""
         return {
-            "ff_heat_buckets": {str(k): v for k, v in self.ff_heat_buckets.items()},
-            "ff_cool_buckets": {str(k): v for k, v in self.ff_cool_buckets.items()},
             "pi_integral": self.pi_integral,
             "desired_temp": self.desired_temp,
             "hp_setpoint": self.hp_setpoint,
-            "ff_bucket_observation_counts": {str(k): v for k, v in self.ff_bucket_observation_counts.items()},
             "integral_convergence": self.integral_convergence,
             "rls_heat_model": self.rls_heat_model,
             "rls_cool_model": self.rls_cool_model,
@@ -130,18 +102,16 @@ class PIExtraStoredData(ExtraStoredData):
 
     @classmethod
     def from_dict(cls, restored: dict[str, Any]) -> Self | None:
-        """Deserialize from stored dict."""
+        """Deserialize from stored dict.
+
+        Gracefully ignores legacy bucket fields (ff_heat_buckets, ff_cool_buckets,
+        ff_bucket_observation_counts) from pre-removal stored data.
+        """
         try:
-            obs_counts = {}
-            if "ff_bucket_observation_counts" in restored:
-                obs_counts = {int(k): int(v) for k, v in restored["ff_bucket_observation_counts"].items()}
             return cls(
-                ff_heat_buckets={int(k): float(v) for k, v in restored["ff_heat_buckets"].items()},
-                ff_cool_buckets={int(k): float(v) for k, v in restored["ff_cool_buckets"].items()},
                 pi_integral=float(restored["pi_integral"]),
                 desired_temp=restored.get("desired_temp"),
                 hp_setpoint=restored.get("hp_setpoint"),
-                ff_bucket_observation_counts=obs_counts,
                 integral_convergence=float(restored.get("integral_convergence", 0.0)),
                 rls_heat_model=restored.get("rls_heat_model", {}),
                 rls_cool_model=restored.get("rls_cool_model", {}),
@@ -208,15 +178,6 @@ class PIController:
         self._ff_heat_slope = config.get(CONF_PI_FF_HEAT_SLOPE, DEFAULT_PI_FF_HEAT_SLOPE)
         self._ff_cool_slope = config.get(CONF_PI_FF_COOL_SLOPE, DEFAULT_PI_FF_COOL_SLOPE)
 
-        # FF learning config
-        self._ff_learn_night_only = config.get(CONF_PI_FF_LEARN_NIGHT_ONLY, DEFAULT_PI_FF_LEARN_NIGHT_ONLY)
-        self._ff_learn_sunset_delay = config.get(CONF_PI_FF_LEARN_SUNSET_DELAY, DEFAULT_PI_FF_LEARN_SUNSET_DELAY) * 60  # Convert min → sec
-        self._ff_alpha = DEFAULT_PI_FF_ALPHA
-        self._ff_alpha_overshoot_ratio = DEFAULT_PI_FF_ALPHA_OVERSHOOT_RATIO
-        self._ff_min_observation_hours = 4.0  # Hours of data before EMA overwrites seed
-
-        # (Anticipated change entity removed — use model inputs instead)
-
         # Learning suppression state (manual service + model input suppress_learning flags)
         self._manual_ff_suppress = False
         self._manual_ff_suppress_reason = ""
@@ -259,15 +220,6 @@ class PIController:
         self._supplemental_failure_start: float | None = None
         self._supplemental_assist_active = False
         self._supplemental_last_override = False  # Edge detection
-
-        # Feedforward buckets (legacy, kept for parallel comparison)
-        self._ff_heat_buckets = _seed_buckets(self._ff_heat_reference, self._ff_heat_slope)
-        self._ff_cool_buckets = _seed_buckets(
-            self._ff_cool_reference, self._ff_cool_slope, is_cooling=True
-        )
-        self._ff_bucket_observation_counts: dict[int, int] = {}
-        self._ff_bucket_first_obs_time: dict[int, float] = {}
-        self._ff_offset_buckets = 0.0  # Legacy bucket FF output (for comparison)
 
         # Model inputs (replaces disturbance inputs for RLS)
         # Each: {"name": str, "entity_id": str, "seed_heat": float, "seed_cool": float,
@@ -349,9 +301,6 @@ class PIController:
         self._outdoor_temp = None
 
 
-        # Night learning state (kept for bucket learning, RLS doesn't need it)
-        self._sun_below_horizon_since = 0.0
-
         # Integral convergence tracking (EMA of abs(integral) over ~24hr)
         self._integral_convergence = 0.0
 
@@ -416,14 +365,6 @@ class PIController:
                     self._desired_temp = float(attrs[ATTR_DESIRED_TEMP])
                 if attrs.get(ATTR_HP_SETPOINT) is not None:
                     self._hp_setpoint = float(attrs[ATTR_HP_SETPOINT])
-                if attrs.get(ATTR_FF_HEAT_BUCKETS) is not None:
-                    self._ff_heat_buckets = {
-                        int(k): float(v) for k, v in attrs[ATTR_FF_HEAT_BUCKETS].items()
-                    }
-                if attrs.get(ATTR_FF_COOL_BUCKETS) is not None:
-                    self._ff_cool_buckets = {
-                        int(k): float(v) for k, v in attrs[ATTR_FF_COOL_BUCKETS].items()
-                    }
                 _LOGGER.debug("PI: restored from state attributes (legacy)")
 
         # Fallback: sync with restored _attr_target_temperature
@@ -447,15 +388,6 @@ class PIController:
             if outdoor_state is not None:
                 self._update_outdoor_temp(outdoor_state)
 
-        # Register sun.sun for night-only learning (legacy bucket learning only)
-        if self._ff_learn_night_only:
-            async_track_state_change_event(
-                self._hass, "sun.sun", self._async_sun_state_changed,
-            )
-            sun_state = self._hass.states.get("sun.sun")
-            if sun_state is not None and sun_state.state == "below_horizon":
-                self._sun_below_horizon_since = time.monotonic()
-
         # Register model input entities
         model_entity_ids = [
             m["entity_id"] for m in self._model_inputs if m.get("entity_id")
@@ -472,11 +404,6 @@ class PIController:
         # Compute initial feedforward offset
         if self._outdoor_temp is not None:
             is_heating = e._attr_hvac_mode in (HVACMode.HEAT, HVACMode.HEAT_COOL, None)
-            # Legacy bucket FF
-            buckets = self._ff_heat_buckets if is_heating else self._ff_cool_buckets
-            bucket_key = round(self._outdoor_temp / 3) * 3
-            self._ff_offset_buckets = buckets.get(bucket_key, 0.0)
-            # RLS model FF
             outdoor_delta = self._ff_heat_reference - self._outdoor_temp if is_heating else self._outdoor_temp - self._ff_cool_reference
             outdoor_delta = max(0, outdoor_delta)
             x = self._build_feature_vector(outdoor_delta)
@@ -519,12 +446,9 @@ class PIController:
         for i, m_input in enumerate(self._model_inputs):
             lag_states[m_input.get("name", str(i))] = self._model_input_filtered[i]
         return PIExtraStoredData(
-            ff_heat_buckets=dict(self._ff_heat_buckets),
-            ff_cool_buckets=dict(self._ff_cool_buckets),
             pi_integral=self._pi_integral,
             desired_temp=self._desired_temp,
             hp_setpoint=self._hp_setpoint,
-            ff_bucket_observation_counts=dict(self._ff_bucket_observation_counts),
             integral_convergence=self._integral_convergence,
             rls_heat_model=self._rls_heat.as_dict(),
             rls_cool_model=self._rls_cool.as_dict(),
@@ -536,8 +460,6 @@ class PIController:
 
     def restore_extra_stored_data(self, data: PIExtraStoredData) -> None:
         """Restore PI data from ExtraStoredData."""
-        self._ff_heat_buckets = data.ff_heat_buckets
-        self._ff_cool_buckets = data.ff_cool_buckets
         # Scale integral if ki changed since last save, so the I-term
         # contribution (ki * integral) stays the same magnitude.
         if data.ki_at_save > 0 and data.ki_at_save != self._pi_ki:
@@ -553,8 +475,6 @@ class PIController:
             self._desired_temp = data.desired_temp
         if data.hp_setpoint is not None:
             self._hp_setpoint = data.hp_setpoint
-        if data.ff_bucket_observation_counts:
-            self._ff_bucket_observation_counts = data.ff_bucket_observation_counts
         self._integral_convergence = data.integral_convergence
         # Restore RLS models if available. Pass seed_coefficients so that
         # if model inputs changed (different vector length), new inputs get
@@ -743,13 +663,6 @@ class PIController:
             "supplemental_assist": self._supplemental_assist_active,
             ATTR_DESIRED_TEMP: self._desired_temp,
             ATTR_FF_OFFSET: round(self._ff_offset, 2),
-            "ff_offset_buckets": round(self._ff_offset_buckets, 2),
-            ATTR_FF_HEAT_BUCKETS: {
-                str(k): round(v, 2) for k, v in self._ff_heat_buckets.items()
-            },
-            ATTR_FF_COOL_BUCKETS: {
-                str(k): round(v, 2) for k, v in self._ff_cool_buckets.items()
-            },
             "rls_heat_coefficients": rls_heat_coeffs,
             "rls_cool_coefficients": rls_cool_coeffs,
             "rls_observation_count": self._rls_heat.observation_count,
@@ -811,13 +724,8 @@ class PIController:
                 SIGNAL_FF_SUPPRESS_UPDATE.format(self._entity._config_entry_id),
             )
 
-    async def async_reset_ff_buckets(self):
-        """Reset feedforward models to seed values from config."""
-        # Reset legacy buckets
-        self._ff_heat_buckets = _seed_buckets(self._ff_heat_reference, self._ff_heat_slope)
-        self._ff_cool_buckets = _seed_buckets(
-            self._ff_cool_reference, self._ff_cool_slope, is_cooling=True
-        )
+    async def async_reset_ff_seeds(self):
+        """Reset feedforward RLS models to seed values from config."""
         # Reset RLS models to seed coefficients
         heat_seeds = [0.0, self._ff_heat_slope]
         cool_seeds = [0.0, -self._ff_cool_slope]  # Negative: hotter outdoor → lower HP setpoint
@@ -956,35 +864,6 @@ class PIController:
         new_state = event.data.get("new_state")
         if new_state is not None:
             self._update_outdoor_temp(new_state)
-
-    @callback
-    def _async_sun_state_changed(self, event):
-        """Track when sun goes below horizon for night-only learning."""
-        new_state = event.data.get("new_state")
-        if new_state is not None:
-            if new_state.state == "below_horizon":
-                if self._sun_below_horizon_since == 0.0:
-                    self._sun_below_horizon_since = time.monotonic()
-            else:
-                self._sun_below_horizon_since = 0.0
-
-    def _is_learning_time_allowed(self) -> bool:
-        """Check if FF learning is allowed based on night-only setting."""
-        if not self._ff_learn_night_only:
-            return True
-        # Check sun.sun entity state
-        sun_state = self._hass.states.get("sun.sun")
-        if sun_state is None:
-            return True  # No sun entity — allow learning always
-        if sun_state.state != "below_horizon":
-            return False
-        # Check sunset delay
-        if self._sun_below_horizon_since == 0.0:
-            # First check — set the timestamp now
-            self._sun_below_horizon_since = time.monotonic()
-            return False
-        elapsed = time.monotonic() - self._sun_below_horizon_since
-        return elapsed >= self._ff_learn_sunset_delay
 
     def _build_feature_vector(self, outdoor_delta):
         """Build the feature vector for RLS prediction/update.
@@ -1230,15 +1109,6 @@ class PIController:
         alpha = min(rls.observation_count / MIN_RLS_OBS, 1.0)
         self._ff_offset = (1.0 - alpha) * seed_offset + alpha * rls_offset
 
-        # Legacy bucket FF for parallel comparison
-        self._ff_offset_buckets = 0.0
-        if self._outdoor_temp is not None:
-            bucket_key = round(self._outdoor_temp / 3) * 3
-            if is_heating:
-                self._ff_offset_buckets = self._ff_heat_buckets.get(bucket_key, 0.0)
-            else:
-                self._ff_offset_buckets = self._ff_cool_buckets.get(bucket_key, 0.0)
-
         # Learning suppression: manual service + per-input suppress_learning flag
         learning_suppressed = self._manual_ff_suppress
         active_suppressors = []
@@ -1305,36 +1175,6 @@ class PIController:
                             idx, beta_before[idx], rls.beta[idx],
                             100 * (rls.beta[idx] - beta_before[idx]) / beta_before[idx],
                         )
-
-            # Legacy bucket learning (parallel comparison, same gate as before)
-            can_learn_buckets = (
-                self._ff_settled_ticks >= 2
-                and self._outdoor_temp is not None
-                and not learning_suppressed
-                and self._is_learning_time_allowed()
-                and not self._tracking_mode
-                and not self._supplemental_assist_active
-            )
-            if can_learn_buckets:
-                observed_offset_buckets = float(self._hp_setpoint) - desired_c
-                bucket_key = round(self._outdoor_temp / 3) * 3
-                learn_buckets = self._ff_heat_buckets if is_heating else self._ff_cool_buckets
-                old = learn_buckets.get(bucket_key, 0.0)
-                first_obs_time = self._ff_bucket_first_obs_time.get(bucket_key)
-                if first_obs_time is None:
-                    self._ff_bucket_first_obs_time[bucket_key] = now_mono
-                    first_obs_time = now_mono
-                self._ff_bucket_observation_counts[bucket_key] = (
-                    self._ff_bucket_observation_counts.get(bucket_key, 0) + 1
-                )
-                hours_observed = (now_mono - first_obs_time) / 3600.0
-                if hours_observed >= self._ff_min_observation_hours:
-                    needed_more = (
-                        (is_heating and observed_offset_buckets > old)
-                        or (is_cooling and observed_offset_buckets < old)
-                    )
-                    alpha = self._ff_alpha if needed_more else self._ff_alpha * self._ff_alpha_overshoot_ratio
-                    learn_buckets[bucket_key] = (1.0 - alpha) * old + alpha * observed_offset_buckets
 
             self._prev_integral_for_rls = self._pi_integral
 

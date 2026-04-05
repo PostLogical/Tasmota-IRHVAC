@@ -16,9 +16,6 @@
       "integral_convergence": {
         "name": "Integral Convergence"
       },
-      "ff_offset_buckets": {
-        "name": "FF Offset (Buckets)"
-      },
       "itae": {
         "name": "ITAE (Control Quality)"
       },

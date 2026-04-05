@@ -80,7 +80,7 @@ class ControllerHook(Protocol):
 
     # ── FF learning services ─────────────────────────────────────────
 
-    async def async_reset_ff_buckets(self) -> None: ...
+    async def async_reset_ff_seeds(self) -> None: ...
 
     async def async_suppress_ff_learning(self, reason: str = "") -> None: ...
 
@@ -169,7 +169,7 @@ class NullController:
 
     # ── FF learning services ─────────────────────────────────────────
 
-    async def async_reset_ff_buckets(self):
+    async def async_reset_ff_seeds(self):
         pass
 
     async def async_suppress_ff_learning(self, reason=""):

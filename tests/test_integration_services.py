@@ -47,23 +47,25 @@ class TestPIServices:
         assert entity._pi._manual_ff_suppress is False
 
     @pytest.mark.asyncio
-    async def test_reset_ff_buckets(self, hass, setup_pi_integration):
-        """reset_ff_buckets service should reset buckets and zero integral."""
+    async def test_reset_ff_seeds(self, hass, setup_pi_integration):
+        """reset_ff_seeds service should reset RLS models and zero integral."""
         entry = await setup_pi_integration()
         entity = get_climate_entity(hass, entry)
 
         # Modify state
         entity._pi._pi_integral = 25.0
-        entity._pi._ff_heat_buckets[0] = 99.0
+        entity._pi._rls_heat.beta[0] = 99.0
+        entity._pi._rls_heat.observation_count = 100
 
         await hass.services.async_call(
-            DOMAIN, "reset_ff_buckets",
+            DOMAIN, "reset_ff_seeds",
             {"entity_id": entity.entity_id},
             blocking=True,
         )
 
         assert entity._pi._pi_integral == 0.0
-        assert entity._pi._ff_heat_buckets[0] != 99.0  # Should be reset to seed value
+        assert entity._pi._rls_heat.beta[0] == 0.0  # Reset to seed
+        assert entity._pi._rls_heat.observation_count == 0
 
 
 class TestIRHVACServices:

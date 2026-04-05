@@ -55,7 +55,6 @@ class TestDiagnosticsWithEntity:
         assert "pi_controller" in diag
         assert diag["pi_controller"]["enabled"] is True
         assert "rls_model" in diag["pi_controller"]
-        assert "legacy_buckets" in diag["pi_controller"]
 
     @pytest.mark.asyncio
     async def test_diagnostics_without_pi(self, hass, setup_integration):

@@ -251,8 +251,6 @@ class TestPIControllerGaps:
         pi._pi_integral = 0.0
         pi._pi_last_tick_time = 0
         pi._outdoor_temp = 30.0
-        pi._ff_cool_buckets[30] = -2.0
-
         # Room is BELOW desired — overshooting in cool mode
         entity._attr_current_temperature = 23.0
 
@@ -685,8 +683,6 @@ class TestPIControllerRestorationGaps:
         from custom_components.tasmota_irhvac.pi_controller import PIExtraStoredData
 
         original = PIExtraStoredData(
-            ff_heat_buckets={-30: 2.5, 0: 1.8},
-            ff_cool_buckets={24: -0.5},
             pi_integral=5.0,
             desired_temp=22.0,
             hp_setpoint=23.0,
@@ -695,7 +691,6 @@ class TestPIControllerRestorationGaps:
         restored = PIExtraStoredData.from_dict(serialized)
 
         assert restored is not None
-        assert restored.ff_heat_buckets == {-30: 2.5, 0: 1.8}
         assert restored.pi_integral == 5.0
         assert restored.desired_temp == 22.0
         assert restored.hp_setpoint == 23.0
@@ -716,8 +711,6 @@ class TestPIControllerRestorationGaps:
                 "pi_integral": 3.0,
                 "desired_temp": 21.5,
                 "hp_setpoint": 22.0,
-                "ff_heat_buckets": {"0": 1.5, "3": 1.0},
-                "ff_cool_buckets": {"24": -0.3},
             }),
         ])
 
@@ -734,7 +727,6 @@ class TestPIControllerRestorationGaps:
         if entity and entity._pi:
             # Integral restored (may have ticked once after restore)
             assert entity._pi._pi_integral != 0.0
-            assert entity._pi._ff_heat_buckets.get(0) == 1.5
 
 
 class TestMqttDelayBranches:
@@ -1452,7 +1444,6 @@ class TestPISensorRecoveryFF:
         entity._attr_hvac_mode = HVACMode.HEAT
         pi._desired_temp = 22.0
         pi._outdoor_temp = 0.0
-        pi._ff_heat_buckets[0] = 3.0
         entity._attr_current_temperature = None
         pi._sensor_recovery_pending = False
 
@@ -2376,8 +2367,6 @@ class TestPIExtraStoredDataRestore:
         entity = FakePIEntity(config)
 
         extra = PIExtraStoredData(
-            ff_heat_buckets={-30: 9.9},
-            ff_cool_buckets={},
             pi_integral=7.7,
             desired_temp=21.0,
             hp_setpoint=23.0,
@@ -2392,7 +2381,6 @@ class TestPIExtraStoredDataRestore:
 
         # Integral may have changed from a PI tick after restore, but should be non-zero
         assert entity._pi._pi_integral != 0.0
-        assert entity._pi._ff_heat_buckets.get(-30) == 9.9
         assert entity._pi._desired_temp == 21.0
 
 
@@ -2593,38 +2581,6 @@ class TestConfigFlowGaps:
         assert model_subs[-1].data["clamp_max"] == 0.0
 
 
-# ── Sun entity tracking initialization (lines 552-557) ──────────────
-
-
-class TestSunEntityTracking:
-    """Cover sun entity tracking initialization in async_added_to_hass."""
-
-    @pytest.mark.asyncio
-    async def test_night_only_registers_sun_tracking(self, hass, mqtt_mock, enable_custom_integrations):
-        """Night-only learning should register sun.sun tracking (lines 552-557)."""
-        hass.states.async_set("sensor.room_temp", "21.0", {"unit_of_measurement": "°C"})
-        hass.states.async_set("sensor.outdoor_temp", "5.0", {"unit_of_measurement": "°C"})
-        # Set sun below horizon before entity setup
-        hass.states.async_set("sun.sun", "below_horizon")
-
-        config = make_pi_config({
-            "pi_ff_learn_night_only": True,
-            "pi_ff_learn_sunset_delay": 90,
-        })
-        entry = MockConfigEntry(
-            domain=DOMAIN, data=config, title="Test AC PI",
-            version=1, minor_version=4,
-        )
-        entry.add_to_hass(hass)
-        assert await hass.config_entries.async_setup(entry.entry_id)
-        await hass.async_block_till_done()
-
-        entity = get_climate_entity(hass, entry)
-        pi = entity._pi
-        # Sun was below horizon at setup, so _sun_below_horizon_since should be set
-        assert pi._sun_below_horizon_since > 0
-
-
 # ── Migration v1.4 with non-1.0 gain (lines 108-109) ────────────────
 
 
@@ -2736,12 +2692,9 @@ class TestExtraStoredDataViaAsyncAdded:
         rls_cool_data["observation_count"] = 10
 
         extra = PIExtraStoredData(
-            ff_heat_buckets={0: 2.0, 3: 1.5},
-            ff_cool_buckets={24: -0.5},
             pi_integral=5.0,
             desired_temp=21.5,
             hp_setpoint=23.0,
-            ff_bucket_observation_counts={0: 15, 3: 8},
             integral_convergence=0.3,
             rls_heat_model=rls_heat_data,
             rls_cool_model=rls_cool_data,
@@ -2757,8 +2710,6 @@ class TestExtraStoredDataViaAsyncAdded:
         # RLS models restored
         assert pi._rls_heat.observation_count == 25
         assert pi._rls_cool.observation_count == 10
-        # Bucket observation counts
-        assert pi._ff_bucket_observation_counts[0] == 15
         # Integral convergence
         assert pi._integral_convergence == pytest.approx(0.3, abs=0.1)
         # Lag filter state

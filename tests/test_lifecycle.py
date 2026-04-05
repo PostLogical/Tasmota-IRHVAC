@@ -105,7 +105,7 @@ class TestProtocolConformance:
             'filter_hvac_modes', 'should_reject_hvac_mode',
             'pi_pause', 'pi_resume', 'pi_reset_integral',
             'get_extra_state_attributes', 'get_extra_stored_data',
-            'async_reset_ff_buckets', 'async_suppress_ff_learning',
+            'async_reset_ff_seeds', 'async_suppress_ff_learning',
             'async_resume_ff_learning',
         ]
         for attr in required:
@@ -133,7 +133,7 @@ class TestProtocolConformance:
         await nc.handle_state_payload({"Temp": 22})
         await nc.sensor_changed(False)
         await nc.set_temperature(22.0)
-        await nc.async_reset_ff_buckets()
+        await nc.async_reset_ff_seeds()
         await nc.async_suppress_ff_learning("test")
         await nc.async_resume_ff_learning()
         nc.pi_pause()
