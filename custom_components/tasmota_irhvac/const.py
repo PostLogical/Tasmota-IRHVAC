@@ -1,27 +1,21 @@
 """Provides the constants needed for component."""
 
-from homeassistant.components.climate.const import HVACMode
+from homeassistant.components.climate.const import FAN_MEDIUM, HVACMode
 
-# States
-STATE_AUTO = "auto"
-STATE_COOL = "cool"
-STATE_DRY = "dry"
-STATE_FAN_ONLY = "fan_only"
-STATE_HEAT = "heat"
+# Swing oscillation value sent to/from Tasmota (not an HA swing mode)
+SWING_AUTO = "auto"
 
-# Fan speeds
-HVAC_FAN_AUTO = "auto"
+# Tasmota fan speed values (not all map to HA FAN_* constants)
+# HA provides: FAN_AUTO="auto", FAN_LOW="low", FAN_MEDIUM="medium", FAN_HIGH="high"
+# Tasmota uses: "auto", "min", "medium", "max" — "min" and "max" have no HA equivalent
 HVAC_FAN_MIN = "min"
-HVAC_FAN_MEDIUM = "medium"
 HVAC_FAN_MAX = "max"
 
-# Some devices have "auto" and "fan_only" changed
+# Vendor mode swaps: some devices interchange auto/fan_only
 HVAC_MODE_AUTO_FAN = "auto_fan_only"
-
-# Some devicec have "fan_only" and "auto" changed
 HVAC_MODE_FAN_AUTO = "fan_only_auto"
 
-# Some devices say max,but it is high, and auto which is max
+# ELECTRA_AC fan speed labels (remapped to standard names by ElectraHandler)
 HVAC_FAN_MAX_HIGH = "max_high"
 HVAC_FAN_AUTO_MAX = "auto_max"
 
@@ -86,7 +80,7 @@ DEFAULT_TARGET_TEMP = 26
 DEFAULT_MIN_TEMP = 16
 DEFAULT_MAX_TEMP = 32
 DEFAULT_PRECISION = 1
-DEFAULT_FAN_LIST = [HVAC_FAN_AUTO_MAX, HVAC_FAN_MAX_HIGH, HVAC_FAN_MEDIUM, HVAC_FAN_MIN]
+DEFAULT_FAN_LIST = [HVAC_FAN_AUTO_MAX, HVAC_FAN_MAX_HIGH, FAN_MEDIUM, HVAC_FAN_MIN]
 DEFAULT_CONF_QUIET = "off"
 DEFAULT_CONF_TURBO = "off"
 DEFAULT_CONF_ECONO = "off"

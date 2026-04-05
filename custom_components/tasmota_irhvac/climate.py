@@ -165,11 +165,9 @@ from .const import (
     DEFAULT_STATE_TOPIC,
     DEFAULT_TARGET_TEMP,
     DOMAIN,
-    HVAC_FAN_AUTO,
     HVAC_FAN_AUTO_MAX,
     HVAC_FAN_MAX,
     HVAC_FAN_MAX_HIGH,
-    HVAC_FAN_MEDIUM,
     HVAC_FAN_MIN,
     HVAC_MODE_AUTO_FAN,
     HVAC_MODE_FAN_AUTO,
@@ -185,7 +183,7 @@ from .const import (
     SERVICE_SET_SWINGV,
     SERVICE_SLEEP_MODE,
     SERVICE_TURBO_MODE,
-    STATE_AUTO,
+    SWING_AUTO,
     STATE_MODE_LIST,
     TOGGLE_ALL_LIST,
 )
@@ -257,9 +255,9 @@ PLATFORM_SCHEMA = CLIMATE_PLATFORM_SCHEMA.extend(
                         FAN_FOCUS,
                         FAN_DIFFUSE,
                         HVAC_FAN_MIN,
-                        HVAC_FAN_MEDIUM,
+                        FAN_MEDIUM,
                         HVAC_FAN_MAX,
-                        HVAC_FAN_AUTO,
+                        FAN_AUTO,
                         HVAC_FAN_MAX_HIGH,
                         HVAC_FAN_AUTO_MAX,
                     ]
@@ -954,9 +952,9 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                     self._fix_swingh = self._swingh
             if (
                 "SwingV" in payload
-                and payload["SwingV"].lower() == STATE_AUTO
+                and payload["SwingV"].lower() == SWING_AUTO
                 and "SwingH" in payload
-                and payload["SwingH"].lower() == STATE_AUTO
+                and payload["SwingH"].lower() == SWING_AUTO
             ):
                 if SWING_BOTH in (self._attr_swing_modes or []):
                     self._attr_swing_mode = SWING_BOTH
@@ -968,13 +966,13 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                     self._attr_swing_mode = SWING_OFF
             elif (
                 "SwingV" in payload
-                and payload["SwingV"].lower() == STATE_AUTO
+                and payload["SwingV"].lower() == SWING_AUTO
                 and SWING_VERTICAL in (self._attr_swing_modes or [])
             ):
                 self._attr_swing_mode = SWING_VERTICAL
             elif (
                 "SwingH" in payload
-                and payload["SwingH"].lower() == STATE_AUTO
+                and payload["SwingH"].lower() == SWING_AUTO
                 and SWING_HORIZONTAL in (self._attr_swing_modes or [])
             ):
                 self._attr_swing_mode = SWING_HORIZONTAL
@@ -994,7 +992,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                     # mapping code, making it dead. See upstream issue #184.
                     if fan_mode == HVAC_FAN_MAX:
                         self._attr_fan_mode = FAN_HIGH
-                    elif fan_mode == HVAC_FAN_AUTO:
+                    elif fan_mode == FAN_AUTO:  # pragma: no cover
                         self._attr_fan_mode = HVAC_FAN_MAX
                     else:
                         self._attr_fan_mode = fan_mode
@@ -1647,7 +1645,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                 self._attr_swing_mode == SWING_BOTH
                 or self._attr_swing_mode == SWING_VERTICAL
             ):
-                self._swingv = STATE_AUTO
+                self._swingv = SWING_AUTO
 
         if SWING_BOTH in (self._attr_swing_modes or []) or SWING_HORIZONTAL in (
             self._attr_swing_modes or []
@@ -1656,7 +1654,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                 self._attr_swing_mode == SWING_BOTH
                 or self._attr_swing_mode == SWING_HORIZONTAL
             ):
-                self._swingh = STATE_AUTO
+                self._swingh = SWING_AUTO
 
         _dt = dt_util.now()
         _min = _dt.hour * 60 + _dt.minute
