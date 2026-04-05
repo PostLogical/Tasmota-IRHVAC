@@ -194,6 +194,23 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 entry, minor_version=7, version=1,
             )
 
+    # v1.8: Normalize on/off toggle values to lowercase.
+    # Tasmota sends "On"/"Off" (capitalized) but our selectors expect "on"/"off".
+    if entry.version == 1 and entry.minor_version < 8:
+        toggle_keys = (
+            "celsius_mode", "beep", "turbo", "quiet", "econo",
+            "light", "filter", "clean", "sleep", "swingv", "swingh",
+        )
+        new_options = {**entry.options}
+        new_data = {**entry.data}
+        for store in (new_data, new_options):
+            for key in toggle_keys:
+                if key in store and isinstance(store[key], str):
+                    store[key] = store[key].lower()
+        hass.config_entries.async_update_entry(
+            entry, data=new_data, options=new_options, minor_version=8, version=1,
+        )
+
     return True
 
 

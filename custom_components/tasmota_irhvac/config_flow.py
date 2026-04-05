@@ -424,7 +424,7 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Tasmota IRHVAC."""
 
     VERSION = 1
-    MINOR_VERSION = 7  # config temps migrated from celsius_mode to system unit
+    MINOR_VERSION = 8  # normalize on/off toggles to lowercase
 
     @classmethod
     @callback

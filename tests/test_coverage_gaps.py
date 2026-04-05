@@ -2647,7 +2647,7 @@ class TestMigrationGain:
 
         result = await async_migrate_entry(hass, entry)
         assert result is True
-        assert entry.minor_version == 7
+        assert entry.minor_version == 8
 
         # After migration, model_inputs are in subentries (removed from data/options)
         # But the v1.4 migration puts them in data first, then v1.6 moves to subentries
