@@ -407,13 +407,13 @@ OPTIONS_PI_CONTROLLER_SCHEMA = vol.Schema(
             NumberSelectorConfig(min=60, max=3600, step=60, mode=NumberSelectorMode.BOX)
         ),
         vol.Optional(CONF_PI_DEADBAND, default=DEFAULT_PI_DEADBAND): NumberSelector(
-            NumberSelectorConfig(min=0, max=5, step=0.1, mode=NumberSelectorMode.BOX)
+            NumberSelectorConfig(min=0, max=10, step=0.1, mode=NumberSelectorMode.BOX)
         ),
         vol.Optional(CONF_OUTDOOR_TEMP_SENSOR): EntitySelector(
             EntitySelectorConfig(domain="sensor")
         ),
         vol.Optional(CONF_PI_FF_HEAT_REFERENCE, default=DEFAULT_PI_FF_HEAT_REFERENCE): NumberSelector(
-            NumberSelectorConfig(min=-20, max=50, step=0.5, mode=NumberSelectorMode.BOX)
+            NumberSelectorConfig(min=-20, max=120, step=0.5, mode=NumberSelectorMode.BOX)
         ),
         vol.Optional(CONF_PI_FF_HEAT_SLOPE, default=DEFAULT_PI_FF_HEAT_SLOPE): NumberSelector(
             NumberSelectorConfig(min=0, max=5, step=0.01, mode=NumberSelectorMode.BOX)
@@ -733,7 +733,7 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Optional(
                         CONF_PI_DEADBAND, default=DEFAULT_PI_DEADBAND
                     ): NumberSelector(
-                        NumberSelectorConfig(min=0, max=5, step=0.1, mode=NumberSelectorMode.BOX)
+                        NumberSelectorConfig(min=0, max=10, step=0.1, mode=NumberSelectorMode.BOX)
                     ),
                     vol.Optional(CONF_OUTDOOR_TEMP_SENSOR): EntitySelector(
                         EntitySelectorConfig(domain="sensor")
@@ -741,7 +741,7 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Optional(
                         CONF_PI_FF_HEAT_REFERENCE, default=DEFAULT_PI_FF_HEAT_REFERENCE
                     ): NumberSelector(
-                        NumberSelectorConfig(min=-20, max=50, step=0.5, mode=NumberSelectorMode.BOX)
+                        NumberSelectorConfig(min=-20, max=120, step=0.5, mode=NumberSelectorMode.BOX)
                     ),
                     vol.Optional(
                         CONF_PI_FF_HEAT_SLOPE, default=DEFAULT_PI_FF_HEAT_SLOPE
