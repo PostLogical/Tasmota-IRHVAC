@@ -95,8 +95,8 @@ class TestSeedUnitConversion:
         # Index 0=intercept, 1=outdoor_delta, 2=first model input
         assert pi._heat_seeds[2] == -3.0
 
-    def test_coefficient_display_converts_to_fahrenheit(self):
-        """Extra state attributes should show coefficients in system unit."""
+    def test_coefficient_display_always_celsius(self):
+        """Extra state attributes show coefficients in °C regardless of system unit."""
         config = make_pi_config()
         entity = _make_f_entity(config)
 
@@ -107,8 +107,8 @@ class TestSeedUnitConversion:
         attrs = pi.get_extra_state_attributes()
         displayed = attrs["rls_heat_coefficients"]["outdoor_delta"]
 
-        # Should be 0.35 * 1.8 = 0.63 in °F
-        assert abs(displayed - 0.63) < 0.01
+        # Coefficients are always in °C — no conversion
+        assert abs(displayed - 0.35) < 0.001
 
     def test_coefficient_display_unchanged_in_celsius(self):
         """When system is °C, coefficients display as-is."""
@@ -128,9 +128,7 @@ class TestDeadbandBehavior:
 
     @pytest.mark.asyncio
     async def test_deadband_equivalent_behavior(self):
-        """0.9°F deadband and 0.5°C deadband should produce same PI behavior."""
-        import time
-
+        """Both °C and °F systems use same °C deadband value."""
         # Celsius system: deadband 0.5°C
         config_c = make_pi_config({"pi_deadband": 0.5})
         entity_c = FakePIEntity(config_c)
@@ -139,27 +137,24 @@ class TestDeadbandBehavior:
         pi_c._outdoor_temp = 5.0
         entity_c._attr_current_temperature = 20.3  # within 0.5°C deadband
 
-        # Fahrenheit system: deadband 0.9°F (= 0.5°C)
-        config_f = make_pi_config({"pi_deadband": 0.9})
+        # Fahrenheit system: same deadband 0.5°C (entered in °C in config)
+        config_f = make_pi_config({"pi_deadband": 0.5})
         entity_f = _make_f_entity(config_f)
         pi_f = entity_f._pi
         pi_f._desired_temp = 68.0  # 20°C in °F
         pi_f._outdoor_temp = 5.0
         entity_f._attr_current_temperature = 68.54  # 20.3°C in °F
 
-        # Both should be in deadband (error < deadband)
-        error_c = 20.0 - 20.3  # -0.3°C
-        error_f_converted = (68.0 - 68.54) / 1.8  # -0.3°C equivalent
-
-        assert abs(error_c) < 0.5  # within °C deadband
-        assert abs(error_f_converted) < 0.5  # within equivalent deadband
+        # Both store deadband in °C — same value
+        assert pi_c._pi_deadband == 0.5
+        assert pi_f._pi_deadband == 0.5
 
 
 class TestFFOffsetDisplay:
     """FF offset displays in system unit."""
 
-    def test_ff_offset_displayed_in_fahrenheit(self):
-        """FF offset should be in °F when system is °F."""
+    def test_ff_offset_displayed_in_celsius(self):
+        """FF offset is always in °C regardless of system unit."""
         config = make_pi_config()
         entity = _make_f_entity(config)
 
@@ -169,8 +164,8 @@ class TestFFOffsetDisplay:
         attrs = pi.get_extra_state_attributes()
         displayed_ff = attrs["ff_offset"]
 
-        # Should be 3.5 * 1.8 = 6.3 in °F
-        assert abs(displayed_ff - 6.3) < 0.1
+        # FF offset always displays in °C — no conversion
+        assert abs(displayed_ff - 3.5) < 0.01
 
     def test_ff_offset_displayed_in_celsius(self):
         """FF offset should be unchanged when system is °C."""
@@ -183,35 +178,21 @@ class TestFFOffsetDisplay:
         assert abs(attrs["ff_offset"] - 3.5) < 0.01
 
 
-class TestDeltaConversionRoundTrip:
-    """Temperature delta conversions should be stable on round-trip."""
+class TestControlParamsAlwaysCelsius:
+    """Control parameters are always stored and used in °C."""
 
-    def test_celsius_round_trip(self):
-        """°C → display → store should be identity in °C system."""
-        from custom_components.tasmota_irhvac.pi_controller import (
-            _delta_to_c, _delta_to_display,
-        )
-        for val in [0.3, 0.5, 1.0, 3.5, -4.0, -8.0]:
-            displayed = _delta_to_display(val, UnitOfTemperature.CELSIUS)
-            stored = _delta_to_c(displayed, UnitOfTemperature.CELSIUS)
-            assert abs(stored - val) < 0.001, f"Round-trip failed for {val}"
+    def test_deadband_stored_in_celsius(self):
+        """Deadband is stored in °C regardless of system unit."""
+        config = make_pi_config({"pi_deadband": 0.5})
+        entity = _make_f_entity(config)
+        assert entity._pi._pi_deadband == 0.5
 
-    def test_fahrenheit_round_trip(self):
-        """°C → display(°F) → store(°C) should be stable."""
-        from custom_components.tasmota_irhvac.pi_controller import (
-            _delta_to_c, _delta_to_display,
-        )
-        for val in [0.3, 0.5, 1.0, 3.5, -4.0, -8.0]:
-            displayed = _delta_to_display(val, UnitOfTemperature.FAHRENHEIT)
-            stored = _delta_to_c(displayed, UnitOfTemperature.FAHRENHEIT)
-            assert abs(stored - val) < 0.001, f"Round-trip failed for {val}: {val} → {displayed} → {stored}"
-
-    def test_user_enters_round_fahrenheit(self):
-        """User enters -6°F → stored as °C → displayed as -6°F."""
-        from custom_components.tasmota_irhvac.pi_controller import (
-            _delta_to_c, _delta_to_display,
-        )
-        user_input = -6.0  # °F
-        stored = _delta_to_c(user_input, UnitOfTemperature.FAHRENHEIT)
-        redisplayed = _delta_to_display(stored, UnitOfTemperature.FAHRENHEIT)
-        assert abs(redisplayed - user_input) < 0.01
+    def test_ff_references_stored_in_celsius(self):
+        """FF references are stored in °C regardless of system unit."""
+        config = make_pi_config({
+            "pi_ff_heat_reference": 15.0,
+            "pi_ff_cool_reference": 25.0,
+        })
+        entity = _make_f_entity(config)
+        assert entity._pi._ff_heat_reference == 15.0
+        assert entity._pi._ff_cool_reference == 25.0

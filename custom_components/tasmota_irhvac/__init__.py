@@ -218,6 +218,67 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry, minor_version=9, version=1,
         )
 
+    # v1.10: Revert values corrupted by v1.9 back to °C.
+    # v1.9 applied °C→°F conversion to control params that should always be °C.
+    # Only affects °F systems (°C systems were never converted).
+    if entry.version == 1 and entry.minor_version < 10:
+        if hass.config.units.temperature_unit == UnitOfTemperature.FAHRENHEIT:
+            new_options = {**entry.options}
+            new_data = {**entry.data}
+            changed = False
+
+            for store in (new_data, new_options):
+                # Detect if v1.9 actually corrupted this store by checking
+                # FF refs — if either is > 40, v1.9 applied °C→°F absolute
+                # conversion. Fresh installs/post-gut upgrades will have
+                # refs at defaults (15, 25) which are ≤ 40.
+                hr = store.get("pi_ff_heat_reference")
+                cr = store.get("pi_ff_cool_reference")
+                was_corrupted = (
+                    (hr is not None and hr > 40)
+                    or (cr is not None and cr > 40)
+                )
+
+                if was_corrupted:
+                    # Deadband: v1.9 delta-converted (×1.8).
+                    db = store.get("pi_deadband")
+                    if db is not None:
+                        store["pi_deadband"] = round(db / 1.8, 4)
+                        changed = True
+
+                    # FF refs: v1.9 absolute-converted (×1.8+32).
+                    for key in ("pi_ff_heat_reference", "pi_ff_cool_reference"):
+                        val = store.get(key)
+                        if val is not None:
+                            store[key] = round((val - 32) / 1.8, 4)
+                            changed = True
+
+                    # away_temp: may have been multi-converted. Reverse
+                    # until value is in a reasonable °F range (≤120).
+                    at = store.get("away_temp")
+                    if at is not None and at > 120:
+                        while at > 120:
+                            at = (at - 32) / 1.8
+                        store["away_temp"] = round(at, 1)
+                        changed = True
+
+            if changed:
+                _LOGGER.info(
+                    "v1.10 migration: reverted corrupted °F values to °C for %s",
+                    entry.title,
+                )
+            hass.config_entries.async_update_entry(
+                entry,
+                data=new_data,
+                options=new_options,
+                minor_version=10,
+                version=1,
+            )
+        else:
+            hass.config_entries.async_update_entry(
+                entry, minor_version=10, version=1,
+            )
+
     return True
 
 
