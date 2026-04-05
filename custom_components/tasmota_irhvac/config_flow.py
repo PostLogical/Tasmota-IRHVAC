@@ -46,6 +46,7 @@ from homeassistant.helpers.selector import (
     TextSelector,
 )
 
+from .vendors import KNOWN_VENDORS
 from .const import (
     CONF_AVAILABILITY_TOPIC,
     CONF_AWAY_TEMP,
@@ -463,7 +464,14 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema(
                 {
                     vol.Required(CONF_NAME, default=DEFAULT_NAME): TextSelector(),
-                    vol.Required(CONF_VENDOR): TextSelector(),
+                    vol.Required(CONF_VENDOR): SelectSelector(
+                        SelectSelectorConfig(
+                            options=KNOWN_VENDORS,
+                            mode=SelectSelectorMode.DROPDOWN,
+                            custom_value=True,
+                            sort=True,
+                        )
+                    ),
                     vol.Required(
                         CONF_COMMAND_TOPIC, default="cmnd/your_device/irhvac"
                     ): TextSelector(),
@@ -824,7 +832,14 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Schema(
                     {
                         vol.Required(CONF_NAME): TextSelector(),
-                        vol.Required(CONF_VENDOR): TextSelector(),
+                        vol.Required(CONF_VENDOR): SelectSelector(
+                            SelectSelectorConfig(
+                                options=KNOWN_VENDORS,
+                                mode=SelectSelectorMode.DROPDOWN,
+                                custom_value=True,
+                                sort=True,
+                            )
+                        ),
                         vol.Required(CONF_COMMAND_TOPIC): TextSelector(),
                         vol.Required(CONF_STATE_TOPIC): TextSelector(),
                         vol.Optional(CONF_STATE_TOPIC_2): TextSelector(),
