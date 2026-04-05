@@ -999,8 +999,27 @@ class TestPIEdgeCases:
         assert pi_entity._pi._hp_setpoint == 25.0
 
     @pytest.mark.asyncio
-    async def test_handle_state_payload_external_change(self, pi_entity):
-        """Echo >5s after send with no pending flag = external change (physical remote)."""
+    async def test_handle_state_payload_physical_remote(self, pi_entity):
+        """IrReceived echo (physical remote) updates desired_temp."""
+        pi_entity._pi._pi_command_pending = False
+        pi_entity._pi._desired_temp = 22.0
+        pi_entity._pi._hp_setpoint = 22.0
+        pi_entity._pi._last_send_ir_time = 0  # Long ago
+        pi_entity._attr_current_temperature = 20.0
+        pi_entity._attr_hvac_mode = HVACMode.HEAT
+
+        await pi_entity._pi.handle_state_payload(
+            {"Temp": 25, "Power": "On"}, ir_received=True
+        )
+
+        # Physical remote: desired_temp updated to remote's value
+        assert pi_entity._pi._desired_temp == 25
+        # hp_setpoint is recomputed by pi_tick after the remote change
+        assert pi_entity._pi._hp_setpoint != 22.0  # No longer the old value
+
+    @pytest.mark.asyncio
+    async def test_handle_state_payload_telemetry_no_overwrite(self, pi_entity):
+        """Non-IrReceived echo (telemetry/command echo) never overwrites desired_temp."""
         pi_entity._pi._pi_command_pending = False
         pi_entity._pi._desired_temp = 22.0
         pi_entity._pi._hp_setpoint = 22.0
@@ -1010,24 +1029,10 @@ class TestPIEdgeCases:
 
         await pi_entity._pi.handle_state_payload({"Temp": 25, "Power": "On"})
 
-        # External change: desired_temp updated to remote's value
-        assert pi_entity._pi._desired_temp == 25
-
-    @pytest.mark.asyncio
-    async def test_handle_state_payload_late_duplicate(self, pi_entity):
-        """Echo 2-5s after send should be treated as late duplicate."""
-        import time
-        pi_entity._pi._pi_command_pending = False
-        pi_entity._pi._desired_temp = 22.0
-        pi_entity._pi._hp_setpoint = 25.0
-        # 3 seconds ago — in the 2-5s ambiguous window
-        pi_entity._pi._last_send_ir_time = time.monotonic() - 3.0
-        pi_entity._attr_hvac_mode = HVACMode.HEAT
-
-        await pi_entity._pi.handle_state_payload({"Temp": 25, "Power": "On"})
-
-        # Should be ignored — desired_temp unchanged
+        # Telemetry mismatch: desired_temp preserved (not overwritten by echo)
         assert pi_entity._pi._desired_temp == 22.0
+        # hp_setpoint was updated to 25 then recomputed by pi_tick
+        assert pi_entity._pi._hp_setpoint != 22.0  # Changed from original
 
     @pytest.mark.asyncio
     async def test_away_preset_syncs_desired_temp(self, pi_entity):

@@ -343,11 +343,11 @@ class TestDualTopicEcho:
 
     @pytest.mark.asyncio
     async def test_physical_remote_change_updates_desired_and_reticks(self, hass, setup_pi_integration):
-        """Physical remote setting a temp should update desired_temp and send correct HP setpoint.
+        """Physical remote (IrReceived wrapper) should update desired_temp and re-tick.
 
         When someone uses the physical remote to set 22°C, the blaster captures the IR
-        and echoes it via MQTT. The PI should:
-        1. Recognize it as external change (>5s since last send)
+        and publishes on tele with IrReceived wrapper. The PI should:
+        1. Recognize it as physical remote (IrReceived wrapper present)
         2. Set desired_temp = 22
         3. Re-tick to compute HP setpoint = 22 + FF_offset
         4. Send the corrected HP setpoint via IR
@@ -363,12 +363,13 @@ class TestDualTopicEcho:
         pi._desired_temp = 20.0
         pi._hp_setpoint = 24
         pi._pi_command_pending = False
-        pi._last_send_ir_time = 0  # Long ago — so echo is external
+        pi._last_send_ir_time = 0  # Long ago
 
         with patch.object(entity, 'send_ir', new_callable=AsyncMock) as mock_send:
-            # Physical remote sets 22°C — blaster captures and echoes
-            payload = make_mqtt_state_payload({"Temp": 22, "Mode": "Heat"})
-            async_fire_mqtt_message(hass, "tele/irhvac/RESULT", payload)
+            # Physical remote sets 22°C — blaster publishes with IrReceived wrapper
+            irhvac_payload = json.loads(make_mqtt_state_payload({"Temp": 22, "Mode": "Heat"}))
+            ir_received_payload = json.dumps({"IrReceived": irhvac_payload})
+            async_fire_mqtt_message(hass, "tele/irhvac/RESULT", ir_received_payload)
             await hass.async_block_till_done()
 
             # desired_temp should now be 22 (from the remote)
@@ -379,6 +380,37 @@ class TestDualTopicEcho:
             # (22 + FF offset, which will be > 22 in heating mode)
             assert mock_send.call_count >= 1, (
                 "PI should have sent a corrected HP setpoint after remote change"
+            )
+
+    @pytest.mark.asyncio
+    async def test_telemetry_echo_does_not_overwrite_desired(self, hass, setup_pi_integration):
+        """Non-IrReceived echo (telemetry/command echo) must not overwrite desired_temp.
+
+        This is the bug that caused desired_temp corruption: periodic telemetry
+        reports the HP's °C setpoint, which was being written to desired_temp.
+        """
+        from unittest.mock import AsyncMock, patch
+
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 20.0
+        pi._desired_temp = 20.0
+        pi._hp_setpoint = 24
+        pi._pi_command_pending = False
+        pi._last_send_ir_time = 0  # Long ago
+
+        with patch.object(entity, 'send_ir', new_callable=AsyncMock):
+            # Telemetry echo (no IrReceived wrapper) reports HP at 22°C
+            payload = make_mqtt_state_payload({"Temp": 22, "Mode": "Heat"})
+            async_fire_mqtt_message(hass, "tele/irhvac/RESULT", payload)
+            await hass.async_block_till_done()
+
+            # desired_temp must NOT change — this is telemetry, not a user action
+            assert pi._desired_temp == 20.0, (
+                f"desired_temp corrupted by telemetry echo: {pi._desired_temp}"
             )
 
 

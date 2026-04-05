@@ -84,7 +84,7 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
 
     # ── State Payload Handling ─────────────────────────────────────────
 
-    async def _handle_state_payload(self, json_payload, payload):
+    async def _handle_state_payload(self, json_payload, payload, *, ir_received=False):
         """Handle MQTT state with Fujitsu-specific preset detection."""
         if payload.get("Vendor") != self._vendor:
             return
@@ -103,7 +103,7 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
             }
 
         # Standard IRHVAC processing (includes PI hooks)
-        await super()._handle_state_payload(json_payload, payload)
+        await super()._handle_state_payload(json_payload, payload, ir_received=ir_received)
 
         # Map turbo/econo/clean flags to Fujitsu presets
         if self.power_mode == "off":
