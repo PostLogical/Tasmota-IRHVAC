@@ -860,6 +860,18 @@ class PIController:
             else:
                 # External change (physical remote or another system).
                 # The remote sets a room temp target, not an HP setpoint offset.
+                # Sanity check: reported temp must be within HVAC physical range.
+                # No residential HVAC accepts temps outside 0-50°C.
+                reported_c = TemperatureConverter.convert(
+                    reported_temp, e._celsius_unit, UnitOfTemperature.CELSIUS
+                )
+                if reported_c < 0 or reported_c > 50:
+                    _LOGGER.warning(
+                        "MQTT echo: ignoring impossible temp %s°C (reported=%s)",
+                        reported_c, reported_temp,
+                    )
+                    e.async_write_ha_state()
+                    return
                 # Convert from IR unit (celsius_mode) to entity unit (system).
                 desired_in_entity_unit = TemperatureConverter.convert(
                     reported_temp, e._celsius_unit, e.temperature_unit
@@ -882,8 +894,13 @@ class PIController:
         await self._pi_async_sensor_changed(was_none=was_none)
 
     def get_ir_temp(self):
-        """Return PI-computed setpoint for IR command."""
-        return round(self._hp_setpoint)
+        """Return PI-computed setpoint for IR command.
+
+        Safety clamp: no residential HVAC accepts temps outside 0-50°C.
+        This catches corrupted _min_temp_c/_max_temp_c (e.g., from bad
+        config migration) that would let the PI send impossible temps.
+        """
+        return max(0, min(50, round(self._hp_setpoint)))
 
     def get_extra_state_attributes(self):
         """Return PI state attributes to merge into entity attributes."""

@@ -851,7 +851,16 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                     self._attr_hvac_mode = HVACMode.FAN_ONLY
             if "Temp" in payload:
                 if payload["Temp"] > 0:
-                    if self.power_mode == STATE_OFF and self._ignore_off_temp:
+                    # Sanity check: reject impossible temps (no HVAC uses 0-50°C range)
+                    temp_c = TemperatureConverter.convert(
+                        payload["Temp"], self._celsius_unit, UnitOfTemperature.CELSIUS
+                    )
+                    if temp_c < 0 or temp_c > 50:
+                        _LOGGER.warning(
+                            "MQTT state: ignoring impossible Temp %s (%s°C)",
+                            payload["Temp"], temp_c,
+                        )
+                    elif self.power_mode == STATE_OFF and self._ignore_off_temp:
                         pass  # Keep existing target temp
                     elif self._pi:
                         pass  # PI handler manages target temp separately
@@ -1466,7 +1475,20 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             temp = TemperatureConverter.convert(
                 temp, self._attr_temperature_unit, self._celsius_unit
             )
-        return round(temp / self._temp_precision) * self._temp_precision
+        temp = round(temp / self._temp_precision) * self._temp_precision
+        # Safety clamp: no residential HVAC accepts temps outside 0-50°C
+        temp_c = (
+            temp if self._celsius_unit == UnitOfTemperature.CELSIUS
+            else TemperatureConverter.convert(temp, UnitOfTemperature.FAHRENHEIT, UnitOfTemperature.CELSIUS)
+        )
+        if temp_c < 0 or temp_c > 50:
+            _LOGGER.error("IR temp %.1f°C out of safe range, clamping", temp_c)
+            temp_c = max(0, min(50, temp_c))
+            temp = (
+                temp_c if self._celsius_unit == UnitOfTemperature.CELSIUS
+                else TemperatureConverter.convert(temp_c, UnitOfTemperature.CELSIUS, UnitOfTemperature.FAHRENHEIT)
+            )
+        return temp
 
     async def send_ir(self):
         """Send the payload to tasmota mqtt topic."""
