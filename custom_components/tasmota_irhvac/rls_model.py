@@ -4,7 +4,10 @@ Standalone module — no Home Assistant dependencies. Used by PIController
 to learn optimal HP setpoint offsets from multiple input features.
 """
 
+from __future__ import annotations
+
 import logging
+from typing import Any
 
 from .const import (
     DEFAULT_RLS_DELTA,
@@ -29,13 +32,17 @@ class RLSModel:
         - Min/max coefficient clamps (physical bounds)
     """
 
-    def __init__(self, n_inputs, seed_coefficients=None,
-                 lambda_base=DEFAULT_RLS_LAMBDA_BASE,
-                 lambda_min=DEFAULT_RLS_LAMBDA_MIN,
-                 delta=DEFAULT_RLS_DELTA,
-                 p_init=DEFAULT_RLS_P_INIT,
-                 coeff_clamps=None,
-                 feature_scales=None):
+    def __init__(
+        self,
+        n_inputs: int,
+        seed_coefficients: list[float] | None = None,
+        lambda_base: float = DEFAULT_RLS_LAMBDA_BASE,
+        lambda_min: float = DEFAULT_RLS_LAMBDA_MIN,
+        delta: float = DEFAULT_RLS_DELTA,
+        p_init: float = DEFAULT_RLS_P_INIT,
+        coeff_clamps: list[tuple[float, float] | None] | None = None,
+        feature_scales: list[float] | None = None,
+    ) -> None:
         """Initialize RLS model.
 
         Args:
@@ -52,12 +59,13 @@ class RLSModel:
                            Used to scale P initialization so all dimensions
                            have balanced learning rates. Defaults to all 1.0.
         """
-        self.n = n_inputs + 1  # +1 for intercept
-        self.lambda_base = lambda_base
-        self.lambda_min = lambda_min
-        self.delta = delta
+        self.n: int = n_inputs + 1  # +1 for intercept
+        self.lambda_base: float = lambda_base
+        self.lambda_min: float = lambda_min
+        self.delta: float = delta
 
         # Coefficient vector β (intercept + n_inputs)
+        self.beta: list[float]
         if seed_coefficients is not None:
             self.beta = list(seed_coefficients)
             # Pad with zeros if seed is shorter
@@ -67,28 +75,28 @@ class RLSModel:
             self.beta = [0.0] * self.n
 
         # Seed values (retained for blend and seed change detection)
-        self.beta_seed = list(self.beta)
+        self.beta_seed: list[float] = list(self.beta)
 
         # Feature scales for P initialization (retained for seed change reset)
-        self.feature_scales = feature_scales or [1.0] * self.n
+        self.feature_scales: list[float] = feature_scales or [1.0] * self.n
         while len(self.feature_scales) < self.n:
             self.feature_scales.append(1.0)
 
         # Covariance matrix P (n × n, stored as flat list row-major)
         # Scale each diagonal by inverse feature magnitude squared so all
         # dimensions have balanced initial learning rates.
-        self.P = [0.0] * (self.n * self.n)
+        self.P: list[float] = [0.0] * (self.n * self.n)
         for i in range(self.n):
             scale = self.feature_scales[i]
             self.P[i * self.n + i] = p_init / max(scale * scale, 0.01)
 
         # Coefficient clamps: [(min, max), ...] for each coefficient
-        self.coeff_clamps = coeff_clamps or [None] * self.n
+        self.coeff_clamps: list[tuple[float, float] | None] = coeff_clamps or [None] * self.n
 
         # Observation counter
-        self.observation_count = 0
+        self.observation_count: int = 0
 
-    def predict(self, x):
+    def predict(self, x: list[float]) -> float:
         """Predict offset from feature vector.
 
         Args:
@@ -100,7 +108,7 @@ class RLSModel:
         """
         return sum(self.beta[i] * x[i] for i in range(self.n))
 
-    def update(self, x, y):
+    def update(self, x: list[float], y: float) -> float:
         """Update coefficients via RLS with one observation.
 
         Args:
@@ -169,15 +177,15 @@ class RLSModel:
 
         return residual
 
-    def get_coefficients(self):
+    def get_coefficients(self) -> dict[int, float]:
         """Return coefficient dict: {index: value}."""
         return {i: self.beta[i] for i in range(self.n)}
 
-    def get_covariance_diagonal(self):
+    def get_covariance_diagonal(self) -> list[float]:
         """Return diagonal of P (uncertainty per coefficient)."""
         return [self.P[i * self.n + i] for i in range(self.n)]
 
-    def as_dict(self):
+    def as_dict(self) -> dict[str, Any]:
         """Serialize model state to dict."""
         return {
             "beta": list(self.beta),
@@ -186,7 +194,7 @@ class RLSModel:
         }
 
     @classmethod
-    def from_dict(cls, data, n_inputs, **kwargs):
+    def from_dict(cls, data: dict[str, Any], n_inputs: int, **kwargs: Any) -> RLSModel:
         """Restore model from serialized dict.
 
         Handles length mismatches when model inputs are added/removed:
