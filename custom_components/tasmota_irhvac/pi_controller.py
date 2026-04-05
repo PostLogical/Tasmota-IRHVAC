@@ -370,6 +370,24 @@ class PIController:
     def _hass(self):
         return self._entity.hass
 
+    # ── ControllerHook Protocol properties ─────────────────────────
+
+    @property
+    def is_active(self):
+        return self._pi_enabled
+
+    @property
+    def desired_temp(self):
+        return self._desired_temp
+
+    @desired_temp.setter
+    def desired_temp(self, value):
+        self._desired_temp = value
+
+    @property
+    def is_tick_running(self):
+        return self._pi_tick_running
+
     # ── Lifecycle hooks (called by climate entity) ───────────────────
 
     async def async_added_to_hass(self, old_state=None):

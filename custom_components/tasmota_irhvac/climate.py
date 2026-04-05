@@ -679,9 +679,12 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         else:
             self._attr_preset_modes = None
 
-        # Initialize PI controller (composed object, gated by pi_enabled config)
-        # PI still uses raw config dict — will be converted in a future step
-        self._pi = PIController(self, raw_config) if cfg.pi_enabled else None
+        # Controller: PIController when enabled, NullController otherwise.
+        # All calls are unconditional — no `if self._pi:` guards needed.
+        from .controller_protocol import NullController
+        self._controller = PIController(self, raw_config) if cfg.pi_enabled else NullController()
+        # Legacy alias for tests that reference self._pi directly
+        self._pi = self._controller if cfg.pi_enabled else None
 
     async def async_added_to_hass(self):
         def regist_track_state_change_event(entity_id):
@@ -740,8 +743,8 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             old_state.attributes.get(ATTR_PRESET_MODE) if old_state else None
         )
         self._vendor_handler.on_restore_state(restored_preset)
-        if self._vendor_handler.should_pause_controller and self._pi:
-            self._pi.pi_pause()
+        if self._vendor_handler.should_pause_controller:
+            self._controller.pi_pause()
 
         # No previous target temperature, try and restore defaults
         if self._attr_target_temperature is None or self._attr_target_temperature < 1:
@@ -787,8 +790,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             regist_track_state_change_event(self._power_sensor)
 
         # Initialize PI controller (restores state, starts timers)
-        if self._pi:
-            await self._pi.async_added_to_hass(old_state=old_state)
+        await self._controller.async_added_to_hass(old_state=old_state)
 
     async def _subscribe_topics(self):
         """(Re)Subscribe to topics."""
@@ -884,7 +886,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                         )
                     elif self.power_mode == STATE_OFF and self._ignore_off_temp:
                         pass  # Keep existing target temp
-                    elif self._pi:
+                    elif self._controller.is_active:
                         pass  # PI handler manages target temp separately
                     else:
                         # Convert from IR unit (celsius_mode) to entity unit (system)
@@ -991,10 +993,10 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
 
             # PI controller: restore desired temp over HP setpoint, handle echo
             # PI handler writes state itself (with corrected target_temperature)
-            if self._pi:
-                await self._pi.handle_state_payload(payload, ir_received=ir_received)
-            else:
-                # Update HA UI and State
+            # Controller processes echo (PI restores desired_temp, NullController no-ops).
+            # PI writes HA state itself; NullController falls through to explicit write.
+            await self._controller.handle_state_payload(payload, ir_received=ir_received)
+            if not self._controller.is_active:
                 self.async_schedule_update_ha_state()
 
             # Check power sensor state
@@ -1047,12 +1049,12 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             self._econo = "off"
             self._turbo = "off"
             self._clean = "off"
-        if self._vendor_handler.should_pause_controller and self._pi:
-            self._pi.pi_pause()
-        elif not self._vendor_handler.should_pause_controller and self._pi:
-            self._pi.pi_resume()
-        if self._vendor_handler.should_reset_integral and self._pi:
-            self._pi.pi_reset_integral()
+        if self._vendor_handler.should_pause_controller:
+            self._controller.pi_pause()
+        elif not self._vendor_handler.should_pause_controller:
+            self._controller.pi_resume()
+        if self._vendor_handler.should_reset_integral:
+            self._controller.pi_reset_integral()
 
     async def _send_raw_ir(self, raw_code):
         """Send a raw IR code via Tasmota's IRSend command."""
@@ -1075,8 +1077,8 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             # Apply handler state after timer fires
             if self._vendor_handler.active_preset is not None:
                 self._attr_preset_mode = self._vendor_handler.active_preset
-            if not self._vendor_handler.should_pause_controller and self._pi:
-                self._pi.pi_resume()
+            if not self._vendor_handler.should_pause_controller:
+                self._controller.pi_resume()
             self.async_schedule_update_ha_state()
 
         self._vendor_timer_unsub = async_call_later(
@@ -1088,23 +1090,19 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         if hasattr(self, "_vendor_timer_unsub") and self._vendor_timer_unsub:
             self._vendor_timer_unsub()
             self._vendor_timer_unsub = None
-        if self._pi:
-            self._pi.async_will_remove_from_hass()
+        self._controller.async_will_remove_from_hass()
         for unsubscribe in self._unsubscribes:
             unsubscribe()
 
     def async_write_ha_state(self):
         """Write state and fire PI dispatcher signal for companion sensors."""
         super().async_write_ha_state()
-        if self._pi:
-            self._pi.fire_dispatcher()
+        self._controller.fire_dispatcher()
 
     @property
     def extra_restore_state_data(self):
         """Return PI data for ExtraStoredData persistence."""
-        if self._pi:
-            return self._pi.get_extra_stored_data()
-        return None
+        return self._controller.get_extra_stored_data()
 
     @property
     def device_info(self):
@@ -1147,8 +1145,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         attrs = {
             attr: getattr(self, "_" + prop) for attr, prop in ATTRIBUTES_IRHVAC.items()
         }
-        if self._pi:
-            attrs.update(self._pi.get_extra_state_attributes())
+        attrs.update(self._controller.get_extra_state_attributes())
         return attrs
 
     @property
@@ -1159,13 +1156,11 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
     @property
     def hvac_modes(self):
         """Return the list of available HVAC modes."""
-        if self._pi:
-            return self._pi.filter_hvac_modes(self._attr_hvac_modes)
-        return self._attr_hvac_modes
+        return self._controller.filter_hvac_modes(self._attr_hvac_modes)
 
     async def async_set_hvac_mode(self, hvac_mode):
         """Set hvac mode."""
-        if self._pi and self._pi.should_reject_hvac_mode(hvac_mode):
+        if self._controller.should_reject_hvac_mode(hvac_mode):
             _LOGGER.warning(
                 "PI mode does not support %s — use HEAT or COOL explicitly",
                 hvac_mode,
@@ -1196,20 +1191,15 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         if temperature is None:
             return
 
-        # PI controller handles its own setpoint logic
-        if self._pi:
+        # Controller handles its own setpoint logic when active
+        if self._controller.is_active:
             _LOGGER.info(
                 "async_set_temperature: temp=%s unit=%s max=%s "
                 "BEFORE target=%s desired=%s",
                 temperature, self.temperature_unit, self.max_temp,
-                self._attr_target_temperature, self._pi._desired_temp,
+                self._attr_target_temperature, self._controller.desired_temp,
             )
-            await self._pi.set_temperature(temperature, hvac_mode)
-            _LOGGER.info(
-                "async_set_temperature AFTER: desired=%s target=%s hp=%s integral=%s",
-                self._pi._desired_temp, self._attr_target_temperature,
-                self._pi._hp_setpoint, self._pi._pi_integral,
-            )
+            await self._controller.set_temperature(temperature, hvac_mode)
             return
 
         if hvac_mode is not None:
@@ -1398,8 +1388,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             was_none = self._attr_current_temperature is None
             self._async_update_temp(new_state)
             self.async_schedule_update_ha_state()
-            if self._pi:
-                await self._pi.sensor_changed(was_none)
+            await self._controller.sensor_changed(was_none)
         elif entity_id == self._humidity_sensor:
             self._async_update_humidity(new_state)
             self.async_schedule_update_ha_state()
@@ -1489,8 +1478,8 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                     await asyncio.sleep(float(self._mqtt_delay))
                 await mqtt.async_publish(self.hass, irsend_topic, old_action["exit_ir_code"])
             # Resume PI if it was paused
-            if old_action.get("pause_pi") and self._pi:
-                self._pi.pi_resume()
+            if old_action.get("pause_pi"):
+                self._controller.pi_resume()
 
         # Vendor-specific preset handling
         from .vendors.base import EntityState
@@ -1522,13 +1511,11 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             self._is_away = True
             self._saved_target_temp = self._attr_target_temperature
             self._attr_target_temperature = self._away_temp
-            if self._pi:
-                self._pi._desired_temp = self._away_temp
+            self._controller.desired_temp = self._away_temp
         elif preset_mode == PRESET_NONE and self._is_away:
             self._is_away = False
             self._attr_target_temperature = self._saved_target_temp
-            if self._pi:
-                self._pi._desired_temp = self._saved_target_temp
+            self._controller.desired_temp = self._saved_target_temp
         self._attr_preset_mode = PRESET_AWAY if self._is_away else PRESET_NONE
         await self.send_ir()
 
@@ -1544,8 +1531,8 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         self._attr_preset_mode = preset_name
 
         # Optionally pause PI
-        if action.get("pause_pi") and self._pi:
-            self._pi.pi_pause()
+        if action.get("pause_pi"):
+            self._controller.pi_pause()
 
         # Optionally auto-clear after timeout
         auto_clear = action.get("auto_clear_seconds")
@@ -1555,8 +1542,8 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             @callback
             def _clear_preset(_now):
                 self._attr_preset_mode = PRESET_NONE
-                if action.get("pause_pi") and self._pi:
-                    self._pi.pi_resume()
+                if action.get("pause_pi"):
+                    self._controller.pi_resume()
                 self.async_schedule_update_ha_state()
 
             async_call_later(self.hass, auto_clear, _clear_preset)
@@ -1568,18 +1555,15 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
 
     async def async_reset_ff_buckets(self):
         """Reset feedforward buckets to seed values."""
-        if self._pi:
-            await self._pi.async_reset_ff_buckets()
+        await self._controller.async_reset_ff_buckets()
 
     async def async_suppress_ff_learning(self, reason=""):
         """Manually suppress FF learning."""
-        if self._pi:
-            await self._pi.async_suppress_ff_learning(reason=reason)
+        await self._controller.async_suppress_ff_learning(reason=reason)
 
     async def async_resume_ff_learning(self):
         """Resume FF learning after manual suppression."""
-        if self._pi:
-            await self._pi.async_resume_ff_learning()
+        await self._controller.async_resume_ff_learning()
 
     async def set_mode(self, hvac_mode):
         """Set hvac mode."""
@@ -1595,8 +1579,8 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
 
     def _get_ir_temp(self):
         """Return temperature for IR payload (in celsius_mode unit)."""
-        if self._pi and self._attr_hvac_mode != HVACMode.OFF:
-            return self._pi.get_ir_temp()
+        if self._controller.is_active and self._attr_hvac_mode != HVACMode.OFF:
+            return self._controller.get_ir_temp()
         # Convert from entity unit (system) to IR unit (celsius_mode)
         temp = self._attr_target_temperature
         if self._celsius_unit != self._attr_temperature_unit:
@@ -1693,5 +1677,5 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         # Update HA UI and State
         # Skip only when PI tick is the caller (it writes state at end of tick).
         # All other callers (mode changes, presets, manual commands) need the write.
-        if not (self._pi and self._pi._pi_tick_running):
+        if not self._controller.is_tick_running:
             self.async_schedule_update_ha_state()
