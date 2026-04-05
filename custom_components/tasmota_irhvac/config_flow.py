@@ -1,6 +1,9 @@
 """Config flow for Tasmota IRHVAC integration."""
 
+from __future__ import annotations
+
 import logging
+from typing import Any
 
 import voluptuous as vol
 from homeassistant import config_entries
@@ -42,6 +45,7 @@ from homeassistant.helpers.selector import (
     NumberSelector,
     NumberSelectorConfig,
     NumberSelectorMode,
+    SelectOptionDict,
     SelectSelector,
     SelectSelectorConfig,
     SelectSelectorMode,
@@ -205,38 +209,41 @@ _ON_OFF_SELECTOR = SelectSelectorConfig(
 )
 
 # IR protocol temperature unit — what unit the AC's IR protocol uses
+_IR_TEMP_UNIT_OPTIONS: list[SelectOptionDict] = [
+    SelectOptionDict(value="celsius", label="Celsius (°C)"),
+    SelectOptionDict(value="fahrenheit", label="Fahrenheit (°F)"),
+]
 _IR_TEMP_UNIT_SELECTOR = SelectSelectorConfig(
-    options=[
-        {"value": "celsius", "label": "Celsius (°C)"},
-        {"value": "fahrenheit", "label": "Fahrenheit (°F)"},
-    ],
+    options=_IR_TEMP_UNIT_OPTIONS,
     mode=SelectSelectorMode.DROPDOWN,
 )
 
+_PRECISION_OPTIONS: list[SelectOptionDict] = [
+    SelectOptionDict(value=str(PRECISION_TENTHS), label="0.1"),
+    SelectOptionDict(value=str(PRECISION_HALVES), label="0.5"),
+    SelectOptionDict(value=str(PRECISION_WHOLE), label="1"),
+]
 _PRECISION_SELECTOR = SelectSelector(
     SelectSelectorConfig(
-        options=[
-            {"value": str(PRECISION_TENTHS), "label": "0.1"},
-            {"value": str(PRECISION_HALVES), "label": "0.5"},
-            {"value": str(PRECISION_WHOLE), "label": "1"},
-        ],
+        options=_PRECISION_OPTIONS,
         mode=SelectSelectorMode.DROPDOWN,
     )
 )
 
+_TEMP_STEP_OPTIONS: list[SelectOptionDict] = [
+    SelectOptionDict(value=str(PRECISION_HALVES), label="0.5"),
+    SelectOptionDict(value=str(PRECISION_WHOLE), label="1"),
+    SelectOptionDict(value="2.0", label="2"),
+]
 _TEMP_STEP_SELECTOR = SelectSelector(
     SelectSelectorConfig(
-        options=[
-            {"value": str(PRECISION_HALVES), "label": "0.5"},
-            {"value": str(PRECISION_WHOLE), "label": "1"},
-            {"value": "2.0", "label": "2"},
-        ],
+        options=_TEMP_STEP_OPTIONS,
         mode=SelectSelectorMode.DROPDOWN,
     )
 )
 
 
-def _coerce_floats(data: dict) -> dict:
+def _coerce_floats(data: dict[str, Any]) -> dict[str, Any]:
     """Coerce SelectSelector string values to float for numeric keys."""
     for key in _FLOAT_KEYS:
         if key in data and isinstance(data[key], str):
@@ -244,7 +251,7 @@ def _coerce_floats(data: dict) -> dict:
     return data
 
 
-def _stringify_for_ui(data: dict) -> dict:
+def _stringify_for_ui(data: dict[str, Any] | Any) -> dict[str, Any]:
     """Convert stored float values to strings for SelectSelector suggested values."""
     out = dict(data)
     for key in _FLOAT_KEYS:
@@ -441,13 +448,15 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             SUBENTRY_SUPPLEMENTAL_SOURCE: SupplementalSourceSubentryFlow,
         }
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize the config flow."""
-        self._user_input = {}
+        self._user_input: dict[str, Any] = {}
 
-    async def async_step_user(self, user_input=None):
+    async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
         """Step 1: Device Setup."""
-        errors = {}
+        errors: dict[str, str] = {}
 
         if user_input is not None:
             vendor = user_input.get(CONF_VENDOR, "")
@@ -490,7 +499,9 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    async def async_step_climate(self, user_input=None):
+    async def async_step_climate(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
         """Step 2: Climate Settings."""
         if user_input is not None:
             self._user_input.update(user_input)
@@ -594,12 +605,14 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             ),
         )
 
-    def _vendor_is_fujitsu(self):
+    def _vendor_is_fujitsu(self) -> bool:
         """Check if the configured vendor is a Fujitsu model."""
-        vendor = self._user_input.get(CONF_VENDOR, "")
+        vendor: str = self._user_input.get(CONF_VENDOR, "")
         return vendor.upper().startswith("FUJITSU")
 
-    async def async_step_advanced(self, user_input=None):
+    async def async_step_advanced(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
         """Step 3: Advanced & Sensors."""
         if user_input is not None:
             self._user_input.update(user_input)
@@ -691,7 +704,9 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             })
         return self.async_show_form(step_id="advanced", data_schema=schema)
 
-    async def async_step_pi_controller(self, user_input=None):
+    async def async_step_pi_controller(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
         """Step 4: PI Controller settings (shown when PI is enabled)."""
         if user_input is not None:
             self._user_input.update(user_input)
@@ -761,7 +776,7 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             ),
         )
 
-    async def _create_entry(self):
+    async def _create_entry(self) -> config_entries.ConfigFlowResult:
         """Create the config entry from accumulated user input."""
         vendor = self._user_input.get(CONF_VENDOR, "")
         topic = self._user_input.get(CONF_COMMAND_TOPIC, "")
@@ -780,7 +795,9 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             options=options,
         )
 
-    async def async_step_import(self, import_data):
+    async def async_step_import(
+        self, import_data: dict[str, Any]
+    ) -> config_entries.ConfigFlowResult:
         """Handle YAML import."""
         # Normalize protocol -> vendor
         if CONF_PROTOCOL in import_data and CONF_VENDOR not in import_data:
@@ -809,10 +826,12 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             options=options,
         )
 
-    async def async_step_reconfigure(self, user_input=None):
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
         """Handle reconfiguration of connection/identity settings."""
-        entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
-        errors = {}
+        entry = self._get_reconfigure_entry()
+        errors: dict[str, str] = {}
 
         if user_input is not None:
             vendor = user_input.get(CONF_VENDOR, "")
@@ -851,7 +870,7 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     @staticmethod
     @callback
-    def async_get_options_flow(config_entry):
+    def async_get_options_flow(config_entry: ConfigEntry) -> TasmotaIrhvacOptionsFlow:
         """Get the options flow handler."""
         return TasmotaIrhvacOptionsFlow()
 
@@ -863,12 +882,14 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
     """Handle options flow for Tasmota IRHVAC."""
 
-    def _vendor_is_fujitsu(self):
+    def _vendor_is_fujitsu(self) -> bool:
         """Check if the configured vendor is a Fujitsu model."""
-        vendor = self.config_entry.data.get(CONF_VENDOR, "")
+        vendor: str = self.config_entry.data.get(CONF_VENDOR, "")
         return vendor.upper().startswith("FUJITSU")
 
-    async def async_step_init(self, user_input=None):
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
         """Show the options menu."""
         menu = [
             "mqtt",
@@ -885,7 +906,9 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
             menu_options=menu,
         )
 
-    async def async_step_mqtt(self, user_input=None):
+    async def async_step_mqtt(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
         """MQTT options."""
         if user_input is not None:
             return self.async_create_entry(
@@ -899,7 +922,9 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
             ),
         )
 
-    async def async_step_temperature(self, user_input=None):
+    async def async_step_temperature(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
         """Temperature options."""
         if user_input is not None:
             merged = _coerce_floats({**self.config_entry.options, **user_input})
@@ -916,7 +941,9 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
             ),
         )
 
-    async def async_step_modes(self, user_input=None):
+    async def async_step_modes(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
         """Mode options."""
         if user_input is not None:
             return self.async_create_entry(
@@ -930,7 +957,9 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
             ),
         )
 
-    async def async_step_defaults(self, user_input=None):
+    async def async_step_defaults(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
         """Default values options."""
         if user_input is not None:
             return self.async_create_entry(
@@ -944,7 +973,9 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
             ),
         )
 
-    async def async_step_sensors(self, user_input=None):
+    async def async_step_sensors(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
         """Sensor entity options."""
         if user_input is not None:
             return self.async_create_entry(
@@ -958,7 +989,9 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
             ),
         )
 
-    async def async_step_advanced_options(self, user_input=None):
+    async def async_step_advanced_options(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
         """Advanced options."""
         if user_input is not None:
             return self.async_create_entry(
@@ -983,7 +1016,9 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
             ),
         )
 
-    async def async_step_pi_controller(self, user_input=None):
+    async def async_step_pi_controller(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
         """PI controller options."""
         if user_input is not None:
             return self.async_create_entry(
@@ -1000,7 +1035,9 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
     # ── Model Inputs — managed via subentries (ModelInputSubentryFlow) ──
     # ── IR Actions ────────────────────────────────────────────────────
 
-    async def async_step_ir_actions(self, user_input=None):
+    async def async_step_ir_actions(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
         """IR actions management menu."""
         actions = self.config_entry.options.get(CONF_IR_ACTIONS, [])
         menu = ["ir_actions_add"]
@@ -1015,7 +1052,9 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
             },
         )
 
-    async def async_step_ir_actions_add(self, user_input=None):
+    async def async_step_ir_actions_add(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
         """Add a new IR action."""
         if user_input is not None:
             actions = list(self.config_entry.options.get(CONF_IR_ACTIONS, []))
@@ -1060,7 +1099,9 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
             ),
         )
 
-    async def async_step_ir_actions_remove(self, user_input=None):
+    async def async_step_ir_actions_remove(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
         """Remove IR actions."""
         actions = list(self.config_entry.options.get(CONF_IR_ACTIONS, []))
         if user_input is not None:
