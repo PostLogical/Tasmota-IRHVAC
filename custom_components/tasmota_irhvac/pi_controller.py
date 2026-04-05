@@ -420,15 +420,15 @@ class PIController:
         self._pi_kd_filter_n = config.get(CONF_PI_KD_FILTER_N, DEFAULT_PI_KD_FILTER_N)
         self._pi_min_interval = config.get(CONF_PI_MIN_INTERVAL, DEFAULT_PI_MIN_INTERVAL)
         # Deadband and FF references are stored in system unit; convert to °C for PI math
-        _deadband_raw = config.get(CONF_PI_DEADBAND, DEFAULT_PI_DEADBAND)
-        _heat_ref_raw = config.get(CONF_PI_FF_HEAT_REFERENCE, DEFAULT_PI_FF_HEAT_REFERENCE)
-        _cool_ref_raw = config.get(CONF_PI_FF_COOL_REFERENCE, DEFAULT_PI_FF_COOL_REFERENCE)
         _unit = entity._attr_temperature_unit
-        self._pi_deadband = _delta_to_c(_deadband_raw, _unit)
+        self._pi_deadband = _delta_to_c(
+            config.get(CONF_PI_DEADBAND, DEFAULT_PI_DEADBAND), _unit)
         self._ff_heat_reference = TemperatureConverter.convert(
-            _heat_ref_raw, _unit, UnitOfTemperature.CELSIUS)
+            config.get(CONF_PI_FF_HEAT_REFERENCE, DEFAULT_PI_FF_HEAT_REFERENCE),
+            _unit, UnitOfTemperature.CELSIUS)
         self._ff_cool_reference = TemperatureConverter.convert(
-            _cool_ref_raw, _unit, UnitOfTemperature.CELSIUS)
+            config.get(CONF_PI_FF_COOL_REFERENCE, DEFAULT_PI_FF_COOL_REFERENCE),
+            _unit, UnitOfTemperature.CELSIUS)
         self._pi_setpoint_weight = config.get(CONF_PI_SETPOINT_WEIGHT, DEFAULT_PI_SETPOINT_WEIGHT)
 
         # Feedforward config
