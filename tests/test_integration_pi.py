@@ -211,8 +211,8 @@ class TestPIMQTTEcho:
         assert pi._desired_temp == 21.5, (
             f"MQTT echo overwrote desired_temp: {pi._desired_temp}"
         )
-        assert entity._attr_target_temperature == 21.5, (
-            f"MQTT echo overwrote target_temperature: {entity._attr_target_temperature}"
+        assert entity.target_temperature == 21.5, (
+            f"MQTT echo overwrote target_temperature: {entity.target_temperature}"
         )
 
 
