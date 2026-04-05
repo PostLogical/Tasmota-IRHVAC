@@ -5,11 +5,17 @@ and calls its hook methods at the appropriate points. This avoids MRO issues
 and minimizes changes to the upstream-derived climate.py.
 """
 
+from __future__ import annotations
+
 import dataclasses
 import logging
 import time
 from datetime import timedelta
-from typing import Any, Self
+from typing import TYPE_CHECKING, Any, Self
+
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
+    from homeassistant.helpers.event import CALLBACK_TYPE
 
 from homeassistant.components.climate.const import HVACMode
 from homeassistant.const import STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN, UnitOfTemperature
@@ -143,7 +149,7 @@ class PIController:
     Vendor subclasses use: pi_pause(), pi_resume(), pi_reset_integral()
     """
 
-    def __init__(self, entity, config):
+    def __init__(self, entity: Any, config: dict[str, Any]) -> None:
         """Initialize PI controller.
 
         Args:
@@ -153,41 +159,41 @@ class PIController:
         self._entity = entity
 
         # Convert entity temp limits to °C for internal PI math
-        self._min_temp_c = TemperatureConverter.convert(
+        self._min_temp_c: float = TemperatureConverter.convert(
             entity._min_temp, entity._attr_temperature_unit, UnitOfTemperature.CELSIUS
         )
-        self._max_temp_c = TemperatureConverter.convert(
+        self._max_temp_c: float = TemperatureConverter.convert(
             entity._max_temp, entity._attr_temperature_unit, UnitOfTemperature.CELSIUS
         )
 
         # PID controller config
-        self._pi_enabled = config.get(CONF_PI_ENABLED, DEFAULT_PI_ENABLED)
-        self._pi_kp = config.get(CONF_PI_KP, DEFAULT_PI_KP)
-        self._pi_ki = config.get(CONF_PI_KI, DEFAULT_PI_KI)
-        self._pi_kd = config.get(CONF_PI_KD, DEFAULT_PI_KD)
-        self._pi_kd_filter_n = config.get(CONF_PI_KD_FILTER_N, DEFAULT_PI_KD_FILTER_N)
-        self._pi_min_interval = config.get(CONF_PI_MIN_INTERVAL, DEFAULT_PI_MIN_INTERVAL)
+        self._pi_enabled: bool = config.get(CONF_PI_ENABLED, DEFAULT_PI_ENABLED)
+        self._pi_kp: float = config.get(CONF_PI_KP, DEFAULT_PI_KP)
+        self._pi_ki: float = config.get(CONF_PI_KI, DEFAULT_PI_KI)
+        self._pi_kd: float = config.get(CONF_PI_KD, DEFAULT_PI_KD)
+        self._pi_kd_filter_n: float = config.get(CONF_PI_KD_FILTER_N, DEFAULT_PI_KD_FILTER_N)
+        self._pi_min_interval: float = config.get(CONF_PI_MIN_INTERVAL, DEFAULT_PI_MIN_INTERVAL)
         # Control parameters are stored in °C always — read directly, no conversion
-        self._pi_deadband = config.get(CONF_PI_DEADBAND, DEFAULT_PI_DEADBAND)
-        self._ff_heat_reference = config.get(CONF_PI_FF_HEAT_REFERENCE, DEFAULT_PI_FF_HEAT_REFERENCE)
-        self._ff_cool_reference = config.get(CONF_PI_FF_COOL_REFERENCE, DEFAULT_PI_FF_COOL_REFERENCE)
-        self._pi_setpoint_weight = config.get(CONF_PI_SETPOINT_WEIGHT, DEFAULT_PI_SETPOINT_WEIGHT)
+        self._pi_deadband: float = config.get(CONF_PI_DEADBAND, DEFAULT_PI_DEADBAND)
+        self._ff_heat_reference: float = config.get(CONF_PI_FF_HEAT_REFERENCE, DEFAULT_PI_FF_HEAT_REFERENCE)
+        self._ff_cool_reference: float = config.get(CONF_PI_FF_COOL_REFERENCE, DEFAULT_PI_FF_COOL_REFERENCE)
+        self._pi_setpoint_weight: float = config.get(CONF_PI_SETPOINT_WEIGHT, DEFAULT_PI_SETPOINT_WEIGHT)
 
         # Feedforward config
-        self._outdoor_temp_sensor = config.get(CONF_OUTDOOR_TEMP_SENSOR)
-        self._ff_heat_slope = config.get(CONF_PI_FF_HEAT_SLOPE, DEFAULT_PI_FF_HEAT_SLOPE)
-        self._ff_cool_slope = config.get(CONF_PI_FF_COOL_SLOPE, DEFAULT_PI_FF_COOL_SLOPE)
+        self._outdoor_temp_sensor: str | None = config.get(CONF_OUTDOOR_TEMP_SENSOR)
+        self._ff_heat_slope: float = config.get(CONF_PI_FF_HEAT_SLOPE, DEFAULT_PI_FF_HEAT_SLOPE)
+        self._ff_cool_slope: float = config.get(CONF_PI_FF_COOL_SLOPE, DEFAULT_PI_FF_COOL_SLOPE)
 
         # Learning suppression state (manual service + model input suppress_learning flags)
-        self._manual_ff_suppress = False
-        self._manual_ff_suppress_reason = ""
-        self._disturbance_suppress_active = False
-        self._disturbance_active_suppressors = []
+        self._manual_ff_suppress: bool = False
+        self._manual_ff_suppress_reason: str = ""
+        self._disturbance_suppress_active: bool = False
+        self._disturbance_active_suppressors: list[str] = []
 
         # PI controller state
         # _desired_temp is in entity unit (system); _hp_setpoint is always °C (for IR)
-        self._desired_temp = entity._attr_target_temperature
-        self._hp_setpoint = (
+        self._desired_temp: float | None = entity._attr_target_temperature
+        self._hp_setpoint: float | None = (
             TemperatureConverter.convert(
                 entity._attr_target_temperature,
                 entity._attr_temperature_unit,
@@ -196,40 +202,40 @@ class PIController:
             if entity._attr_target_temperature is not None
             else None
         )
-        self._pi_integral = 0.0
-        self._pi_timer_unsub = None
-        self._ff_offset = 0.0
-        self._pi_command_pending = False
-        self._pi_tick_running = False
-        self._last_send_ir_time = 0.0
-        self._last_setpoint_change_time = 0.0
-        self._ff_settled_ticks = 0
-        self._sensor_unavailable = False
-        self._sensor_recovery_pending = False
-        self._sensor_recovery_unsub = None
-        self._pi_paused = False
-        self._pi_last_tick_time = 0.0
-        self._pi_last_error = 0.0
-        self._pi_d_filtered = 0.0    # Filtered derivative term
-        self._pi_last_measurement = None  # Previous temperature measurement for derivative
+        self._pi_integral: float = 0.0
+        self._pi_timer_unsub: CALLBACK_TYPE | None = None
+        self._ff_offset: float = 0.0
+        self._pi_command_pending: bool = False
+        self._pi_tick_running: bool = False
+        self._last_send_ir_time: float = 0.0
+        self._last_setpoint_change_time: float = 0.0
+        self._ff_settled_ticks: int = 0
+        self._sensor_unavailable: bool = False
+        self._sensor_recovery_pending: bool = False
+        self._sensor_recovery_unsub: CALLBACK_TYPE | None = None
+        self._pi_paused: bool = False
+        self._pi_last_tick_time: float = 0.0
+        self._pi_last_error: float = 0.0
+        self._pi_d_filtered: float = 0.0    # Filtered derivative term
+        self._pi_last_measurement: float | None = None  # Previous temperature measurement for derivative
 
         # Supplemental heat source selector/override control
-        self._supplemental_sources = config.get("pi_supplemental_sources", [])
-        self._tracking_mode = False          # True = HP defers to supplemental
+        self._supplemental_sources: list[dict[str, Any]] = config.get("pi_supplemental_sources", [])
+        self._tracking_mode: bool = False          # True = HP defers to supplemental
         self._tracking_sources: list[str] = []  # Names of active overriding sources
         self._supplemental_failure_start: float | None = None
-        self._supplemental_assist_active = False
-        self._supplemental_last_override = False  # Edge detection
+        self._supplemental_assist_active: bool = False
+        self._supplemental_last_override: bool = False  # Edge detection
 
         # Model inputs (replaces disturbance inputs for RLS)
         # Each: {"name": str, "entity_id": str, "seed_heat": float, "seed_cool": float,
         #         "clamp_min": float, "clamp_max": float, "lag_tau": float (seconds)}
-        self._model_inputs = list(config.get(CONF_PI_MODEL_INPUTS, []))
+        self._model_inputs: list[dict[str, Any]] = list(config.get(CONF_PI_MODEL_INPUTS, []))
 
         # Auto-generate model inputs from supplemental sources with auto_model_input=true.
         # These use the supplemental's climate entity as a binary signal (heat/cool=1, else=0).
         # The PI controller reads the entity state each tick to update the value.
-        self._supplemental_auto_inputs = []
+        self._supplemental_auto_inputs: list[dict[str, Any]] = []
         for source in self._supplemental_sources:
             if not source.get("auto_model_input", True):
                 continue
@@ -298,48 +304,48 @@ class PIController:
         self._model_input_last_values = [0.0] * len(self._model_inputs)  # For lag filter
 
         # Outdoor temp state
-        self._outdoor_temp = None
+        self._outdoor_temp: float | None = None
 
 
         # Integral convergence tracking (EMA of abs(integral) over ~24hr)
-        self._integral_convergence = 0.0
+        self._integral_convergence: float = 0.0
 
         # Performance metrics (running accumulators, reset daily)
-        self._itae_accumulator = 0.0      # Σ(tick * |effective_error|)
-        self._itae_tick_count = 0         # ticks since last reset
-        self._comfort_violation_hours = 0.0  # hours spent >1°C from setpoint
-        self._setpoint_changes_today = 0  # setpoint change count since reset
+        self._itae_accumulator: float = 0.0      # Σ(tick * |effective_error|)
+        self._itae_tick_count: int = 0         # ticks since last reset
+        self._comfort_violation_hours: float = 0.0  # hours spent >1°C from setpoint
+        self._setpoint_changes_today: int = 0  # setpoint change count since reset
 
         # RLS learning gate: track integral stability
-        self._prev_integral_for_rls = 0.0
+        self._prev_integral_for_rls: float = 0.0
 
     # ── Shorthand entity access ──────────────────────────────────────
 
     @property
-    def _hass(self):
+    def _hass(self) -> Any:
         return self._entity.hass
 
     # ── ControllerHook Protocol properties ─────────────────────────
 
     @property
-    def is_active(self):
-        return self._pi_enabled
+    def is_active(self) -> bool:
+        return bool(self._pi_enabled)
 
     @property
-    def desired_temp(self):
+    def desired_temp(self) -> float | None:
         return self._desired_temp
 
     @desired_temp.setter
-    def desired_temp(self, value):
+    def desired_temp(self, value: float) -> None:
         self._desired_temp = value
 
     @property
-    def is_tick_running(self):
+    def is_tick_running(self) -> bool:
         return self._pi_tick_running
 
     # ── Lifecycle hooks (called by climate entity) ───────────────────
 
-    async def async_added_to_hass(self, old_state=None):
+    async def async_added_to_hass(self, old_state: Any = None) -> None:
         """Set up PI after entity is added to HA."""
         if not self._pi_enabled:
             return
@@ -427,7 +433,7 @@ class PIController:
             else:
                 _LOGGER.debug("PI: skipping initial tick, waiting for sensor")
 
-    def async_will_remove_from_hass(self):
+    def async_will_remove_from_hass(self) -> None:
         """Clean up PI timers."""
         if self._pi_timer_unsub:
             self._pi_timer_unsub()
@@ -503,7 +509,9 @@ class PIController:
                 if key in data.lag_filter_states:
                     self._model_input_filtered[i] = float(data.lag_filter_states[key])
 
-    def _apply_seed_changes(self, old_seeds, new_seeds, rls_model):
+    def _apply_seed_changes(
+        self, old_seeds: list[float], new_seeds: list[float], rls_model: RLSModel
+    ) -> None:
         """Detect seed changes and selectively reset affected coefficients.
 
         Compares seeds stored at last persist with current config seeds.
@@ -525,7 +533,9 @@ class PIController:
                     i, old_seeds[i], new_seeds[i], old_val,
                 )
 
-    async def set_temperature(self, temperature, hvac_mode=None):
+    async def set_temperature(
+        self, temperature: float | None, hvac_mode: str | None = None
+    ) -> None:
         """Handle temperature set when PI is active."""
         if temperature is None:
             return
@@ -540,7 +550,9 @@ class PIController:
         await self._pi_tick()
         e.async_schedule_update_ha_state()
 
-    async def handle_state_payload(self, payload, *, ir_received=False):
+    async def handle_state_payload(
+        self, payload: dict[str, Any], *, ir_received: bool = False
+    ) -> None:
         """Handle MQTT state echo. Call after base class processes payload.
 
         Uses ir_received flag to distinguish physical remote (IrReceived wrapper
@@ -626,20 +638,21 @@ class PIController:
             _LOGGER.debug("MQTT echo: telemetry confirms current setpoint %s", reported_temp)
             e.async_write_ha_state()
 
-    async def sensor_changed(self, was_none):
+    async def sensor_changed(self, was_none: bool) -> None:
         """Handle temp sensor update."""
         await self._pi_async_sensor_changed(was_none=was_none)
 
-    def get_ir_temp(self):
+    def get_ir_temp(self) -> float:
         """Return PI-computed setpoint for IR command.
 
         Safety clamp: no residential HVAC accepts temps outside 0-50°C.
         This catches corrupted _min_temp_c/_max_temp_c (e.g., from bad
         config migration) that would let the PI send impossible temps.
         """
+        assert self._hp_setpoint is not None
         return max(0, min(50, round(self._hp_setpoint)))
 
-    def get_extra_state_attributes(self):
+    def get_extra_state_attributes(self) -> dict[str, Any]:
         """Return PI state attributes to merge into entity attributes."""
         if not self._pi_enabled:
             return {}
@@ -670,17 +683,17 @@ class PIController:
             "integral_convergence": round(self._integral_convergence, 2),
         }
 
-    def filter_hvac_modes(self, modes):
+    def filter_hvac_modes(self, modes: list[str]) -> list[str]:
         """Filter out auto/heat_cool when PI is enabled."""
         if self._pi_enabled and modes:
             return [m for m in modes if m not in (HVACMode.AUTO, HVACMode.HEAT_COOL)]
         return modes
 
-    def should_reject_hvac_mode(self, hvac_mode):
+    def should_reject_hvac_mode(self, hvac_mode: str) -> bool:
         """Return True if PI should reject this HVAC mode."""
         return self._pi_enabled and hvac_mode in (HVACMode.AUTO, HVACMode.HEAT_COOL)
 
-    def fire_dispatcher(self):
+    def fire_dispatcher(self) -> None:
         """Fire dispatcher signal for companion PI sensors."""
         if self._pi_enabled and hasattr(self._entity, "_config_entry_id"):
             async_dispatcher_send(
@@ -690,19 +703,19 @@ class PIController:
 
     # ── Public API (for vendor subclasses via entity._pi) ────────────
 
-    def pi_pause(self):
+    def pi_pause(self) -> None:
         """Pause PI control (e.g., during vendor-specific preset modes)."""
         self._pi_paused = True
 
-    def pi_resume(self):
+    def pi_resume(self) -> None:
         """Resume PI control after a pause."""
         self._pi_paused = False
 
-    def pi_reset_integral(self):
+    def pi_reset_integral(self) -> None:
         """Zero the integral (e.g., after mode changes that invalidate it)."""
         self._pi_integral = 0.0
 
-    async def async_suppress_ff_learning(self, reason=""):
+    async def async_suppress_ff_learning(self, reason: str = "") -> None:
         """Manually suppress FF learning (service call handler)."""
         self._manual_ff_suppress = True
         self._manual_ff_suppress_reason = reason or ""
@@ -713,7 +726,7 @@ class PIController:
                 SIGNAL_FF_SUPPRESS_UPDATE.format(self._entity._config_entry_id),
             )
 
-    async def async_resume_ff_learning(self):
+    async def async_resume_ff_learning(self) -> None:
         """Resume FF learning after manual suppression (service call handler)."""
         self._manual_ff_suppress = False
         self._manual_ff_suppress_reason = ""
@@ -724,7 +737,7 @@ class PIController:
                 SIGNAL_FF_SUPPRESS_UPDATE.format(self._entity._config_entry_id),
             )
 
-    async def async_reset_ff_seeds(self):
+    async def async_reset_ff_seeds(self) -> None:
         """Reset feedforward RLS models to seed values from config."""
         # Reset RLS models to seed coefficients
         heat_seeds = [0.0, self._ff_heat_slope]
@@ -752,7 +765,7 @@ class PIController:
 
     # ── Supplemental Source Override/Selector ────────────────────────
 
-    def _evaluate_supplemental_override(self, error_c, now_mono):
+    def _evaluate_supplemental_override(self, error_c: float, now_mono: float) -> bool:
         """Evaluate whether supplemental sources are active and update tracking mode.
 
         Implements override/selector control pattern:
@@ -847,7 +860,7 @@ class PIController:
     # ── PI Internals ──────────────────────────────────────────────────
 
     @callback
-    def _update_outdoor_temp(self, state):
+    def _update_outdoor_temp(self, state: Any) -> None:
         """Update outdoor temperature from sensor state, converting to °C."""
         try:
             temp = float(state.state)
@@ -859,23 +872,23 @@ class PIController:
             pass
 
     @callback
-    def _async_outdoor_temp_changed(self, event):
+    def _async_outdoor_temp_changed(self, event: Any) -> None:
         """Handle outdoor temperature sensor state changes."""
         new_state = event.data.get("new_state")
         if new_state is not None:
             self._update_outdoor_temp(new_state)
 
-    def _build_feature_vector(self, outdoor_delta):
+    def _build_feature_vector(self, outdoor_delta: float) -> list[float]:
         """Build the feature vector for RLS prediction/update.
 
         Returns [1, outdoor_delta, input1_filtered, input2_filtered, ...].
         """
-        x = [1.0, outdoor_delta]
+        x: list[float] = [1.0, outdoor_delta]
         for i in range(len(self._model_inputs)):
             x.append(self._model_input_filtered[i])
         return x
 
-    def _update_lag_filters(self, dt_seconds):
+    def _update_lag_filters(self, dt_seconds: float) -> None:
         """Update exponential lag filters for model inputs."""
         for i, m_input in enumerate(self._model_inputs):
             tau = float(m_input.get("lag_tau", 0))
@@ -888,7 +901,7 @@ class PIController:
             else:
                 self._model_input_filtered[i] = raw
 
-    def _read_model_input_values(self):
+    def _read_model_input_values(self) -> None:
         """Read current values from all model input entities."""
         for i, m_input in enumerate(self._model_inputs):
             entity_id = m_input.get("entity_id", "")
@@ -908,7 +921,7 @@ class PIController:
                                  "heating", "cooling", "burning", "igniting"}
                 self._model_input_values[i] = 1.0 if state.state in active_states else 0.0
 
-    def _any_model_input_unavailable(self):
+    def _any_model_input_unavailable(self) -> bool:
         """Check if any model input entity is currently unavailable."""
         for m_input in self._model_inputs:
             entity_id = m_input.get("entity_id", "")
@@ -920,7 +933,7 @@ class PIController:
         return False
 
     @callback
-    def _async_model_input_changed(self, event):
+    def _async_model_input_changed(self, event: Any) -> None:
         """Handle model input entity state changes — update binary sensor."""
         if hasattr(self._entity, "_config_entry_id"):
             async_dispatcher_send(
@@ -928,7 +941,7 @@ class PIController:
                 SIGNAL_FF_SUPPRESS_UPDATE.format(self._entity._config_entry_id),
             )
 
-    async def _pi_async_sensor_changed(self, was_none=False):
+    async def _pi_async_sensor_changed(self, was_none: bool = False) -> None:
         """Handle temp sensor update."""
         if not self._pi_enabled:
             return
@@ -961,7 +974,7 @@ class PIController:
         if elapsed >= min_cooldown:
             await self._pi_tick()
 
-    async def _check_sensor_recovery(self, _now=None):
+    async def _check_sensor_recovery(self, _now: Any = None) -> None:
         """Called 60s after sensor went unavailable. Fall back to FF-only if still gone."""
         self._sensor_recovery_pending = False
         self._sensor_recovery_unsub = None
@@ -1002,7 +1015,7 @@ class PIController:
             await e.send_ir()
         e.async_schedule_update_ha_state()
 
-    async def _pi_tick(self, now=None):
+    async def _pi_tick(self, now: Any = None) -> None:
         """PI + feedforward controller tick. Called by timer and sensor events."""
         if not self._pi_enabled:
             return
@@ -1015,13 +1028,13 @@ class PIController:
         finally:
             self._pi_tick_running = False
 
-    async def _pi_tick_inner(self, now=None):
+    async def _pi_tick_inner(self, now: Any = None) -> None:
         """PI + feedforward controller tick implementation."""
         e = self._entity
         if e._attr_hvac_mode == HVACMode.OFF:
             self._pi_integral = 0.0
             return
-        if self._desired_temp is None:
+        if self._desired_temp is None or self._hp_setpoint is None:
             return
         if e._attr_current_temperature is None:
             if self._sensor_unavailable or self._sensor_recovery_pending:
