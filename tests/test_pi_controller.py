@@ -97,6 +97,17 @@ class FakePIEntity:
     _ir_temp_unit = UnitOfTemperature.CELSIUS
     _temp_precision = 1.0
 
+    @property
+    def target_temperature(self):
+        """Mirror real entity: read from PI when active, else _attr."""
+        if hasattr(self, '_pi') and self._pi and self._pi._desired_temp is not None:
+            return self._pi._desired_temp
+        return self._attr_target_temperature
+
+    @property
+    def temperature_unit(self):
+        return self._attr_temperature_unit
+
     def __init__(self, config):
         # Simulate base class attributes — all temps in °C (entity unit)
         self.hass = MagicMock()
@@ -827,7 +838,8 @@ class TestPIOverrides:
         pi_entity._pi._pi_integral = 5.0
         await pi_entity.async_set_temperature(temperature=74.0)
         assert pi_entity._pi._desired_temp == 74.0
-        assert pi_entity._attr_target_temperature == 74.0
+        # target_temperature property reads from desired_temp when PI active
+        assert pi_entity.target_temperature == 74.0
         assert pi_entity.send_ir.called
 
     @pytest.mark.asyncio
@@ -836,7 +848,7 @@ class TestPIOverrides:
         pi_entity._pi._pi_enabled = False
         await pi_entity.async_set_temperature(temperature=74.0)
         # Falls to FakeBaseEntity.async_set_temperature
-        assert pi_entity._attr_target_temperature == 74.0
+        assert pi_entity.target_temperature == 74.0
 
     def test_hvac_modes_filters_auto(self, pi_entity):
         """hvac_modes property should remove auto/heat_cool when PI enabled."""

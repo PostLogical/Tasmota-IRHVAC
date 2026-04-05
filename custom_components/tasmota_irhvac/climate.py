@@ -881,7 +881,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             )
             entity_state = EntityState(
                 hvac_mode=self._attr_hvac_mode,
-                target_temperature=self._attr_target_temperature,
+                target_temperature=self.target_temperature,
                 fan_mode=self._attr_fan_mode,
                 swing_mode=self._attr_swing_mode,
                 swingv=self._swingv,
@@ -1166,6 +1166,17 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         elif self._attr_hvac_mode == HVACMode.FAN_ONLY:
             return HVACAction.FAN
 
+    @property
+    def target_temperature(self):
+        """Return target temperature — single source of truth.
+
+        When controller is active (PI), reads from controller.desired_temp.
+        Otherwise reads from _attr_target_temperature (entity-owned).
+        """
+        if self._controller.is_active and self._controller.desired_temp is not None:
+            return self._controller.desired_temp
+        return self._attr_target_temperature
+
     # This extension property is written throughout the instance, so use @property instead of @cached_property.
     @property
     def extra_state_attributes(self):
@@ -1225,7 +1236,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                 "async_set_temperature: temp=%s unit=%s max=%s "
                 "BEFORE target=%s desired=%s",
                 temperature, self.temperature_unit, self.max_temp,
-                self._attr_target_temperature, self._controller.desired_temp,
+                self.target_temperature, self._controller.desired_temp,
             )
             await self._controller.set_temperature(temperature, hvac_mode)
             return
@@ -1537,7 +1548,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
 
         if preset_mode == PRESET_AWAY and not self._is_away:
             self._is_away = True
-            self._saved_target_temp = self._attr_target_temperature
+            self._saved_target_temp = self.target_temperature  # property reads from controller when active
             self._attr_target_temperature = self._away_temp
             self._controller.desired_temp = self._away_temp
         elif preset_mode == PRESET_NONE and self._is_away:

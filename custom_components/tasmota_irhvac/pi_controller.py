@@ -613,7 +613,7 @@ class PIController:
         if hvac_mode is not None:
             await e.set_mode(hvac_mode)
         self._desired_temp = temperature
-        e._attr_target_temperature = temperature
+        # target_temperature property reads from desired_temp — no dual-write needed
         self._pi_integral = 0.0
         if e._attr_hvac_mode != HVACMode.OFF:
             e.power_mode = STATE_ON
@@ -631,15 +631,8 @@ class PIController:
         if not self._pi_enabled or self._desired_temp is None or self._pi_paused:
             return
         e = self._entity
-        # Defensive: always ensure _attr_target_temperature matches desired_temp.
-        # Vendor handler state restores (Fujitsu presets) or concurrent echoes
-        # could corrupt it, and HA's frontend reads it for +/- increments.
-        if e._attr_target_temperature != self._desired_temp:
-            _LOGGER.warning(
-                "MQTT echo: target_temp MISMATCH — target=%s desired=%s, restoring",
-                e._attr_target_temperature, self._desired_temp,
-            )
-            e._attr_target_temperature = self._desired_temp
+        # target_temperature property now reads from desired_temp when PI is active,
+        # so no defensive sync needed.
         if "Temp" not in payload or payload["Temp"] <= 0:
             e.async_write_ha_state()
             return
@@ -649,7 +642,7 @@ class PIController:
             "MQTT echo entry: reported=%s hp=%s desired=%s target=%s "
             "pending=%s elapsed=%.1f ir_received=%s",
             reported_temp, self._hp_setpoint, self._desired_temp,
-            e._attr_target_temperature, self._pi_command_pending, elapsed,
+            e.target_temperature, self._pi_command_pending, elapsed,
             ir_received,
         )
         if ir_received:
@@ -674,7 +667,7 @@ class PIController:
                 reported_temp, desired_in_entity_unit,
             )
             self._desired_temp = desired_in_entity_unit
-            e._attr_target_temperature = desired_in_entity_unit
+            # target_temperature property reads from desired_temp — no dual-write
             self._pi_integral = 0.0
             self._hp_setpoint = reported_temp
             await self._pi_tick()
