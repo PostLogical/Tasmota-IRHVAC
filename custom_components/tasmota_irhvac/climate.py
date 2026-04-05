@@ -808,8 +808,10 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             _LOGGER.debug(json_payload)
 
             # If listening to `tele`, result looks like: {"IrReceived":{"Protocol":"XXX", ... ,"IRHVAC":{ ... }}}
-            # we want to extract the data.
-            if "IrReceived" in json_payload:
+            # IrReceived wrapper = physical IR signal captured (physical remote).
+            # Without wrapper = command echo or periodic telemetry.
+            ir_received = "IrReceived" in json_payload
+            if ir_received:
                 json_payload = json_payload["IrReceived"]
 
             # By now the payload must include an `IRHVAC` field.
@@ -817,7 +819,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                 return
 
             payload = json_payload["IRHVAC"]
-            await self._handle_state_payload(json_payload, payload)
+            await self._handle_state_payload(json_payload, payload, ir_received=ir_received)
 
         unsubscribe = []
         unsubscribe.append(
@@ -839,7 +841,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
 
         return unsubscribe
 
-    async def _handle_state_payload(self, json_payload, payload):
+    async def _handle_state_payload(self, json_payload, payload, *, ir_received=False):
         """Process IRHVAC state payload."""
         if payload["Vendor"] == self._vendor:
             # Build IRDecode + EntityState for vendor handler hooks
@@ -990,7 +992,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             # PI controller: restore desired temp over HP setpoint, handle echo
             # PI handler writes state itself (with corrected target_temperature)
             if self._pi:
-                await self._pi.handle_state_payload(payload)
+                await self._pi.handle_state_payload(payload, ir_received=ir_received)
             else:
                 # Update HA UI and State
                 self.async_schedule_update_ha_state()

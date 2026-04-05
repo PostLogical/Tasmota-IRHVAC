@@ -602,21 +602,20 @@ class PIController:
         await self._pi_tick()
         e.async_schedule_update_ha_state()
 
-    async def handle_state_payload(self, payload):
+    async def handle_state_payload(self, payload, *, ir_received=False):
         """Handle MQTT state echo. Call after base class processes payload.
 
-        Base handler no longer overwrites _attr_target_temperature when PI is
-        active, so we don't need to restore it. But we defensively ensure
-        _attr_target_temperature always matches _desired_temp — other code
-        paths (Fujitsu preset restore, state writes during concurrent echoes)
-        could corrupt it, and HA's frontend reads it for +/- temperature
-        increments.
+        Uses ir_received flag to distinguish physical remote (IrReceived wrapper
+        on tele topic) from command echoes and telemetry (no wrapper).
+        Only physical remote signals update desired_temp; all other echoes
+        just track HP setpoint state.
         """
         if not self._pi_enabled or self._desired_temp is None or self._pi_paused:
             return
         e = self._entity
         # Defensive: always ensure _attr_target_temperature matches desired_temp.
-        # If anything corrupted it, this corrects it before the state write below.
+        # Vendor handler state restores (Fujitsu presets) or concurrent echoes
+        # could corrupt it, and HA's frontend reads it for +/- increments.
         if e._attr_target_temperature != self._desired_temp:
             _LOGGER.warning(
                 "MQTT echo: target_temp MISMATCH — target=%s desired=%s, restoring",
@@ -629,11 +628,39 @@ class PIController:
         reported_temp = payload["Temp"]
         elapsed = time.monotonic() - self._last_send_ir_time
         _LOGGER.info(
-            "MQTT echo entry: reported=%s hp=%s desired=%s target=%s pending=%s elapsed=%.1f",
+            "MQTT echo entry: reported=%s hp=%s desired=%s target=%s "
+            "pending=%s elapsed=%.1f ir_received=%s",
             reported_temp, self._hp_setpoint, self._desired_temp,
             e._attr_target_temperature, self._pi_command_pending, elapsed,
+            ir_received,
         )
-        if self._pi_command_pending or elapsed < 2.0:
+        if ir_received:
+            # Physical remote: someone pointed a remote at the unit.
+            # Update desired_temp to match what they set.
+            reported_c = TemperatureConverter.convert(
+                reported_temp, e._celsius_unit, UnitOfTemperature.CELSIUS
+            )
+            if reported_c < 0 or reported_c > 50:
+                _LOGGER.warning(
+                    "MQTT echo: ignoring impossible remote temp %s°C (reported=%s)",
+                    reported_c, reported_temp,
+                )
+                e.async_write_ha_state()
+                return
+            desired_in_entity_unit = TemperatureConverter.convert(
+                reported_temp, e._celsius_unit, e.temperature_unit
+            )
+            _LOGGER.info(
+                "MQTT echo: physical remote detected (IrReceived), "
+                "reported=%s -> desired=%s",
+                reported_temp, desired_in_entity_unit,
+            )
+            self._desired_temp = desired_in_entity_unit
+            e._attr_target_temperature = desired_in_entity_unit
+            self._pi_integral = 0.0
+            self._hp_setpoint = reported_temp
+            await self._pi_tick()
+        elif self._pi_command_pending or elapsed < 2.0:
             # Our echo (pending flag) or duplicate from second MQTT topic (<2s).
             # With dual topics (tele + stat), 2-4 echoes arrive within ~500ms.
             # Clear pending on first, ignore the rest.
@@ -643,42 +670,30 @@ class PIController:
             else:
                 _LOGGER.debug("MQTT echo: duplicate ignored (%.1fs since send)", elapsed)
             e.async_write_ha_state()
-        elif elapsed >= 5.0:
-            if reported_temp == self._hp_setpoint:
-                # Tasmota confirming current state (periodic telemetry or status report).
-                # Not an external change — just ignore.
-                _LOGGER.debug("MQTT echo: telemetry confirms current setpoint %s", reported_temp)
-            else:
-                # External change (physical remote or another system).
-                # The remote sets a room temp target, not an HP setpoint offset.
-                # Sanity check: reported temp must be within HVAC physical range.
-                # No residential HVAC accepts temps outside 0-50°C.
-                reported_c = TemperatureConverter.convert(
-                    reported_temp, e._celsius_unit, UnitOfTemperature.CELSIUS
+        elif reported_temp != self._hp_setpoint:
+            # Telemetry/echo reports a different setpoint than we expect.
+            # Could be failed IR send or drift. Track actual HP state;
+            # PI will correct on next tick. Never overwrite desired_temp.
+            reported_c = TemperatureConverter.convert(
+                reported_temp, e._celsius_unit, UnitOfTemperature.CELSIUS
+            )
+            if reported_c < 0 or reported_c > 50:
+                _LOGGER.warning(
+                    "MQTT echo: ignoring impossible temp %s°C (reported=%s)",
+                    reported_c, reported_temp,
                 )
-                if reported_c < 0 or reported_c > 50:
-                    _LOGGER.warning(
-                        "MQTT echo: ignoring impossible temp %s°C (reported=%s)",
-                        reported_c, reported_temp,
-                    )
-                    e.async_write_ha_state()
-                    return
-                # Convert from IR unit (celsius_mode) to entity unit (system).
-                desired_in_entity_unit = TemperatureConverter.convert(
-                    reported_temp, e._celsius_unit, e.temperature_unit
-                )
-                _LOGGER.info(
-                    "MQTT echo: external change (%.1fs since send), "
-                    "reported=%s -> desired=%s",
-                    elapsed, reported_temp, desired_in_entity_unit,
-                )
-                self._desired_temp = desired_in_entity_unit
-                e._attr_target_temperature = desired_in_entity_unit
-                self._pi_integral = 0.0
-                await self._pi_tick()  # tick computes HP setpoint and writes state
+                e.async_write_ha_state()
+                return
+            _LOGGER.info(
+                "MQTT echo: setpoint mismatch (%.1fs since send), "
+                "reported=%s hp=%s — updating hp_setpoint, keeping desired=%s",
+                elapsed, reported_temp, self._hp_setpoint, self._desired_temp,
+            )
+            self._hp_setpoint = reported_temp
+            await self._pi_tick()
         else:
-            # Echo in 2-5s window — ambiguous, treat as duplicate
-            _LOGGER.debug("MQTT echo: late duplicate ignored (%.1fs since send)", elapsed)
+            _LOGGER.debug("MQTT echo: telemetry confirms current setpoint %s", reported_temp)
+            e.async_write_ha_state()
 
     async def sensor_changed(self, was_none):
         """Handle temp sensor update."""
