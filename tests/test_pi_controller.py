@@ -121,7 +121,7 @@ class FakePIEntity:
 
     @property
     def temperature_unit(self):
-        return UnitOfTemperature.CELSIUS
+        return self._attr_temperature_unit
 
     async def set_mode(self, hvac_mode):
         self._attr_hvac_mode = hvac_mode
