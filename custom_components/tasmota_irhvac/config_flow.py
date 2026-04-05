@@ -31,6 +31,7 @@ from homeassistant.const import (
     PRECISION_HALVES,
     PRECISION_TENTHS,
     PRECISION_WHOLE,
+    UnitOfTemperature,
 )
 from homeassistant.core import callback
 from homeassistant.helpers.selector import (
@@ -199,6 +200,20 @@ DEFAULT_SWING_LIST = [SWING_OFF, SWING_VERTICAL]
 
 # Keys whose SelectSelector values need coercion from str to float
 _FLOAT_KEYS = (CONF_PRECISION, CONF_TEMP_STEP)
+
+
+def _delta_c_to_system(value_c: float, hass) -> float:
+    """Convert a temperature delta from °C to system unit for display."""
+    if hass.config.units.temperature_unit == UnitOfTemperature.FAHRENHEIT:
+        return round(value_c * 1.8, 2)
+    return value_c
+
+
+def _delta_system_to_c(value: float, hass) -> float:
+    """Convert a temperature delta from system unit to °C for storage."""
+    if hass.config.units.temperature_unit == UnitOfTemperature.FAHRENHEIT:
+        return round(value / 1.8, 4)
+    return value
 
 # Reusable selector configs
 _ON_OFF_SELECTOR = SelectSelectorConfig(
@@ -424,7 +439,7 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Tasmota IRHVAC."""
 
     VERSION = 1
-    MINOR_VERSION = 8  # normalize on/off toggles to lowercase
+    MINOR_VERSION = 9  # all temp values stored in system unit
 
     @classmethod
     @callback
@@ -1116,9 +1131,17 @@ class ModelInputSubentryFlow(ConfigSubentryFlow):
                 if (sub.subentry_type == SUBENTRY_MODEL_INPUT
                         and sub.unique_id == entity_id):
                     return self.async_abort(reason="already_configured")
+            # Convert seed deltas from system unit to °C for storage
+            data = dict(user_input)
+            for key in ("seed_heat", "seed_cool"):
+                if key in data and data[key] is not None:
+                    data[key] = _delta_system_to_c(float(data[key]), self.hass)
+            for key in ("clamp_min", "clamp_max"):
+                if key in data and data[key] is not None:
+                    data[key] = _delta_system_to_c(float(data[key]), self.hass)
             return self.async_create_entry(
-                title=user_input.get("name", "Model Input"),
-                data=user_input,
+                title=data.get("name", "Model Input"),
+                data=data,
                 unique_id=entity_id,
             )
 
@@ -1160,12 +1183,23 @@ class ModelInputSubentryFlow(ConfigSubentryFlow):
         subentry = self._get_reconfigure_subentry()
 
         if user_input is not None:
+            # Convert seed deltas from system unit to °C for storage
+            data = dict(user_input)
+            for key in ("seed_heat", "seed_cool", "clamp_min", "clamp_max"):
+                if key in data and data[key] is not None:
+                    data[key] = _delta_system_to_c(float(data[key]), self.hass)
             return self.async_update_reload_and_abort(
                 self._get_entry(),
                 subentry,
-                data=user_input,
-                title=user_input.get("name", subentry.title),
+                data=data,
+                title=data.get("name", subentry.title),
             )
+
+        # Convert stored °C values to system unit for display
+        display_data = dict(subentry.data)
+        for key in ("seed_heat", "seed_cool", "clamp_min", "clamp_max"):
+            if key in display_data and display_data[key] is not None:
+                display_data[key] = _delta_c_to_system(float(display_data[key]), self.hass)
 
         return self.async_show_form(
             step_id="reconfigure",
@@ -1177,10 +1211,10 @@ class ModelInputSubentryFlow(ConfigSubentryFlow):
                             EntitySelectorConfig(domain=["sensor", "binary_sensor", "input_boolean", "input_number", "climate"])
                         ),
                         vol.Optional("seed_heat", default=0.0): NumberSelector(
-                            NumberSelectorConfig(min=-20, max=20, step=0.01, mode=NumberSelectorMode.BOX)
+                            NumberSelectorConfig(min=-40, max=40, step=0.01, mode=NumberSelectorMode.BOX)
                         ),
                         vol.Optional("seed_cool", default=0.0): NumberSelector(
-                            NumberSelectorConfig(min=-20, max=20, step=0.01, mode=NumberSelectorMode.BOX)
+                            NumberSelectorConfig(min=-40, max=40, step=0.01, mode=NumberSelectorMode.BOX)
                         ),
                         vol.Optional("clamp_min"): NumberSelector(
                             NumberSelectorConfig(min=-50, max=50, step=0.1, mode=NumberSelectorMode.BOX)
@@ -1217,9 +1251,14 @@ class SupplementalSourceSubentryFlow(ConfigSubentryFlow):
                 if (sub.subentry_type == SUBENTRY_SUPPLEMENTAL_SOURCE
                         and sub.unique_id == entity_id):
                     return self.async_abort(reason="already_configured")
+            # Convert seed deltas from system unit to °C for storage
+            data = dict(user_input)
+            for key in (CONF_SUPPLEMENTAL_SEED_HEAT, CONF_SUPPLEMENTAL_SEED_COOL):
+                if key in data and data[key] is not None:
+                    data[key] = _delta_system_to_c(float(data[key]), self.hass)
             return self.async_create_entry(
-                title=user_input.get(CONF_SUPPLEMENTAL_NAME, "Supplemental Source"),
-                data=user_input,
+                title=data.get(CONF_SUPPLEMENTAL_NAME, "Supplemental Source"),
+                data=data,
                 unique_id=entity_id,
             )
 
@@ -1267,12 +1306,22 @@ class SupplementalSourceSubentryFlow(ConfigSubentryFlow):
         subentry = self._get_reconfigure_subentry()
 
         if user_input is not None:
+            data = dict(user_input)
+            for key in (CONF_SUPPLEMENTAL_SEED_HEAT, CONF_SUPPLEMENTAL_SEED_COOL):
+                if key in data and data[key] is not None:
+                    data[key] = _delta_system_to_c(float(data[key]), self.hass)
             return self.async_update_reload_and_abort(
                 self._get_entry(),
                 subentry,
-                data=user_input,
-                title=user_input.get(CONF_SUPPLEMENTAL_NAME, subentry.title),
+                data=data,
+                title=data.get(CONF_SUPPLEMENTAL_NAME, subentry.title),
             )
+
+        # Convert stored °C values to system unit for display
+        display_data = dict(subentry.data)
+        for key in (CONF_SUPPLEMENTAL_SEED_HEAT, CONF_SUPPLEMENTAL_SEED_COOL):
+            if key in display_data and display_data[key] is not None:
+                display_data[key] = _delta_c_to_system(float(display_data[key]), self.hass)
 
         return self.async_show_form(
             step_id="reconfigure",
@@ -1284,14 +1333,14 @@ class SupplementalSourceSubentryFlow(ConfigSubentryFlow):
                             EntitySelectorConfig(domain=["climate"])
                         ),
                         vol.Optional(
-                            CONF_SUPPLEMENTAL_SEED_HEAT, default=DEFAULT_SUPPLEMENTAL_SEED
+                            CONF_SUPPLEMENTAL_SEED_HEAT, default=_delta_c_to_system(DEFAULT_SUPPLEMENTAL_SEED, self.hass)
                         ): NumberSelector(
-                            NumberSelectorConfig(min=-20, max=20, step=0.1, mode=NumberSelectorMode.BOX)
+                            NumberSelectorConfig(min=-40, max=40, step=0.1, mode=NumberSelectorMode.BOX)
                         ),
                         vol.Optional(
                             CONF_SUPPLEMENTAL_SEED_COOL, default=0.0
                         ): NumberSelector(
-                            NumberSelectorConfig(min=-20, max=20, step=0.1, mode=NumberSelectorMode.BOX)
+                            NumberSelectorConfig(min=-40, max=40, step=0.1, mode=NumberSelectorMode.BOX)
                         ),
                         vol.Optional(
                             CONF_SUPPLEMENTAL_FAILURE_THRESHOLD,

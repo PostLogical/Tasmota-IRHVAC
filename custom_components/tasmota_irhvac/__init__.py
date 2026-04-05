@@ -211,6 +211,45 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry, data=new_data, options=new_options, minor_version=8, version=1,
         )
 
+    # v1.9: Convert remaining temp values from °C to system unit.
+    # v1.7 converted min/max/target/away. This covers deadband, FF references,
+    # and recovery_margin (supplemental sources).
+    if entry.version == 1 and entry.minor_version < 9:
+        from homeassistant.util.unit_conversion import TemperatureConverter
+        celsius_mode = entry.options.get("celsius_mode", entry.data.get("celsius_mode", "on"))
+        celsius_unit = (
+            UnitOfTemperature.CELSIUS if celsius_mode.lower() == "on"
+            else UnitOfTemperature.FAHRENHEIT
+        )
+        system_unit = hass.config.units.temperature_unit
+        if celsius_unit != system_unit:
+            new_options = {**entry.options}
+            new_data = {**entry.data}
+            # Absolute temperatures: convert using TemperatureConverter
+            abs_keys = ("pi_ff_heat_reference", "pi_ff_cool_reference")
+            # Temperature deltas: multiply by 1.8 for °C→°F (or /1.8 for °F→°C)
+            delta_keys = ("pi_deadband",)
+            for store in (new_data, new_options):
+                for key in abs_keys:
+                    if key in store and store[key] is not None:
+                        store[key] = round(TemperatureConverter.convert(
+                            float(store[key]), celsius_unit, system_unit
+                        ), 1)
+                for key in delta_keys:
+                    if key in store and store[key] is not None:
+                        old_val = float(store[key])
+                        if system_unit == UnitOfTemperature.FAHRENHEIT:
+                            store[key] = round(old_val * 1.8, 2)
+                        else:
+                            store[key] = round(old_val / 1.8, 2)
+            hass.config_entries.async_update_entry(
+                entry, data=new_data, options=new_options, minor_version=9, version=1,
+            )
+        else:
+            hass.config_entries.async_update_entry(
+                entry, minor_version=9, version=1,
+            )
+
     return True
 
 

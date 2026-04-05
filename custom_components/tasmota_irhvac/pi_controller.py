@@ -88,6 +88,20 @@ def _seed_buckets(reference, slope, is_cooling=False):
     return buckets
 
 
+def _delta_to_c(value, entity_unit):
+    """Convert a temperature delta from entity unit to °C."""
+    if entity_unit == UnitOfTemperature.FAHRENHEIT:
+        return value / 1.8
+    return value
+
+
+def _delta_to_display(value_c, entity_unit):
+    """Convert a temperature delta from °C to entity display unit."""
+    if entity_unit == UnitOfTemperature.FAHRENHEIT:
+        return value_c * 1.8
+    return value_c
+
+
 class RLSModel:
     """Recursive Least Squares feedforward model.
 
@@ -405,14 +419,21 @@ class PIController:
         self._pi_kd = config.get(CONF_PI_KD, DEFAULT_PI_KD)
         self._pi_kd_filter_n = config.get(CONF_PI_KD_FILTER_N, DEFAULT_PI_KD_FILTER_N)
         self._pi_min_interval = config.get(CONF_PI_MIN_INTERVAL, DEFAULT_PI_MIN_INTERVAL)
-        self._pi_deadband = config.get(CONF_PI_DEADBAND, DEFAULT_PI_DEADBAND)
+        # Deadband and FF references are stored in system unit; convert to °C for PI math
+        _deadband_raw = config.get(CONF_PI_DEADBAND, DEFAULT_PI_DEADBAND)
+        _heat_ref_raw = config.get(CONF_PI_FF_HEAT_REFERENCE, DEFAULT_PI_FF_HEAT_REFERENCE)
+        _cool_ref_raw = config.get(CONF_PI_FF_COOL_REFERENCE, DEFAULT_PI_FF_COOL_REFERENCE)
+        _unit = entity._attr_temperature_unit
+        self._pi_deadband = _delta_to_c(_deadband_raw, _unit)
+        self._ff_heat_reference = TemperatureConverter.convert(
+            _heat_ref_raw, _unit, UnitOfTemperature.CELSIUS)
+        self._ff_cool_reference = TemperatureConverter.convert(
+            _cool_ref_raw, _unit, UnitOfTemperature.CELSIUS)
         self._pi_setpoint_weight = config.get(CONF_PI_SETPOINT_WEIGHT, DEFAULT_PI_SETPOINT_WEIGHT)
 
         # Feedforward config
         self._outdoor_temp_sensor = config.get(CONF_OUTDOOR_TEMP_SENSOR)
-        self._ff_heat_reference = config.get(CONF_PI_FF_HEAT_REFERENCE, DEFAULT_PI_FF_HEAT_REFERENCE)
         self._ff_heat_slope = config.get(CONF_PI_FF_HEAT_SLOPE, DEFAULT_PI_FF_HEAT_SLOPE)
-        self._ff_cool_reference = config.get(CONF_PI_FF_COOL_REFERENCE, DEFAULT_PI_FF_COOL_REFERENCE)
         self._ff_cool_slope = config.get(CONF_PI_FF_COOL_SLOPE, DEFAULT_PI_FF_COOL_SLOPE)
 
         # FF learning config
@@ -892,9 +913,14 @@ class PIController:
         for m_input in self._model_inputs:
             coeff_names.append(m_input.get("name", "unknown"))
 
-        rls_heat_coeffs = {coeff_names[i]: round(self._rls_heat.beta[i], 4)
+        # Convert coefficients from °C to system unit for display
+        _unit = self._entity.temperature_unit
+        def _coeff_to_display(val):
+            return round(_delta_to_display(val, _unit), 4)
+
+        rls_heat_coeffs = {coeff_names[i]: _coeff_to_display(self._rls_heat.beta[i])
                           for i in range(min(len(coeff_names), len(self._rls_heat.beta)))}
-        rls_cool_coeffs = {coeff_names[i]: round(self._rls_cool.beta[i], 4)
+        rls_cool_coeffs = {coeff_names[i]: _coeff_to_display(self._rls_cool.beta[i])
                           for i in range(min(len(coeff_names), len(self._rls_cool.beta)))}
 
         return {
@@ -905,8 +931,8 @@ class PIController:
             "tracking_sources": self._tracking_sources,
             "supplemental_assist": self._supplemental_assist_active,
             ATTR_DESIRED_TEMP: self._desired_temp,
-            ATTR_FF_OFFSET: round(self._ff_offset, 2),
-            "ff_offset_buckets": round(self._ff_offset_buckets, 2),
+            ATTR_FF_OFFSET: round(_coeff_to_display(self._ff_offset), 2),
+            "ff_offset_buckets": round(_coeff_to_display(self._ff_offset_buckets), 2),
             ATTR_FF_HEAT_BUCKETS: {
                 str(k): round(v, 2) for k, v in self._ff_heat_buckets.items()
             },
@@ -1060,10 +1086,12 @@ class PIController:
             if s.get("name", "") in active_sources
         ) if active_sources else 900
 
-        recovery_margin = min(
+        recovery_margin_raw = min(
             s.get("recovery_margin", 0.3) for s in self._supplemental_sources
             if s.get("name", "") in active_sources
         ) if active_sources else 0.3
+        # Convert from system unit delta to °C for comparison with error_c
+        recovery_margin = _delta_to_c(recovery_margin_raw, self._entity._attr_temperature_unit)
 
         if error_c > self._pi_deadband:
             # Room is below desired
