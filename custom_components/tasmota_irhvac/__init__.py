@@ -1,11 +1,15 @@
 """The Tasmota IRHVAC integration."""
 
+from __future__ import annotations
+
 import asyncio
 import logging
+from typing import Any
 
+import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_ENTITY_ID, UnitOfTemperature
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.typing import ConfigType
@@ -50,7 +54,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Defer config issue checks to give other integrations time to load entities
     @callback
-    def _deferred_check(_now):
+    def _deferred_check(_now: Any) -> None:
         _check_config_issues(hass, entry)
 
     async_call_later(hass, 120, _deferred_check)
@@ -193,10 +197,10 @@ def _register_services(hass: HomeAssistant) -> None:
     if hass.services.has_service(DOMAIN, "set_econo"):
         return
 
-    async def async_service_handler(service):
+    async def async_service_handler(service: ServiceCall) -> None:
         """Map services to methods on TasmotaIrhvac."""
-        method = SERVICE_TO_METHOD.get(service.service, {})
-        params = {
+        method_info: dict[str, Any] = SERVICE_TO_METHOD.get(service.service, {})
+        params: dict[str, Any] = {
             key: value for key, value in service.data.items() if key != ATTR_ENTITY_ID
         }
         entity_ids = service.data.get(ATTR_ENTITY_ID)
@@ -207,13 +211,14 @@ def _register_services(hass: HomeAssistant) -> None:
                 if device.entity_id in entity_ids
             ]
         else:  # pragma: no cover — schema requires entity_id, defensive only
-            devices = hass.data[DATA_KEY].values()
+            devices = list(hass.data[DATA_KEY].values())
 
-        update_tasks = []
+        update_tasks: list[asyncio.Task[None]] = []
+        method_name: str = method_info["method"]
         for device in devices:
-            if not hasattr(device, method["method"]):  # pragma: no cover — defensive for vendor subclasses
+            if not hasattr(device, method_name):  # pragma: no cover — defensive for vendor subclasses
                 continue
-            await getattr(device, method["method"])(**params)
+            await getattr(device, method_name)(**params)
             update_tasks.append(
                 asyncio.create_task(device.async_update_ha_state(True))
             )
@@ -221,8 +226,8 @@ def _register_services(hass: HomeAssistant) -> None:
         if update_tasks:
             await asyncio.wait(update_tasks)
 
-    for irhvac_service, method_info in SERVICE_TO_METHOD.items():
-        schema = method_info.get("schema", IRHVAC_SERVICE_SCHEMA)
+    for irhvac_service in SERVICE_TO_METHOD:
+        svc_schema = SERVICE_TO_METHOD[irhvac_service].get("schema", IRHVAC_SERVICE_SCHEMA)
         hass.services.async_register(
-            DOMAIN, irhvac_service, async_service_handler, schema=schema
+            DOMAIN, irhvac_service, async_service_handler, schema=svc_schema  # type: ignore[arg-type]
         )
