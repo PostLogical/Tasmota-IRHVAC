@@ -803,25 +803,17 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                 self._attr_available = True if msg == "Online" else False
                 self.async_schedule_update_ha_state()
 
+        from .vendors.base import TopicSource
+
         @callback
         async def state_message_received(message: mqtt.ReceiveMessage) -> None:
-            """Handle new MQTT state messages."""
-            json_payload = json.loads(message.payload)
-            _LOGGER.debug(json_payload)
+            """Handle MQTT state from primary topic (tele)."""
+            await self._process_mqtt_state(message, is_stat_topic=False)
 
-            # If listening to `tele`, result looks like: {"IrReceived":{"Protocol":"XXX", ... ,"IRHVAC":{ ... }}}
-            # IrReceived wrapper = physical IR signal captured (physical remote).
-            # Without wrapper = command echo or periodic telemetry.
-            ir_received = "IrReceived" in json_payload
-            if ir_received:
-                json_payload = json_payload["IrReceived"]
-
-            # By now the payload must include an `IRHVAC` field.
-            if "IRHVAC" not in json_payload:
-                return
-
-            payload = json_payload["IRHVAC"]
-            await self._handle_state_payload(json_payload, payload, ir_received=ir_received)
+        @callback
+        async def stat_message_received(message: mqtt.ReceiveMessage) -> None:
+            """Handle MQTT state from stat topic (our command echo)."""
+            await self._process_mqtt_state(message, is_stat_topic=True)
 
         unsubscribe = []
         unsubscribe.append(
@@ -837,22 +829,57 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         if self.state_topic2:
             unsubscribe.append(
                 await mqtt.async_subscribe(
-                    self.hass, self.state_topic2, state_message_received
+                    self.hass, self.state_topic2, stat_message_received
                 )
             )
 
         return unsubscribe
 
-    async def _handle_state_payload(self, json_payload, payload, *, ir_received=False):
+    async def _process_mqtt_state(
+        self, message: mqtt.ReceiveMessage, *, is_stat_topic: bool
+    ) -> None:
+        """Classify MQTT message source and dispatch to state handler."""
+        from .vendors.base import TopicSource
+
+        json_payload = json.loads(message.payload)
+        _LOGGER.debug(json_payload)
+
+        # Classify topic source:
+        # - stat topic: always our command echo confirmation
+        # - tele + IrReceived wrapper: physical remote captured by blaster
+        # - tele without IrReceived: periodic telemetry or our command duplicate
+        ir_received = "IrReceived" in json_payload
+        if ir_received:
+            json_payload = json_payload["IrReceived"]
+
+        if is_stat_topic:
+            source = TopicSource.STAT_ECHO
+        elif ir_received:
+            source = TopicSource.TELE_REMOTE
+        else:
+            source = TopicSource.TELE_TELEMETRY
+
+        if "IRHVAC" not in json_payload:
+            return
+
+        payload = json_payload["IRHVAC"]
+        await self._handle_state_payload(
+            json_payload, payload,
+            ir_received=ir_received, source=source,
+        )
+
+    async def _handle_state_payload(self, json_payload, payload, *, ir_received=False, source=None):
         """Process IRHVAC state payload."""
         if payload["Vendor"] == self._vendor:
             # Build IRDecode + EntityState for vendor handler hooks
             from .vendors.base import IRDecode, EntityState
+            from .vendors.base import TopicSource
             decode = IRDecode(
                 irhvac=payload,
                 protocol=json_payload.get("Protocol"),
                 bits=json_payload.get("Bits"),
                 data=json_payload.get("Data"),
+                source=source or TopicSource.TELE_TELEMETRY,
             )
             entity_state = EntityState(
                 hvac_mode=self._attr_hvac_mode,
