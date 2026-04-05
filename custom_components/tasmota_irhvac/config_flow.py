@@ -429,7 +429,7 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Tasmota IRHVAC."""
 
     VERSION = 1
-    MINOR_VERSION = 3  # clean chain: v1.2 temp units, v1.3 toggle case
+    MINOR_VERSION = 2  # v1.2: temp unit conversion + toggle normalization
 
     @classmethod
     @callback

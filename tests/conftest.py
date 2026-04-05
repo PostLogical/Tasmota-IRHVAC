@@ -122,7 +122,7 @@ def setup_integration(hass, mqtt_mock, enable_custom_integrations):
             data=config,
             title=config.get("name", "Test AC"),
             version=1,
-            minor_version=3,
+            minor_version=2,
         )
         entry.add_to_hass(hass)
         assert await hass.config_entries.async_setup(entry.entry_id)
@@ -152,7 +152,7 @@ def setup_pi_integration(hass, mqtt_mock, enable_custom_integrations):
             data=config,
             title=config.get("name", "Test AC PI"),
             version=1,
-            minor_version=3,
+            minor_version=2,
         )
         entry.add_to_hass(hass)
         assert await hass.config_entries.async_setup(entry.entry_id)

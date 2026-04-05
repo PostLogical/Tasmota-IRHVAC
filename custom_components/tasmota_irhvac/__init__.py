@@ -58,27 +58,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 
-MINOR_VERSION = 3
+MINOR_VERSION = 2
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Migrate config entry to current version.
 
-    Clean migration chain for upstream (post config-flow).
-    Beta migrations (v1.2–v1.6, v1.9–v1.11) stripped.
+    Single migration for users coming from config-flow branch (v1.1).
+    Beta migrations (v1.2–v1.11) stripped — set minor_version=2 to skip.
     """
     _LOGGER.debug("Migrating config entry from version %s.%s", entry.version, entry.minor_version)
 
     if entry.version != 1:
         return True
 
-    new_data = {**entry.data}
-    new_options = {**entry.options}
-
-    # v1.2: Convert stored config temps from celsius_mode unit to system unit.
-    # Config flow stores temps in celsius_mode unit; entity expects system unit.
-    # Without this, double-conversion occurs when user edits via UI.
     if entry.minor_version < 2:
         from homeassistant.util.unit_conversion import TemperatureConverter
+
+        new_data = {**entry.data}
+        new_options = {**entry.options}
+
+        # Convert stored config temps from celsius_mode unit to system unit.
+        # Config flow stores temps in celsius_mode unit; entity expects system unit.
+        # Without this, double-conversion occurs when user edits via UI.
         celsius_mode = new_options.get("celsius_mode", new_data.get("celsius_mode", "on"))
         celsius_unit = (
             UnitOfTemperature.CELSIUS if celsius_mode.lower() == "on"
@@ -90,15 +91,13 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             for store in (new_data, new_options):
                 for key in temp_keys:
                     if key in store and store[key] is not None:
-                        old_val = store[key]
                         store[key] = round(TemperatureConverter.convert(
-                            float(old_val), celsius_unit, system_unit
+                            float(store[key]), celsius_unit, system_unit
                         ), 1)
             _LOGGER.info("Migrated config temps from %s to %s", celsius_unit, system_unit)
 
-    # v1.3: Normalize on/off toggle values to lowercase.
-    # Tasmota sends "On"/"Off" (capitalized) but selectors expect "on"/"off".
-    if entry.minor_version < 3:
+        # Normalize on/off toggle values to lowercase.
+        # Tasmota sends "On"/"Off" (capitalized) but selectors expect "on"/"off".
         toggle_keys = (
             "celsius_mode", "beep", "turbo", "quiet", "econo",
             "light", "filter", "clean", "sleep", "swingv", "swingh",
@@ -108,16 +107,17 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if key in store and isinstance(store[key], str):
                     store[key] = store[key].lower()
 
-    # Coerce precision/temp_step to float (config flow may store as string)
-    for store in (new_data, new_options):
-        for key in ("precision", "temp_step"):
-            if key in store and isinstance(store[key], str):
-                store[key] = float(store[key])
+        # Coerce precision/temp_step to float (config flow may store as string)
+        for store in (new_data, new_options):
+            for key in ("precision", "temp_step"):
+                if key in store and isinstance(store[key], str):
+                    store[key] = float(store[key])
 
-    hass.config_entries.async_update_entry(
-        entry, data=new_data, options=new_options,
-        minor_version=MINOR_VERSION, version=1,
-    )
+        hass.config_entries.async_update_entry(
+            entry, data=new_data, options=new_options,
+            minor_version=MINOR_VERSION, version=1,
+        )
+
     return True
 
 
