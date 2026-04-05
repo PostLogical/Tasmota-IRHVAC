@@ -174,6 +174,7 @@ class TestConfigFlowImport:
         assert result["reason"] == "already_configured"
 
     @pytest.mark.asyncio
+    @pytest.mark.skip(reason="beta migration removed — suppress/bias→disturbance_inputs no longer exists")
     async def test_import_transforms_legacy_keys(self, hass, mqtt_mock, enable_custom_integrations):
         """Import should transform legacy suppress/bias entities to disturbance inputs."""
         config = make_config({

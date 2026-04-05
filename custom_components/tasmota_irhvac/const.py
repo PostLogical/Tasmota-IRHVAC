@@ -199,14 +199,9 @@ CONF_PI_FF_HEAT_REFERENCE = "pi_ff_heat_reference"
 CONF_PI_FF_HEAT_SLOPE = "pi_ff_heat_slope"
 CONF_PI_FF_COOL_REFERENCE = "pi_ff_cool_reference"
 CONF_PI_FF_COOL_SLOPE = "pi_ff_cool_slope"
-CONF_PI_FF_SUPPRESS_LEARNING_ENTITY = "pi_ff_suppress_learning_entity"  # Legacy (v1.2)
-CONF_PI_FF_BIAS_ENTITY = "pi_ff_bias_entity"  # Legacy (v1.2)
-CONF_PI_DISTURBANCE_INPUTS = "pi_disturbance_inputs"
 CONF_PI_SETPOINT_WEIGHT = "pi_setpoint_weight"
 CONF_PI_FF_LEARN_NIGHT_ONLY = "pi_ff_learn_night_only"
 CONF_PI_FF_LEARN_SUNSET_DELAY = "pi_ff_learn_sunset_delay"
-CONF_PI_FF_ANTICIPATED_CHANGE_ENTITY = "pi_ff_anticipated_change_entity"
-CONF_PI_FF_ANTICIPATED_CHANGE_GAIN = "pi_ff_anticipated_change_gain"
 CONF_PI_MODEL_INPUTS = "pi_model_inputs"
 
 # Subentry types

@@ -11,7 +11,6 @@ from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.typing import ConfigType
 
 from .const import (
-    CONF_PI_DISTURBANCE_INPUTS,
     CONF_PI_ENABLED,
     CONF_OUTDOOR_TEMP_SENSOR,
     DATA_KEY,

@@ -27,13 +27,15 @@ class TestEntitySetup:
         assert state.state == "off"  # initial_operation_mode
 
     @pytest.mark.asyncio
-    async def test_setup_fujitsu_creates_subclass(self, hass, setup_integration):
-        """Fujitsu vendor should create FujitsuTasmotaIrhvac instance."""
+    async def test_setup_fujitsu_uses_handler(self, hass, setup_integration):
+        """Fujitsu vendor should use FujitsuHandler via composition."""
+        from custom_components.tasmota_irhvac.vendors.fujitsu import FujitsuHandler
         entry = await setup_integration({"vendor": "FUJITSU_AC"})
 
         entity = get_climate_entity(hass, entry)
         assert entity is not None
-        assert type(entity).__name__ == "FujitsuTasmotaIrhvac"
+        assert type(entity).__name__ == "TasmotaIrhvac"
+        assert isinstance(entity._vendor_handler, FujitsuHandler)
 
     @pytest.mark.asyncio
     async def test_setup_non_fujitsu_creates_base(self, hass, setup_integration):

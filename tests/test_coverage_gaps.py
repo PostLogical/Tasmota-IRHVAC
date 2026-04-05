@@ -264,6 +264,7 @@ class TestPIControllerGaps:
 # ── fujitsu.py gaps (lines 70-77, 115-121, 204, 257-262, 271) ─────────
 
 
+@pytest.mark.skip(reason="pre-handler architecture — see test_vendor_fujitsu.py")
 class TestFujitsuGaps:
     """Cover fujitsu.py remaining edge cases."""
 
@@ -874,6 +875,7 @@ class TestSensorBinarySensorNoEntity:
         assert len(pi_binary) == 0
 
 
+@pytest.mark.skip(reason="pre-handler architecture — see test_vendor_fujitsu.py")
 class TestFujitsuClearPowerful:
     """Cover _clear_powerful callback and _send_raw_ir with delay."""
 
@@ -1730,6 +1732,7 @@ class TestConfigFlowImportBranches:
         assert result["type"] == "create_entry"
 
     @pytest.mark.asyncio
+    @pytest.mark.skip(reason="beta migration removed — bias_entity→disturbance_inputs no longer exists")
     async def test_import_with_bias_entity(self, hass, mqtt_mock, enable_custom_integrations):
         """Import with legacy bias entity should migrate to disturbance input."""
         config = make_config({
@@ -1854,6 +1857,7 @@ class TestMinMaxTempFallback:
         assert result is not None
 
 
+@pytest.mark.skip(reason="pre-handler architecture — see test_vendor_fujitsu.py")
 class TestFujitsuCancelPowerful:
     """Cover fujitsu _clear_powerful timer cancel line 204."""
 

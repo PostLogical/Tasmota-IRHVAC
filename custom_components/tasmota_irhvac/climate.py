@@ -60,6 +60,7 @@ from homeassistant.const import (
 )
 from homeassistant.core import cached_property, callback
 from homeassistant.helpers import event as ha_event
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.util.unit_conversion import TemperatureConverter
@@ -87,8 +88,6 @@ from .const import (
     CONF_PI_ENABLED,
     CONF_PI_FF_COOL_REFERENCE,
     CONF_PI_FF_COOL_SLOPE,
-    CONF_PI_FF_SUPPRESS_LEARNING_ENTITY,
-    CONF_PI_FF_BIAS_ENTITY,
     CONF_PI_FF_HEAT_REFERENCE,
     CONF_PI_FF_HEAT_SLOPE,
     CONF_PI_KI,
@@ -303,8 +302,6 @@ PLATFORM_SCHEMA = CLIMATE_PLATFORM_SCHEMA.extend(
         vol.Optional(CONF_PI_FF_HEAT_SLOPE, default=DEFAULT_PI_FF_HEAT_SLOPE): vol.Coerce(float),
         vol.Optional(CONF_PI_FF_COOL_REFERENCE, default=DEFAULT_PI_FF_COOL_REFERENCE): vol.Coerce(float),
         vol.Optional(CONF_PI_FF_COOL_SLOPE, default=DEFAULT_PI_FF_COOL_SLOPE): vol.Coerce(float),
-        vol.Optional(CONF_PI_FF_SUPPRESS_LEARNING_ENTITY): cv.entity_id,
-        vol.Optional(CONF_PI_FF_BIAS_ENTITY): cv.entity_id,
         vol.Optional(CONF_PI_SETPOINT_WEIGHT, default=DEFAULT_PI_SETPOINT_WEIGHT): vol.All(
             vol.Coerce(float), vol.Range(min=0.0, max=1.0)
         ),
@@ -506,18 +503,16 @@ async def async_setup_entry(hass, entry, async_add_entities):
             config[CONF_PI_MODEL_INPUTS] = model_inputs_from_subentries
         config["pi_supplemental_sources"] = supplemental_sources
 
-    vendor = config.get(CONF_VENDOR)
-    if vendor is None:
-        vendor = config.get(CONF_PROTOCOL)
-    if vendor is None:
+    from .config_model import IrhvacConfig
+    from .vendors import get_handler
+
+    irhvac_config = IrhvacConfig.from_config_dict(config)
+
+    if not irhvac_config.vendor:
         _LOGGER.error("No vendor configured for %s", entry.title)
         return False
 
-    if vendor and vendor.upper().startswith("FUJITSU"):
-        from .fujitsu import FujitsuTasmotaIrhvac
-        entity = FujitsuTasmotaIrhvac(hass, vendor, config)
-    else:
-        entity = TasmotaIrhvac(hass, vendor, config)
+    entity = TasmotaIrhvac(hass, irhvac_config, get_handler(irhvac_config.vendor))
 
     if entity.unique_id is None:
         entity._attr_unique_id = entry.entry_id
@@ -542,70 +537,80 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
     def __init__(
         self,
         hass,
-        vendor,
         config,
+        vendor_handler=None,
     ):
-        """Initialize the thermostat."""
-        self.topic = config.get(CONF_COMMAND_TOPIC)
+        """Initialize the thermostat.
+
+        Args:
+            hass: Home Assistant instance.
+            config: IrhvacConfig (frozen dataclass) or raw dict (legacy/tests).
+            vendor_handler: VendorHandler instance (from registry).
+        """
+        from .vendors.base import VendorHandler
+        from .config_model import IrhvacConfig
+
+        # Accept both IrhvacConfig and raw dict (for backward compat in tests)
+        if isinstance(config, dict):
+            cfg = IrhvacConfig.from_config_dict(config)
+            raw_config = config
+        else:
+            cfg = config
+            raw_config = cfg.pi_raw_config
+
+        self._vendor_handler = vendor_handler or VendorHandler()
+        self.topic = cfg.command_topic
         self.hass = hass
-        self._vendor = vendor
-        self._temp_sensor = config.get(CONF_TEMP_SENSOR)
-        self._humidity_sensor = config.get(CONF_HUMIDITY_SENSOR)
-        self._power_sensor = config.get(CONF_POWER_SENSOR)
-        self.state_topic = config[CONF_STATE_TOPIC]
-        self.state_topic2 = config.get(CONF_STATE_TOPIC_2) or config.get(CONF_STATE_TOPIC + "_2")
-        self._away_temp = config.get(CONF_AWAY_TEMP)
-        self._saved_target_temp = config[CONF_TARGET_TEMP] or self._away_temp
-        self._temp_precision = config[CONF_PRECISION]
+        self._vendor = cfg.vendor
+        self._temp_sensor = cfg.temp_sensor
+        self._humidity_sensor = cfg.humidity_sensor
+        self._power_sensor = cfg.power_sensor
+        self.state_topic = cfg.state_topic
+        self.state_topic2 = cfg.state_topic_2
+        self._away_temp = cfg.away_temp
+        self._saved_target_temp = cfg.target_temp or cfg.away_temp
+        self._temp_precision = cfg.precision
         self._enabled = False
         self.power_mode = None
         self._active = False
-        self._mqtt_delay = config[CONF_MQTT_DELAY]
-        self._min_temp = config[CONF_MIN_TEMP]
-        self._max_temp = config[CONF_MAX_TEMP]
-        self._def_target_temp = config[CONF_TARGET_TEMP]
+        self._mqtt_delay = cfg.mqtt_delay
+        self._min_temp = cfg.min_temp
+        self._max_temp = cfg.max_temp
+        self._def_target_temp = cfg.target_temp
         self._is_away = False
-        self._modes_list = config[CONF_MODES_LIST]
-        self._quiet = config[CONF_QUIET].lower()
-        self._turbo = config[CONF_TURBO].lower()
-        self._econo = config[CONF_ECONO].lower()
-        self._model = config[CONF_MODEL]
-        self._celsius = config[CONF_CELSIUS]
-        self._light = config[CONF_LIGHT].lower()
-        self._filter = config[CONF_FILTER].lower()
-        self._clean = config[CONF_CLEAN].lower()
-        self._beep = config[CONF_BEEP].lower()
-        self._sleep = config[CONF_SLEEP].lower()
+        self._modes_list = cfg.modes_list
+        self._quiet = cfg.quiet
+        self._turbo = cfg.turbo
+        self._econo = cfg.econo
+        self._model = cfg.model
+        self._celsius = cfg.celsius_mode
+        self._light = cfg.light
+        self._filter = cfg.filter
+        self._clean = cfg.clean
+        self._beep = cfg.beep
+        self._sleep = cfg.sleep
         self._sub_state = None
-        self._keep_mode = config[CONF_KEEP_MODE]
+        self._keep_mode = cfg.keep_mode
         self._last_on_mode = None
-        self._swingv = (
-            config.get(CONF_SWINGV).lower()
-            if config.get(CONF_SWINGV) is not None
-            else None
-        )
-        self._swingh = (
-            config.get(CONF_SWINGH).lower()
-            if config.get(CONF_SWINGH) is not None
-            else None
-        )
+        self._swingv = cfg.swingv
+        self._swingh = cfg.swingh
         self._fix_swingv = None
         self._fix_swingh = None
-        self._toggle_list = config[CONF_TOGGLE_LIST]
+        self._toggle_list = cfg.toggle_list
         self._state_mode = DEFAULT_STATE_MODE
-        self._ignore_off_temp = config[CONF_IGNORE_OFF_TEMP]
-        self._special_mode = config[CONF_SPECIAL_MODE]
+        self._ignore_off_temp = cfg.ignore_off_temp
+        self._special_mode = cfg.special_mode
         self._use_track_state_change_event = False
         self._unsubscribes = []
 
-        self.availability_topic = config.get(CONF_AVAILABILITY_TOPIC)
-        if (self.availability_topic) is None:
+        self.availability_topic = cfg.availability_topic
+        if self.availability_topic is None:
             path = self.topic.split("/")
             self.availability_topic = "tele/" + path[1] + "/LWT"
 
         # Set _attr_*
-        self._attr_unique_id = config.get(CONF_UNIQUE_ID)
-        self._attr_name = config.get(CONF_NAME)
+        self._attr_unique_id = cfg.unique_id
+        self._attr_name = cfg.name
         self._attr_should_poll = False
         # Entity temperature unit = HA system unit (what the user sees).
         # celsius_mode only controls the IR protocol encoding, not the HA-facing unit.
@@ -617,30 +622,20 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         )
         # Config temps are stored in system unit after v1.7 migration.
         # No runtime conversion needed.
-        self._attr_hvac_mode = config.get(CONF_INITIAL_OPERATION_MODE)
-        self._attr_target_temperature_step = config[CONF_TEMP_STEP]
-        self._attr_hvac_modes = config[CONF_MODES_LIST]
-        self._attr_fan_modes = config.get(CONF_FAN_LIST)
-        if (
-            isinstance(self._attr_fan_modes, list)
-            and HVAC_FAN_MAX_HIGH in self._attr_fan_modes
-            and HVAC_FAN_AUTO_MAX in self._attr_fan_modes
-        ):
-            new_fan_list = []
-            for val in self._attr_fan_modes:
-                if val == HVAC_FAN_MAX_HIGH:
-                    new_fan_list.append(FAN_HIGH)
-                elif val == HVAC_FAN_AUTO_MAX:
-                    new_fan_list.append(HVAC_FAN_MAX)
-                else:
-                    new_fan_list.append(val)
-            self._attr_fan_modes = new_fan_list if len(new_fan_list) else None
+        self._attr_hvac_mode = cfg.initial_operation_mode
+        self._attr_target_temperature_step = cfg.temp_step
+        self._attr_hvac_modes = cfg.modes_list
+        self._attr_fan_modes = cfg.fan_list
+        if isinstance(self._attr_fan_modes, list):
+            self._attr_fan_modes = self._vendor_handler.transform_fan_modes(
+                self._attr_fan_modes
+            ) or None
         self._attr_fan_mode = (
             self._attr_fan_modes[0]
             if isinstance(self._attr_fan_modes, list) and len(self._attr_fan_modes)
             else None
         )
-        self._attr_swing_modes = config.get(CONF_SWING_LIST)
+        self._attr_swing_modes = cfg.swing_list
         self._attr_swing_mode = (
             self._attr_swing_modes[0]
             if isinstance(self._attr_swing_modes, list) and len(self._attr_swing_modes)
@@ -656,12 +651,11 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             self._support_flags = self._support_flags | ClimateEntityFeature.SWING_MODE
 
         # Build preset list from base (Away) + vendor config, deduplicated
-        preset_modes_from_config = config.get(CONF_PRESET_MODES_LIST)
         presets = [PRESET_NONE]
         if self._away_temp:
             presets.append(PRESET_AWAY)
-        if preset_modes_from_config:
-            presets.extend(preset_modes_from_config)
+        if cfg.preset_modes_list:
+            presets.extend(cfg.preset_modes_list)
         # Deduplicate while preserving order
         seen = set()
         unique_presets = []
@@ -670,9 +664,8 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                 seen.add(mode)
                 unique_presets.append(mode)
         # Add IR action presets from config
-        ir_actions = config.get(CONF_IR_ACTIONS, [])
         self._ir_action_presets = {}
-        for action in ir_actions:
+        for action in cfg.ir_actions:
             if action.get("type") == "preset":
                 name = action["name"]
                 if name not in seen:
@@ -687,7 +680,8 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             self._attr_preset_modes = None
 
         # Initialize PI controller (composed object, gated by pi_enabled config)
-        self._pi = PIController(self, config) if config.get(CONF_PI_ENABLED) else None
+        # PI still uses raw config dict — will be converted in a future step
+        self._pi = PIController(self, raw_config) if cfg.pi_enabled else None
 
     async def async_added_to_hass(self):
         def regist_track_state_change_event(entity_id):
@@ -740,6 +734,14 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                 self._fix_swingv = self._swingv
             if self._swingh != "auto":
                 self._fix_swingh = self._swingh
+
+        # Let vendor handler restore its state from the previous preset
+        restored_preset = (
+            old_state.attributes.get(ATTR_PRESET_MODE) if old_state else None
+        )
+        self._vendor_handler.on_restore_state(restored_preset)
+        if self._vendor_handler.should_pause_controller and self._pi:
+            self._pi.pi_pause()
 
         # No previous target temperature, try and restore defaults
         if self._attr_target_temperature is None or self._attr_target_temperature < 1:
@@ -838,8 +840,26 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         return unsubscribe
 
     async def _handle_state_payload(self, json_payload, payload):
-        """Process IRHVAC state payload. Subclasses may override."""
+        """Process IRHVAC state payload."""
         if payload["Vendor"] == self._vendor:
+            # Build IRDecode + EntityState for vendor handler hooks
+            from .vendors.base import IRDecode, EntityState
+            decode = IRDecode(
+                irhvac=payload,
+                protocol=json_payload.get("Protocol"),
+                bits=json_payload.get("Bits"),
+                data=json_payload.get("Data"),
+            )
+            entity_state = EntityState(
+                hvac_mode=self._attr_hvac_mode,
+                target_temperature=self._attr_target_temperature,
+                fan_mode=self._attr_fan_mode,
+                swing_mode=self._attr_swing_mode,
+                swingv=self._swingv,
+                swingh=self._swingh,
+                power_mode=self.power_mode,
+            )
+            self._vendor_handler.pre_state_processing(decode, entity_state)
             # All values in the payload are Optional
             prev_power = self.power_mode
             if "Power" in payload:
@@ -962,6 +982,11 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             for key in self._toggle_list:
                 setattr(self, "_" + key.lower(), "off")
 
+            # Vendor handler post-processing (preset detection, 56-bit, etc.)
+            self._vendor_handler.post_state_processing(decode)
+
+            self._apply_vendor_handler_state()
+
             # PI controller: restore desired temp over HP setpoint, handle echo
             # PI handler writes state itself (with corrected target_temperature)
             if self._pi:
@@ -984,8 +1009,83 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                 )
                 await self._async_power_sensor_changed(None, state, is_special_mode)
 
+    # ── Vendor handler helpers ───────────────────────────────────────
+
+    def _apply_vendor_state_restore(self):
+        """Apply state_restore from vendor handler to entity attributes."""
+        restore = self._vendor_handler.state_restore
+        if restore is None:
+            return
+        if restore.hvac_mode is not None:
+            self._attr_hvac_mode = restore.hvac_mode
+        if restore.target_temperature is not None:
+            temp = restore.target_temperature
+            if self._celsius_unit != self._attr_temperature_unit:
+                temp = TemperatureConverter.convert(
+                    temp, UnitOfTemperature.CELSIUS,
+                    self._attr_temperature_unit,
+                )
+            self._attr_target_temperature = temp
+        if restore.fan_mode is not None:
+            self._attr_fan_mode = restore.fan_mode
+        if restore.swing_mode is not None:
+            self._attr_swing_mode = restore.swing_mode
+        # swingv/swingh: always apply from restore (None means "clear")
+        self._swingv = restore.swingv
+        self._swingh = restore.swingh
+        if restore.power_mode is not None:
+            self.power_mode = restore.power_mode
+
+    def _apply_vendor_handler_state(self):
+        """Read vendor handler properties and apply to entity state."""
+        if self._vendor_handler.active_preset is not None:
+            self._attr_preset_mode = self._vendor_handler.active_preset
+        self._apply_vendor_state_restore()
+        if self._vendor_handler.clear_toggles:
+            self._econo = "off"
+            self._turbo = "off"
+            self._clean = "off"
+        if self._vendor_handler.should_pause_controller and self._pi:
+            self._pi.pi_pause()
+        elif not self._vendor_handler.should_pause_controller and self._pi:
+            self._pi.pi_resume()
+        if self._vendor_handler.should_reset_integral and self._pi:
+            self._pi.pi_reset_integral()
+
+    async def _send_raw_ir(self, raw_code):
+        """Send a raw IR code via Tasmota's IRSend command."""
+        path = self.topic.split("/")
+        irsend_topic = f"cmnd/{path[1]}/irsend"
+        if float(self._mqtt_delay) != 0.0:
+            await asyncio.sleep(float(self._mqtt_delay))
+        await mqtt.async_publish(self.hass, irsend_topic, raw_code)
+
+    def _schedule_vendor_timer(self, timer_request):
+        """Schedule a vendor handler timer callback."""
+        # Cancel any existing vendor timer
+        if hasattr(self, "_vendor_timer_unsub") and self._vendor_timer_unsub:
+            self._vendor_timer_unsub()
+
+        @callback
+        def _on_vendor_timer(_now=None):
+            self._vendor_timer_unsub = None
+            self._vendor_handler.on_timer(timer_request.callback_id)
+            # Apply handler state after timer fires
+            if self._vendor_handler.active_preset is not None:
+                self._attr_preset_mode = self._vendor_handler.active_preset
+            if not self._vendor_handler.should_pause_controller and self._pi:
+                self._pi.pi_resume()
+            self.async_schedule_update_ha_state()
+
+        self._vendor_timer_unsub = async_call_later(
+            self.hass, timer_request.delay_seconds, _on_vendor_timer
+        )
+
     async def async_will_remove_from_hass(self):
         """Unsubscribe when removed."""
+        if hasattr(self, "_vendor_timer_unsub") and self._vendor_timer_unsub:
+            self._vendor_timer_unsub()
+            self._vendor_timer_unsub = None
         if self._pi:
             self._pi.async_will_remove_from_hass()
         for unsubscribe in self._unsubscribes:
@@ -1390,6 +1490,32 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             if old_action.get("pause_pi") and self._pi:
                 self._pi.pi_resume()
 
+        # Vendor-specific preset handling
+        from .vendors.base import EntityState
+        vendor_entity_state = EntityState(
+            hvac_mode=self._attr_hvac_mode,
+            target_temperature=self._attr_target_temperature,
+            fan_mode=self._attr_fan_mode,
+            swing_mode=self._attr_swing_mode,
+            swingv=self._swingv,
+            swingh=self._swingh,
+            power_mode=self.power_mode,
+        )
+        vendor_result = await self._vendor_handler.handle_preset(
+            preset_mode, vendor_entity_state, self._send_raw_ir,
+        )
+        if vendor_result is not None:
+            # Handler fully owned this preset
+            self._apply_vendor_handler_state()
+            if vendor_result.timer_request:
+                self._schedule_vendor_timer(vendor_result.timer_request)
+            self.async_schedule_update_ha_state()
+            return
+
+        # PRESET_NONE from vendor handler clears its flags but falls through
+        # to base logic for AWAY→NONE handling and send_ir
+        self._apply_vendor_handler_state()
+
         if preset_mode == PRESET_AWAY and not self._is_away:
             self._is_away = True
             self._saved_target_temp = self._attr_target_temperature
@@ -1492,15 +1618,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
 
     async def send_ir(self):
         """Send the payload to tasmota mqtt topic."""
-        fan_speed = self.fan_mode
-        # tweak for some ELECTRA_AC devices
-        if HVAC_FAN_MAX_HIGH in (self._attr_fan_modes or []) and HVAC_FAN_AUTO_MAX in (  # pragma: no cover — upstream bug #184
-            self._attr_fan_modes or []
-        ):
-            if self.fan_mode == FAN_HIGH:
-                fan_speed = HVAC_FAN_MAX
-            if self.fan_mode == HVAC_FAN_MAX:
-                fan_speed = HVAC_FAN_AUTO
+        fan_speed = self._vendor_handler.remap_fan_to_ir(self.fan_mode)
 
         # Set the swing mode - default off
         self._swingv = STATE_OFF if self._fix_swingv is None else self._fix_swingv
