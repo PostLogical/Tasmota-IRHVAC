@@ -2198,3 +2198,74 @@ class TestRecoveryTickDedup:
         # Should run the tick → sends IR
         entity.send_ir.assert_called()
 
+
+# ── Anti-windup: negative integral clamp (L1235-1236) ────────────────
+
+
+class TestAntiWindupNegativeClamp:
+    """Test anti-windup clamping when raw setpoint is below min temp."""
+
+    @pytest.mark.asyncio
+    async def test_negative_integral_clamped_at_min_temp(self):
+        """When cooling drives setpoint below min_temp, negative integral is clamped."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        # Set up cooling mode with large negative integral pushing below min_temp
+        entity._attr_hvac_mode = HVACMode.COOL
+        entity._attr_current_temperature = 18.0  # Well below desired
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22.0
+        # Large negative integral that would push raw_setpoint below min_temp (16)
+        pi._pi_integral = -50000.0
+
+        await pi._pi_tick()
+
+        # Integral should be clamped (less negative than -50000)
+        assert pi._pi_integral > -50000.0
+        # Setpoint should be at min_temp, not below
+        assert pi._hp_setpoint >= pi._min_temp_c
+
+
+# ── Tracking mode: IR suppressed on setpoint change (L1272) ─────────
+
+
+class TestTrackingModeIRSuppressed:
+    """Test that setpoint changes in tracking mode don't send IR."""
+
+    @pytest.mark.asyncio
+    async def test_tracking_mode_suppresses_ir_send(self):
+        """When supplemental is active (tracking mode), setpoint updates but no IR sent."""
+        config = make_pi_config({
+            "pi_supplemental_sources": [{
+                "name": "Pellet Stove",
+                "entity_id": "climate.pellet_stove",
+                "failure_threshold": 900,
+                "recovery_margin": 0.3,
+                "auto_model_input": False,
+            }],
+        })
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        # Set up state
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 19.0
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22.0
+
+        # Simulate supplemental active → tracking mode
+        state = MagicMock()
+        state.state = "heat"
+        entity.hass.states.get.return_value = state
+        pi._tracking_mode = True
+        pi._tracking_sources = ["Pellet Stove"]
+
+        entity.send_ir.reset_mock()
+        await pi._pi_tick()
+
+        # Setpoint should have been computed (error > 0 → setpoint > 22)
+        # but IR should NOT be sent (tracking mode suppresses)
+        entity.send_ir.assert_not_called()
+
