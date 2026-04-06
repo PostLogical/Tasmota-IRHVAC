@@ -258,6 +258,40 @@ class TestFujitsu56Bit:
 
         assert h.state_restore.swing_mode == SWING_OFF
 
+    def test_set_v_noop_when_swing_off(self):
+        """Vane set V with swing_mode=OFF keeps OFF."""
+        h = FujitsuHandler()
+        state = _entity_state(swing_mode=SWING_OFF)
+        decode = _model3_decode(FUJITSU_DATA_SET_V)
+        h.pre_state_processing(decode, state)
+        h.post_state_processing(decode)
+
+        assert h.state_restore.swing_mode == SWING_OFF
+
+    def test_set_h_noop_when_swing_off(self):
+        """Vane set H with swing_mode=OFF keeps OFF."""
+        h = FujitsuHandler()
+        state = _entity_state(swing_mode=SWING_OFF)
+        decode = _model3_decode(FUJITSU_DATA_SET_H)
+        h.pre_state_processing(decode, state)
+        h.post_state_processing(decode)
+
+        assert h.state_restore.swing_mode == SWING_OFF
+
+    def test_set_v_noop_when_no_state_restore(self):
+        """Vane set V is a no-op when _state_restore is None."""
+        h = FujitsuHandler()
+        h._state_restore = None
+        h._apply_vane_set_v()
+        assert h.state_restore is None
+
+    def test_set_h_noop_when_no_state_restore(self):
+        """Vane set H is a no-op when _state_restore is None."""
+        h = FujitsuHandler()
+        h._state_restore = None
+        h._apply_vane_set_h()
+        assert h.state_restore is None
+
     def test_non_model3_ignores_data_field(self):
         """Non-Model 3 payloads shouldn't trigger 56-bit detection."""
         h = FujitsuHandler()

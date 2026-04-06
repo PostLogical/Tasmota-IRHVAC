@@ -43,6 +43,11 @@ class TestGetHandler:
 class TestGetHandlerClass:
     """Class-level lookup for capabilities() before instantiation."""
 
+    def test_exact_match_returns_class(self):
+        """Exact registry key returns the handler class."""
+        cls = get_handler_class("FUJITSU")
+        assert cls is FujitsuHandler
+
     def test_returns_class_not_instance(self):
         cls = get_handler_class("FUJITSU_AC")
         assert cls is FujitsuHandler
@@ -50,6 +55,15 @@ class TestGetHandlerClass:
     def test_unknown_returns_base(self):
         cls = get_handler_class("UNKNOWN_VENDOR")
         assert cls is VendorHandler
+
+    def test_prefix_match_returns_best(self):
+        """Vendor like FUJITSU_AC264 should match FUJITSU_AC prefix."""
+        cls = get_handler_class("FUJITSU_AC264")
+        assert cls is FujitsuHandler
+
+    def test_prefix_match_case_insensitive(self):
+        cls = get_handler_class("fujitsu_ac264")
+        assert cls is FujitsuHandler
 
 
 class TestKnownVendors:

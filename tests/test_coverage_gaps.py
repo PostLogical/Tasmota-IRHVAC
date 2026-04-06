@@ -2921,3 +2921,1043 @@ class TestSeedChangeDetection:
         pi._apply_seed_changes([], [0.0, 0.3], pi._rls_heat)
 
         assert pi._rls_heat.beta[1] == 0.42  # Unchanged
+
+
+# ── config_model.py lines 81-84: legacy celsius_mode fallback ────────
+
+
+class TestConfigModelLegacyCelsius:
+    """Cover _parse_ir_protocol_unit legacy fallback path."""
+
+    def test_legacy_celsius_on_returns_celsius(self):
+        """Legacy celsius_mode='on' should return 'celsius'."""
+        from custom_components.tasmota_irhvac.config_model import _parse_ir_protocol_unit
+        config = {"celsius_mode": "on"}
+        assert _parse_ir_protocol_unit(config) == "celsius"
+
+    def test_legacy_celsius_off_returns_fahrenheit(self):
+        """Legacy celsius_mode='off' should return 'fahrenheit'."""
+        from custom_components.tasmota_irhvac.config_model import _parse_ir_protocol_unit
+        config = {"celsius_mode": "off"}
+        assert _parse_ir_protocol_unit(config) == "fahrenheit"
+
+    def test_no_key_defaults_to_celsius(self):
+        """No ir_protocol_unit or celsius_mode should default to 'celsius'."""
+        from custom_components.tasmota_irhvac.config_model import _parse_ir_protocol_unit
+        config = {}
+        assert _parse_ir_protocol_unit(config) == "celsius"
+
+    def test_new_key_takes_priority_over_legacy(self):
+        """When both keys present, ir_protocol_unit wins."""
+        from custom_components.tasmota_irhvac.config_model import _parse_ir_protocol_unit
+        config = {"ir_protocol_unit": "fahrenheit", "celsius_mode": "on"}
+        assert _parse_ir_protocol_unit(config) == "fahrenheit"
+
+    def test_legacy_celsius_string_returns_celsius(self):
+        """Legacy celsius_mode='celsius' should also return 'celsius'."""
+        from custom_components.tasmota_irhvac.config_model import _parse_ir_protocol_unit
+        config = {"celsius_mode": "celsius"}
+        assert _parse_ir_protocol_unit(config) == "celsius"
+
+
+# ── controller_protocol.py line 141: NullController.get_ir_temp ──────
+
+
+class TestNullControllerGetIrTemp:
+    """Cover NullController.get_ir_temp raising RuntimeError."""
+
+    def test_get_ir_temp_raises_runtime_error(self):
+        """Calling get_ir_temp on NullController should raise RuntimeError."""
+        from custom_components.tasmota_irhvac.controller_protocol import NullController
+        controller = NullController()
+        with pytest.raises(RuntimeError, match="get_ir_temp called on NullController"):
+            controller.get_ir_temp()
+
+
+# ── binary_sensor.py lines 87-88, 95-99: FF learning suppression ─────
+
+
+class TestFFLearningSuppression:
+    """Cover binary_sensor is_on and extra_state_attributes for FF suppression."""
+
+    @pytest.mark.asyncio
+    async def test_binary_sensor_is_on_when_suppressed(self, hass, setup_pi_integration):
+        """Binary sensor should be on when disturbance suppress is active."""
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        # Simulate suppression active
+        pi._disturbance_suppress_active = True
+
+        from custom_components.tasmota_irhvac.binary_sensor import FFLearningSuppressedBinarySensor
+        from homeassistant.helpers.entity_platform import async_get_platforms
+        platforms = async_get_platforms(hass, DOMAIN)
+        entity_obj = None
+        for platform in platforms:
+            for ent in platform.entities.values():
+                if isinstance(ent, FFLearningSuppressedBinarySensor):
+                    entity_obj = ent
+                    break
+
+        assert entity_obj is not None, "FFLearningSuppressedBinarySensor not found"
+        assert entity_obj.is_on is True
+
+    @pytest.mark.asyncio
+    async def test_binary_sensor_is_off_when_not_suppressed(self, hass, setup_pi_integration):
+        """Binary sensor should be off when no suppression."""
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        pi._disturbance_suppress_active = False
+
+        from custom_components.tasmota_irhvac.binary_sensor import FFLearningSuppressedBinarySensor
+        from homeassistant.helpers.entity_platform import async_get_platforms
+        platforms = async_get_platforms(hass, DOMAIN)
+        entity_obj = None
+        for platform in platforms:
+            for ent in platform.entities.values():
+                if isinstance(ent, FFLearningSuppressedBinarySensor):
+                    entity_obj = ent
+                    break
+
+        assert entity_obj is not None
+        assert entity_obj.is_on is False
+
+    @pytest.mark.asyncio
+    async def test_binary_sensor_extra_attrs_when_suppressed(self, hass, setup_pi_integration):
+        """Extra state attributes should expose suppression details."""
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        pi._manual_ff_suppress = True
+        pi._manual_ff_suppress_reason = "setpoint_change"
+        pi._disturbance_active_suppressors = ["setpoint_change"]
+
+        from custom_components.tasmota_irhvac.binary_sensor import FFLearningSuppressedBinarySensor
+        from homeassistant.helpers.entity_platform import async_get_platforms
+        platforms = async_get_platforms(hass, DOMAIN)
+        entity_obj = None
+        for platform in platforms:
+            for ent in platform.entities.values():
+                if isinstance(ent, FFLearningSuppressedBinarySensor):
+                    entity_obj = ent
+                    break
+
+        assert entity_obj is not None
+        attrs = entity_obj.extra_state_attributes
+        assert attrs["manual_suppress"] is True
+        assert attrs["manual_suppress_reason"] == "setpoint_change"
+        assert "setpoint_change" in attrs["active_suppressors"]
+
+    @pytest.mark.asyncio
+    async def test_binary_sensor_extra_attrs_no_pi(self, hass, setup_integration):
+        """Extra state attributes should return empty dict when no PI."""
+        from custom_components.tasmota_irhvac.binary_sensor import FFLearningSuppressedBinarySensor
+        # Non-PI integration won't create the binary sensor, so test the property directly
+        # by creating a mock instance
+        entity = MagicMock()
+        entity._pi = None
+
+        sensor = FFLearningSuppressedBinarySensor.__new__(FFLearningSuppressedBinarySensor)
+        sensor._climate = entity
+
+        assert sensor.is_on is False
+        assert sensor.extra_state_attributes == {}
+
+
+# ── button.py lines 251-277: save learned coefficients ───────────────
+
+
+class TestSaveLearnedSeedsButton:
+    """Cover SaveLearnedSeedsButton.async_press writing to config entry."""
+
+    @pytest.mark.asyncio
+    async def test_save_copies_rls_beta_to_config(self, hass, setup_pi_integration):
+        """Pressing save should write RLS beta coefficients to config entry options."""
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        # Give the RLS model some observations so available=True
+        pi._rls_heat.update([1.0, 10.0], 5.0)
+        pi._rls_cool.update([1.0, 10.0], 3.0)
+
+        # Find the save button
+        from custom_components.tasmota_irhvac.button import SaveLearnedSeedsButton
+        from homeassistant.helpers.entity_platform import async_get_platforms
+        platforms = async_get_platforms(hass, DOMAIN)
+        save_button = None
+        for platform in platforms:
+            for ent in platform.entities.values():
+                if isinstance(ent, SaveLearnedSeedsButton):
+                    save_button = ent
+                    break
+
+        assert save_button is not None, "SaveLearnedSeedsButton not found"
+        assert save_button.available is True
+
+        # Press it
+        await save_button.async_press()
+
+        # Verify config entry options were updated with learned slopes
+        updated_options = entry.options
+        if len(pi._rls_heat.beta) > 1:
+            assert "pi_ff_heat_slope" in updated_options
+            assert updated_options["pi_ff_heat_slope"] == round(pi._rls_heat.beta[1], 4)
+
+    @pytest.mark.asyncio
+    async def test_save_unavailable_without_observations(self, hass, setup_pi_integration):
+        """Save button should be unavailable when no RLS observations."""
+        entry = await setup_pi_integration()
+
+        from custom_components.tasmota_irhvac.button import SaveLearnedSeedsButton
+        from homeassistant.helpers.entity_platform import async_get_platforms
+        platforms = async_get_platforms(hass, DOMAIN)
+        save_button = None
+        for platform in platforms:
+            for ent in platform.entities.values():
+                if isinstance(ent, SaveLearnedSeedsButton):
+                    save_button = ent
+                    break
+
+        assert save_button is not None
+        assert save_button.available is False
+
+    @pytest.mark.asyncio
+    async def test_save_noop_when_pi_none(self):
+        """async_press should return early when PI is None."""
+        from custom_components.tasmota_irhvac.button import SaveLearnedSeedsButton
+
+        button = SaveLearnedSeedsButton.__new__(SaveLearnedSeedsButton)
+        climate = MagicMock()
+        climate._pi = None
+        button._climate = climate
+        button._entry = MagicMock()
+
+        # Should not raise
+        await button.async_press()
+
+    @pytest.mark.asyncio
+    async def test_save_updates_beta_seed(self, hass, setup_pi_integration):
+        """After save, beta_seed should match saved values."""
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        # Give RLS observations
+        for _ in range(5):
+            pi._rls_heat.update([1.0, 10.0], 5.0)
+            pi._rls_cool.update([1.0, 10.0], 3.0)
+
+        from custom_components.tasmota_irhvac.button import SaveLearnedSeedsButton
+        from homeassistant.helpers.entity_platform import async_get_platforms
+        platforms = async_get_platforms(hass, DOMAIN)
+        save_button = None
+        for platform in platforms:
+            for ent in platform.entities.values():
+                if isinstance(ent, SaveLearnedSeedsButton):
+                    save_button = ent
+                    break
+
+        assert save_button is not None
+        heat_beta_before = list(pi._rls_heat.beta)
+
+        await save_button.async_press()
+
+        # Internal seeds should be updated to match saved coefficients
+        for i in range(min(len(heat_beta_before), len(pi._heat_seeds), pi._rls_heat.n)):
+            assert pi._rls_heat.beta_seed[i] == round(heat_beta_before[i], 4)
+
+
+# ── __init__.py: MQTT not available → ConfigEntryNotReady (lines 46-48) ──
+
+
+class TestMQTTNotReady:
+    """Cover __init__.py lines 46-48: MQTT not available raises ConfigEntryNotReady."""
+
+    @pytest.mark.asyncio
+    async def test_mqtt_unavailable_raises_config_entry_not_ready(
+        self, hass, enable_custom_integrations
+    ):
+        """When mqtt.async_wait_for_mqtt_client raises, setup should raise ConfigEntryNotReady."""
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            data=make_config(),
+            title="Test AC",
+            version=1,
+            minor_version=2,
+        )
+        entry.add_to_hass(hass)
+
+        with patch(
+            "homeassistant.components.mqtt.async_wait_for_mqtt_client",
+            side_effect=Exception("MQTT broker down"),
+        ):
+            result = await hass.config_entries.async_setup(entry.entry_id)
+            assert result is False
+
+        # Entry should be in a retry state (SETUP_RETRY)
+        from homeassistant.config_entries import ConfigEntryState
+        assert entry.state is ConfigEntryState.SETUP_RETRY
+
+
+# ── __init__.py: config migration v1.1 → v1.2 through full setup ────
+
+
+class TestMigrationV1Integration:
+    """Cover __init__.py migration v1.1 → v1.2 through full HA setup."""
+
+    @pytest.mark.asyncio
+    async def test_migration_v1_1_to_v1_2_through_setup(
+        self, hass, mqtt_mock, enable_custom_integrations
+    ):
+        """Config entry with version=1, minor_version=1 should migrate during setup."""
+        from homeassistant.util.unit_system import US_CUSTOMARY_SYSTEM
+
+        hass.config.units = US_CUSTOMARY_SYSTEM
+
+        config = make_config({
+            "min_temp": 16, "max_temp": 30, "target_temp": 22, "away_temp": 16,
+        })
+        # Simulate pre-migration: use legacy celsius_mode key
+        config["celsius_mode"] = "on"
+        config.pop("ir_protocol_unit", None)
+
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            data=config,
+            title="Test AC Migration",
+            version=1,
+            minor_version=1,
+        )
+        entry.add_to_hass(hass)
+
+        result = await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        assert result is True
+
+        # Migration should have updated minor_version
+        assert entry.minor_version == 2
+
+        # Temps should be converted from °C to °F
+        assert entry.data["min_temp"] == pytest.approx(60.8, abs=0.1)
+        assert entry.data["max_temp"] == pytest.approx(86.0, abs=0.1)
+        assert entry.data["target_temp"] == pytest.approx(71.6, abs=0.1)
+
+        # celsius_mode should be renamed to ir_protocol_unit
+        assert "celsius_mode" not in entry.data
+        assert entry.data["ir_protocol_unit"] == "celsius"
+
+
+# ── climate.py: subentry loading (lines 507-518) ─────────────────────
+
+
+class TestSubentryLoading:
+    """Cover climate.py lines 507-518: model inputs and supplemental sources from subentries."""
+
+    @pytest.mark.asyncio
+    async def test_model_input_subentries_loaded(self, hass, setup_pi_integration):
+        """Entity should load model inputs from subentries during setup."""
+        hass.states.async_set("input_boolean.stove", "off")
+
+        entry = await setup_pi_integration()
+
+        # Add a model input subentry
+        result = await hass.config_entries.subentries.async_init(
+            (entry.entry_id, "model_input"),
+            context={"source": "user"},
+        )
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            user_input={
+                "name": "Stove",
+                "entity_id": "input_boolean.stove",
+                "seed_heat": -3.0,
+                "seed_cool": 0.0,
+            },
+        )
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+
+        model_subs = [
+            s for s in entry.subentries.values()
+            if s.subentry_type == "model_input"
+        ]
+        assert len(model_subs) == 1
+        assert model_subs[0].data["entity_id"] == "input_boolean.stove"
+
+    @pytest.mark.asyncio
+    async def test_supplemental_source_subentry_loaded(self, hass, setup_pi_integration):
+        """Entity should load supplemental sources from subentries during setup."""
+        hass.states.async_set("climate.pellet_stove", "heat")
+
+        entry = await setup_pi_integration()
+
+        result = await hass.config_entries.subentries.async_init(
+            (entry.entry_id, "supplemental_source"),
+            context={"source": "user"},
+        )
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            user_input={
+                "name": "Pellet Stove",
+                "entity_id": "climate.pellet_stove",
+                "seed_heat": -3.0,
+                "seed_cool": 0.0,
+                "failure_threshold": 900,
+                "recovery_margin": 0.3,
+                "auto_model_input": True,
+            },
+        )
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+
+        supp_subs = [
+            s for s in entry.subentries.values()
+            if s.subentry_type == "supplemental_source"
+        ]
+        assert len(supp_subs) == 1
+        assert supp_subs[0].data["entity_id"] == "climate.pellet_stove"
+
+
+# ── climate.py: vendor restore state + pause controller (lines 762-764) ──
+
+
+class TestVendorRestoreStatePause:
+    """Cover climate.py lines 762-764: vendor handler restore + PI pause on startup."""
+
+    @pytest.mark.asyncio
+    async def test_restore_state_with_boost_pauses_pi(
+        self, hass, mqtt_mock, enable_custom_integrations
+    ):
+        """Restoring a state with PRESET_BOOST should call on_restore_state and pause PI."""
+        from homeassistant.components.climate.const import PRESET_BOOST, ATTR_PRESET_MODE
+
+        hass.states.async_set("sensor.room_temp", "21.0", {"unit_of_measurement": "°C"})
+        hass.states.async_set("sensor.outdoor_temp", "5.0", {"unit_of_measurement": "°C"})
+
+        config = make_pi_config({"vendor": "FUJITSU_AC"})
+        entry = MockConfigEntry(
+            domain=DOMAIN, data=config, title="Test AC PI",
+            version=1, minor_version=2,
+        )
+        entry.add_to_hass(hass)
+
+        mock_state = MagicMock()
+        mock_state.state = "heat"
+        mock_state.attributes = {
+            ATTR_PRESET_MODE: PRESET_BOOST,
+            "target_temp_high": None,
+            "target_temp_low": None,
+            "temperature": 22.0,
+            "fan_mode": "auto",
+            "swing_mode": "off",
+        }
+        with patch(
+            "custom_components.tasmota_irhvac.climate.RestoreEntity.async_get_last_state",
+            return_value=mock_state,
+        ):
+            assert await hass.config_entries.async_setup(entry.entry_id)
+            await hass.async_block_till_done()
+
+        entity = get_climate_entity(hass, entry)
+        assert entity is not None
+
+        # Fujitsu handler should have restored the preset and paused PI
+        assert entity._vendor_handler._powerful is True
+        assert entity._pi._pi_paused is True
+
+
+# ── climate.py: JSON parse error handling (lines 854-856) ────────────
+
+
+class TestMQTTJsonParseError:
+    """Cover climate.py lines 854-856: invalid JSON MQTT payload."""
+
+    @pytest.mark.asyncio
+    async def test_invalid_json_payload_no_crash(self, hass, setup_integration):
+        """Invalid JSON in MQTT payload should log error and not crash."""
+        entry = await setup_integration()
+        entity = get_climate_entity(hass, entry)
+
+        async_fire_mqtt_message(hass, "tele/irhvac/RESULT", "not valid json {{{")
+        await hass.async_block_till_done()
+
+        state = hass.states.get(entity.entity_id)
+        assert state is not None
+
+
+# ── climate.py: temp unit conversion in MQTT payload (line 929) ──────
+
+
+class TestMQTTTempUnitConversion:
+    """Cover climate.py line 929: temp conversion when IR unit != system unit."""
+
+    @pytest.mark.asyncio
+    async def test_mqtt_temp_converted_when_units_differ(
+        self, hass, mqtt_mock, enable_custom_integrations
+    ):
+        """MQTT temp should be converted from IR unit (°C) to system unit (°F)."""
+        from homeassistant.util.unit_system import US_CUSTOMARY_SYSTEM
+
+        hass.config.units = US_CUSTOMARY_SYSTEM
+
+        config = make_config({
+            "ir_protocol_unit": "celsius",
+            "min_temp": 61, "max_temp": 86,
+            "target_temp": 72, "away_temp": 61,
+        })
+        entry = MockConfigEntry(
+            domain=DOMAIN, data=config, title="Test AC F",
+            version=1, minor_version=2,
+        )
+        entry.add_to_hass(hass)
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        entity = get_climate_entity(hass, entry)
+        assert entity is not None
+
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity.power_mode = STATE_ON
+        entity._enabled = True
+
+        payload = json.dumps({"IRHVAC": {
+            "Vendor": "FUJITSU_AC", "Power": "On", "Mode": "Heat",
+            "Temp": 22, "Celsius": "On", "FanSpeed": "Auto",
+            "SwingV": "Auto", "SwingH": "Off", "Quiet": "Off",
+            "Turbo": "Off", "Econo": "Off", "Light": "Off",
+            "Filter": "Off", "Clean": "Off", "Beep": "Off", "Sleep": "-1",
+        }})
+        async_fire_mqtt_message(hass, "tele/irhvac/RESULT", payload)
+        await hass.async_block_till_done()
+
+        # Target temp should be in °F (~71.6)
+        assert entity._attr_target_temperature == pytest.approx(71.6, abs=0.5)
+
+
+# ── climate.py: vendor state restore with temp conversion (lines 1060-1066) ──
+
+
+class TestVendorStateRestoreTempConversion:
+    """Cover climate.py lines 1060-1066: vendor state restore converts temp units."""
+
+    @pytest.mark.asyncio
+    async def test_vendor_restore_converts_temp_to_system_unit(
+        self, hass, mqtt_mock, enable_custom_integrations
+    ):
+        """Vendor handler state_restore.target_temperature should be converted to system unit."""
+        from homeassistant.util.unit_system import US_CUSTOMARY_SYSTEM
+
+        hass.config.units = US_CUSTOMARY_SYSTEM
+
+        config = make_config({
+            "vendor": "FUJITSU_AC",
+            "ir_protocol_unit": "celsius",
+            "min_temp": 61, "max_temp": 86,
+            "target_temp": 72, "away_temp": 61,
+        })
+        entry = MockConfigEntry(
+            domain=DOMAIN, data=config, title="Test AC F",
+            version=1, minor_version=2,
+        )
+        entry.add_to_hass(hass)
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        entity = get_climate_entity(hass, entry)
+
+        from custom_components.tasmota_irhvac.vendors.base import EntityState
+        entity._vendor_handler._state_restore = EntityState(
+            target_temperature=10.0,  # 10°C → 50°F
+        )
+
+        entity._apply_vendor_state_restore()
+
+        assert entity._attr_target_temperature == pytest.approx(50.0, abs=0.5)
+
+
+# ── climate.py: _send_raw_ir and _schedule_vendor_timer (lines 1096-1120) ──
+
+
+class TestSendRawIRAndVendorTimer:
+    """Cover climate.py lines 1094-1121: _send_raw_ir and _schedule_vendor_timer."""
+
+    @pytest.mark.asyncio
+    async def test_preset_boost_sends_raw_ir_and_schedules_timer(
+        self, hass, setup_integration
+    ):
+        """PRESET_BOOST on Fujitsu should send raw IR and schedule a timer."""
+        from homeassistant.components.climate.const import PRESET_BOOST
+
+        entry = await setup_integration({"vendor": "FUJITSU_AC"})
+        entity = get_climate_entity(hass, entry)
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity.power_mode = STATE_ON
+
+        with patch(
+            "homeassistant.components.mqtt.async_publish", new_callable=AsyncMock
+        ):
+            await entity.async_set_preset_mode(PRESET_BOOST)
+
+        # Timer should be scheduled (powerful timeout)
+        assert entity._vendor_timer_unsub is not None
+
+        # When timer fires, it should clear the preset
+        async_fire_time_changed(hass, dt_util.utcnow() + timedelta(minutes=25))
+        await hass.async_block_till_done()
+
+        # After timer, powerful should be cleared
+        assert entity._vendor_handler._powerful is False
+
+
+# ── climate.py: _get_ir_temp non-PI path with unit conversion (line 1635) ──
+
+
+class TestGetIRTempNonPI:
+    """Cover climate.py line 1635: _get_ir_temp with unit conversion (non-PI)."""
+
+    @pytest.mark.asyncio
+    async def test_get_ir_temp_converts_f_to_c(
+        self, hass, mqtt_mock, enable_custom_integrations
+    ):
+        """_get_ir_temp should convert from system °F to IR °C when units differ."""
+        from homeassistant.util.unit_system import US_CUSTOMARY_SYSTEM
+
+        hass.config.units = US_CUSTOMARY_SYSTEM
+
+        config = make_config({
+            "ir_protocol_unit": "celsius",
+            "pi_enabled": False,
+            "min_temp": 61, "max_temp": 86,
+            "target_temp": 72, "away_temp": 61,
+        })
+        entry = MockConfigEntry(
+            domain=DOMAIN, data=config, title="Test AC F",
+            version=1, minor_version=2,
+        )
+        entry.add_to_hass(hass)
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        entity = get_climate_entity(hass, entry)
+        entity._attr_target_temperature = 72.0  # °F
+
+        ir_temp = entity._get_ir_temp()
+
+        # 72°F ≈ 22.2°C — should return value in celsius
+        assert ir_temp == pytest.approx(22.0, abs=1.0)
+
+
+# ── config_flow.py: _stringify_for_ui (lines 259-264) ────────────────
+
+
+class TestStringifyForUI:
+    """Cover config_flow.py lines 259-264: _stringify_for_ui float formatting."""
+
+    def test_stringify_strips_trailing_zero(self):
+        """Float 1.0 should be stringified as '1', not '1.0'."""
+        from custom_components.tasmota_irhvac.config_flow import _stringify_for_ui
+
+        data = {"precision": 1.0, "temp_step": 0.5}
+        result = _stringify_for_ui(data)
+        assert result["precision"] == "1"
+        assert result["temp_step"] == "0.5"
+
+    def test_stringify_handles_int(self):
+        """Integer values should be converted to string."""
+        from custom_components.tasmota_irhvac.config_flow import _stringify_for_ui
+
+        data = {"precision": 1, "temp_step": 2}
+        result = _stringify_for_ui(data)
+        assert result["precision"] == "1"
+        assert result["temp_step"] == "2"
+
+    def test_stringify_leaves_existing_strings(self):
+        """String values should pass through unchanged."""
+        from custom_components.tasmota_irhvac.config_flow import _stringify_for_ui
+
+        data = {"precision": "0.5", "temp_step": "1"}
+        result = _stringify_for_ui(data)
+        assert result["precision"] == "0.5"
+        assert result["temp_step"] == "1"
+
+
+# ── config_flow.py: model input subentry duplicate check (lines 1149-1151) ──
+
+
+class TestModelInputSubentryDuplicate:
+    """Cover config_flow.py lines 1149-1151: duplicate entity_id abort."""
+
+    @pytest.mark.asyncio
+    async def test_duplicate_model_input_aborted(self, hass, setup_integration):
+        """Adding model input with same entity_id should abort with 'already_configured'."""
+        entry = await setup_integration()
+
+        # Add first model input
+        result = await hass.config_entries.subentries.async_init(
+            (entry.entry_id, "model_input"),
+            context={"source": "user"},
+        )
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            user_input={
+                "name": "Stove",
+                "entity_id": "input_boolean.stove",
+                "seed_heat": -3.0,
+                "seed_cool": 0.0,
+            },
+        )
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+
+        # Try to add duplicate with same entity_id
+        result = await hass.config_entries.subentries.async_init(
+            (entry.entry_id, "model_input"),
+            context={"source": "user"},
+        )
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            user_input={
+                "name": "Stove Again",
+                "entity_id": "input_boolean.stove",
+                "seed_heat": -2.0,
+                "seed_cool": 0.0,
+            },
+        )
+        assert result["type"] == FlowResultType.ABORT
+        assert result["reason"] == "already_configured"
+
+
+# ── config_flow.py: model input reconfigure (lines 1195-1206) ────────
+
+
+class TestModelInputReconfigure:
+    """Cover config_flow.py lines 1195-1206: reconfigure model input subentry."""
+
+    @pytest.mark.asyncio
+    async def test_reconfigure_model_input(self, hass, setup_integration):
+        """Reconfiguring model input should update subentry data."""
+        entry = await setup_integration()
+
+        # Add a model input
+        result = await hass.config_entries.subentries.async_init(
+            (entry.entry_id, "model_input"),
+            context={"source": "user"},
+        )
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            user_input={
+                "name": "Stove",
+                "entity_id": "input_boolean.stove",
+                "seed_heat": -3.0,
+                "seed_cool": 0.0,
+            },
+        )
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+
+        model_subs = [
+            s for s in entry.subentries.values()
+            if s.subentry_type == "model_input"
+        ]
+        assert len(model_subs) == 1
+        sub_id = model_subs[0].subentry_id
+
+        # Reconfigure it
+        result = await hass.config_entries.subentries.async_init(
+            (entry.entry_id, "model_input"),
+            context={"source": "reconfigure", "subentry_id": sub_id},
+        )
+        assert result["type"] == FlowResultType.FORM
+        assert result["step_id"] == "reconfigure"
+
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            user_input={
+                "name": "Updated Stove",
+                "entity_id": "input_boolean.stove",
+                "seed_heat": -5.0,
+                "seed_cool": 1.0,
+            },
+        )
+        # async_update_reload_and_abort returns ABORT type
+        assert result["type"] == FlowResultType.ABORT
+
+
+# ── config_flow.py: supplemental source subentry creation (lines 1248-1263) ──
+
+
+class TestSupplementalSourceSubentry:
+    """Cover config_flow.py lines 1248-1263: supplemental source subentry."""
+
+    @pytest.mark.asyncio
+    async def test_create_supplemental_source(self, hass, setup_integration):
+        """Creating a supplemental source subentry should store all fields."""
+        entry = await setup_integration()
+
+        result = await hass.config_entries.subentries.async_init(
+            (entry.entry_id, "supplemental_source"),
+            context={"source": "user"},
+        )
+        assert result["type"] == FlowResultType.FORM
+        assert result["step_id"] == "user"
+
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            user_input={
+                "name": "Pellet Stove",
+                "entity_id": "climate.pellet_stove",
+                "seed_heat": -3.0,
+                "seed_cool": 0.0,
+                "failure_threshold": 900,
+                "recovery_margin": 0.3,
+                "auto_model_input": True,
+            },
+        )
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+
+        supp_subs = [
+            s for s in entry.subentries.values()
+            if s.subentry_type == "supplemental_source"
+        ]
+        assert len(supp_subs) == 1
+        assert supp_subs[0].data["entity_id"] == "climate.pellet_stove"
+        assert supp_subs[0].data["seed_heat"] == -3.0
+        assert supp_subs[0].data["failure_threshold"] == 900
+
+    @pytest.mark.asyncio
+    async def test_duplicate_supplemental_source_aborted(self, hass, setup_integration):
+        """Adding supplemental source with same entity_id should abort."""
+        entry = await setup_integration()
+
+        # Add first
+        result = await hass.config_entries.subentries.async_init(
+            (entry.entry_id, "supplemental_source"),
+            context={"source": "user"},
+        )
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            user_input={
+                "name": "Pellet Stove",
+                "entity_id": "climate.pellet_stove",
+                "seed_heat": -3.0,
+                "seed_cool": 0.0,
+                "failure_threshold": 900,
+                "recovery_margin": 0.3,
+                "auto_model_input": True,
+            },
+        )
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+
+        # Try duplicate
+        result = await hass.config_entries.subentries.async_init(
+            (entry.entry_id, "supplemental_source"),
+            context={"source": "user"},
+        )
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            user_input={
+                "name": "Pellet Stove Again",
+                "entity_id": "climate.pellet_stove",
+                "seed_heat": -2.0,
+                "seed_cool": 0.0,
+                "failure_threshold": 900,
+                "recovery_margin": 0.3,
+                "auto_model_input": True,
+            },
+        )
+        assert result["type"] == FlowResultType.ABORT
+        assert result["reason"] == "already_configured"
+
+
+# ── config_flow.py: supplemental source reconfigure (lines 1304-1317) ──
+
+
+class TestSupplementalSourceReconfigure:
+    """Cover config_flow.py lines 1304-1317: reconfigure supplemental source."""
+
+    @pytest.mark.asyncio
+    async def test_reconfigure_supplemental_source(self, hass, setup_integration):
+        """Reconfiguring supplemental source should update subentry data."""
+        entry = await setup_integration()
+
+        result = await hass.config_entries.subentries.async_init(
+            (entry.entry_id, "supplemental_source"),
+            context={"source": "user"},
+        )
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            user_input={
+                "name": "Pellet Stove",
+                "entity_id": "climate.pellet_stove",
+                "seed_heat": -3.0,
+                "seed_cool": 0.0,
+                "failure_threshold": 900,
+                "recovery_margin": 0.3,
+                "auto_model_input": True,
+            },
+        )
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+
+        supp_subs = [
+            s for s in entry.subentries.values()
+            if s.subentry_type == "supplemental_source"
+        ]
+        assert len(supp_subs) == 1
+        sub_id = supp_subs[0].subentry_id
+
+        # Reconfigure
+        result = await hass.config_entries.subentries.async_init(
+            (entry.entry_id, "supplemental_source"),
+            context={"source": "reconfigure", "subentry_id": sub_id},
+        )
+        assert result["type"] == FlowResultType.FORM
+        assert result["step_id"] == "reconfigure"
+
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            user_input={
+                "name": "Updated Stove",
+                "entity_id": "climate.pellet_stove",
+                "seed_heat": -5.0,
+                "seed_cool": 1.0,
+                "failure_threshold": 1800,
+                "recovery_margin": 0.5,
+                "auto_model_input": False,
+            },
+        )
+        # async_update_reload_and_abort returns ABORT type
+        assert result["type"] == FlowResultType.ABORT
+
+
+# ── climate.py: dict config backward compat (lines 572-573) ─────────
+
+
+class TestDictConfigBackwardCompat:
+    """Cover climate.py lines 571-573: TasmotaIrhvac.__init__ receives raw dict."""
+
+    @pytest.mark.asyncio
+    async def test_entity_init_with_raw_dict(self, hass, mqtt_mock, enable_custom_integrations):
+        """TasmotaIrhvac should accept a raw dict config and wrap it in IrhvacConfig."""
+        from custom_components.tasmota_irhvac.climate import TasmotaIrhvac
+
+        config = make_config()
+        entity = TasmotaIrhvac(hass, config)
+
+        assert entity._vendor == "FUJITSU_AC"
+        assert entity.topic == "cmnd/irhvac/irhvac"
+
+
+# ── __init__.py: migration version != 1 early return (L73) ──────────
+
+
+class TestMigrationVersionNotOne:
+    """Cover the early return when config entry version is not 1."""
+
+    @pytest.mark.asyncio
+    async def test_migration_skips_version_2(self, hass):
+        """Config entries with version != 1 should skip migration."""
+        from custom_components.tasmota_irhvac import async_migrate_entry
+
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            data=make_config(),
+            version=2,
+            minor_version=1,
+        )
+        entry.add_to_hass(hass)
+
+        result = await async_migrate_entry(hass, entry)
+        assert result is True
+
+
+# ── button.py: save learned seeds with model inputs (L268-274) ──────
+
+
+class TestSaveLearnedSeedsWithModelInputs:
+    """Cover the model input seed update loop in save button."""
+
+    @pytest.mark.asyncio
+    async def test_save_copies_model_input_seeds(self, hass, setup_pi_integration):
+        """Pressing save should copy model input RLS betas to config entry."""
+        from custom_components.tasmota_irhvac.const import CONF_PI_MODEL_INPUTS
+
+        model_inputs = [{
+            "name": "Stove",
+            "entity_id": "input_boolean.stove",
+            "seed_heat": 0.0,
+            "seed_cool": 0.0,
+            "lag_tau": 0,
+        }]
+        entry = await setup_pi_integration(config_overrides={
+            "pi_model_inputs": model_inputs,
+        })
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        # Put model_inputs in options (where the button reads from)
+        hass.config_entries.async_update_entry(
+            entry, options={**entry.options, CONF_PI_MODEL_INPUTS: model_inputs}
+        )
+
+        # Give RLS enough betas: intercept, outdoor_delta, model_input
+        pi._rls_heat.beta = [0.5, 0.3, -2.5]
+        pi._rls_cool.beta = [0.5, -0.3, 1.5]
+        pi._rls_heat.observation_count = 10
+
+        # Find and press the save button
+        all_buttons = hass.states.async_entity_ids("button")
+        save_id = next(s for s in all_buttons if "save_learned" in s)
+        await hass.services.async_call("button", "press", {"entity_id": save_id}, blocking=True)
+
+        # Verify model input seeds were updated in options
+        updated = entry.options.get(CONF_PI_MODEL_INPUTS, [])
+        assert len(updated) == 1
+        assert updated[0]["seed_heat"] == round(-2.5, 4)
+        assert updated[0]["seed_cool"] == round(1.5, 4)
+
+
+# ── climate.py: _send_raw_ir with mqtt_delay (L1099) ────────────────
+
+
+class TestSendRawIRWithDelay:
+    """Cover the mqtt_delay branch in _send_raw_ir."""
+
+    @pytest.mark.asyncio
+    async def test_send_raw_ir_with_mqtt_delay(self, hass, setup_integration):
+        """_send_raw_ir with mqtt_delay > 0 should sleep before publishing."""
+        from unittest.mock import patch, AsyncMock
+
+        entry = await setup_integration(config_overrides={"mqtt_delay": "0.01"})
+        entity = get_climate_entity(hass, entry)
+
+        with patch("custom_components.tasmota_irhvac.climate.mqtt.async_publish", new_callable=AsyncMock) as mock_pub:
+            await entity._send_raw_ir("0xABCD1234")
+            mock_pub.assert_called_once()
+
+
+# ── climate.py: _schedule_vendor_timer cancel existing (L1106) ───────
+
+
+class TestVendorTimerCancel:
+    """Cover canceling an existing vendor timer before scheduling a new one."""
+
+    @pytest.mark.asyncio
+    async def test_schedule_vendor_timer_cancels_existing(self, hass, setup_pi_integration):
+        """Scheduling a new vendor timer should cancel any existing one."""
+        from custom_components.tasmota_irhvac.vendors.base import TimerRequest
+        from unittest.mock import MagicMock
+
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+
+        # Set up a fake existing timer
+        mock_unsub = MagicMock()
+        entity._vendor_timer_unsub = mock_unsub
+
+        # Schedule a new timer — should cancel the old one
+        timer_req = TimerRequest(delay_seconds=5.0, callback_id="test")
+        entity._schedule_vendor_timer(timer_req)
+
+        mock_unsub.assert_called_once()
+        assert entity._vendor_timer_unsub is not None

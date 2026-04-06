@@ -402,3 +402,37 @@ class TestRLSBayesianRidge:
         assert restored.beta[1] != 0.35
         # beta_seed should be the seed, not the learned value
         assert restored.beta_seed == [0.0, 0.35]
+
+
+class TestRLSFeatureScalesPadding:
+    """Tests for feature_scales padding when fewer scales than dimensions (line 83)."""
+
+    def test_fewer_scales_than_dimensions_pads_with_ones(self):
+        """Providing 1 feature_scale for a 3-input model should pad to [2.0, 1.0, 1.0, 1.0]."""
+        model = RLSModel(n_inputs=3, feature_scales=[2.0])
+        # n=4 (intercept + 3 inputs), but only 1 scale provided
+        assert len(model.feature_scales) == 4
+        assert model.feature_scales[0] == 2.0
+        assert model.feature_scales[1] == 1.0
+        assert model.feature_scales[2] == 1.0
+        assert model.feature_scales[3] == 1.0
+
+    def test_exact_scales_no_padding(self):
+        """Providing exact number of scales should not pad."""
+        model = RLSModel(n_inputs=2, feature_scales=[2.0, 3.0, 4.0])
+        assert model.feature_scales == [2.0, 3.0, 4.0]
+
+    def test_empty_scales_defaults_to_all_ones(self):
+        """No feature_scales should default to all 1.0."""
+        model = RLSModel(n_inputs=2)
+        assert model.feature_scales == [1.0, 1.0, 1.0]
+
+    def test_padded_scales_affect_P_initialization(self):
+        """Padded (1.0) scales should give default P diagonal; provided scale should differ."""
+        model = RLSModel(n_inputs=2, feature_scales=[5.0], p_init=10.0)
+        # P diagonal for index 0: p_init / (5.0^2) = 10 / 25 = 0.4
+        assert model.P[0 * 3 + 0] == pytest.approx(0.4)
+        # P diagonal for index 1: p_init / (1.0^2) = 10.0 (padded scale)
+        assert model.P[1 * 3 + 1] == pytest.approx(10.0)
+        # P diagonal for index 2: same as index 1
+        assert model.P[2 * 3 + 2] == pytest.approx(10.0)
