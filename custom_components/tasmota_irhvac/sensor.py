@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .climate import TasmotaIrhvac
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -148,7 +152,7 @@ class TasmotaIrhvacPISensor(SensorEntity):
 
     def __init__(
         self,
-        climate_entity,
+        climate_entity: TasmotaIrhvac,
         entry_id: str,
         description: TasmotaIrhvacPISensorDescription,
     ) -> None:
@@ -174,7 +178,7 @@ class TasmotaIrhvacPISensor(SensorEntity):
     @property
     def available(self) -> bool:
         """Sensor is available when the climate entity is available."""
-        return self._climate.available
+        return bool(self._climate.available)
 
     async def async_added_to_hass(self) -> None:
         """Subscribe to dispatcher signal for state updates."""

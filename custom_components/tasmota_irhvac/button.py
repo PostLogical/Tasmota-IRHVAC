@@ -5,6 +5,11 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .climate import TasmotaIrhvac
+    from .pi_controller import PIController
 
 from homeassistant.components import mqtt
 from homeassistant.components.button import ButtonEntity, ButtonEntityDescription
@@ -67,7 +72,7 @@ async def async_setup_entry(
         return
 
     config = {**entry.data, **entry.options}
-    buttons = []
+    buttons: list[ButtonEntity] = []
 
     for conf_key, description in VANE_BUTTON_DESCRIPTIONS.items():
         if config.get(conf_key):
@@ -110,7 +115,7 @@ class VaneButton(ButtonEntity):
 
     def __init__(
         self,
-        climate_entity,
+        climate_entity: TasmotaIrhvac,
         description: VaneButtonDescription,
     ) -> None:
         """Initialize the vane button."""
@@ -126,11 +131,11 @@ class VaneButton(ButtonEntity):
     @property
     def available(self) -> bool:
         """Button is available when the climate entity is available."""
-        return self._climate.available
+        return bool(self._climate.available)
 
     async def async_press(self) -> None:
         """Send the raw IR code and update swing state."""
-        description = self.entity_description
+        description: VaneButtonDescription = self.entity_description  # type: ignore[assignment]
 
         # Send the raw IR code via MQTT
         topic = self._climate.topic
@@ -165,7 +170,7 @@ class IRActionButton(ButtonEntity):
     _attr_has_entity_name = True
     _attr_should_poll = False
 
-    def __init__(self, climate_entity, action: dict) -> None:
+    def __init__(self, climate_entity: TasmotaIrhvac, action: dict[str, Any]) -> None:
         """Initialize from an IR action config dict."""
         self._climate = climate_entity
         self._ir_code = action["ir_code"]
@@ -183,7 +188,7 @@ class IRActionButton(ButtonEntity):
     @property
     def available(self) -> bool:
         """Available when climate entity is available."""
-        return self._climate.available
+        return bool(self._climate.available)
 
     async def async_press(self) -> None:
         """Send the raw IR code via MQTT."""
@@ -211,7 +216,7 @@ class SaveLearnedSeedsButton(ButtonEntity):
     _attr_entity_category = EntityCategory.CONFIG
     _attr_translation_key = "save_learned_seeds"
 
-    def __init__(self, climate_entity, entry: ConfigEntry) -> None:
+    def __init__(self, climate_entity: TasmotaIrhvac, entry: ConfigEntry) -> None:
         """Initialize the button."""
         self._climate = climate_entity
         self._entry = entry
@@ -223,18 +228,25 @@ class SaveLearnedSeedsButton(ButtonEntity):
         return self._climate.device_info
 
     @property
+    def _pi(self) -> PIController | None:
+        """Return the PI controller, narrowed from the union type."""
+        from .pi_controller import PIController
+        pi = self._climate._pi
+        return pi if isinstance(pi, PIController) else None
+
+    @property
     def available(self) -> bool:
         """Available when climate entity is available and PI has data."""
-        pi = self._climate._pi
+        pi = self._pi
         return (
-            self._climate.available
+            bool(self._climate.available)
             and pi is not None
             and pi._rls_heat.observation_count > 0
         )
 
     async def async_press(self) -> None:
         """Copy learned coefficients to config entry seeds."""
-        pi = self._climate._pi
+        pi = self._pi
         if pi is None:
             return
 

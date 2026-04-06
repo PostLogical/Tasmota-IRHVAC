@@ -1,7 +1,10 @@
 """Fujitsu-specific IRHVAC with preset modes."""
 
+from __future__ import annotations
+
 import asyncio
 import logging
+from typing import Any
 
 from homeassistant.components import mqtt
 from homeassistant.components.climate.const import (
@@ -81,7 +84,9 @@ class FujitsuTasmotaIrhvac(TasmotaIrhvac):
 
     # ── State Payload Handling ─────────────────────────────────────────
 
-    async def _handle_state_payload(self, json_payload, payload):
+    async def _handle_state_payload(
+        self, json_payload: Any, payload: Any, **kwargs: Any
+    ) -> None:
         """Handle MQTT state with Fujitsu-specific preset detection."""
         if payload.get("Vendor") != self._vendor:
             return

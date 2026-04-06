@@ -223,6 +223,7 @@ class FujitsuHandler(VendorHandler):
         if self._state_restore is None:
             return
         swing = self._state_restore.swing_mode
+        new_swing: str | None
         if swing == SWING_BOTH:
             new_swing = SWING_HORIZONTAL
         elif swing == SWING_VERTICAL:
@@ -244,6 +245,7 @@ class FujitsuHandler(VendorHandler):
         if self._state_restore is None:
             return
         swing = self._state_restore.swing_mode
+        new_swing: str | None
         if swing == SWING_BOTH:
             new_swing = SWING_VERTICAL
         elif swing == SWING_HORIZONTAL:

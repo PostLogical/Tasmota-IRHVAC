@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .climate import TasmotaIrhvac
+    from .pi_controller import PIController
 
 from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
@@ -51,7 +56,7 @@ class FFLearningSuppressedBinarySensor(BinarySensorEntity):
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_translation_key = "ff_learning"
 
-    def __init__(self, climate_entity, entry_id: str) -> None:
+    def __init__(self, climate_entity: TasmotaIrhvac, entry_id: str) -> None:
         """Initialize the binary sensor."""
         self._climate = climate_entity
         self._entry_id = entry_id
@@ -65,17 +70,29 @@ class FFLearningSuppressedBinarySensor(BinarySensorEntity):
     @property
     def available(self) -> bool:
         """Available when the climate entity is available."""
-        return self._climate.available
+        return bool(self._climate.available)
+
+    @property
+    def _pi(self) -> PIController | None:
+        """Return the PI controller, narrowed from the union type."""
+        from .pi_controller import PIController
+        pi = self._climate._pi
+        return pi if isinstance(pi, PIController) else None
 
     @property
     def is_on(self) -> bool:
         """True when FF learning is suppressed."""
-        return self._climate._pi._disturbance_suppress_active
+        pi = self._pi
+        if pi is None:
+            return False
+        return bool(pi._disturbance_suppress_active)
 
     @property
-    def extra_state_attributes(self):
+    def extra_state_attributes(self) -> dict[str, Any]:
         """Return details about what is suppressing learning."""
-        pi = self._climate._pi
+        pi = self._pi
+        if pi is None:
+            return {}
         return {
             "manual_suppress": pi._manual_ff_suppress,
             "manual_suppress_reason": pi._manual_ff_suppress_reason,

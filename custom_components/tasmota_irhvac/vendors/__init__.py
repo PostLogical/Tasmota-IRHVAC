@@ -6,12 +6,14 @@ get the default pass-through handler — no user is ever locked out.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from .base import VendorHandler
 
 _REGISTRY: dict[str, type[VendorHandler]] = {}
 
 
-def register(vendor_key: str):
+def register(vendor_key: str) -> Callable[[type[VendorHandler]], type[VendorHandler]]:
     """Class decorator — register a handler under an upper-cased vendor key.
 
     The key can be a prefix (e.g. "FUJITSU") to match FUJITSU_AC,
