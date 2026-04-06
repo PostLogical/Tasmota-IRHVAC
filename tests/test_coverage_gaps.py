@@ -793,26 +793,26 @@ class TestPISetTempWithMode:
 
 
 class TestPIHandlePayloadDisabled:
-    """Cover handle_state_payload when PI disabled or desired_temp None."""
+    """Cover handle_state_update when PI disabled or desired_temp None."""
 
     @pytest.mark.asyncio
     async def test_handle_payload_pi_disabled(self, hass, setup_pi_integration):
-        """handle_state_payload should return early when PI disabled."""
+        """handle_state_update should return early when PI disabled."""
         entry = await setup_pi_integration()
         entity = get_climate_entity(hass, entry)
         entity._pi._pi_enabled = False
 
         # Should not crash
-        await entity._pi.handle_state_payload({"Temp": 25})
+        await entity._pi.handle_state_update({"Temp": 25})
 
     @pytest.mark.asyncio
     async def test_handle_payload_desired_temp_none(self, hass, setup_pi_integration):
-        """handle_state_payload should return early when desired_temp is None."""
+        """handle_state_update should return early when desired_temp is None."""
         entry = await setup_pi_integration()
         entity = get_climate_entity(hass, entry)
         entity._pi._desired_temp = None
 
-        await entity._pi.handle_state_payload({"Temp": 25})
+        await entity._pi.handle_state_update({"Temp": 25})
 
 
 class TestPIFireDispatcherEdge:
@@ -1202,7 +1202,7 @@ class TestNoVendorSetup:
 
 
 class TestSwingModePayloadBranches:
-    """Cover all swing mode branches in _handle_state_payload."""
+    """Cover all swing mode branches in _handle_state_update."""
 
     @pytest.mark.asyncio
     async def test_swing_no_both_vertical_only(self, hass, setup_integration):
@@ -1476,7 +1476,7 @@ class TestElectraFanPayload:
 
 
 class TestToggleList:
-    """Cover toggle list processing in _handle_state_payload."""
+    """Cover toggle list processing in _handle_state_update."""
 
     @pytest.mark.asyncio
     async def test_toggle_list_resets_state(self, hass, setup_integration):
@@ -1611,7 +1611,7 @@ class TestIRPresetExitDeactivation:
 
 
 class TestElectraFanFromMQTTPayload:
-    """Cover ELECTRA fan mode mapping lines 905-910 in _handle_state_payload."""
+    """Cover ELECTRA fan mode mapping lines 905-910 in _handle_state_update."""
 
     @pytest.mark.asyncio
     async def test_electra_fan_max_from_payload(self, hass, mqtt_mock, enable_custom_integrations):

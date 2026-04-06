@@ -19,7 +19,7 @@ from custom_components.tasmota_irhvac.const import (
     ATTR_PI_INTEGRAL,
     DOMAIN,
 )
-from custom_components.tasmota_irhvac.pi_controller import PIController
+from custom_components.tasmota_irhvac.pi_controller import PIController, PIExtraStoredData
 
 from .conftest import make_pi_config
 
@@ -936,29 +936,45 @@ class TestPIEdgeCases:
         assert pi_entity._pi._rls_heat.observation_count > old_obs_count or pi_entity._pi._ff_settled_ticks >= 4
 
     @pytest.mark.asyncio
-    async def test_handle_state_payload_command_pending(self, pi_entity):
-        """Echo after PI command should clear pending flag without updating hp_setpoint."""
-        pi_entity._pi._pi_command_pending = True
+    async def test_own_echo_within_window_is_noop(self, pi_entity):
+        """Non-IrReceived echo within send window confirms hp_setpoint."""
+        import time as _time
         pi_entity._pi._desired_temp = 22.0
         pi_entity._pi._hp_setpoint = 25.0  # What PI computed
+        pi_entity._pi._last_send_ir_time = _time.monotonic()
 
-        await pi_entity._pi.handle_state_payload({"Temp": 22, "Power": "On"})
+        await pi_entity._pi.handle_state_update({"Temp": 25, "Power": "On"})
 
-        assert pi_entity._pi._pi_command_pending is False
-        # hp_setpoint should NOT be overwritten by the echo — PI's value is authoritative
+        # Telemetry confirms hp_setpoint — no change to desired_temp
+        assert pi_entity._pi._hp_setpoint == 25.0
+        assert pi_entity._pi._desired_temp == 22.0
+
+    @pytest.mark.asyncio
+    async def test_self_echo_ir_received_within_window(self, pi_entity):
+        """IrReceived within echo window is self-echo, not physical remote."""
+        import time as _time
+        pi_entity._pi._desired_temp = 22.0
+        pi_entity._pi._hp_setpoint = 25.0
+        pi_entity._pi._last_send_ir_time = _time.monotonic()
+
+        await pi_entity._pi.handle_state_update(
+            {"Temp": 25, "Power": "On"}, ir_received=True
+        )
+
+        # Self-echo: confirms hp_setpoint, does NOT update desired_temp
+        assert pi_entity._pi._desired_temp == 22.0
         assert pi_entity._pi._hp_setpoint == 25.0
 
     @pytest.mark.asyncio
-    async def test_handle_state_payload_physical_remote(self, pi_entity):
-        """IrReceived echo (physical remote) updates desired_temp."""
-        pi_entity._pi._pi_command_pending = False
+    async def test_physical_remote_updates_desired(self, pi_entity):
+        """IrReceived outside echo window (physical remote) updates desired_temp."""
         pi_entity._pi._desired_temp = 22.0
         pi_entity._pi._hp_setpoint = 22.0
         pi_entity._pi._last_send_ir_time = 0  # Long ago
         pi_entity._attr_current_temperature = 20.0
         pi_entity._attr_hvac_mode = HVACMode.HEAT
 
-        await pi_entity._pi.handle_state_payload(
+        await pi_entity._pi.handle_state_update(
             {"Temp": 25, "Power": "On"}, ir_received=True
         )
 
@@ -968,21 +984,51 @@ class TestPIEdgeCases:
         assert pi_entity._pi._hp_setpoint != 22.0
 
     @pytest.mark.asyncio
-    async def test_handle_state_payload_telemetry_no_overwrite(self, pi_entity):
-        """Non-IrReceived echo (telemetry/command echo) never overwrites desired_temp."""
-        pi_entity._pi._pi_command_pending = False
+    async def test_physical_remote_same_temp_keeps_integral(self, pi_entity):
+        """Physical remote setting same temp as desired should not zero integral."""
         pi_entity._pi._desired_temp = 22.0
-        pi_entity._pi._hp_setpoint = 22.0
+        pi_entity._pi._hp_setpoint = 24.0
+        pi_entity._pi._pi_integral = 5.0
         pi_entity._pi._last_send_ir_time = 0  # Long ago
         pi_entity._attr_current_temperature = 20.0
         pi_entity._attr_hvac_mode = HVACMode.HEAT
 
-        await pi_entity._pi.handle_state_payload({"Temp": 25, "Power": "On"})
+        await pi_entity._pi.handle_state_update(
+            {"Temp": 22, "Power": "On"}, ir_received=True
+        )
 
-        # Telemetry mismatch: desired_temp preserved (not overwritten by echo)
+        # Same desired temp — integral NOT zeroed (tick may accumulate more)
         assert pi_entity._pi._desired_temp == 22.0
-        # hp_setpoint was updated to 25 then recomputed by pi_tick
-        assert pi_entity._pi._hp_setpoint != 22.0
+        assert pi_entity._pi._pi_integral != 0.0
+
+    @pytest.mark.asyncio
+    async def test_telemetry_mismatch_resends(self, pi_entity):
+        """Non-IrReceived echo with mismatched temp triggers resend."""
+        pi_entity._pi._desired_temp = 22.0
+        pi_entity._pi._hp_setpoint = 25.0
+        pi_entity._pi._last_send_ir_time = 0  # Long ago
+
+        pi_entity.send_ir.reset_mock()
+        await pi_entity._pi.handle_state_update({"Temp": 22, "Power": "On"})
+
+        # Telemetry mismatch: desired_temp preserved, resend triggered
+        assert pi_entity._pi._desired_temp == 22.0
+        assert pi_entity._pi._hp_setpoint == 25.0
+        pi_entity.send_ir.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_telemetry_match_is_noop(self, pi_entity):
+        """Non-IrReceived echo matching hp_setpoint is a no-op confirmation."""
+        pi_entity._pi._desired_temp = 22.0
+        pi_entity._pi._hp_setpoint = 25.0
+        pi_entity._pi._last_send_ir_time = 0
+
+        pi_entity.send_ir.reset_mock()
+        await pi_entity._pi.handle_state_update({"Temp": 25, "Power": "On"})
+
+        assert pi_entity._pi._desired_temp == 22.0
+        assert pi_entity._pi._hp_setpoint == 25.0
+        pi_entity.send_ir.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_away_preset_syncs_desired_temp(self, pi_entity):
@@ -1014,22 +1060,23 @@ class TestPIEdgeCases:
         assert pi_entity._pi._pi_integral == old_integral
 
     @pytest.mark.asyncio
-    async def test_echo_does_not_corrupt_hp_setpoint_during_send(self, pi_entity):
-        """Echo arriving during send_ir should not overwrite hp_setpoint."""
+    async def test_dual_echo_does_not_corrupt_hp_setpoint(self, pi_entity):
+        """Two echoes with wrong Temp should not overwrite hp_setpoint."""
         import time
         pi_entity._pi._desired_temp = 22.0
         pi_entity._pi._hp_setpoint = 25.0
-        pi_entity._pi._pi_command_pending = True
-        # Simulate recent send (so second echo falls within 5s cooldown)
+        # Simulate recent send (echoes within window)
         pi_entity._pi._last_send_ir_time = time.monotonic()
         pi_entity._pi._pi_last_tick_time = time.monotonic()
 
-        # Simulate two echoes (dual MQTT topics) with wrong Temp
-        await pi_entity._pi.handle_state_payload({"Temp": 22, "Power": "On"})
-        await pi_entity._pi.handle_state_payload({"Temp": 22, "Power": "On"})
+        # Non-IrReceived echoes with Temp=22 (mismatch with hp=25)
+        # Within echo window, but these are non-IrReceived so Case 3 (mismatch).
+        # However the temp doesn't match hp_setpoint, so resend is triggered.
+        # hp_setpoint itself should NOT be overwritten.
+        pi_entity.send_ir.reset_mock()
+        await pi_entity._pi.handle_state_update({"Temp": 22, "Power": "On"})
+        await pi_entity._pi.handle_state_update({"Temp": 22, "Power": "On"})
 
-        # First echo clears pending, second is within 5s cooldown
-        # Neither should overwrite hp_setpoint
         assert pi_entity._pi._hp_setpoint == 25.0
 
     @pytest.mark.asyncio
@@ -1296,33 +1343,38 @@ class TestExtraStoredDataFullRestore:
         assert pi._model_input_filtered[0] == 0.75
 
 
-# ── handle_state_payload no Temp (line 709) ─────────────���───────────
+# ── handle_state_update no Temp (line 709) ─────────────���───────────
 
 
-class TestHandleStatePayloadNoTemp:
-    """Tests for handle_state_payload when payload has no Temp or Temp <= 0."""
+class TestHandleStateUpdateNoTemp:
+    """Tests for handle_state_update when payload has no Temp or Temp <= 0."""
 
     @pytest.mark.asyncio
-    async def test_payload_no_temp_writes_state(self):
-        """Payload without Temp should still write HA state."""
+    async def test_payload_no_temp_returns_early(self):
+        """Payload without Temp should return without modifying state."""
         config = make_pi_config()
         entity = FakePIEntity(config)
         pi = entity._pi
         pi._desired_temp = 22.0
+        pi._hp_setpoint = 24.0
 
-        await pi.handle_state_payload({"Power": "On", "Mode": "Heat"})
-        entity.async_write_ha_state.assert_called()
+        await pi.handle_state_update({"Power": "On", "Mode": "Heat"})
+        # Controller returns early — climate.py handles the state write
+        assert pi._desired_temp == 22.0
+        assert pi._hp_setpoint == 24.0
 
     @pytest.mark.asyncio
-    async def test_payload_temp_zero_writes_state(self):
-        """Payload with Temp=0 should write HA state (no Temp branch)."""
+    async def test_payload_temp_zero_returns_early(self):
+        """Payload with Temp=0 should return without modifying state."""
         config = make_pi_config()
         entity = FakePIEntity(config)
         pi = entity._pi
         pi._desired_temp = 22.0
+        pi._hp_setpoint = 24.0
 
-        await pi.handle_state_payload({"Temp": 0, "Power": "On", "Mode": "Heat"})
-        entity.async_write_ha_state.assert_called()
+        await pi.handle_state_update({"Temp": 0, "Power": "On", "Mode": "Heat"})
+        assert pi._desired_temp == 22.0
+        assert pi._hp_setpoint == 24.0
 
 
 # ── async_reset_ff_seeds RLS beta reset ──────────────────────────────
@@ -1679,4 +1731,470 @@ class TestLearningGateDebugLogging:
 
         await pi._pi_tick()
         # Should have logged "model input unavailable"
+
+
+# ── Supplemental Auto Model Inputs (L242-261) ───────────────────────
+
+
+class TestSupplementalAutoModelInputs:
+    """Tests for auto-generation of model inputs from supplemental sources."""
+
+    def test_supplemental_auto_generates_model_input(self):
+        """Supplemental source with auto_model_input=True (default) creates a model input."""
+        config = make_pi_config({
+            "pi_supplemental_sources": [{
+                "name": "Pellet Stove",
+                "entity_id": "climate.pellet_stove",
+                "seed_heat": -4.0,
+                "seed_cool": 0.0,
+            }],
+        })
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        # Should have auto-generated one model input
+        assert len(pi._supplemental_auto_inputs) == 1
+        auto = pi._supplemental_auto_inputs[0]
+        assert auto["name"] == "Pellet Stove (auto)"
+        assert auto["entity_id"] == "climate.pellet_stove"
+        assert auto["seed_heat"] == -4.0
+        assert auto["seed_cool"] == 0.0
+        assert auto["lag_tau"] == 0
+        assert auto["suppress_learning"] is True
+        assert auto["_auto_supplemental"] is True
+        # Should also be in _model_inputs
+        assert auto in pi._model_inputs
+
+    def test_supplemental_auto_model_input_opt_out(self):
+        """Supplemental source with auto_model_input=False skips auto generation."""
+        config = make_pi_config({
+            "pi_supplemental_sources": [{
+                "name": "Pellet Stove",
+                "entity_id": "climate.pellet_stove",
+                "auto_model_input": False,
+            }],
+        })
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        assert len(pi._supplemental_auto_inputs) == 0
+
+    def test_supplemental_skips_if_manual_input_exists(self):
+        """Auto model input skipped when user already has a manual input for same entity."""
+        config = make_pi_config({
+            "pi_model_inputs": [{
+                "name": "Stove Manual",
+                "entity_id": "climate.pellet_stove",
+                "seed_heat": -2.0,
+                "seed_cool": 0.0,
+                "lag_tau": 0,
+            }],
+            "pi_supplemental_sources": [{
+                "name": "Pellet Stove",
+                "entity_id": "climate.pellet_stove",
+            }],
+        })
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        assert len(pi._supplemental_auto_inputs) == 0
+        # Only the manual input should be in _model_inputs
+        assert len(pi._model_inputs) == 1
+        assert pi._model_inputs[0]["name"] == "Stove Manual"
+
+    def test_supplemental_default_seeds(self):
+        """Auto model input uses default seeds when not specified."""
+        config = make_pi_config({
+            "pi_supplemental_sources": [{
+                "name": "Stove",
+                "entity_id": "climate.stove",
+            }],
+        })
+        entity = FakePIEntity(config)
+        auto = entity._pi._supplemental_auto_inputs[0]
+
+        assert auto["seed_heat"] == -3.0
+        assert auto["seed_cool"] == 0.0
+
+    def test_n_model_inputs_includes_auto(self):
+        """_n_model_inputs counts outdoor_delta + all model inputs including auto."""
+        config = make_pi_config({
+            "pi_model_inputs": [{
+                "name": "Manual",
+                "entity_id": "input_boolean.manual",
+                "seed_heat": -1.0,
+                "seed_cool": 0.0,
+                "lag_tau": 0,
+            }],
+            "pi_supplemental_sources": [{
+                "name": "Stove",
+                "entity_id": "climate.stove",
+            }],
+        })
+        entity = FakePIEntity(config)
+        # 1 (outdoor_delta) + 1 (manual) + 1 (auto) = 3
+        assert entity._pi._n_model_inputs == 3
+
+
+# ── Ki-Changed Integral Scaling on Restore (L474-479) ───────────────
+
+
+class TestKiChangedIntegralScaling:
+    """Tests for integral rescaling when ki changes between restarts."""
+
+    def test_ki_changed_scales_integral(self):
+        """Integral rescaled when ki differs from ki_at_save."""
+        config = make_pi_config({"pi_ki": 0.002})
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        data = PIExtraStoredData(
+            pi_integral=10.0,
+            desired_temp=22.0,
+            hp_setpoint=23.0,
+            ki_at_save=0.001,  # Was half of current ki
+        )
+        pi.restore_extra_stored_data(data)
+
+        # scale = old_ki / new_ki = 0.001 / 0.002 = 0.5
+        assert pi._pi_integral == pytest.approx(5.0)
+
+    def test_ki_unchanged_no_scaling(self):
+        """Integral not rescaled when ki is the same."""
+        config = make_pi_config({"pi_ki": 0.001})
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        data = PIExtraStoredData(
+            pi_integral=10.0,
+            desired_temp=22.0,
+            hp_setpoint=23.0,
+            ki_at_save=0.001,
+        )
+        pi.restore_extra_stored_data(data)
+
+        assert pi._pi_integral == pytest.approx(10.0)
+
+    def test_ki_at_save_zero_no_scaling(self):
+        """Integral not rescaled when ki_at_save is zero (legacy data)."""
+        config = make_pi_config({"pi_ki": 0.001})
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        data = PIExtraStoredData(
+            pi_integral=10.0,
+            desired_temp=22.0,
+            hp_setpoint=23.0,
+            ki_at_save=0.0,
+        )
+        pi.restore_extra_stored_data(data)
+
+        assert pi._pi_integral == pytest.approx(10.0)
+
+
+# ── MQTT Echo: Impossible Temp Guards (L589-594, L626-631) ──────────
+
+
+class TestMQTTEchoPhysicalRemote:
+    """Tests for physical remote (IrReceived outside echo window)."""
+
+    @pytest.mark.asyncio
+    async def test_physical_remote_updates_desired_temp(self):
+        """Physical remote should update desired_temp and tick."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 23.0
+        pi._last_send_ir_time = 0  # Long ago
+        entity._attr_current_temperature = 20.0
+        entity._attr_hvac_mode = HVACMode.HEAT
+
+        await pi.handle_state_update({"Temp": 25}, ir_received=True)
+
+        assert pi._desired_temp == 25.0
+        assert pi._hp_setpoint != 23.0  # Recomputed by tick
+
+
+# ── Telemetry Cases ─────────────────────────────────────────────────
+
+
+class TestTelemetryCases:
+    """Tests for telemetry confirmation and mismatch paths."""
+
+    @pytest.mark.asyncio
+    async def test_telemetry_confirms_current_setpoint(self):
+        """Non-IrReceived echo matching hp_setpoint is a no-op."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 25.0
+        pi._last_send_ir_time = 0.0
+
+        entity.send_ir.reset_mock()
+        await pi.handle_state_update({"Temp": 25.0}, ir_received=False)
+
+        assert pi._hp_setpoint == 25.0
+        assert pi._desired_temp == 22.0
+        entity.send_ir.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_telemetry_mismatch_triggers_resend(self):
+        """Non-IrReceived echo with mismatched temp triggers resend."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 25.0
+        pi._last_send_ir_time = 0.0
+
+        entity.send_ir.reset_mock()
+        await pi.handle_state_update({"Temp": 22}, ir_received=False)
+
+        # hp_setpoint preserved, resend triggered
+        assert pi._hp_setpoint == 25.0
+        assert pi._desired_temp == 22.0
+        entity.send_ir.assert_called_once()
+
+
+# ── Supplemental Source Evaluation (L783-860) ────────────────────────
+
+
+class TestEvaluateSupplementalSources:
+    """Tests for _evaluate_supplemental_override tracking/assist logic."""
+
+    def _make_supplemental_entity(self, sources=None):
+        """Create entity with supplemental sources configured."""
+        if sources is None:
+            sources = [{
+                "name": "Pellet Stove",
+                "entity_id": "climate.pellet_stove",
+                "failure_threshold": 900,
+                "recovery_margin": 0.3,
+                "auto_model_input": False,
+            }]
+        config = make_pi_config({"pi_supplemental_sources": sources})
+        entity = FakePIEntity(config)
+        return entity
+
+    def test_no_supplemental_sources_returns_true(self):
+        """No supplemental sources → HP always active."""
+        entity = FakePIEntity(make_pi_config())
+        result = entity._pi._evaluate_supplemental_override(
+            error_c=1.0, now_mono=100.0
+        )
+        assert result is True
+
+    def test_supplemental_active_enters_tracking(self):
+        """When supplemental is heating and room is fine, HP enters tracking."""
+        entity = self._make_supplemental_entity()
+        pi = entity._pi
+
+        state = MagicMock()
+        state.state = "heat"
+        entity.hass.states.get.return_value = state
+
+        result = pi._evaluate_supplemental_override(error_c=0.0, now_mono=100.0)
+
+        assert result is False  # HP defers
+        assert pi._tracking_mode is True
+        assert pi._tracking_sources == ["Pellet Stove"]
+
+    def test_supplemental_inactive_hp_active(self):
+        """When supplemental is off, HP is active."""
+        entity = self._make_supplemental_entity()
+        pi = entity._pi
+
+        state = MagicMock()
+        state.state = "off"
+        entity.hass.states.get.return_value = state
+
+        result = pi._evaluate_supplemental_override(error_c=1.0, now_mono=100.0)
+
+        assert result is True
+        assert pi._tracking_mode is False
+
+    def test_supplemental_unavailable_hp_active(self):
+        """When supplemental entity is unavailable, HP stays active."""
+        entity = self._make_supplemental_entity()
+        pi = entity._pi
+
+        state = MagicMock()
+        state.state = "unavailable"
+        entity.hass.states.get.return_value = state
+
+        result = pi._evaluate_supplemental_override(error_c=1.0, now_mono=100.0)
+
+        assert result is True
+        assert pi._tracking_mode is False
+
+    def test_supplemental_none_state_hp_active(self):
+        """When hass.states.get returns None, HP stays active."""
+        entity = self._make_supplemental_entity()
+        pi = entity._pi
+
+        entity.hass.states.get.return_value = None
+
+        result = pi._evaluate_supplemental_override(error_c=1.0, now_mono=100.0)
+
+        assert result is True
+
+    def test_failure_detection_starts_timer(self):
+        """Error above deadband starts failure timer."""
+        entity = self._make_supplemental_entity()
+        pi = entity._pi
+
+        state = MagicMock()
+        state.state = "heat"
+        entity.hass.states.get.return_value = state
+
+        pi._evaluate_supplemental_override(error_c=1.0, now_mono=100.0)
+
+        assert pi._supplemental_failure_start == 100.0
+        assert pi._tracking_mode is True  # Still tracking (threshold not met)
+
+    def test_failure_threshold_triggers_assist(self):
+        """After failure_threshold seconds below desired, HP assists."""
+        entity = self._make_supplemental_entity()
+        pi = entity._pi
+
+        state = MagicMock()
+        state.state = "heat"
+        entity.hass.states.get.return_value = state
+
+        # First call: start failure timer
+        pi._evaluate_supplemental_override(error_c=1.0, now_mono=100.0)
+        assert pi._supplemental_assist_active is False
+
+        # Second call: 901s later, exceeds 900s threshold
+        result = pi._evaluate_supplemental_override(error_c=1.0, now_mono=1001.0)
+
+        assert pi._supplemental_assist_active is True
+        assert result is True  # HP active (assisting)
+        assert pi._tracking_mode is False
+
+    def test_recovery_clears_assist(self):
+        """Room recovering past margin clears assist mode."""
+        entity = self._make_supplemental_entity()
+        pi = entity._pi
+
+        state = MagicMock()
+        state.state = "heat"
+        entity.hass.states.get.return_value = state
+
+        # Enter assist mode
+        pi._supplemental_assist_active = True
+        pi._supplemental_failure_start = 0.0
+
+        # Error negative beyond recovery_margin (0.3) → recovered
+        pi._evaluate_supplemental_override(error_c=-0.5, now_mono=2000.0)
+
+        assert pi._supplemental_assist_active is False
+        assert pi._supplemental_failure_start is None
+        assert pi._tracking_mode is True  # Back to tracking
+
+    def test_bumpless_transfer_on_supplemental_end(self):
+        """When supplemental stops, bumpless transfer clears hold timer."""
+        entity = self._make_supplemental_entity()
+        pi = entity._pi
+
+        # Simulate was in tracking mode
+        pi._tracking_mode = True
+        pi._tracking_sources = ["Pellet Stove"]
+        pi._last_setpoint_change_time = 999.0
+
+        # Supplemental turns off
+        state = MagicMock()
+        state.state = "off"
+        entity.hass.states.get.return_value = state
+
+        result = pi._evaluate_supplemental_override(error_c=1.0, now_mono=2000.0)
+
+        assert result is True
+        assert pi._tracking_mode is False
+        assert pi._last_setpoint_change_time == 0.0  # Cleared for bumpless transfer
+
+    def test_error_within_deadband_clears_failure_timer(self):
+        """Error dropping within deadband clears failure start."""
+        entity = self._make_supplemental_entity()
+        pi = entity._pi
+
+        state = MagicMock()
+        state.state = "heat"
+        entity.hass.states.get.return_value = state
+
+        # Start failure timer
+        pi._evaluate_supplemental_override(error_c=1.0, now_mono=100.0)
+        assert pi._supplemental_failure_start == 100.0
+
+        # Error drops to 0 (within deadband, not negative enough for recovery)
+        pi._evaluate_supplemental_override(error_c=0.0, now_mono=200.0)
+        assert pi._supplemental_failure_start is None
+
+    def test_empty_entity_id_skipped(self):
+        """Supplemental source with empty entity_id is skipped."""
+        entity = self._make_supplemental_entity(sources=[{
+            "name": "Bad",
+            "entity_id": "",
+            "auto_model_input": False,
+        }])
+        pi = entity._pi
+
+        result = pi._evaluate_supplemental_override(error_c=1.0, now_mono=100.0)
+        assert result is True  # No active sources, HP active
+
+
+# ── Recovery Tick Dedup Guard (L969-970) ─────────────────────────────
+
+
+class TestRecoveryTickDedup:
+    """Tests for recovery tick deduplication guard."""
+
+    @pytest.mark.asyncio
+    async def test_recovery_tick_skipped_if_recent_tick(self):
+        """Recovery tick skipped when another tick ran less than 2s ago."""
+        import time as _time
+
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22.0
+        entity._attr_current_temperature = 21.0
+
+        # Simulate a recent tick
+        pi._pi_last_tick_time = _time.monotonic() - 0.5  # 0.5s ago
+
+        entity.send_ir.reset_mock()
+        await pi._pi_async_sensor_changed(was_none=True)
+
+        # Should skip the recovery tick — no IR send
+        entity.send_ir.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_recovery_tick_runs_if_no_recent_tick(self):
+        """Recovery tick runs when no tick has run recently."""
+        import time as _time
+
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22.0
+        entity._attr_current_temperature = 20.0  # Below desired → will produce IR
+
+        # Simulate no recent tick
+        pi._pi_last_tick_time = _time.monotonic() - 10.0
+
+        entity.send_ir.reset_mock()
+        await pi._pi_async_sensor_changed(was_none=True)
+
+        # Should run the tick → sends IR
+        entity.send_ir.assert_called()
 

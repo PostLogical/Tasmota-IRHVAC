@@ -3,16 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
-
-
-class TopicSource(Enum):
-    """Classification of incoming MQTT message origin."""
-
-    STAT_ECHO = auto()
-    TELE_REMOTE = auto()
-    TELE_TELEMETRY = auto()
 
 
 @dataclass(frozen=True)
@@ -27,7 +18,7 @@ class IRDecode:
     protocol: str | None = None
     bits: int | None = None
     data: str | None = None
-    source: TopicSource = TopicSource.TELE_TELEMETRY
+    ir_received: bool = False
 
 
 @dataclass(frozen=True)

@@ -42,7 +42,7 @@ class ControllerHook(Protocol):
 
     # ── State processing ─────────────────────────────────────────────
 
-    async def handle_state_payload(
+    async def handle_state_update(
         self, payload: dict, *, ir_received: bool = False
     ) -> None: ...
 
@@ -122,7 +122,7 @@ class NullController:
 
     # ── State processing ─────────────────────────────────────────────
 
-    async def handle_state_payload(self, payload, *, ir_received=False):
+    async def handle_state_update(self, payload, *, ir_received=False):
         pass
 
     async def sensor_changed(self, was_none):

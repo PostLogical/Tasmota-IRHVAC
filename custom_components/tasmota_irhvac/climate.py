@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from homeassistant.helpers.event import CALLBACK_TYPE
 
     from .config_model import IrhvacConfig
-    from .vendors.base import TimerRequest, TopicSource, VendorHandler
+    from .vendors.base import TimerRequest, VendorHandler
 
 import homeassistant.helpers.config_validation as cv
 import homeassistant.util.dt as dt_util
@@ -820,17 +820,10 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                 self._attr_available = True if msg == "Online" else False
                 self.async_schedule_update_ha_state()
 
-        from .vendors.base import TopicSource
-
         @callback
         async def state_message_received(message: mqtt.ReceiveMessage) -> None:
-            """Handle MQTT state from primary topic (tele)."""
-            await self._process_mqtt_state(message, is_stat_topic=False)
-
-        @callback
-        async def stat_message_received(message: mqtt.ReceiveMessage) -> None:
-            """Handle MQTT state from stat topic (our command echo)."""
-            await self._process_mqtt_state(message, is_stat_topic=True)
+            """Handle MQTT state from any topic (tele or stat)."""
+            await self._process_mqtt_state(message)
 
         unsubscribe = []
         unsubscribe.append(
@@ -846,35 +839,30 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         if self.state_topic2:
             unsubscribe.append(
                 await mqtt.async_subscribe(
-                    self.hass, self.state_topic2, stat_message_received
+                    self.hass, self.state_topic2, state_message_received
                 )
             )
 
         return unsubscribe
 
     async def _process_mqtt_state(
-        self, message: mqtt.ReceiveMessage, *, is_stat_topic: bool
+        self, message: mqtt.ReceiveMessage,
     ) -> None:
-        """Classify MQTT message source and dispatch to state handler."""
-        from .vendors.base import TopicSource
-
-        json_payload = json.loads(message.payload)
+        """Parse MQTT message, extract ir_received transport fact, dispatch."""
+        try:
+            json_payload = json.loads(message.payload)
+        except ValueError:
+            _LOGGER.error("Unable to parse MQTT payload as JSON: %s", message.payload)
+            return
         _LOGGER.debug(json_payload)
 
-        # Classify topic source:
-        # - stat topic: always our command echo confirmation
-        # - tele + IrReceived wrapper: physical remote captured by blaster
-        # - tele without IrReceived: periodic telemetry or our command duplicate
+        # IrReceived wrapper means the IR receiver decoded a signal —
+        # could be our own transmission bouncing back or a physical remote.
+        # This is a transport fact; the controller combines it with timing
+        # to classify the message.
         ir_received = "IrReceived" in json_payload
         if ir_received:
             json_payload = json_payload["IrReceived"]
-
-        if is_stat_topic:
-            source = TopicSource.STAT_ECHO
-        elif ir_received:
-            source = TopicSource.TELE_REMOTE
-        else:
-            source = TopicSource.TELE_TELEMETRY
 
         if "IRHVAC" not in json_payload:
             return
@@ -882,24 +870,23 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         payload = json_payload["IRHVAC"]
         await self._handle_state_payload(
             json_payload, payload,
-            ir_received=ir_received, source=source,
+            ir_received=ir_received,
         )
 
     async def _handle_state_payload(
         self, json_payload: dict[str, Any], payload: dict[str, Any],
-        *, ir_received: bool = False, source: TopicSource | None = None
+        *, ir_received: bool = False,
     ) -> None:
         """Process IRHVAC state payload."""
         if payload["Vendor"] == self._vendor:
             # Build IRDecode + EntityState for vendor handler hooks
             from .vendors.base import IRDecode, EntityState
-            from .vendors.base import TopicSource
             decode = IRDecode(
                 irhvac=payload,
                 protocol=json_payload.get("Protocol"),
                 bits=json_payload.get("Bits"),
                 data=json_payload.get("Data"),
-                source=source or TopicSource.TELE_TELEMETRY,
+                ir_received=ir_received,
             )
             entity_state = EntityState(
                 hvac_mode=self._attr_hvac_mode,
@@ -1041,13 +1028,11 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
 
             self._apply_vendor_handler_state()
 
-            # PI controller: restore desired temp over HP setpoint, handle echo
-            # PI handler writes state itself (with corrected target_temperature)
-            # Controller processes echo (PI restores desired_temp, NullController no-ops).
-            # PI writes HA state itself; NullController falls through to explicit write.
-            await self._controller.handle_state_payload(payload, ir_received=ir_received)
-            if not self._controller.is_active:
-                self.async_schedule_update_ha_state()
+            # Controller classifies the message (using ir_received + internal timing)
+            # and updates its own state (desired_temp, hp_setpoint, integral).
+            # NullController no-ops; PI handles echo/remote/telemetry cases.
+            await self._controller.handle_state_update(payload, ir_received=ir_received)
+            self.async_schedule_update_ha_state()
 
             # Check power sensor state
             if (

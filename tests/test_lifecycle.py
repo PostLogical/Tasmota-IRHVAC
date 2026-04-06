@@ -98,7 +98,7 @@ class TestProtocolConformance:
         required = [
             'is_active', 'desired_temp', 'is_tick_running',
             'async_added_to_hass', 'async_will_remove_from_hass',
-            'handle_state_payload', 'sensor_changed', 'fire_dispatcher',
+            'handle_state_update', 'sensor_changed', 'fire_dispatcher',
             'set_temperature', 'get_ir_temp',
             'filter_hvac_modes', 'should_reject_hvac_mode',
             'pi_pause', 'pi_resume', 'pi_reset_integral',
@@ -128,7 +128,7 @@ class TestProtocolConformance:
         nc = NullController()
         # These should all complete without error
         await nc.async_added_to_hass()
-        await nc.handle_state_payload({"Temp": 22})
+        await nc.handle_state_update({"Temp": 22})
         await nc.sensor_changed(False)
         await nc.set_temperature(22.0)
         await nc.async_reset_ff_seeds()

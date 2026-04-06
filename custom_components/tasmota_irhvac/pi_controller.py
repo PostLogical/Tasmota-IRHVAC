@@ -140,7 +140,7 @@ class PIController:
         async_added_to_hass:     await self._pi.async_added_to_hass(old_state)
         async_will_remove:       self._pi.async_will_remove_from_hass()
         async_set_temperature:   await self._pi.set_temperature(temp, hvac_mode)
-        _handle_state_payload:   await self._pi.handle_state_payload(payload)
+        _handle_state_payload:   await self._pi.handle_state_update(payload, ir_received=...)
         _async_sensor_changed:   await self._pi.sensor_changed(was_none)
         _get_ir_temp:            return self._pi.get_ir_temp()
         extra_state_attributes:  attrs.update(self._pi.get_extra_state_attributes())
@@ -207,7 +207,6 @@ class PIController:
         self._pi_integral: float = 0.0
         self._pi_timer_unsub: CALLBACK_TYPE | None = None
         self._ff_offset: float = 0.0
-        self._pi_command_pending: bool = False
         self._pi_tick_running: bool = False
         self._last_send_ir_time: float = 0.0
         self._last_setpoint_change_time: float = 0.0
@@ -552,93 +551,89 @@ class PIController:
         await self._pi_tick()
         e.async_schedule_update_ha_state()
 
-    async def handle_state_payload(
+    async def handle_state_update(
         self, payload: dict[str, Any], *, ir_received: bool = False
     ) -> None:
-        """Handle MQTT state echo. Call after base class processes payload.
+        """Handle MQTT state update. Called by climate entity after base state applied.
 
-        Uses ir_received flag to distinguish physical remote (IrReceived wrapper
-        on tele topic) from command echoes and telemetry (no wrapper).
-        Only physical remote signals update desired_temp; all other echoes
-        just track HP setpoint state.
+        Classifies the message using ir_received (transport fact from climate.py)
+        combined with internal timing state to determine the appropriate action:
+
+        Case 1 — Our echo: IrReceived within 2s of our send, or any non-IrReceived
+                  message (stat echo / telemetry) where temp matches hp_setpoint.
+                  Action: confirm hp_setpoint, no other changes.
+
+        Case 2 — Physical remote: IrReceived WITHOUT a recent send (>2s).
+                  Action: update desired_temp, zero integral if changed, tick.
+
+        Case 3 — Telemetry mismatch: non-IrReceived message where reported temp
+                  differs from hp_setpoint. Our IR send may have failed.
+                  Action: resend current setpoint.
+
+        State writes are handled by climate.py after this method returns.
         """
         if not self._pi_enabled or self._desired_temp is None or self._pi_paused:
             return
         e = self._entity
-        # target_temperature property now reads from desired_temp when PI is active,
-        # so no defensive sync needed.
         if "Temp" not in payload or payload["Temp"] <= 0:
-            e.async_write_ha_state()
             return
         reported_temp = payload["Temp"]
         elapsed = time.monotonic() - self._last_send_ir_time
-        _LOGGER.info(
-            "MQTT echo entry: reported=%s hp=%s desired=%s target=%s "
-            "pending=%s elapsed=%.1f ir_received=%s",
+
+        _LOGGER.debug(
+            "State update: reported=%s hp=%s desired=%s "
+            "elapsed=%.1f ir_received=%s",
             reported_temp, self._hp_setpoint, self._desired_temp,
-            e.target_temperature, self._pi_command_pending, elapsed,
-            ir_received,
+            elapsed, ir_received,
         )
-        if ir_received:
-            # Physical remote: someone pointed a remote at the unit.
-            # Update desired_temp to match what they set.
+
+        if ir_received and elapsed > 2.0:
+            # Case 2: Physical remote — IrReceived with no recent send.
+            # Someone used the physical remote. The reported Temp is their
+            # desired room temperature in the IR protocol's unit.
             reported_c = TemperatureConverter.convert(
                 reported_temp, e._ir_temp_unit, UnitOfTemperature.CELSIUS
             )
-            if reported_c < 0 or reported_c > 50:
-                _LOGGER.warning(
-                    "MQTT echo: ignoring impossible remote temp %s°C (reported=%s)",
-                    reported_c, reported_temp,
-                )
-                e.async_write_ha_state()
-                return
             desired_in_entity_unit = TemperatureConverter.convert(
                 reported_temp, e._ir_temp_unit, e.temperature_unit
             )
             _LOGGER.info(
-                "MQTT echo: physical remote detected (IrReceived), "
-                "reported=%s -> desired=%s",
-                reported_temp, desired_in_entity_unit,
+                "Physical remote detected: reported=%s (%.1f°C) -> desired=%s",
+                reported_temp, reported_c, desired_in_entity_unit,
             )
+            old_desired = self._desired_temp
             self._desired_temp = desired_in_entity_unit
-            # target_temperature property reads from desired_temp — no dual-write
-            self._pi_integral = 0.0
             self._hp_setpoint = reported_temp
+            # Only zero integral when the user actually changed the target
+            if old_desired != desired_in_entity_unit:
+                self._pi_integral = 0.0
             await self._pi_tick()
-        elif self._pi_command_pending or elapsed < 2.0:
-            # Our echo (pending flag) or duplicate from second MQTT topic (<2s).
-            # With dual topics (tele + stat), 2-4 echoes arrive within ~500ms.
-            # Clear pending on first, ignore the rest.
-            if self._pi_command_pending:
-                _LOGGER.debug("MQTT echo: own echo (pending), clearing flag")
-                self._pi_command_pending = False
-            else:
-                _LOGGER.debug("MQTT echo: duplicate ignored (%.1fs since send)", elapsed)
-            e.async_write_ha_state()
+
+        elif ir_received:
+            # Case 1a: Our self-echo — IrReceived within 2s of our send.
+            # The IR receiver picked up our own transmission. Confirm hp_setpoint.
+            _LOGGER.debug(
+                "Self-echo (IrReceived, %.1fs since send): confirming hp=%s",
+                elapsed, reported_temp,
+            )
+            self._hp_setpoint = reported_temp
+
         elif reported_temp != self._hp_setpoint:
-            # Telemetry/echo reports a different setpoint than we expect.
-            # Could be failed IR send or drift. Track actual HP state;
-            # PI will correct on next tick. Never overwrite desired_temp.
-            reported_c = TemperatureConverter.convert(
-                reported_temp, e._ir_temp_unit, UnitOfTemperature.CELSIUS
+            # Case 3: Telemetry mismatch — no IrReceived, temp differs.
+            # Periodic telemetry (TelePeriod) or stat echo reports a different
+            # temp than we expect. Our IR send may have failed. Resend.
+            _LOGGER.warning(
+                "Telemetry mismatch: reported=%s expected hp=%s. Resending.",
+                reported_temp, self._hp_setpoint,
             )
-            if reported_c < 0 or reported_c > 50:
-                _LOGGER.warning(
-                    "MQTT echo: ignoring impossible temp %s°C (reported=%s)",
-                    reported_c, reported_temp,
-                )
-                e.async_write_ha_state()
-                return
-            _LOGGER.info(
-                "MQTT echo: setpoint mismatch (%.1fs since send), "
-                "reported=%s hp=%s — updating hp_setpoint, keeping desired=%s",
-                elapsed, reported_temp, self._hp_setpoint, self._desired_temp,
-            )
-            self._hp_setpoint = reported_temp
-            await self._pi_tick()
+            await e.send_ir()
+
         else:
-            _LOGGER.debug("MQTT echo: telemetry confirms current setpoint %s", reported_temp)
-            e.async_write_ha_state()
+            # Case 1b: Telemetry/stat confirmation — temp matches hp_setpoint.
+            _LOGGER.debug(
+                "State confirmed: reported=%s matches hp=%s",
+                reported_temp, self._hp_setpoint,
+            )
 
     async def sensor_changed(self, was_none: bool) -> None:
         """Handle temp sensor update."""
@@ -1012,7 +1007,6 @@ class PIController:
         if new_setpoint != self._hp_setpoint:
             _LOGGER.info("PI fallback: setpoint %s -> %s (FF only)", self._hp_setpoint, new_setpoint)
             self._hp_setpoint = new_setpoint
-            self._pi_command_pending = True
             self._last_send_ir_time = time.monotonic()
             await e.send_ir()
         e.async_schedule_update_ha_state()
@@ -1287,7 +1281,6 @@ class PIController:
                     )
                     self._last_setpoint_change_time = now_mono
                     self._setpoint_changes_today += 1
-                    self._pi_command_pending = True
                     self._last_send_ir_time = time.monotonic()
                     await e.send_ir()
         else:
