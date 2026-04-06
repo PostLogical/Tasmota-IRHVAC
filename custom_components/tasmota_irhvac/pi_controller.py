@@ -683,7 +683,7 @@ class PIController:
             "integral_convergence": round(self._integral_convergence, 2),
         }
 
-    def filter_hvac_modes(self, modes: list[str]) -> list[str]:
+    def filter_hvac_modes(self, modes: list[Any]) -> list[Any]:
         """Filter out auto/heat_cool when PI is enabled."""
         if self._pi_enabled and modes:
             return [m for m in modes if m not in (HVACMode.AUTO, HVACMode.HEAT_COOL)]
