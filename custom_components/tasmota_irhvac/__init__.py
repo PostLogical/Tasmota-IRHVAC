@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime
 from typing import Any
 
 import voluptuous as vol
@@ -54,7 +55,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Defer config issue checks to give other integrations time to load entities
     @callback
-    def _deferred_check(_now: Any) -> None:
+    def _deferred_check(_now: datetime) -> None:
         _check_config_issues(hass, entry)
 
     async_call_later(hass, 120, _deferred_check)

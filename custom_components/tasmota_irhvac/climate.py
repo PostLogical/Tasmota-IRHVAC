@@ -6,13 +6,23 @@ import asyncio
 import json
 import logging
 import uuid
-from typing import Any
+from datetime import datetime
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from homeassistant.core import Event, EventStateChangedData, State
+    from homeassistant.helpers.entity_platform import AddEntitiesCallback
+    from homeassistant.helpers.event import CALLBACK_TYPE
+
+    from .config_model import IrhvacConfig
+    from .vendors.base import TimerRequest, TopicSource, VendorHandler
 
 import homeassistant.helpers.config_validation as cv
 import homeassistant.util.dt as dt_util
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.components import mqtt
+from homeassistant.config_entries import ConfigEntry
 
 from homeassistant.components.mqtt.schemas import MQTT_ENTITY_COMMON_SCHEMA
 
@@ -61,11 +71,11 @@ from homeassistant.const import (
     STATE_UNKNOWN,
     UnitOfTemperature,
 )
-from homeassistant.core import cached_property, callback
+from homeassistant.core import HomeAssistant, cached_property, callback
 from homeassistant.helpers import event as ha_event
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.device_registry import DeviceInfo
-from homeassistant.helpers.restore_state import RestoreEntity
+from homeassistant.helpers.restore_state import ExtraStoredData, RestoreEntity
 from homeassistant.util.unit_conversion import TemperatureConverter
 
 from .const import (
@@ -456,7 +466,8 @@ SERVICE_TO_METHOD = {
 
 
 async def async_setup_platform(
-    hass: Any, config: dict[str, Any], async_add_entities: Any, discovery_info: Any = None
+    hass: HomeAssistant, config: dict[str, Any], async_add_entities: AddEntitiesCallback,
+    discovery_info: Any = None,
 ) -> None:
     """Set up via YAML (deprecated — triggers config entry import)."""
     _LOGGER.warning(
@@ -482,7 +493,9 @@ async def async_setup_platform(
     )
 
 
-async def async_setup_entry(hass: Any, entry: Any, async_add_entities: Any) -> bool | None:
+async def async_setup_entry(
+    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback,
+) -> bool | None:
     """Set up Tasmota IRHVAC climate from a config entry."""
     hass.data.setdefault(DATA_KEY, {})
 
@@ -536,13 +549,13 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
 
     _last_on_mode: HVACMode | None
     _config_entry_id: str
-    _vendor_timer_unsub: Any
+    _vendor_timer_unsub: CALLBACK_TYPE | None
 
     def __init__(
         self,
-        hass: Any,
-        config: Any,
-        vendor_handler: Any = None,
+        hass: HomeAssistant,
+        config: IrhvacConfig | dict[str, Any],
+        vendor_handler: VendorHandler | None = None,
     ) -> None:
         """Initialize the thermostat.
 
@@ -873,7 +886,8 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         )
 
     async def _handle_state_payload(
-        self, json_payload: Any, payload: Any, *, ir_received: bool = False, source: Any = None
+        self, json_payload: dict[str, Any], payload: dict[str, Any],
+        *, ir_received: bool = False, source: TopicSource | None = None
     ) -> None:
         """Process IRHVAC state payload."""
         if payload["Vendor"] == self._vendor:
@@ -1100,7 +1114,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             await asyncio.sleep(float(self._mqtt_delay))
         await mqtt.async_publish(self.hass, irsend_topic, raw_code)
 
-    def _schedule_vendor_timer(self, timer_request: Any) -> None:
+    def _schedule_vendor_timer(self, timer_request: TimerRequest) -> None:
         """Schedule a vendor handler timer callback."""
         # Cancel any existing vendor timer
         if hasattr(self, "_vendor_timer_unsub") and self._vendor_timer_unsub:
@@ -1136,7 +1150,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         self._controller.fire_dispatcher()
 
     @property
-    def extra_restore_state_data(self) -> Any:
+    def extra_restore_state_data(self) -> ExtraStoredData | None:
         """Return PI data for ExtraStoredData persistence."""
         return self._controller.get_extra_stored_data()
 
@@ -1422,7 +1436,8 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         return super().max_temp
 
     async def _async_sensor_changed(
-        self, entity_id_or_event: Any, old_state: Any = None, new_state: Any = None
+        self, entity_id_or_event: Event[EventStateChangedData],
+        old_state: State | None = None, new_state: State | None = None
     ) -> None:
         # Replacing `async_track_state_change` with `async_track_state_change_event`
         entity_id = entity_id_or_event.data["entity_id"]
@@ -1444,7 +1459,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             await self._async_power_sensor_changed(old_state, new_state)
 
     async def _async_power_sensor_changed(
-        self, old_state: Any, new_state: Any, is_special_mode: bool = False
+        self, old_state: State | None, new_state: State | None, is_special_mode: bool = False
     ) -> None:
         """Handle power sensor changes."""
         if new_state is None:  # pragma: no cover — _async_sensor_changed already filters None
@@ -1470,7 +1485,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                 self.async_schedule_update_ha_state()
 
     @callback
-    def _async_update_temp(self, state: Any) -> None:
+    def _async_update_temp(self, state: State) -> None:
         """Update thermostat with latest state from sensor."""
         try:
             self._attr_current_temperature = TemperatureConverter.convert(
@@ -1482,7 +1497,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             _LOGGER.debug("Unable to update from sensor: %s", ex)
 
     @callback
-    def _async_update_humidity(self, state: Any) -> None:
+    def _async_update_humidity(self, state: State) -> None:
         """Update thermostat with latest state from humidity sensor."""
         try:
             if state.state != STATE_UNKNOWN and state.state != STATE_UNAVAILABLE:

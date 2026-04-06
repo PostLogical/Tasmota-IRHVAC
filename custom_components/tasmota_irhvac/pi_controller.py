@@ -10,12 +10,14 @@ from __future__ import annotations
 import dataclasses
 import logging
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Self
 
 if TYPE_CHECKING:
-    from homeassistant.core import HomeAssistant
+    from homeassistant.core import Event, EventStateChangedData, HomeAssistant, State
     from homeassistant.helpers.event import CALLBACK_TYPE
+
+    from .climate import TasmotaIrhvac
 
 from homeassistant.components.climate.const import HVACMode
 from homeassistant.const import STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN, UnitOfTemperature
@@ -149,7 +151,7 @@ class PIController:
     Vendor subclasses use: pi_pause(), pi_resume(), pi_reset_integral()
     """
 
-    def __init__(self, entity: Any, config: dict[str, Any]) -> None:
+    def __init__(self, entity: TasmotaIrhvac, config: dict[str, Any]) -> None:
         """Initialize PI controller.
 
         Args:
@@ -322,7 +324,7 @@ class PIController:
     # ── Shorthand entity access ──────────────────────────────────────
 
     @property
-    def _hass(self) -> Any:
+    def _hass(self) -> HomeAssistant:
         return self._entity.hass
 
     # ── ControllerHook Protocol properties ─────────────────────────
@@ -345,7 +347,7 @@ class PIController:
 
     # ── Lifecycle hooks (called by climate entity) ───────────────────
 
-    async def async_added_to_hass(self, old_state: Any = None) -> None:
+    async def async_added_to_hass(self, old_state: State | None = None) -> None:
         """Set up PI after entity is added to HA."""
         if not self._pi_enabled:
             return
@@ -860,7 +862,7 @@ class PIController:
     # ── PI Internals ──────────────────────────────────────────────────
 
     @callback
-    def _update_outdoor_temp(self, state: Any) -> None:
+    def _update_outdoor_temp(self, state: State) -> None:
         """Update outdoor temperature from sensor state, converting to °C."""
         try:
             temp = float(state.state)
@@ -872,7 +874,7 @@ class PIController:
             pass
 
     @callback
-    def _async_outdoor_temp_changed(self, event: Any) -> None:
+    def _async_outdoor_temp_changed(self, event: Event[EventStateChangedData]) -> None:
         """Handle outdoor temperature sensor state changes."""
         new_state = event.data.get("new_state")
         if new_state is not None:
@@ -933,7 +935,7 @@ class PIController:
         return False
 
     @callback
-    def _async_model_input_changed(self, event: Any) -> None:
+    def _async_model_input_changed(self, event: Event[EventStateChangedData]) -> None:
         """Handle model input entity state changes — update binary sensor."""
         if hasattr(self._entity, "_config_entry_id"):
             async_dispatcher_send(
@@ -974,7 +976,7 @@ class PIController:
         if elapsed >= min_cooldown:
             await self._pi_tick()
 
-    async def _check_sensor_recovery(self, _now: Any = None) -> None:
+    async def _check_sensor_recovery(self, _now: datetime | None = None) -> None:
         """Called 60s after sensor went unavailable. Fall back to FF-only if still gone."""
         self._sensor_recovery_pending = False
         self._sensor_recovery_unsub = None
@@ -1015,7 +1017,7 @@ class PIController:
             await e.send_ir()
         e.async_schedule_update_ha_state()
 
-    async def _pi_tick(self, now: Any = None) -> None:
+    async def _pi_tick(self, now: datetime | None = None) -> None:
         """PI + feedforward controller tick. Called by timer and sensor events."""
         if not self._pi_enabled:
             return
@@ -1028,7 +1030,7 @@ class PIController:
         finally:
             self._pi_tick_running = False
 
-    async def _pi_tick_inner(self, now: Any = None) -> None:
+    async def _pi_tick_inner(self, now: datetime | None = None) -> None:
         """PI + feedforward controller tick implementation."""
         e = self._entity
         if e._attr_hvac_mode == HVACMode.OFF:
