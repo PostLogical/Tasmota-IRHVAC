@@ -1406,11 +1406,13 @@ class TestResetFFSeedsRLS:
 
         await pi.async_reset_ff_seeds()
 
-        # Beta should be reset to seeds (lines 816-818)
-        assert pi._rls_heat.beta[0] == 0.0  # intercept
-        assert pi._rls_heat.beta[1] == pytest.approx(pi._ff_heat_slope)  # outdoor
-        assert pi._rls_heat.beta[2] == -3.0  # model input seed
-        assert pi._rls_cool.beta[2] == 1.5
+        # Coefficients should be reset to seeds (check physical units)
+        heat_coeffs = pi._rls_heat.get_coefficients()
+        cool_coeffs = pi._rls_cool.get_coefficients()
+        assert heat_coeffs[0] == pytest.approx(0.0)  # intercept
+        assert heat_coeffs[1] == pytest.approx(pi._ff_heat_slope)  # outdoor
+        assert heat_coeffs[2] == pytest.approx(-3.0)  # model input seed
+        assert cool_coeffs[2] == pytest.approx(1.5)
         assert pi._rls_heat.observation_count == 0
         assert pi._rls_cool.observation_count == 0
 

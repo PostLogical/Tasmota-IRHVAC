@@ -2870,9 +2870,10 @@ class TestSeedChangeDetection:
         entity = FakePIEntity(config)
         pi = entity._pi
 
-        # Simulate learned state
-        pi._rls_heat.beta = [0.1, 0.42, ]  # Learned outdoor_delta=0.42
-        pi._rls_heat.beta_seed = [0.0, 0.3]  # Old seed was 0.3
+        # Simulate learned state (set in normalized space: phys * scale)
+        scale = pi._rls_heat.feature_scales[1]
+        pi._rls_heat.beta = [0.1, 0.42 * scale]  # Learned outdoor_delta=0.42 (phys)
+        pi._rls_heat.beta_seed = [0.0, 0.3 * scale]  # Old seed was 0.3
 
         # New seeds: user changed outdoor_delta seed to 0.5
         old_seeds = [0.0, 0.3]
@@ -2880,14 +2881,12 @@ class TestSeedChangeDetection:
 
         pi._apply_seed_changes(old_seeds, new_seeds, pi._rls_heat)
 
-        # Coefficient should be reset to new seed
-        assert pi._rls_heat.beta[1] == 0.5
-        assert pi._rls_heat.beta_seed[1] == 0.5
-        # P diagonal should be reset using scaled initialization
+        # Coefficient should be reset to new seed (in physical units via get_coefficients)
+        coeffs = pi._rls_heat.get_coefficients()
+        assert coeffs[1] == pytest.approx(0.5)
+        # P diagonal should be reset to uniform P_INIT
         from custom_components.tasmota_irhvac.const import DEFAULT_RLS_P_INIT
-        scale = pi._rls_heat.feature_scales[1]
-        expected_p = DEFAULT_RLS_P_INIT / max(scale * scale, 0.01)
-        assert pi._rls_heat.P[1 * pi._rls_heat.n + 1] == pytest.approx(expected_p)
+        assert pi._rls_heat.P[1 * pi._rls_heat.n + 1] == pytest.approx(DEFAULT_RLS_P_INIT)
 
     @pytest.mark.asyncio
     async def test_unchanged_seed_preserves_learned(self):
@@ -2897,7 +2896,8 @@ class TestSeedChangeDetection:
         entity = FakePIEntity(config)
         pi = entity._pi
 
-        pi._rls_heat.beta = [0.1, 0.42]
+        scale = pi._rls_heat.feature_scales[1]
+        pi._rls_heat.beta = [0.1, 0.42 * scale]
         old_P = pi._rls_heat.P[1 * pi._rls_heat.n + 1]
 
         old_seeds = [0.0, 0.3]
@@ -2905,7 +2905,7 @@ class TestSeedChangeDetection:
 
         pi._apply_seed_changes(old_seeds, new_seeds, pi._rls_heat)
 
-        assert pi._rls_heat.beta[1] == 0.42  # Preserved
+        assert pi._rls_heat.get_coefficients()[1] == pytest.approx(0.42)  # Preserved
         assert pi._rls_heat.P[1 * pi._rls_heat.n + 1] == old_P  # Not reset
 
     @pytest.mark.asyncio
@@ -2916,11 +2916,12 @@ class TestSeedChangeDetection:
         entity = FakePIEntity(config)
         pi = entity._pi
 
-        pi._rls_heat.beta = [0.1, 0.42]
+        scale = pi._rls_heat.feature_scales[1]
+        pi._rls_heat.beta = [0.1, 0.42 * scale]
 
         pi._apply_seed_changes([], [0.0, 0.3], pi._rls_heat)
 
-        assert pi._rls_heat.beta[1] == 0.42  # Unchanged
+        assert pi._rls_heat.get_coefficients()[1] == pytest.approx(0.42)  # Unchanged
 
 
 # ── config_model.py lines 81-84: legacy celsius_mode fallback ────────

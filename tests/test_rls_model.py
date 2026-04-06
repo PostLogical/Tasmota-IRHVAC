@@ -427,12 +427,10 @@ class TestRLSFeatureScalesPadding:
         model = RLSModel(n_inputs=2)
         assert model.feature_scales == [1.0, 1.0, 1.0]
 
-    def test_padded_scales_affect_P_initialization(self):
-        """Padded (1.0) scales should give default P diagonal; provided scale should differ."""
+    def test_uniform_P_regardless_of_scales(self):
+        """P initialization should be uniform — normalization handles scale balance."""
         model = RLSModel(n_inputs=2, feature_scales=[5.0], p_init=10.0)
-        # P diagonal for index 0: p_init / (5.0^2) = 10 / 25 = 0.4
-        assert model.P[0 * 3 + 0] == pytest.approx(0.4)
-        # P diagonal for index 1: p_init / (1.0^2) = 10.0 (padded scale)
+        # All P diagonals should be p_init (uniform), regardless of feature scales
+        assert model.P[0 * 3 + 0] == pytest.approx(10.0)
         assert model.P[1 * 3 + 1] == pytest.approx(10.0)
-        # P diagonal for index 2: same as index 1
         assert model.P[2 * 3 + 2] == pytest.approx(10.0)

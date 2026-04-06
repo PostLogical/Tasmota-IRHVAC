@@ -2,13 +2,16 @@
 
 These tests simulate multi-day cycles with realistic outdoor temp, solar gain,
 and supplemental heat patterns to validate RLS convergence and stability.
+
+Includes both open-loop tests (feed true offset directly) and closed-loop
+tests (simulate PI feedback loop where observation = hp_setpoint - desired).
 """
 
 import math
 import random
 import pytest
 
-from custom_components.tasmota_irhvac.pi_controller import RLSModel
+from custom_components.tasmota_irhvac.rls_model import RLSModel
 
 
 def _simulate_diurnal_cycle(hours=72, seed=42):
@@ -254,5 +257,360 @@ class TestRLSCoefficientStability:
             model.update(x, y)
 
         # Coefficients should be reasonable, not exploded
-        assert abs(model.beta[1]) < 2.0, f"Outdoor coefficient exploded: {model.beta[1]}"
-        assert abs(model.beta[2]) < 10.0, f"Solar coefficient exploded: {model.beta[2]}"
+        coeffs = model.get_coefficients()
+        assert abs(coeffs[1]) < 2.0, f"Outdoor coefficient exploded: {coeffs[1]}"
+        assert abs(coeffs[2]) < 10.0, f"Solar coefficient exploded: {coeffs[2]}"
+
+
+# ── Closed-Loop PI+RLS Simulation ──────────────────────────────────────
+
+
+def _simulate_closed_loop(
+    rls, true_slope, ki=0.15, kp=1.0, deadband=0.5,
+    n_ticks=200, outdoor_schedule=None, disturbance_schedule=None,
+    seed=42,
+):
+    """Simulate a PI+RLS closed loop.
+
+    The PI controller drives hp_setpoint based on error + integral + FF.
+    The RLS observes hp_setpoint - desired when in deadband and integral stable.
+    A simple thermal model connects hp_setpoint to room temperature.
+
+    Returns history list of dicts with per-tick state.
+    """
+    random.seed(seed)
+
+    desired = 20.5  # °C
+    room_temp = desired
+    integral = 0.0
+    hp_setpoint = round(desired)
+    settled_ticks = 0
+    prev_integral = 0.0
+
+    # Simple thermal model: room temp moves toward hp_setpoint with time constant
+    thermal_tc = 0.7  # fraction of gap closed per tick (15-min tick, ~25min TC)
+
+    history = []
+
+    for tick in range(n_ticks):
+        outdoor = outdoor_schedule(tick) if outdoor_schedule else 5.0
+        disturbance = disturbance_schedule(tick) if disturbance_schedule else 0.0
+
+        # True required offset (what the room actually needs)
+        outdoor_delta = max(0, 15.0 - outdoor)
+        true_offset = true_slope * outdoor_delta + disturbance
+
+        # Room temperature evolves: moves toward (desired + noise) driven by
+        # how much the HP setpoint overshoots/undershoots the true need
+        excess = (hp_setpoint - desired) - true_offset  # positive = too much heat
+        room_temp += thermal_tc * excess + random.gauss(0, 0.05)
+
+        error = desired - room_temp
+        abs_error = abs(error)
+        in_deadband = abs_error < deadband
+
+        if in_deadband:
+            settled_ticks += 1
+            p_term = 0.0
+        else:
+            settled_ticks = 0
+            p_term = kp * 0.3 * error  # setpoint weight b=0.3
+            integral += error  # trapezoidal approximation simplified
+
+        # FF prediction from RLS
+        x = [1.0, outdoor_delta]
+        ff_offset = rls.predict(x)
+
+        # RLS learning gate: in deadband, settled 4+ ticks, integral stable
+        integral_stable = abs(integral - prev_integral) < 0.5
+        if in_deadband and settled_ticks >= 4 and integral_stable:
+            observed_offset = float(hp_setpoint) - desired
+            rls.update(x, observed_offset)
+
+        prev_integral = integral
+        i_term = ki * integral
+
+        raw_setpoint = desired + p_term + i_term + ff_offset
+        clamped = max(16.0, min(30.0, raw_setpoint))
+
+        # Midpoint-crossing hysteresis
+        if clamped > hp_setpoint + 0.5:
+            hp_setpoint = round(clamped)
+        elif clamped < hp_setpoint - 0.5:
+            hp_setpoint = round(clamped)
+        hp_setpoint = int(max(16, min(30, hp_setpoint)))
+
+        history.append({
+            "tick": tick,
+            "room_temp": room_temp,
+            "hp_setpoint": hp_setpoint,
+            "integral": integral,
+            "ff_offset": ff_offset,
+            "error": error,
+            "outdoor_delta": outdoor_delta,
+        })
+
+    return history
+
+
+class TestClosedLoopMultiScale:
+    """Test that feature normalization gives balanced learning in closed loop."""
+
+    def test_intercept_stable_with_feature_scales(self):
+        """With production-like feature_scales, intercept should not dominate.
+
+        This is the bug that caused intercept=-2.26 in DR: the intercept had
+        100x the Kalman gain of outdoor_delta, absorbing all variance.
+        """
+        # Production-like scales: outdoor_delta typically ~10
+        model = RLSModel(
+            n_inputs=1,
+            seed_coefficients=[0.0, 0.35],
+            feature_scales=[1.0, 10.0],
+        )
+
+        history = _simulate_closed_loop(
+            model, true_slope=0.35, n_ticks=200,
+            outdoor_schedule=lambda t: 5.0 + 3.0 * math.sin(t * 0.1),
+        )
+
+        coeffs = model.get_coefficients()
+        # Intercept should stay near 0, not drift to large values
+        assert abs(coeffs[0]) < 0.5, (
+            f"Intercept drifted to {coeffs[0]:.2f} — should stay near 0"
+        )
+        # Outdoor coefficient should stay near true value
+        assert coeffs[1] == pytest.approx(0.35, abs=0.15), (
+            f"Outdoor coeff={coeffs[1]:.3f}, expected ~0.35"
+        )
+
+    def test_single_observation_after_reset_bounded(self):
+        """After reset, a single observation should not cause >20% coefficient shift.
+
+        This reproduces the DR bug: 1 observation shifted intercept by -2.26
+        and outdoor_delta by 46%.
+        """
+        model = RLSModel(
+            n_inputs=1,
+            seed_coefficients=[0.0, 0.48],  # DR seeds
+            feature_scales=[1.0, 10.0],
+        )
+
+        # One observation at an unusual condition
+        x = [1.0, 13.0]  # outdoor_delta=13 (outdoor=2°C, cold)
+        y = 4.5  # observed offset
+
+        model.update(x, y)
+
+        coeffs = model.get_coefficients()
+        # Intercept should not shift more than ~0.5 from seed (0)
+        assert abs(coeffs[0]) < 1.0, (
+            f"Single observation shifted intercept to {coeffs[0]:.2f}"
+        )
+        # Outdoor coefficient should not shift more than ~30% from seed
+        assert abs(coeffs[1] - 0.48) / 0.48 < 0.30, (
+            f"Single observation shifted outdoor coeff to {coeffs[1]:.3f} "
+            f"({100 * (coeffs[1] - 0.48) / 0.48:.0f}% from seed 0.48)"
+        )
+
+    def test_balanced_learning_rates_across_scales(self):
+        """Both intercept and outdoor_delta should learn at similar rates.
+
+        Feed data where the true relationship is [0.5, 0.4]. Track convergence
+        of both coefficients from wrong seeds [0, 0.2].
+        """
+        model = RLSModel(
+            n_inputs=1,
+            seed_coefficients=[0.0, 0.2],  # Wrong seeds
+            feature_scales=[1.0, 10.0],  # Production scales
+        )
+
+        random.seed(42)
+        for _ in range(100):
+            outdoor_delta = random.uniform(3, 15)
+            x = [1.0, outdoor_delta]
+            y = 0.5 + 0.4 * outdoor_delta + random.gauss(0, 0.2)
+            model.update(x, y)
+
+        coeffs = model.get_coefficients()
+        assert coeffs[0] == pytest.approx(0.5, abs=0.3), (
+            f"Intercept={coeffs[0]:.3f}, expected ~0.5"
+        )
+        assert coeffs[1] == pytest.approx(0.4, abs=0.1), (
+            f"Outdoor={coeffs[1]:.3f}, expected ~0.4"
+        )
+
+
+class TestClosedLoopSelfCorrection:
+    """Test that RLS can correct wrong coefficients through the feedback loop."""
+
+    def test_wrong_seed_corrected_via_integral(self):
+        """FF with wrong slope should be corrected as integral absorbs the error.
+
+        When FF underpredicts, integral builds to compensate. RLS observes
+        hp_setpoint - desired which includes ki * integral, revealing the
+        true offset needed. Coefficients should converge toward truth.
+        """
+        # Start with wrong seed (0.2 instead of true 0.35)
+        model = RLSModel(
+            n_inputs=1,
+            seed_coefficients=[0.0, 0.20],
+            feature_scales=[1.0, 10.0],
+        )
+
+        history = _simulate_closed_loop(
+            model, true_slope=0.35, n_ticks=300,
+            outdoor_schedule=lambda t: 5.0,  # Constant outdoor
+        )
+
+        coeffs = model.get_coefficients()
+        # Should have corrected toward 0.35 (at least partially)
+        assert coeffs[1] > 0.25, (
+            f"Outdoor coeff={coeffs[1]:.3f} — didn't correct from seed 0.20 "
+            f"toward true 0.35"
+        )
+
+        # Room should be holding near target by end
+        late_temps = [h["room_temp"] for h in history[-20:]]
+        avg_error = sum(abs(t - 20.5) for t in late_temps) / len(late_temps)
+        assert avg_error < 0.5, (
+            f"Room not converging: avg error={avg_error:.2f}°C"
+        )
+
+    def test_large_integral_observations_drive_correction(self):
+        """When integral is large but stable, RLS should learn from it.
+
+        The observation hp_setpoint - desired = ff_predict + ki*integral.
+        Large integral means FF is wrong. The residual = ki*integral should
+        push coefficients in the right direction.
+        """
+        model = RLSModel(
+            n_inputs=1,
+            seed_coefficients=[0.0, 0.15],  # Very wrong seed
+            feature_scales=[1.0, 10.0],
+        )
+
+        history = _simulate_closed_loop(
+            model, true_slope=0.40, n_ticks=400,
+            outdoor_schedule=lambda t: 3.0,  # Cold, outdoor_delta=12
+        )
+
+        coeffs = model.get_coefficients()
+        # Combined intercept + slope should predict close to true offset
+        # True offset = 0.40 * 12 = 4.8
+        predicted = model.predict([1.0, 12.0])
+        assert abs(predicted - 4.8) < 1.5, (
+            f"After 400 ticks, prediction={predicted:.2f} vs true=4.8 "
+            f"(coeffs: intercept={coeffs[0]:.3f}, od={coeffs[1]:.3f})"
+        )
+
+
+class TestClosedLoopDisturbanceRejection:
+    """Test behavior with unmeasured disturbances (like solar without solar input)."""
+
+    def test_diurnal_disturbance_absorbed_by_intercept(self):
+        """Solar-like diurnal disturbance without solar input.
+
+        Without a solar model input, the intercept WILL absorb the average
+        solar effect — this is omitted variable bias and is mathematically
+        expected. The test verifies the outdoor coefficient stays close to
+        truth (intercept absorbs the bias, not outdoor_delta).
+        """
+        model = RLSModel(
+            n_inputs=1,
+            seed_coefficients=[0.0, 0.35],
+            feature_scales=[1.0, 10.0],
+        )
+
+        def outdoor(tick):
+            hour = (tick % 96) / 4  # 15-min ticks, 24-hour cycle
+            return 5.0 + 5.0 * math.sin(math.radians((hour - 5) * 15 - 90))
+
+        def solar_disturbance(tick):
+            hour = (tick % 96) / 4
+            if 8 <= hour <= 18:
+                return -1.5 * math.sin(math.radians((hour - 8) * 18))
+            return 0.0
+
+        history = _simulate_closed_loop(
+            model, true_slope=0.35, n_ticks=96 * 3,  # 3 days
+            outdoor_schedule=outdoor,
+            disturbance_schedule=solar_disturbance,
+        )
+
+        coeffs = model.get_coefficients()
+        # Both intercept and outdoor_delta absorb some solar bias because
+        # solar correlates with outdoor temp (both follow diurnal cycle).
+        # This is omitted variable bias — expected without the solar input.
+        # The key property is that outdoor_delta stays in a reasonable range
+        # and doesn't explode or collapse.
+        assert 0.15 < coeffs[1] < 0.65, (
+            f"Outdoor coeff outside reasonable range: {coeffs[1]:.3f}"
+        )
+
+    def test_diurnal_disturbance_fixed_with_solar_input(self):
+        """With solar as a model input, intercept stays near 0."""
+        model = RLSModel(
+            n_inputs=2,
+            seed_coefficients=[0.0, 0.35, -1.5],
+            feature_scales=[1.0, 10.0, 0.5],
+        )
+
+        random.seed(42)
+        for tick in range(96 * 5):  # 5 days
+            hour = (tick % 96) / 4
+            outdoor = 5.0 + 5.0 * math.sin(math.radians((hour - 5) * 15 - 90))
+            outdoor_delta = max(0, 15.0 - outdoor)
+
+            if 8 <= hour <= 18:
+                solar = 0.7 * math.sin(math.radians((hour - 8) * 18))
+                solar += random.gauss(0, 0.05)
+                solar = max(0, solar)
+            else:
+                solar = 0.0
+
+            x = [1.0, outdoor_delta, solar]
+            true_offset = 0.35 * outdoor_delta - 1.5 * solar
+            y = true_offset + random.gauss(0, 0.2)
+            model.update(x, y)
+
+        coeffs = model.get_coefficients()
+        assert abs(coeffs[0]) < 0.5, (
+            f"Intercept drifted to {coeffs[0]:.2f} despite solar input"
+        )
+        assert coeffs[1] == pytest.approx(0.35, abs=0.1)
+        assert coeffs[2] == pytest.approx(-1.5, abs=0.5)
+
+    def test_collinear_noise_does_not_corrupt(self):
+        """Noise partially correlated with outdoor_delta should not shift coefficients.
+
+        Simulates a confounding variable (e.g., wind correlates with cold
+        outdoor temps) that isn't modeled as an input.
+        """
+        model = RLSModel(
+            n_inputs=1,
+            seed_coefficients=[0.0, 0.35],
+            feature_scales=[1.0, 10.0],
+        )
+
+        random.seed(42)
+        for _ in range(200):
+            outdoor_delta = random.uniform(3, 15)
+            # Correlated noise: wind effect ~ 0.3 * outdoor_delta + random
+            wind_effect = 0.05 * outdoor_delta + random.gauss(0, 0.3)
+            x = [1.0, outdoor_delta]
+            y = 0.35 * outdoor_delta + wind_effect + random.gauss(0, 0.2)
+            model.update(x, y)
+
+        coeffs = model.get_coefficients()
+        # Outdoor coefficient absorbs some of the correlated wind effect
+        # (this is expected — omitted variable bias). The key test is that
+        # the intercept doesn't explode.
+        assert abs(coeffs[0]) < 1.5, (
+            f"Intercept exploded with collinear noise: {coeffs[0]:.2f}"
+        )
+        # Outdoor coefficient should absorb the correlated portion
+        # True = 0.35, plus ~0.05 from wind = ~0.40
+        assert 0.2 < coeffs[1] < 0.7, (
+            f"Outdoor coeff outside expected range: {coeffs[1]:.3f}"
+        )

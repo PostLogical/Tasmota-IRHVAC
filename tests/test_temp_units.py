@@ -101,8 +101,9 @@ class TestSeedUnitConversion:
         entity = _make_f_entity(config)
 
         pi = entity._pi
-        # Set a known coefficient in °C
-        pi._rls_heat.beta[1] = 0.35  # outdoor_delta coefficient in °C
+        # Set a known coefficient in physical °C (must store as normalized)
+        scale = pi._rls_heat.feature_scales[1]
+        pi._rls_heat.beta[1] = 0.35 * scale  # 0.35 °C/°C in normalized space
 
         attrs = pi.get_extra_state_attributes()
         displayed = attrs["rls_heat_coefficients"]["outdoor_delta"]
@@ -115,7 +116,8 @@ class TestSeedUnitConversion:
         config = make_pi_config()
         entity = FakePIEntity(config)
         pi = entity._pi
-        pi._rls_heat.beta[1] = 0.35
+        scale = pi._rls_heat.feature_scales[1]
+        pi._rls_heat.beta[1] = 0.35 * scale
 
         attrs = pi.get_extra_state_attributes()
         displayed = attrs["rls_heat_coefficients"]["outdoor_delta"]

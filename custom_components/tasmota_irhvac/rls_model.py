@@ -47,85 +47,108 @@ class RLSModel:
 
         Args:
             n_inputs: Number of input features (excluding intercept).
-            seed_coefficients: Initial β vector [intercept, β₁, β₂, ...].
-                              Length n_inputs + 1. Defaults to zeros.
+            seed_coefficients: Initial β vector [intercept, β₁, β₂, ...] in
+                              physical units. Length n_inputs + 1. Defaults to zeros.
             lambda_base: Base forgetting factor (0.99-0.999).
             lambda_min: Minimum λ when residuals are large.
             delta: Covariance regularization constant (added to P diagonal
                    each step to prevent covariance windup).
-            p_init: Base initial covariance diagonal value.
-            coeff_clamps: List of (min, max) tuples per coefficient, or None.
+            p_init: Initial covariance diagonal value (uniform for all dimensions).
+            coeff_clamps: List of (min, max) tuples per coefficient in physical
+                         units, or None.
             feature_scales: Typical magnitude of each feature [1, scale₁, ...].
-                           Used to scale P initialization so all dimensions
-                           have balanced learning rates. Defaults to all 1.0.
+                           Features are normalized by these scales before entering
+                           the RLS, so all dimensions are O(1). Coefficients are
+                           stored internally in normalized space and converted to
+                           physical units for prediction and external access.
         """
         self.n: int = n_inputs + 1  # +1 for intercept
         self.lambda_base: float = lambda_base
         self.lambda_min: float = lambda_min
         self.delta: float = delta
+        self.p_init: float = p_init
 
-        # Coefficient vector β (intercept + n_inputs)
-        self.beta: list[float]
-        if seed_coefficients is not None:
-            self.beta = list(seed_coefficients)
-            # Pad with zeros if seed is shorter
-            while len(self.beta) < self.n:
-                self.beta.append(0.0)
-        else:
-            self.beta = [0.0] * self.n
-
-        # Seed values (retained for blend and seed change detection)
-        self.beta_seed: list[float] = list(self.beta)
-
-        # Feature scales for P initialization (retained for seed change reset)
+        # Feature scales: normalize features to O(1) before RLS math.
+        # This gives truly balanced learning rates across all dimensions.
         self.feature_scales: list[float] = feature_scales or [1.0] * self.n
         while len(self.feature_scales) < self.n:
             self.feature_scales.append(1.0)
 
+        # Coefficient vector β in normalized space.
+        # Physical β_phys[i] = β_norm[i] / scale[i]
+        # So β_norm[i] = β_phys[i] * scale[i]
+        self.beta: list[float]
+        if seed_coefficients is not None:
+            self.beta = [
+                seed_coefficients[i] * self.feature_scales[i]
+                if i < len(seed_coefficients) else 0.0
+                for i in range(self.n)
+            ]
+        else:
+            self.beta = [0.0] * self.n
+
+        # Seed values in normalized space (for seed change detection)
+        self.beta_seed: list[float] = list(self.beta)
+
         # Covariance matrix P (n × n, stored as flat list row-major)
-        # Scale each diagonal by inverse feature magnitude squared so all
-        # dimensions have balanced initial learning rates.
+        # Uniform initialization — feature normalization handles scale balance.
         self.P: list[float] = [0.0] * (self.n * self.n)
         for i in range(self.n):
-            scale = self.feature_scales[i]
-            self.P[i * self.n + i] = p_init / max(scale * scale, 0.01)
+            self.P[i * self.n + i] = p_init
 
-        # Coefficient clamps: [(min, max), ...] for each coefficient
-        self.coeff_clamps: list[tuple[float, float] | None] = coeff_clamps or [None] * self.n
+        # Coefficient clamps in normalized space
+        self.coeff_clamps: list[tuple[float, float] | None]
+        if coeff_clamps is not None:
+            self.coeff_clamps = [
+                (clamp[0] * self.feature_scales[i], clamp[1] * self.feature_scales[i])
+                if clamp is not None and i < len(self.feature_scales)
+                else clamp
+                for i, clamp in enumerate(coeff_clamps)
+            ]
+        else:
+            self.coeff_clamps = [None] * self.n
 
         # Observation counter
         self.observation_count: int = 0
+
+    def _normalize(self, x: list[float]) -> list[float]:
+        """Normalize raw feature vector to O(1) by dividing by scales."""
+        return [x[i] / self.feature_scales[i] for i in range(self.n)]
 
     def predict(self, x: list[float]) -> float:
         """Predict offset from feature vector.
 
         Args:
-            x: Feature vector [1, x₁, x₂, ...] with leading 1 for intercept.
+            x: Feature vector [1, x₁, x₂, ...] in physical units.
                Length must equal self.n.
 
         Returns:
             Predicted offset (float).
         """
-        return sum(self.beta[i] * x[i] for i in range(self.n))
+        # β_norm · x_norm = Σ (β_phys * scale) * (x / scale) = Σ β_phys * x
+        x_norm = self._normalize(x)
+        return sum(self.beta[i] * x_norm[i] for i in range(self.n))
 
     def update(self, x: list[float], y: float) -> float:
         """Update coefficients via RLS with one observation.
 
         Args:
-            x: Feature vector [1, x₁, x₂, ...].
+            x: Feature vector [1, x₁, x₂, ...] in physical units.
             y: Observed offset (float).
 
         Returns:
             Residual (y - prediction before update).
         """
         n = self.n
+        x_norm = self._normalize(x)
+
         # Prediction error (residual)
-        y_pred = self.predict(x)
+        y_pred = sum(self.beta[i] * x_norm[i] for i in range(n))
         residual = y - y_pred
 
         # Kalman gain: K = P·x / (λ + x'·P·x)
-        Px = [sum(self.P[i * n + j] * x[j] for j in range(n)) for i in range(n)]
-        xPx = sum(x[i] * Px[i] for i in range(n))
+        Px = [sum(self.P[i * n + j] * x_norm[j] for j in range(n)) for i in range(n)]
+        xPx = sum(x_norm[i] * Px[i] for i in range(n))
 
         # Variable forgetting factor based on normalized residual.
         # When residual^2 >> expected prediction variance (xPx), the model
@@ -165,7 +188,7 @@ class RLSModel:
         new_P = [0.0] * (n * n)
         for i in range(n):
             for j in range(n):
-                col_j = sum(x[k] * self.P[k * n + j] for k in range(n))
+                col_j = sum(x_norm[k] * self.P[k * n + j] for k in range(n))
                 new_P[i * n + j] = (self.P[i * n + j] - K[i] * col_j) / lam
 
         # Regularization: prevent covariance windup by adding δ·I each step
@@ -178,15 +201,15 @@ class RLSModel:
         return residual
 
     def get_coefficients(self) -> dict[int, float]:
-        """Return coefficient dict: {index: value}."""
-        return {i: self.beta[i] for i in range(self.n)}
+        """Return coefficient dict in physical units: {index: value}."""
+        return {i: self.beta[i] / self.feature_scales[i] for i in range(self.n)}
 
     def get_covariance_diagonal(self) -> list[float]:
         """Return diagonal of P (uncertainty per coefficient)."""
         return [self.P[i * self.n + i] for i in range(self.n)]
 
     def as_dict(self) -> dict[str, Any]:
-        """Serialize model state to dict."""
+        """Serialize model state to dict (beta in normalized space)."""
         return {
             "beta": list(self.beta),
             "P": list(self.P),
@@ -197,25 +220,20 @@ class RLSModel:
     def from_dict(cls, data: dict[str, Any], n_inputs: int, **kwargs: Any) -> RLSModel:
         """Restore model from serialized dict.
 
-        Handles length mismatches when model inputs are added/removed:
-        - If stored beta matches current length: restore exactly
-        - If shorter (inputs added): restore existing, new inputs use seeds
-        - If longer (inputs removed): restore only what fits
+        Beta and P are stored in normalized space. Handles length mismatches
+        when model inputs are added/removed.
         """
         model = cls(n_inputs, **kwargs)
         if "beta" in data:
             beta = data["beta"]
             if len(beta) == model.n:
-                # Exact match — restore all
                 model.beta = [float(v) for v in beta]
             elif len(beta) < model.n:
-                # Inputs were added — restore old coefficients, keep seeds for new
                 for i in range(len(beta)):
                     model.beta[i] = float(beta[i])
                 _LOGGER.info("RLS restore: stored %d coefficients, model needs %d — seeding new inputs",
                            len(beta), model.n)
             else:
-                # Inputs were removed — restore what fits
                 for i in range(model.n):
                     model.beta[i] = float(beta[i])
                 _LOGGER.info("RLS restore: stored %d coefficients, model needs %d — truncating",
@@ -225,7 +243,6 @@ class RLSModel:
             if len(P) == model.n * model.n:
                 model.P = [float(v) for v in P]
             else:
-                # Covariance matrix size mismatch — keep initial P (high uncertainty for new inputs)
                 _LOGGER.info("RLS restore: covariance matrix size mismatch, using initial P")
         if "observation_count" in data:
             model.observation_count = int(data["observation_count"])

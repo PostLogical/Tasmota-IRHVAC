@@ -491,12 +491,14 @@ class PIController:
                 data.rls_heat_model, self._n_model_inputs,
                 seed_coefficients=self._heat_seeds,
                 coeff_clamps=self._rls_clamps,
+                feature_scales=self._feature_scales,
             )
         if data.rls_cool_model:
             self._rls_cool = RLSModel.from_dict(
                 data.rls_cool_model, self._n_model_inputs,
                 seed_coefficients=self._cool_seeds,
                 coeff_clamps=self._rls_clamps,
+                feature_scales=self._feature_scales,
             )
         # Seed change detection: if user edited a seed since last save,
         # reset that coefficient to the new seed and increase its uncertainty.
@@ -523,15 +525,15 @@ class PIController:
             return  # No stored seeds (first run or pre-seed-detection data)
         for i in range(min(len(old_seeds), len(new_seeds), rls_model.n)):
             if abs(old_seeds[i] - new_seeds[i]) > 0.001:
-                old_val = rls_model.beta[i]
-                rls_model.beta[i] = new_seeds[i]
-                rls_model.beta_seed[i] = new_seeds[i]
-                # Reset P for this coefficient using scaled initialization
-                scale = rls_model.feature_scales[i] if i < len(rls_model.feature_scales) else 1.0
-                rls_model.P[i * rls_model.n + i] = DEFAULT_RLS_P_INIT / max(scale * scale, 0.01)
+                scale = rls_model.feature_scales[i]
+                old_val_phys = rls_model.beta[i] / scale
+                rls_model.beta[i] = new_seeds[i] * scale  # Store in normalized space
+                rls_model.beta_seed[i] = new_seeds[i] * scale
+                # Reset P for this coefficient — uniform, normalization handles scaling
+                rls_model.P[i * rls_model.n + i] = DEFAULT_RLS_P_INIT
                 _LOGGER.info(
                     "Seed changed for coefficient %d: %.4f → %.4f (learned was %.4f, reset)",
-                    i, old_seeds[i], new_seeds[i], old_val,
+                    i, old_seeds[i], new_seeds[i], old_val_phys,
                 )
 
     async def set_temperature(
@@ -658,11 +660,13 @@ class PIController:
         for m_input in self._model_inputs:
             coeff_names.append(m_input.get("name", "unknown"))
 
-        # Coefficients are in °C — display as-is
-        rls_heat_coeffs = {coeff_names[i]: round(self._rls_heat.beta[i], 4)
-                          for i in range(min(len(coeff_names), len(self._rls_heat.beta)))}
-        rls_cool_coeffs = {coeff_names[i]: round(self._rls_cool.beta[i], 4)
-                          for i in range(min(len(coeff_names), len(self._rls_cool.beta)))}
+        # Convert from normalized to physical units for display
+        heat_phys = self._rls_heat.get_coefficients()
+        cool_phys = self._rls_cool.get_coefficients()
+        rls_heat_coeffs = {coeff_names[i]: round(heat_phys[i], 4)
+                          for i in range(min(len(coeff_names), len(heat_phys)))}
+        rls_cool_coeffs = {coeff_names[i]: round(cool_phys[i], 4)
+                          for i in range(min(len(coeff_names), len(cool_phys)))}
 
         return {
             ATTR_HP_SETPOINT: self._hp_setpoint,
@@ -742,18 +746,24 @@ class PIController:
         for m_input in self._model_inputs:
             heat_seeds.append(float(m_input.get("seed_heat", 0.0)))
             cool_seeds.append(float(m_input.get("seed_cool", 0.0)))
-        self._rls_heat.beta = heat_seeds + [0.0] * (self._rls_heat.n - len(heat_seeds))
-        self._rls_cool.beta = cool_seeds + [0.0] * (self._rls_cool.n - len(cool_seeds))
-        # Reset covariance to scaled initial uncertainty
-        for i in range(self._rls_heat.n):
-            for j in range(self._rls_heat.n):
-                if i == j:
-                    scale = self._feature_scales[i] if i < len(self._feature_scales) else 1.0
-                    val = DEFAULT_RLS_P_INIT / max(scale * scale, 0.01)
-                else:
-                    val = 0.0
-                self._rls_heat.P[i * self._rls_heat.n + j] = val
-                self._rls_cool.P[i * self._rls_cool.n + j] = val
+        # Convert physical-space seeds to normalized space
+        n = self._rls_heat.n
+        heat_norm = [
+            heat_seeds[i] * self._feature_scales[i] if i < len(heat_seeds) else 0.0
+            for i in range(n)
+        ]
+        cool_norm = [
+            cool_seeds[i] * self._feature_scales[i] if i < len(cool_seeds) else 0.0
+            for i in range(n)
+        ]
+        self._rls_heat.beta = heat_norm
+        self._rls_cool.beta = cool_norm
+        # Reset covariance to uniform initial uncertainty
+        for i in range(n):
+            for j in range(n):
+                val = DEFAULT_RLS_P_INIT if i == j else 0.0
+                self._rls_heat.P[i * n + j] = val
+                self._rls_cool.P[i * n + j] = val
         self._rls_heat.observation_count = 0
         self._rls_cool.observation_count = 0
         self._pi_integral = 0.0
