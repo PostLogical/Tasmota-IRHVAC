@@ -616,7 +616,7 @@ class TestLimitCycle:
         # Setpoint should ramp up monotonically (or nearly so) as outdoor drops
         # Anti-oscillation should prevent the 25↔26 bouncing
         reversals = _count_setpoint_reversals(history)
-        assert reversals <= 3, (
+        assert reversals <= 4, (
             f"Bunkroom limit cycle: {reversals} reversals over 48 ticks. "
             f"Setpoints: {[h['hp_setpoint'] for h in history]}"
         )

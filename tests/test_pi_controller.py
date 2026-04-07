@@ -1142,25 +1142,21 @@ class TestPIEdgeCases:
 
     @pytest.mark.asyncio
     async def test_quantization_feedback_in_deadband(self, pi_entity):
-        """Quantization feedback should push integral away from X.5 boundary.
+        """Quantization feedback should nudge integral for small misalignments.
 
-        When raw_setpoint is near X.5 and system is in deadband, the
-        quantization feedback should nudge integral so raw moves toward
-        an integer, preventing limit cycles.
+        Only activates when |q_error| is between 0.3 and 0.5 (true
+        quantization misalignment). Large gaps are real integral corrections
+        and must not trigger feedback (that caused integral runaway).
         """
         pi = pi_entity._pi
         pi._desired_temp = 20.5
-        pi._hp_setpoint = 25
-        # Set integral so that with FF from RLS (≈0), raw ≈ 20.5 + ki*I
-        # We need raw to be near 25.5. effective_ki = 0.05 * (1 + |I|/10)
-        # For I=80: effective_ki = 0.05 * 9 = 0.45, i_term = 0.45*80=36 → too high
-        # For I=60: effective_ki = 0.05 * 7 = 0.35, i_term = 0.35*60=21 → too high
-        # This is hard to set up because FF recomputes from RLS.
-        # Instead, set outdoor temp so FF gives us something useful.
-        pi._outdoor_temp = 5.0  # FF ≈ 0.35 * (15-5) = 3.5
-        pi._pi_integral = 3.0  # effective_ki ≈ 0.05*1.3 = 0.065, i_term ≈ 0.195
-        # raw ≈ 20.5 + 0 + 0.195 + 3.5 = 24.195 → hp stays at 25
-        # q_error = 25 - 24.195 = 0.805 > 0.3 → feedback pushes integral up
+        pi._hp_setpoint = 24
+        # Set integral so clamped ≈ 23.6 → q_error = 24 - 23.6 = 0.4 (in range)
+        # clamped = desired + ff + ki*I = 20.5 + ff + 0.15*I
+        # With outdoor=5, default seed=0.3: ff = 0.3*10 = 3.0
+        # Need 20.5 + 3.0 + 0.15*I = 23.6 → I = 0.67
+        pi._outdoor_temp = 5.0
+        pi._pi_integral = 0.67
         pi._pi_deadband = 0.5
         pi_entity._attr_hvac_mode = HVACMode.HEAT
         pi_entity._attr_current_temperature = 20.5  # Error = 0, in deadband
@@ -1168,9 +1164,34 @@ class TestPIEdgeCases:
         integral_before = pi._pi_integral
         await pi._pi_tick()
 
-        # Quantization feedback should have pushed integral up (toward 25.0)
-        # because raw was below hp_setpoint
+        # Small q_error (0.3-0.5) should nudge integral toward integer alignment
         assert pi._pi_integral != integral_before, "Quantization feedback had no effect"
+
+    @pytest.mark.asyncio
+    async def test_quantization_feedback_rejects_large_gap(self, pi_entity):
+        """Large q_error (> 0.5) must NOT trigger quantization feedback.
+
+        When integral carries real transient correction, the gap between
+        hp_setpoint and clamped_setpoint can be large. Applying q_feedback
+        in this case causes integral runaway (the bunkroom bug).
+        """
+        pi = pi_entity._pi
+        pi._desired_temp = 20.5
+        pi._hp_setpoint = 26
+        pi._outdoor_temp = 5.0  # FF ≈ 3.5
+        pi._pi_integral = -2.0  # clamped ≈ 20.5 + 3.5 + 0.15*(-2) = 23.7
+        # q_error = 26 - 23.7 = 2.3 — way too large for quantization feedback
+        pi._pi_deadband = 0.5
+        pi_entity._attr_hvac_mode = HVACMode.HEAT
+        pi_entity._attr_current_temperature = 20.5
+
+        integral_before = pi._pi_integral
+        await pi._pi_tick()
+
+        # Large gap should NOT modify integral via q_feedback
+        assert pi._pi_integral == integral_before, (
+            f"Large q_error triggered feedback: integral {integral_before} → {pi._pi_integral}"
+        )
 
     def test_set_temperature_none(self, pi_entity):
         """set_temperature with None should return immediately."""

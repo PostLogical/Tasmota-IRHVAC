@@ -1245,12 +1245,13 @@ class PIController:
                 min_i = (clamped_setpoint - desired_c - p_term - self._ff_offset) / self._pi_ki
                 self._pi_integral = max(self._pi_integral, min_i)
 
-        # Quantization-error feedback: push integral toward values where
-        # raw_setpoint lands near an integer, avoiding the X.5 boundary that
-        # causes limit cycles with 1°C HP steps.
+        # Quantization-error feedback: nudge integral so clamped_setpoint
+        # lands near an integer, preventing limit cycles from 1°C HP steps.
+        # Only acts on small misalignments (≤ 0.5°C, half a step) — large
+        # gaps are real integral corrections, not quantization artifacts.
         if in_deadband and self._pi_ki != 0:
             q_error = float(self._hp_setpoint) - clamped_setpoint
-            if abs(q_error) > 0.3:
+            if 0.3 < abs(q_error) <= 0.5:
                 self._pi_integral += (q_error / self._pi_ki) * 0.4
 
         # Midpoint-crossing hysteresis
