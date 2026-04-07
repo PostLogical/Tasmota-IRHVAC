@@ -320,6 +320,10 @@ class PIController:
         # RLS learning gate: track integral stability
         self._prev_integral_for_rls: float = 0.0
 
+        # Room temperature rate of change tracking (°C/min)
+        self._room_temp_history: list[tuple[float, float]] = []  # [(monotonic_time, temp_c), ...]
+        self._room_temp_rate: float = 0.0  # °C/min, updated each tick
+
     # ── Shorthand entity access ──────────────────────────────────────
 
     @property
@@ -682,6 +686,7 @@ class PIController:
             "rls_observation_count": self._rls_heat.observation_count,
             "ff_learning_suppressed": self._disturbance_suppress_active,
             "integral_convergence": round(self._integral_convergence, 2),
+            "room_temp_rate": round(self._room_temp_rate, 4),  # °C/min
         }
 
     def filter_hvac_modes(self, modes: list[Any]) -> list[Any]:
@@ -1076,6 +1081,18 @@ class PIController:
             UnitOfTemperature.CELSIUS,
         )
         error = desired_c - current_c
+
+        # Track room temperature rate of change (°C/min).
+        # Keep last 5 readings (~5 ticks). Compute rate from oldest to newest.
+        self._room_temp_history.append((now_mono, current_c))
+        if len(self._room_temp_history) > 5:
+            self._room_temp_history.pop(0)
+        if len(self._room_temp_history) >= 2:
+            t0, temp0 = self._room_temp_history[0]
+            t1, temp1 = self._room_temp_history[-1]
+            elapsed_min = (t1 - t0) / 60.0
+            if elapsed_min > 0:
+                self._room_temp_rate = (temp1 - temp0) / elapsed_min
 
         # Evaluate supplemental heat source override (selector control)
         now_mono = time.monotonic()
