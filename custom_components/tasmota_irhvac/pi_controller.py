@@ -268,16 +268,19 @@ class PIController:
         # Index 2+: model inputs in order
         self._heat_seeds = [0.0, self._ff_heat_slope]
         self._cool_seeds = [0.0, -self._ff_cool_slope]  # Negative: hotter outdoor → lower HP setpoint
-        self._rls_clamps = [None, (0.0, 2.0)]  # Intercept unclamped, outdoor_delta positive
+        self._rls_heat_clamps: list[tuple[float, float] | None] = [(-0.5, 0.5), (0.0, 2.0)]
+        self._rls_cool_clamps: list[tuple[float, float] | None] = [(-0.5, 0.5), (-2.0, 0.0)]
         for m_input in self._model_inputs:
             self._heat_seeds.append(float(m_input.get("seed_heat", 0.0)))
             self._cool_seeds.append(float(m_input.get("seed_cool", 0.0)))
             clamp_min = m_input.get("clamp_min")
             clamp_max = m_input.get("clamp_max")
-            if clamp_min is not None and clamp_max is not None:
-                self._rls_clamps.append((float(clamp_min), float(clamp_max)))
-            else:
-                self._rls_clamps.append(None)
+            clamp: tuple[float, float] | None = (
+                (float(clamp_min), float(clamp_max))
+                if clamp_min is not None and clamp_max is not None else None
+            )
+            self._rls_heat_clamps.append(clamp)
+            self._rls_cool_clamps.append(clamp)
 
         # Feature scales for balanced P initialization.
         # intercept=1.0, outdoor_delta typical ~10, model inputs ~0.5
@@ -289,13 +292,13 @@ class PIController:
         self._rls_heat = RLSModel(
             n_inputs=self._n_model_inputs,
             seed_coefficients=self._heat_seeds,
-            coeff_clamps=self._rls_clamps,
+            coeff_clamps=self._rls_heat_clamps,
             feature_scales=self._feature_scales,
         )
         self._rls_cool = RLSModel(
             n_inputs=self._n_model_inputs,
             seed_coefficients=self._cool_seeds,
-            coeff_clamps=self._rls_clamps,
+            coeff_clamps=self._rls_cool_clamps,
             feature_scales=self._feature_scales,
         )
 
@@ -494,14 +497,14 @@ class PIController:
             self._rls_heat = RLSModel.from_dict(
                 data.rls_heat_model, self._n_model_inputs,
                 seed_coefficients=self._heat_seeds,
-                coeff_clamps=self._rls_clamps,
+                coeff_clamps=self._rls_heat_clamps,
                 feature_scales=self._feature_scales,
             )
         if data.rls_cool_model:
             self._rls_cool = RLSModel.from_dict(
                 data.rls_cool_model, self._n_model_inputs,
                 seed_coefficients=self._cool_seeds,
-                coeff_clamps=self._rls_clamps,
+                coeff_clamps=self._rls_cool_clamps,
                 feature_scales=self._feature_scales,
             )
         # Seed change detection: if user edited a seed since last save,
@@ -1286,8 +1289,8 @@ class PIController:
             change = new_setpoint - self._hp_setpoint
             time_since_last = now_mono - self._last_setpoint_change_time
             can_change = time_since_last >= 1800.0  # 30 minutes
-            if not in_deadband:
-                can_change = True  # Outside deadband = active demand, bypass hold
+            if abs_error > 1.0:
+                can_change = True  # Large error = urgent demand, bypass hold
             if not can_change:
                 _LOGGER.debug(
                     "PI: setpoint %s -> %s held (%.0fs since last change, need 1800s)",

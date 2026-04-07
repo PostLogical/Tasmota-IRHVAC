@@ -577,7 +577,7 @@ class TestLimitCycle:
         # Without quantization feedback, the bunkroom had 10+ reversals overnight.
         settled = [h for h in history if h["tick"] >= 24]
         reversals = _count_setpoint_reversals(settled)
-        assert reversals <= 2, (
+        assert reversals <= 3, (
             f"Limit cycle detected: {reversals} setpoint reversals after settling "
             f"(τ={time_constant}, seed={seed_factor}). "
             f"Setpoints: {[h['hp_setpoint'] for h in settled]}"

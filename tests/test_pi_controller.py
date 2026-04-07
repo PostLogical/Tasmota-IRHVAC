@@ -1268,7 +1268,7 @@ class TestModelInputClamps:
         entity = FakePIEntity(config)
         pi = entity._pi
         # Index 0=intercept(None), 1=outdoor_delta(0,2), 2=model_input(clamp)
-        assert pi._rls_clamps[2] == (-5.0, 0.0)
+        assert pi._rls_heat_clamps[2] == (-5.0, 0.0)
 
     def test_model_input_with_no_clamps(self):
         """Model input without clamps should have None."""
@@ -1283,7 +1283,7 @@ class TestModelInputClamps:
         })
         entity = FakePIEntity(config)
         pi = entity._pi
-        assert pi._rls_clamps[2] is None
+        assert pi._rls_heat_clamps[2] is None
 
     def test_model_input_with_partial_clamp(self):
         """Model input with only clamp_min (no clamp_max) should have None."""
@@ -1299,7 +1299,7 @@ class TestModelInputClamps:
         })
         entity = FakePIEntity(config)
         pi = entity._pi
-        assert pi._rls_clamps[2] is None
+        assert pi._rls_heat_clamps[2] is None
 
 
 # ── ExtraStoredData Full Restore (lines 639-664) ────────────────────
