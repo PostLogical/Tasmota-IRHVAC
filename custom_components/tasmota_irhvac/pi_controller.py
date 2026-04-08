@@ -14,12 +14,11 @@ from __future__ import annotations
 import dataclasses
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Self
 
 if TYPE_CHECKING:
     from homeassistant.core import Event, EventStateChangedData, HomeAssistant, State
-    from homeassistant.helpers.event import CALLBACK_TYPE
 
     from .climate import TasmotaIrhvac
 
@@ -29,9 +28,7 @@ from homeassistant.core import callback
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.restore_state import ExtraStoredData
 from homeassistant.helpers.event import (
-    async_call_later,
     async_track_state_change_event,
-    async_track_time_interval,
 )
 from homeassistant.util.unit_conversion import TemperatureConverter
 
@@ -218,14 +215,13 @@ class PIController:
             else None
         )
         self._pi_integral: float = 0.0
-        self._pi_timer_unsub: CALLBACK_TYPE | None = None
         self._ff_offset: float = 0.0
         self._pi_tick_running: bool = False
         self._last_setpoint_change_time: float = 0.0
         self._ff_settled_ticks: int = 0
         self._sensor_unavailable: bool = False
         self._sensor_recovery_pending: bool = False
-        self._sensor_recovery_unsub: CALLBACK_TYPE | None = None
+        self._recovery_check_needed: bool = False
         self._pi_paused: bool = False
         self._pi_last_tick_time: float = 0.0
         self._pi_last_error: float = 0.0
@@ -436,31 +432,11 @@ class PIController:
             rls = self._rls_heat if is_heating else self._rls_cool
             self._ff_offset = rls.predict(x)
 
-        # Start fallback timer
-        if e._temp_sensor:
-            self._pi_timer_unsub = async_track_time_interval(
-                self._hass,
-                self._timer_tick_callback,
-                timedelta(seconds=self._pi_min_interval),
-            )
-            if e._attr_current_temperature is not None:
-                # Delay initial tick by 5s to avoid burst of IR sends
-                # on restart when all sensors come online together.
-                @callback
-                def _deferred_initial_tick(_now):
-                    self._hass.async_create_task(self._timer_tick_callback())
-                async_call_later(self._hass, 5, _deferred_initial_tick)
-            else:
-                _LOGGER.debug("PI: skipping initial tick, waiting for sensor")
+        # Timer and initial tick are set up by climate.py after this returns.
 
     def async_will_remove_from_hass(self) -> None:
-        """Clean up PI timers."""
-        if self._pi_timer_unsub:
-            self._pi_timer_unsub()
-            self._pi_timer_unsub = None
-        if self._sensor_recovery_unsub:
-            self._sensor_recovery_unsub()
-            self._sensor_recovery_unsub = None
+        """Clean up PI state."""
+        pass
 
     # ── Hook methods (called by climate entity) ──────────────────────
 
@@ -754,7 +730,6 @@ class PIController:
         self._rls_cool.observation_count = 0
         self._pi_integral = 0.0
         _LOGGER.info("FF models reset to seed values, integral zeroed")
-        self._entity.async_schedule_update_ha_state()
 
     # ── Supplemental Source Override/Selector ────────────────────────
 
@@ -934,18 +909,6 @@ class PIController:
                 SIGNAL_FF_SUPPRESS_UPDATE.format(self._entity._config_entry_id),
             )
 
-    async def _timer_tick_callback(self, now: datetime | None = None) -> None:
-        """HA timer callback wrapper — calls _pi_tick and sends if needed."""
-        if await self._pi_tick(now):
-            await self._entity.send_ir()
-        self._entity.async_schedule_update_ha_state()
-
-    async def _sensor_recovery_callback(self, _now: datetime | None = None) -> None:
-        """HA async_call_later callback wrapper for sensor recovery."""
-        if await self._check_sensor_recovery(_now):
-            await self._entity.send_ir()
-        self._entity.async_schedule_update_ha_state()
-
     async def _pi_async_sensor_changed(self, was_none: bool = False) -> bool:
         """Handle temp sensor update. Returns True if send needed."""
         if not self._pi_enabled:
@@ -955,10 +918,8 @@ class PIController:
             # None to 'unavailable' fire was_none=True but aren't real recoveries.
             if self._entity._attr_current_temperature is None:
                 return False
-            if self._sensor_recovery_unsub:
-                self._sensor_recovery_unsub()
-                self._sensor_recovery_unsub = None
             self._sensor_recovery_pending = False
+            self._recovery_check_needed = False
             if self._sensor_unavailable:
                 _LOGGER.info("PI: temp sensor recovered, resuming full PI control")
                 self._sensor_unavailable = False
@@ -1041,11 +1002,9 @@ class PIController:
         if e._attr_current_temperature is None:
             if self._sensor_unavailable or self._sensor_recovery_pending:
                 return False
-            _LOGGER.info("PI: temp sensor unavailable, scheduling 60s recovery check")
+            _LOGGER.info("PI: temp sensor unavailable, requesting 60s recovery check")
             self._sensor_recovery_pending = True
-            self._sensor_recovery_unsub = async_call_later(
-                self._hass, 60, self._sensor_recovery_callback
-            )
+            self._recovery_check_needed = True
             return False
         if self._pi_paused:
             _LOGGER.debug("PI tick: skipping, paused by vendor")

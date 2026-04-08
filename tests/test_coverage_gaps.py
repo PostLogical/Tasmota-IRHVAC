@@ -186,14 +186,14 @@ class TestPIControllerGaps:
         entity = get_climate_entity(hass, entry)
         pi = entity._pi
 
-        # Simulate having active timers
-        pi._pi_timer_unsub = MagicMock()
-        pi._sensor_recovery_unsub = MagicMock()
+        # Simulate having active timers (owned by climate.py now)
+        entity._pi_timer_unsub = MagicMock()
+        entity._pi_recovery_unsub = MagicMock()
 
-        pi.async_will_remove_from_hass()
+        await entity.async_will_remove_from_hass()
 
-        assert pi._pi_timer_unsub is None
-        assert pi._sensor_recovery_unsub is None
+        assert entity._pi_timer_unsub is None
+        assert entity._pi_recovery_unsub is None
 
     @pytest.mark.asyncio
     async def test_cooldown_prevents_rapid_ticks(self, hass, setup_pi_integration):

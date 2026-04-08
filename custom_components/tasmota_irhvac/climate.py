@@ -707,6 +707,10 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         self._has_sent_once: bool = False
         self._expected_state: dict[str, Any] = {}
 
+        # PI timer/recovery subscriptions (owned by climate.py, not PI)
+        self._pi_timer_unsub: CALLBACK_TYPE | None = None
+        self._pi_recovery_unsub: CALLBACK_TYPE | None = None
+
     async def async_added_to_hass(self) -> None:
         def regist_track_state_change_event(entity_id: str) -> None:
             ha_event.async_track_state_change_event(
@@ -810,8 +814,22 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         if self._power_sensor:
             regist_track_state_change_event(self._power_sensor)
 
-        # Initialize PI controller (restores state, starts timers)
+        # Initialize PI controller (restores state, no I/O)
         await self._controller.async_added_to_hass(old_state=old_state)
+
+        # PI timer and initial tick — climate.py owns all I/O scheduling
+        if self._controller.is_active and self._temp_sensor:
+            from datetime import timedelta
+            self._pi_timer_unsub = ha_event.async_track_time_interval(
+                self.hass,
+                self._on_pi_timer,
+                timedelta(seconds=self._controller._pi_min_interval),
+            )
+            if self._attr_current_temperature is not None:
+                @callback
+                def _deferred_initial_tick(_now):
+                    self.hass.async_create_task(self._on_pi_timer())
+                async_call_later(self.hass, 5, _deferred_initial_tick)
 
     async def _subscribe_topics(self) -> list[Any]:
         """(Re)Subscribe to topics."""
@@ -1177,6 +1195,12 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         if hasattr(self, "_vendor_timer_unsub") and self._vendor_timer_unsub:
             self._vendor_timer_unsub()
             self._vendor_timer_unsub = None
+        if self._pi_timer_unsub:
+            self._pi_timer_unsub()
+            self._pi_timer_unsub = None
+        if self._pi_recovery_unsub:
+            self._pi_recovery_unsub()
+            self._pi_recovery_unsub = None
         self._controller.async_will_remove_from_hass()
         for unsubscribe in self._unsubscribes:
             unsubscribe()
@@ -1474,6 +1498,34 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         # Get default temp from super class
         return super().max_temp
 
+    def _check_pi_recovery_needed(self) -> None:
+        """If PI flagged a sensor recovery check, schedule it."""
+        from .pi_controller import PIController
+        pi = self._pi if isinstance(self._pi, PIController) else None
+        if pi is not None and pi._recovery_check_needed:
+            pi._recovery_check_needed = False
+            if self._pi_recovery_unsub:
+                self._pi_recovery_unsub()
+            self._pi_recovery_unsub = async_call_later(
+                self.hass, 60, self._on_pi_recovery
+            )
+
+    async def _on_pi_timer(self, now: Any = None) -> None:
+        """PI timer tick — climate.py owns the timer, PI does computation."""
+        if await self._controller.pi_tick(now):
+            await self.send_ir()
+        self._check_pi_recovery_needed()
+        self.async_schedule_update_ha_state()
+
+    async def _on_pi_recovery(self, _now: Any = None) -> None:
+        """Sensor recovery check — 60s after sensor went unavailable."""
+        self._pi_recovery_unsub = None
+        from .pi_controller import PIController
+        pi = self._pi if isinstance(self._pi, PIController) else None
+        if pi is not None and await pi._check_sensor_recovery(_now):
+            await self.send_ir()
+        self.async_schedule_update_ha_state()
+
     async def _async_sensor_changed(
         self, entity_id_or_event: Event[EventStateChangedData],
         old_state: State | None = None, new_state: State | None = None
@@ -1491,6 +1543,11 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             self._async_update_temp(new_state)
             if await self._controller.sensor_changed(was_none):
                 await self.send_ir()
+            # Cancel pending recovery if sensor came back
+            if was_none and self._pi_recovery_unsub and self._attr_current_temperature is not None:
+                self._pi_recovery_unsub()
+                self._pi_recovery_unsub = None
+            self._check_pi_recovery_needed()
             self.async_schedule_update_ha_state()
         elif entity_id == self._humidity_sensor:
             self._async_update_humidity(new_state)
@@ -1659,6 +1716,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
     async def async_reset_ff_seeds(self) -> None:
         """Reset feedforward RLS models to seed values."""
         await self._controller.async_reset_ff_seeds()
+        self.async_schedule_update_ha_state()
 
     async def async_suppress_ff_learning(self, reason: str = "") -> None:
         """Manually suppress FF learning."""

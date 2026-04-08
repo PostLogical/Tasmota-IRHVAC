@@ -567,7 +567,7 @@ class TestSensorRecovery:
         await pi_entity._pi._pi_tick()
 
         assert pi_entity._pi._sensor_recovery_pending is True
-        assert pi_entity._pi._sensor_recovery_unsub is not None
+        assert pi_entity._pi._recovery_check_needed is True
 
     @pytest.mark.asyncio
     async def test_sensor_none_skips_when_recovery_pending(self, pi_entity):
@@ -621,8 +621,6 @@ class TestSensorRecovery:
     async def test_sensor_changed_clears_recovery(self, pi_entity):
         """When sensor becomes available, should cancel pending recovery."""
         pi_entity._pi._sensor_recovery_pending = True
-        mock_unsub = MagicMock()
-        pi_entity._pi._sensor_recovery_unsub = mock_unsub
         pi_entity._pi._sensor_unavailable = True
 
         pi_entity._attr_current_temperature = 70.0  # Now available
@@ -633,7 +631,6 @@ class TestSensorRecovery:
 
         assert pi_entity._pi._sensor_recovery_pending is False
         assert pi_entity._pi._sensor_unavailable is False
-        mock_unsub.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_sensor_changed_was_none_but_still_unavailable(self, pi_entity):
