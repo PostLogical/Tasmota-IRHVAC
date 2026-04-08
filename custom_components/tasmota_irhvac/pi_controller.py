@@ -668,6 +668,14 @@ class PIController:
                 "alert_count": 0,
             }
 
+        if self._entity._attr_hvac_mode == HVACMode.OFF:
+            return {
+                "state": "OK",
+                "alerts": [],
+                "reasons": [],
+                "alert_count": 0,
+            }
+
         alerts: list[str] = []
         reasons: list[str] = []
         severity = "OK"
