@@ -485,7 +485,7 @@
             "clamp_max": "Maximum allowed coefficient value (physical bound).",
             "lag_tau": "Exponential smoothing time constant in seconds. 0 = no filtering.",
             "suppress_learning": "Prevent RLS from updating this coefficient (use seed only).",
-            "typical_value": "Expected value when this input is active. Balances learning rates across inputs with different scales. Examples: 1.0 for binary (on/off), 0.5 for solar proxy (0–0.8 range), 2.0 for outdoor temp rate (°F/hr)."
+            "typical_value": "Expected value when this input is active. Balances learning rates across inputs with different scales. Examples: 1.0 for binary (on/off), 0.5 for solar proxy (0–0.8 range), 1.0 for outdoor temp rate in °C/hr, 2.0 in °F/hr."
           }
         },
         "reconfigure": {

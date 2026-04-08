@@ -1244,11 +1244,17 @@ class PIController:
             # RLS learns when integral is stable (not still converging), regardless
             # of magnitude. Large stable integral = FF is wrong, observation is valid.
             integral_stable = abs(self._pi_integral - self._prev_integral_for_rls) < 0.5
+            # Room temperature must be genuinely settled — not coasting from a
+            # recent setpoint change or external disturbance.  The integral_stable
+            # check alone is a near-no-op in deadband (integral is frozen), so
+            # dT/dt is the primary equilibrium signal.
+            room_settling = abs(self._room_temp_rate) < 0.02  # °C/min
             can_learn_rls = (
                 self._ff_settled_ticks >= 4
                 and self._outdoor_temp is not None
                 and not learning_suppressed
                 and integral_stable
+                and room_settling
                 and not self._any_model_input_unavailable()
                 and not self._tracking_mode
                 and not self._supplemental_assist_active
@@ -1262,6 +1268,8 @@ class PIController:
                     reasons.append("manually suppressed")
                 if not integral_stable:
                     reasons.append(f"integral not stable (|I|={abs(self._pi_integral):.1f}, rate={abs(self._pi_integral - self._prev_integral_for_rls):.2f})")
+                if not room_settling:
+                    reasons.append(f"room not settled (dT/dt={self._room_temp_rate:.4f} °C/min)")
                 if self._any_model_input_unavailable():
                     reasons.append("model input unavailable")
                 if reasons:
@@ -1273,10 +1281,12 @@ class PIController:
                 observed_offset = float(self._hp_setpoint) - desired_c
                 beta_before = list(rls.beta)
                 residual = rls.update(x, observed_offset)
+                ki_integral = self._pi_ki * self._pi_integral
                 _LOGGER.debug(
-                    "RLS update: observed=%.2f predicted=%.2f residual=%.2f obs_count=%d",
+                    "RLS update: observed=%.2f predicted=%.2f residual=%.2f obs_count=%d "
+                    "ki_integral=%.3f dT_dt=%.4f",
                     observed_offset, observed_offset - residual, residual,
-                    rls.observation_count,
+                    rls.observation_count, ki_integral, self._room_temp_rate,
                 )
                 # Log significant coefficient changes
                 for idx in range(len(rls.beta)):
