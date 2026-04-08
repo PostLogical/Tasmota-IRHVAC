@@ -10,9 +10,6 @@
       "ff_offset": {
         "name": "FF Offset"
       },
-      "ff_anticipated_offset": {
-        "name": "FF Anticipated Offset"
-      },
       "integral_convergence": {
         "name": "Integral Convergence"
       },
@@ -24,6 +21,15 @@
       },
       "setpoint_changes_today": {
         "name": "Setpoint Changes"
+      },
+      "health": {
+        "name": "Health",
+        "state": {
+          "OK": "OK",
+          "Warning": "Warning",
+          "Critical": "Critical",
+          "Disabled": "Disabled"
+        }
       }
     },
     "button": {

@@ -156,6 +156,14 @@ class PIController:
     Vendor subclasses use: pi_pause(), pi_resume(), pi_reset_integral()
     """
 
+    # Health check thresholds
+    HEALTH_COMFORT_WARN: float = 1.1        # °C error (~2°F)
+    HEALTH_COMFORT_CRIT: float = 1.7        # °C error (~3°F)
+    HEALTH_INTEGRAL_WARN: float = 5.0       # PI integral magnitude
+    HEALTH_INTERCEPT_WARN: float = 1.0      # RLS intercept drift
+    HEALTH_SLOPE_DRIFT_PCT: float = 30.0    # % drift from configured ff slope
+    HEALTH_SLOPE_DRIFT_FLOOR: float = 0.05  # minimum absolute drift to trigger
+
     def __init__(self, entity: TasmotaIrhvac, config: dict[str, Any]) -> None:
         """Initialize PI controller.
 
@@ -318,6 +326,10 @@ class PIController:
         # Outdoor temp state
         self._outdoor_temp: float | None = None
 
+
+        # Health check state
+        self._health_prev_desired: float | None = None
+        self._health_comfort_skip: int = 0
 
         # Integral convergence tracking (EMA of abs(integral) over ~24hr)
         self._integral_convergence: float = 0.0
@@ -644,6 +656,119 @@ class PIController:
             "ff_learning_suppressed": self._disturbance_suppress_active,
             "integral_convergence": round(self._integral_convergence, 2),
             "room_temp_rate": round(self._room_temp_rate, 4),  # °C/min
+        }
+
+    def get_health_status(self) -> dict[str, Any]:
+        """Evaluate PI controller health and return status with alerts."""
+        if not self._pi_enabled:
+            return {
+                "state": "Disabled",
+                "alerts": ["PI controller not enabled"],
+                "reasons": ["pi_disabled"],
+                "alert_count": 0,
+            }
+
+        alerts: list[str] = []
+        reasons: list[str] = []
+        severity = "OK"
+
+        e = self._entity
+
+        # Grace period: suppress comfort check for one tick after setpoint change
+        if self._desired_temp != self._health_prev_desired:
+            self._health_comfort_skip = 1
+            self._health_prev_desired = self._desired_temp
+
+        # Check 1: Comfort error
+        if self._health_comfort_skip > 0:
+            self._health_comfort_skip -= 1
+        elif (
+            e._attr_current_temperature is not None
+            and self._desired_temp is not None
+        ):
+            cur_c = TemperatureConverter.convert(
+                e._attr_current_temperature,
+                e._attr_temperature_unit,
+                UnitOfTemperature.CELSIUS,
+            )
+            desired_c = TemperatureConverter.convert(
+                self._desired_temp,
+                e._attr_temperature_unit,
+                UnitOfTemperature.CELSIUS,
+            )
+            error_c = abs(cur_c - desired_c)
+            if error_c > self.HEALTH_COMFORT_CRIT:
+                severity = "Critical"
+                alerts.append(
+                    f"Temperature {error_c:.1f}°C from setpoint — comfort critical"
+                )
+                reasons.append("comfort_critical")
+            elif error_c > self.HEALTH_COMFORT_WARN:
+                severity = "Warning"
+                alerts.append(
+                    f"Temperature {error_c:.1f}°C from setpoint — comfort warning"
+                )
+                reasons.append("comfort_warn")
+
+        # Check 2: PI integral magnitude
+        if abs(self._pi_integral) > self.HEALTH_INTEGRAL_WARN:
+            if severity != "Critical":
+                severity = "Warning"
+            alerts.append(
+                f"PI integral at {self._pi_integral:.2f} — controller struggling"
+            )
+            reasons.append("integral_high")
+
+        # Determine active RLS model for checks 3 & 4
+        is_heating = e._attr_hvac_mode in (HVACMode.HEAT, HVACMode.HEAT_COOL, None)
+        rls = self._rls_heat if is_heating else self._rls_cool
+        expected_slope = (
+            self._ff_heat_slope if is_heating else -self._ff_cool_slope
+        )
+        has_obs = rls.observation_count > 0
+
+        coeffs = rls.get_coefficients() if has_obs else []
+        intercept = coeffs[0] if len(coeffs) > 0 else 0.0
+        outdoor_slope = coeffs[1] if len(coeffs) > 1 else expected_slope
+
+        # Check 3: RLS intercept drift
+        if has_obs and abs(intercept) > self.HEALTH_INTERCEPT_WARN:
+            if severity != "Critical":
+                severity = "Warning"
+            alerts.append(
+                f"RLS intercept drifted to {intercept:.3f} (expect near 0)"
+            )
+            reasons.append("intercept_drift")
+
+        # Check 4: Outdoor delta slope drift
+        if has_obs and expected_slope != 0:
+            drift_abs = abs(outdoor_slope - expected_slope)
+            drift_pct = (drift_abs / abs(expected_slope)) * 100
+            if (
+                drift_pct > self.HEALTH_SLOPE_DRIFT_PCT
+                and drift_abs > self.HEALTH_SLOPE_DRIFT_FLOOR
+            ):
+                if severity != "Critical":
+                    severity = "Warning"
+                alerts.append(
+                    f"RLS outdoor slope {outdoor_slope:.4f} drifted "
+                    f"{drift_pct:.0f}% from seed {expected_slope:.4f}"
+                )
+                reasons.append("slope_drift")
+
+        return {
+            "state": severity,
+            "alerts": alerts,
+            "reasons": reasons,
+            "alert_count": len(alerts),
+            "pi_integral": round(self._pi_integral, 3),
+            "hp_setpoint": self._hp_setpoint,
+            "ff_offset": round(self._ff_offset, 2),
+            "rls_intercept": round(intercept, 4),
+            "rls_outdoor_slope": round(outdoor_slope, 4),
+            "expected_slope": round(expected_slope, 4),
+            "rls_obs_count": rls.observation_count,
+            "integral_convergence": round(self._integral_convergence, 2),
         }
 
     def filter_hvac_modes(self, modes: list[Any]) -> list[Any]:
