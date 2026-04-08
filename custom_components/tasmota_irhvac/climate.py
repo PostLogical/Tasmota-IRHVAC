@@ -703,6 +703,10 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         # Legacy alias for tests that reference self._pi directly
         self._pi = self._controller if cfg.pi_enabled else None
 
+        # Echo classification state (only active when PI is active)
+        self._has_sent_once: bool = False
+        self._expected_state: dict[str, Any] = {}
+
     async def async_added_to_hass(self) -> None:
         def regist_track_state_change_event(entity_id: str) -> None:
             ha_event.async_track_state_change_event(
@@ -873,12 +877,60 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             ir_received=ir_received,
         )
 
+    def _payload_matches_expected(self, payload: dict[str, Any]) -> bool:
+        """Compare incoming payload against expected state using vendor precision.
+
+        Returns True if all fields match (echo/confirmation), False if any differ.
+        """
+        if not self._expected_state:
+            return False
+        prec = self._temp_precision or 1.0
+        for key, expected in self._expected_state.items():
+            if key not in payload:
+                continue
+            incoming = payload[key]
+            if key == "Temp":
+                # Compare at vendor precision to avoid float→int mismatch
+                if round(incoming / prec) * prec != round(expected / prec) * prec:
+                    return False
+            elif key == "Sleep":
+                # Sleep is numeric, not a string
+                if str(incoming) != str(expected):
+                    return False
+            else:
+                # String fields: case-insensitive
+                if str(incoming).lower() != str(expected).lower():
+                    return False
+        return True
+
     async def _handle_state_payload(
         self, json_payload: dict[str, Any], payload: dict[str, Any],
         *, ir_received: bool = False,
     ) -> None:
         """Process IRHVAC state payload."""
         if payload["Vendor"] == self._vendor:
+            # ── Echo classification (PI active + has sent at least once) ──
+            if self._controller.is_active and self._has_sent_once:
+                matches = self._payload_matches_expected(payload)
+                if matches:
+                    # Cases 1 & 3: echo or confirmation — no state change
+                    _LOGGER.debug(
+                        "MQTT %s: payload matches expected, ignoring",
+                        "echo" if ir_received else "confirmation",
+                    )
+                    return
+                if ir_received:
+                    # Case 2: physical remote — state changed via IrReceived
+                    _LOGGER.info("Physical remote detected (state diff)")
+                    # Fall through to apply state, then notify PI
+                else:
+                    # Case 4: mismatch without IrReceived — resend
+                    _LOGGER.warning(
+                        "Telemetry mismatch (no IrReceived), resending"
+                    )
+                    await self.send_ir()
+                    return
+
             # Build IRDecode + EntityState for vendor handler hooks
             from .vendors.base import IRDecode, EntityState
             decode = IRDecode(
@@ -1028,10 +1080,10 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
 
             self._apply_vendor_handler_state()
 
-            # Controller classifies the message (using ir_received + internal timing)
-            # and updates its own state (desired_temp, hp_setpoint, integral).
-            # NullController no-ops; PI handles echo/remote/telemetry cases.
-            await self._controller.handle_state_update(payload, ir_received=ir_received)
+            # If physical remote detected (ir_received + state diff), notify PI
+            if ir_received and self._controller.is_active and "Temp" in payload and payload["Temp"] > 0:
+                if await self._controller.on_remote_change(payload["Temp"]):
+                    await self.send_ir()
             self.async_schedule_update_ha_state()
 
             # Check power sensor state
@@ -1246,7 +1298,9 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                 temperature, self.temperature_unit, self.max_temp,
                 self.target_temperature, self._controller.desired_temp,
             )
-            await self._controller.set_temperature(temperature, hvac_mode)
+            if await self._controller.set_temperature(temperature, hvac_mode):
+                await self.send_ir()
+            self.async_schedule_update_ha_state()
             return
 
         if hvac_mode is not None:
@@ -1435,8 +1489,9 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         if entity_id == self._temp_sensor:
             was_none = self._attr_current_temperature is None
             self._async_update_temp(new_state)
+            if await self._controller.sensor_changed(was_none):
+                await self.send_ir()
             self.async_schedule_update_ha_state()
-            await self._controller.sensor_changed(was_none)
         elif entity_id == self._humidity_sensor:
             self._async_update_humidity(new_state)
             self.async_schedule_update_ha_state()
@@ -1707,24 +1762,38 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         for key in self._toggle_list:
             setattr(self, "_" + key.lower(), "off")
 
+        # Snapshot expected state for echo classification
+        self._has_sent_once = True
+        self._expected_state = {
+            "Power": payload_data["Power"],
+            "Mode": payload_data["Mode"],
+            "Temp": payload_data["Temp"],
+            "FanSpeed": payload_data["FanSpeed"],
+            "SwingV": payload_data["SwingV"],
+            "SwingH": payload_data["SwingH"],
+            "Quiet": payload_data["Quiet"],
+            "Turbo": payload_data["Turbo"],
+            "Econo": payload_data["Econo"],
+            "Light": payload_data["Light"],
+            "Filter": payload_data["Filter"],
+            "Clean": payload_data["Clean"],
+            "Beep": payload_data["Beep"],
+            "Sleep": payload_data["Sleep"],
+        }
+
         payload = json.dumps(payload_data)
 
         # Publish mqtt message
         if float(self._mqtt_delay) != float(DEFAULT_MQTT_DELAY):
             await asyncio.sleep(float(self._mqtt_delay))
 
-        import traceback
-        caller = "".join(traceback.format_stack()[-4:-1])
         _LOGGER.debug(
-            "send_ir: Temp=%s Power=%s Mode=%s topic=%s\n  caller:\n%s",
+            "send_ir: Temp=%s Power=%s Mode=%s topic=%s",
             payload_data["Temp"], payload_data["Power"], payload_data["Mode"],
-            self.topic, caller,
+            self.topic,
         )
 
         await mqtt.async_publish(self.hass, self.topic, payload)
 
         # Update HA UI and State
-        # Skip only when PI tick is the caller (it writes state at end of tick).
-        # All other callers (mode changes, presets, manual commands) need the write.
-        if not self._controller.is_tick_running:
-            self.async_schedule_update_ha_state()
+        self.async_schedule_update_ha_state()

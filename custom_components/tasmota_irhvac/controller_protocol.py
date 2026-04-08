@@ -42,11 +42,11 @@ class ControllerHook(Protocol):
 
     # ── State processing ─────────────────────────────────────────────
 
-    async def handle_state_update(
-        self, payload: dict, *, ir_received: bool = False
-    ) -> None: ...
+    async def on_remote_change(self, reported_temp: float) -> bool: ...
 
-    async def sensor_changed(self, was_none: bool) -> None: ...
+    async def pi_tick(self, now: Any = None) -> bool: ...
+
+    async def sensor_changed(self, was_none: bool) -> bool: ...
 
     def fire_dispatcher(self) -> None: ...
 
@@ -54,7 +54,7 @@ class ControllerHook(Protocol):
 
     async def set_temperature(
         self, temperature: float, hvac_mode: str | None = None
-    ) -> None: ...
+    ) -> bool: ...
 
     def get_ir_temp(self) -> float: ...
 
@@ -122,11 +122,14 @@ class NullController:
 
     # ── State processing ─────────────────────────────────────────────
 
-    async def handle_state_update(self, payload, *, ir_received=False):
-        pass
+    async def on_remote_change(self, reported_temp):
+        return False
+
+    async def pi_tick(self, now=None):
+        return False
 
     async def sensor_changed(self, was_none):
-        pass
+        return False
 
     def fire_dispatcher(self):
         pass
@@ -134,7 +137,7 @@ class NullController:
     # ── Temperature ──────────────────────────────────────────────────
 
     async def set_temperature(self, temperature, hvac_mode=None):
-        pass
+        return False
 
     def get_ir_temp(self):
         # Should not be called — entity checks is_active before calling

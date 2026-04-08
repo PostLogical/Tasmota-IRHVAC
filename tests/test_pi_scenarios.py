@@ -152,9 +152,21 @@ def _run_simulation(entity, thermal, n_ticks, outdoor_schedule=None,
                 elif tick in outdoor_schedule:
                     thermal.outdoor_temp = outdoor_schedule[tick]
             if desired_schedule and tick in desired_schedule:
+                old_desired = pi._desired_temp
                 pi._desired_temp = desired_schedule[tick]
                 entity._attr_target_temperature = desired_schedule[tick]
-                pi._pi_integral = 0.0  # Same as set_temperature behavior
+                # Bumpless transfer: adjust integral to keep output continuous
+                if old_desired is not None:
+                    from homeassistant.util.unit_conversion import TemperatureConverter
+                    from homeassistant.const import UnitOfTemperature
+                    old_c = TemperatureConverter.convert(
+                        old_desired, entity._attr_temperature_unit, UnitOfTemperature.CELSIUS)
+                    new_c = TemperatureConverter.convert(
+                        desired_schedule[tick], entity._attr_temperature_unit, UnitOfTemperature.CELSIUS)
+                    if abs(old_c - new_c) > 2.0:
+                        pi._pi_integral = 0.0
+                    else:
+                        pi._pi_integral += pi._pi_kp * (1 - pi._pi_setpoint_weight) * (old_c - new_c)
 
             solar = 0.0
             if solar_schedule:

@@ -1,5 +1,9 @@
 """Vendor-agnostic PI + feedforward controller for IRHVAC climate entities.
 
+Pure computation — the controller never publishes MQTT or writes HA state.
+climate.py owns all I/O: it calls PI methods that return bool (True = send
+needed), then decides whether to call send_ir().
+
 Composed object (not a mixin). The climate entity creates a PIController instance
 and calls its hook methods at the appropriate points. This avoids MRO issues
 and minimizes changes to the upstream-derived climate.py.
@@ -135,13 +139,17 @@ class PIExtraStoredData(ExtraStoredData):
 class PIController:
     """PI + feedforward temperature controller for IRHVAC climate entities.
 
+    Pure computation — never publishes MQTT or writes HA state. Methods return
+    bool (True = new setpoint ready, caller should send IR).
+
     Usage in climate entity:
         __init__:           self._pi = PIController(self, config)
         async_added_to_hass:     await self._pi.async_added_to_hass(old_state)
         async_will_remove:       self._pi.async_will_remove_from_hass()
-        async_set_temperature:   await self._pi.set_temperature(temp, hvac_mode)
-        _handle_state_payload:   await self._pi.handle_state_update(payload, ir_received=...)
-        _async_sensor_changed:   await self._pi.sensor_changed(was_none)
+        async_set_temperature:   send = await self._pi.set_temperature(temp, hvac_mode)
+        on_remote_change:        send = await self._pi.on_remote_change(reported_temp)
+        sensor_changed:          send = await self._pi.sensor_changed(was_none)
+        pi_tick:                 send = await self._pi.pi_tick()
         _get_ir_temp:            return self._pi.get_ir_temp()
         extra_state_attributes:  attrs.update(self._pi.get_extra_state_attributes())
         hvac_modes:              return self._pi.filter_hvac_modes(modes)
@@ -195,6 +203,11 @@ class PIController:
         # PI controller state
         # _desired_temp is in entity unit (system); _hp_setpoint is always °C (for IR)
         self._desired_temp: float | None = entity._attr_target_temperature
+        self._vendor_precision: float = entity._temp_precision or 1.0
+        # hp_setpoint is always in °C. The first PI tick will round to vendor
+        # precision. No init rounding needed — the 18.889 mismatch bug is
+        # prevented by climate.py's state-diff echo classification, not by
+        # rounding the stored setpoint.
         self._hp_setpoint: float | None = (
             TemperatureConverter.convert(
                 entity._attr_target_temperature,
@@ -208,7 +221,6 @@ class PIController:
         self._pi_timer_unsub: CALLBACK_TYPE | None = None
         self._ff_offset: float = 0.0
         self._pi_tick_running: bool = False
-        self._last_send_ir_time: float = 0.0
         self._last_setpoint_change_time: float = 0.0
         self._ff_settled_ticks: int = 0
         self._sensor_unavailable: bool = False
@@ -428,7 +440,7 @@ class PIController:
         if e._temp_sensor:
             self._pi_timer_unsub = async_track_time_interval(
                 self._hass,
-                self._pi_tick,
+                self._timer_tick_callback,
                 timedelta(seconds=self._pi_min_interval),
             )
             if e._attr_current_temperature is not None:
@@ -436,7 +448,7 @@ class PIController:
                 # on restart when all sensors come online together.
                 @callback
                 def _deferred_initial_tick(_now):
-                    self._hass.async_create_task(self._pi_tick())
+                    self._hass.async_create_task(self._timer_tick_callback())
                 async_call_later(self._hass, 5, _deferred_initial_tick)
             else:
                 _LOGGER.debug("PI: skipping initial tick, waiting for sensor")
@@ -545,108 +557,74 @@ class PIController:
 
     async def set_temperature(
         self, temperature: float | None, hvac_mode: str | None = None
-    ) -> None:
-        """Handle temperature set when PI is active."""
+    ) -> bool:
+        """Handle temperature set when PI is active. Returns True if send needed."""
         if temperature is None:
-            return
+            return False
         e = self._entity
         if hvac_mode is not None:
             await e.set_mode(hvac_mode)
+        old_desired = self._desired_temp
         self._desired_temp = temperature
-        # target_temperature property reads from desired_temp — no dual-write needed
-        self._pi_integral = 0.0
+        # Bumpless transfer (Åström & Hägglund): keep output continuous
+        if old_desired is not None:
+            old_c = TemperatureConverter.convert(
+                old_desired, e.temperature_unit, UnitOfTemperature.CELSIUS,
+            )
+            new_c = TemperatureConverter.convert(
+                temperature, e.temperature_unit, UnitOfTemperature.CELSIUS,
+            )
+            if abs(old_c - new_c) > 2.0:
+                # Large regime shift — zero integral
+                self._pi_integral = 0.0
+            else:
+                # Adjust integral to keep output continuous
+                self._pi_integral += self._pi_kp * (1 - self._pi_setpoint_weight) * (old_c - new_c)
         if e._attr_hvac_mode != HVACMode.OFF:
             e.power_mode = STATE_ON
-        await self._pi_tick()
-        e.async_schedule_update_ha_state()
+        return await self._pi_tick()
 
-    async def handle_state_update(
-        self, payload: dict[str, Any], *, ir_received: bool = False
-    ) -> None:
-        """Handle MQTT state update. Called by climate entity after base state applied.
+    async def on_remote_change(self, reported_temp_ir_unit: float) -> bool:
+        """Physical remote detected — update desired temp. Returns True if send needed.
 
-        Classifies the message using ir_received (transport fact from climate.py)
-        combined with internal timing state to determine the appropriate action:
-
-        Case 1 — Our echo: IrReceived within 2s of our send, or any non-IrReceived
-                  message (stat echo / telemetry) where temp matches hp_setpoint.
-                  Action: confirm hp_setpoint, no other changes.
-
-        Case 2 — Physical remote: IrReceived WITHOUT a recent send (>2s).
-                  Action: update desired_temp, zero integral if changed, tick.
-
-        Case 3 — Telemetry mismatch: non-IrReceived message where reported temp
-                  differs from hp_setpoint. Our IR send may have failed.
-                  Action: resend current setpoint.
-
-        State writes are handled by climate.py after this method returns.
+        Called by climate.py when state-diff classification determines a physical
+        remote was used (IrReceived + state changed). The reported temperature is
+        in IR protocol units (typically °C).
         """
         if not self._pi_enabled or self._desired_temp is None or self._pi_paused:
-            return
+            return False
         e = self._entity
-        if "Temp" not in payload or payload["Temp"] <= 0:
-            return
-        reported_temp = payload["Temp"]
-        elapsed = time.monotonic() - self._last_send_ir_time
-
-        _LOGGER.debug(
-            "State update: reported=%s hp=%s desired=%s "
-            "elapsed=%.1f ir_received=%s",
-            reported_temp, self._hp_setpoint, self._desired_temp,
-            elapsed, ir_received,
+        desired_in_entity_unit = TemperatureConverter.convert(
+            reported_temp_ir_unit, e._ir_temp_unit, e.temperature_unit
         )
-
-        if ir_received and elapsed > 2.0:
-            # Case 2: Physical remote — IrReceived with no recent send.
-            # Someone used the physical remote. The reported Temp is their
-            # desired room temperature in the IR protocol's unit.
-            reported_c = TemperatureConverter.convert(
-                reported_temp, e._ir_temp_unit, UnitOfTemperature.CELSIUS
+        _LOGGER.info(
+            "Physical remote detected: reported=%s -> desired=%s",
+            reported_temp_ir_unit, desired_in_entity_unit,
+        )
+        old_desired = self._desired_temp
+        self._desired_temp = desired_in_entity_unit
+        self._hp_setpoint = reported_temp_ir_unit
+        # Bumpless transfer: adjust integral to keep output continuous
+        if old_desired != desired_in_entity_unit:
+            old_c = TemperatureConverter.convert(
+                old_desired, e.temperature_unit, UnitOfTemperature.CELSIUS,
             )
-            desired_in_entity_unit = TemperatureConverter.convert(
-                reported_temp, e._ir_temp_unit, e.temperature_unit
+            new_c = TemperatureConverter.convert(
+                desired_in_entity_unit, e.temperature_unit, UnitOfTemperature.CELSIUS,
             )
-            _LOGGER.info(
-                "Physical remote detected: reported=%s (%.1f°C) -> desired=%s",
-                reported_temp, reported_c, desired_in_entity_unit,
-            )
-            old_desired = self._desired_temp
-            self._desired_temp = desired_in_entity_unit
-            self._hp_setpoint = reported_temp
-            # Only zero integral when the user actually changed the target
-            if old_desired != desired_in_entity_unit:
+            if abs(old_c - new_c) > 2.0:
                 self._pi_integral = 0.0
-            await self._pi_tick()
+            else:
+                self._pi_integral += self._pi_kp * (1 - self._pi_setpoint_weight) * (old_c - new_c)
+        return await self._pi_tick()
 
-        elif ir_received:
-            # Case 1a: Our self-echo — IrReceived within 2s of our send.
-            # The IR receiver picked up our own transmission. Confirm hp_setpoint.
-            _LOGGER.debug(
-                "Self-echo (IrReceived, %.1fs since send): confirming hp=%s",
-                elapsed, reported_temp,
-            )
-            self._hp_setpoint = reported_temp
+    async def pi_tick(self, now: datetime | None = None) -> bool:
+        """Run PI tick. Returns True if send needed. Public API for climate.py."""
+        return await self._pi_tick(now)
 
-        elif reported_temp != self._hp_setpoint:
-            # Case 3: Telemetry mismatch — no IrReceived, temp differs.
-            # Periodic telemetry (TelePeriod) or stat echo reports a different
-            # temp than we expect. Our IR send may have failed. Resend.
-            _LOGGER.warning(
-                "Telemetry mismatch: reported=%s expected hp=%s. Resending.",
-                reported_temp, self._hp_setpoint,
-            )
-            await e.send_ir()
-
-        else:
-            # Case 1b: Telemetry/stat confirmation — temp matches hp_setpoint.
-            _LOGGER.debug(
-                "State confirmed: reported=%s matches hp=%s",
-                reported_temp, self._hp_setpoint,
-            )
-
-    async def sensor_changed(self, was_none: bool) -> None:
-        """Handle temp sensor update."""
-        await self._pi_async_sensor_changed(was_none=was_none)
+    async def sensor_changed(self, was_none: bool) -> bool:
+        """Handle temp sensor update. Returns True if send needed."""
+        return await self._pi_async_sensor_changed(was_none=was_none)
 
     def get_ir_temp(self) -> float:
         """Return PI-computed setpoint for IR command.
@@ -956,15 +934,27 @@ class PIController:
                 SIGNAL_FF_SUPPRESS_UPDATE.format(self._entity._config_entry_id),
             )
 
-    async def _pi_async_sensor_changed(self, was_none: bool = False) -> None:
-        """Handle temp sensor update."""
+    async def _timer_tick_callback(self, now: datetime | None = None) -> None:
+        """HA timer callback wrapper — calls _pi_tick and sends if needed."""
+        if await self._pi_tick(now):
+            await self._entity.send_ir()
+        self._entity.async_schedule_update_ha_state()
+
+    async def _sensor_recovery_callback(self, _now: datetime | None = None) -> None:
+        """HA async_call_later callback wrapper for sensor recovery."""
+        if await self._check_sensor_recovery(_now):
+            await self._entity.send_ir()
+        self._entity.async_schedule_update_ha_state()
+
+    async def _pi_async_sensor_changed(self, was_none: bool = False) -> bool:
+        """Handle temp sensor update. Returns True if send needed."""
         if not self._pi_enabled:
-            return
+            return False
         if was_none:
             # Verify the sensor actually has a numeric value — transitions from
             # None to 'unavailable' fire was_none=True but aren't real recoveries.
             if self._entity._attr_current_temperature is None:
-                return
+                return False
             if self._sensor_recovery_unsub:
                 self._sensor_recovery_unsub()
                 self._sensor_recovery_unsub = None
@@ -980,34 +970,33 @@ class PIController:
             elapsed = time.monotonic() - self._pi_last_tick_time
             if elapsed < 2.0:
                 _LOGGER.debug("PI: skipping recovery tick, another ran %.1fs ago", elapsed)
-                return
-            await self._pi_tick()
-            return
+                return False
+            return await self._pi_tick()
 
         elapsed = time.monotonic() - self._pi_last_tick_time
         min_cooldown = max(60.0, self._pi_min_interval / 3.0)
         if elapsed >= min_cooldown:
-            await self._pi_tick()
+            return await self._pi_tick()
+        return False
 
-    async def _check_sensor_recovery(self, _now: datetime | None = None) -> None:
-        """Called 60s after sensor went unavailable. Fall back to FF-only if still gone."""
+    async def _check_sensor_recovery(self, _now: datetime | None = None) -> bool:
+        """Called 60s after sensor went unavailable. Returns True if send needed."""
         self._sensor_recovery_pending = False
         self._sensor_recovery_unsub = None
         e = self._entity
         if e._attr_current_temperature is not None:
             _LOGGER.info("PI: temp sensor recovered during grace period")
-            await self._pi_tick()
-            return
+            return await self._pi_tick()
         self._sensor_unavailable = True
         _LOGGER.warning("PI: temp sensor confirmed unavailable, using feedforward-only fallback")
         if self._desired_temp is None:
-            return
+            return False
         desired_c = TemperatureConverter.convert(
             self._desired_temp, e.temperature_unit, UnitOfTemperature.CELSIUS,
         )
         is_heating = e._attr_hvac_mode == HVACMode.HEAT
         if not is_heating and e._attr_hvac_mode not in (HVACMode.COOL, HVACMode.DRY):
-            return
+            return False
         # Use RLS model for FF-only fallback
         if self._outdoor_temp is not None:
             if is_heating:
@@ -1025,43 +1014,42 @@ class PIController:
         if new_setpoint != self._hp_setpoint:
             _LOGGER.info("PI fallback: setpoint %s -> %s (FF only)", self._hp_setpoint, new_setpoint)
             self._hp_setpoint = new_setpoint
-            self._last_send_ir_time = time.monotonic()
-            await e.send_ir()
-        e.async_schedule_update_ha_state()
+            return True
+        return False
 
-    async def _pi_tick(self, now: datetime | None = None) -> None:
-        """PI + feedforward controller tick. Called by timer and sensor events."""
+    async def _pi_tick(self, now: datetime | None = None) -> bool:
+        """PI + feedforward controller tick. Returns True if send needed."""
         if not self._pi_enabled:
-            return
+            return False
         if self._pi_tick_running:
             _LOGGER.debug("PI tick: skipping, already running (reentrant call)")
-            return
+            return False
         self._pi_tick_running = True
         try:
-            await self._pi_tick_inner(now)
+            return await self._pi_tick_inner(now)
         finally:
             self._pi_tick_running = False
 
-    async def _pi_tick_inner(self, now: datetime | None = None) -> None:
-        """PI + feedforward controller tick implementation."""
+    async def _pi_tick_inner(self, now: datetime | None = None) -> bool:
+        """PI + feedforward controller tick implementation. Returns True if send needed."""
         e = self._entity
         if e._attr_hvac_mode == HVACMode.OFF:
             self._pi_integral = 0.0
-            return
+            return False
         if self._desired_temp is None or self._hp_setpoint is None:
-            return
+            return False
         if e._attr_current_temperature is None:
             if self._sensor_unavailable or self._sensor_recovery_pending:
-                return
+                return False
             _LOGGER.info("PI: temp sensor unavailable, scheduling 60s recovery check")
             self._sensor_recovery_pending = True
             self._sensor_recovery_unsub = async_call_later(
-                self._hass, 60, self._check_sensor_recovery
+                self._hass, 60, self._sensor_recovery_callback
             )
-            return
+            return False
         if self._pi_paused:
             _LOGGER.debug("PI tick: skipping, paused by vendor")
-            return
+            return False
 
         # Time since last tick (for time-normalized integral)
         now_mono = time.monotonic()
@@ -1117,7 +1105,7 @@ class PIController:
         is_heating = e._attr_hvac_mode == HVACMode.HEAT
         is_cooling = e._attr_hvac_mode in (HVACMode.COOL, HVACMode.DRY)
         if not is_heating and not is_cooling:
-            return
+            return False
 
         # Read model input values and update lag filters
         self._read_model_input_values()
@@ -1312,12 +1300,11 @@ class PIController:
                     )
                     self._last_setpoint_change_time = now_mono
                     self._setpoint_changes_today += 1
-                    self._last_send_ir_time = time.monotonic()
-                    await e.send_ir()
+                    return True
         else:
             _LOGGER.debug(
                 "PI: error=%.1f raw=%.1f setpoint=%s (held)",
                 error, clamped_setpoint, self._hp_setpoint,
             )
 
-        e.async_schedule_update_ha_state()
+        return False

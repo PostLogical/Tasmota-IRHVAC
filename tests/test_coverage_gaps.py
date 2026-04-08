@@ -792,27 +792,28 @@ class TestPISetTempWithMode:
         assert entity._pi._desired_temp == 24
 
 
-class TestPIHandlePayloadDisabled:
-    """Cover handle_state_update when PI disabled or desired_temp None."""
+class TestPIOnRemoteChangeDisabled:
+    """Cover on_remote_change when PI disabled or desired_temp None."""
 
     @pytest.mark.asyncio
-    async def test_handle_payload_pi_disabled(self, hass, setup_pi_integration):
-        """handle_state_update should return early when PI disabled."""
+    async def test_on_remote_change_pi_disabled(self, hass, setup_pi_integration):
+        """on_remote_change should return False when PI disabled."""
         entry = await setup_pi_integration()
         entity = get_climate_entity(hass, entry)
         entity._pi._pi_enabled = False
 
-        # Should not crash
-        await entity._pi.handle_state_update({"Temp": 25})
+        result = await entity._pi.on_remote_change(25)
+        assert result is False
 
     @pytest.mark.asyncio
-    async def test_handle_payload_desired_temp_none(self, hass, setup_pi_integration):
-        """handle_state_update should return early when desired_temp is None."""
+    async def test_on_remote_change_desired_temp_none(self, hass, setup_pi_integration):
+        """on_remote_change should return False when desired_temp is None."""
         entry = await setup_pi_integration()
         entity = get_climate_entity(hass, entry)
         entity._pi._desired_temp = None
 
-        await entity._pi.handle_state_update({"Temp": 25})
+        result = await entity._pi.on_remote_change(25)
+        assert result is False
 
 
 class TestPIFireDispatcherEdge:

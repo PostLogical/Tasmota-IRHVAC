@@ -171,6 +171,7 @@ class _FakeBenchEntity:
         self.entity_id = "climate.bench_test"
         self._config_entry_id = "bench_test"
         self.unique_id = "bench_test"
+        self._temp_precision = config.get("precision", 1.0)
         self._min_temp = config.get("min_temp", 16)
         self._max_temp = config.get("max_temp", 30)
         self._attr_min_temp = self._min_temp
