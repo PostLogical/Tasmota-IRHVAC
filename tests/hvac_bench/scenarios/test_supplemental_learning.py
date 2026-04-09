@@ -153,6 +153,7 @@ def run_with_stove(controller, model, stove, n_ticks, mode="heat",
             "sensor_reading": sensor_reading,
             "desired": desired,
             "hp_setpoint": hp_setpoint,
+            "raw_setpoint": state.get("raw_setpoint", float(hp_setpoint)),
             "integral": state.get("integral", 0.0),
             "ff_offset": state.get("ff_offset", 0.0),
             "error": desired - model.room_temp,
@@ -173,33 +174,41 @@ class TestTrackedSetpointPhases:
     """Does the tracked setpoint meaningfully differ between burn and idle?"""
 
     def test_setpoint_differs_burn_vs_idle(self):
-        """HP tracked setpoint should be lower during burn (less HP needed)
-        and higher during idle (more HP needed)."""
+        """HP raw setpoint should be lower during burn (less HP needed)
+        and higher during idle (more HP needed).
+
+        Uses raw (pre-quantization) setpoints to test controller intent.
+        Quantized setpoints with 1°C steps create limit cycles whose phase
+        alignment is fragile — testing quantized values measures phase
+        coincidence rather than controller behavior.
+        """
         profile = PROFILES["standard_residential"]
         ctrl = TasmotaPIAdapter({"pi_ff_heat_slope": 0.35})
         ctrl.set_desired_temp(20.5)
         model = ThermalModel(profile=profile, initial_temp=20.5, outdoor_temp=2.0)
         stove = StoveCycleModel(setpoint_c=21.0, heat_rate_c_per_min=0.15)
 
-        history = run_with_stove(ctrl, model, stove, n_ticks=48,
+        # Run longer to average out phase coupling between stove cycle
+        # and HP limit cycle (both respond to same temperature signal).
+        history = run_with_stove(ctrl, model, stove, n_ticks=96,
                                  stove_on_ticks=(4, None))
 
-        # Collect setpoints during settled stove operation (after tick 16)
-        burn_setpoints = [h["hp_setpoint"] for h in history
-                         if h["tick"] > 16 and h["stove_burning"]]
-        idle_setpoints = [h["hp_setpoint"] for h in history
-                         if h["tick"] > 16 and not h["stove_burning"]
+        # Collect raw setpoints during settled stove operation (after tick 32)
+        burn_setpoints = [h["raw_setpoint"] for h in history
+                         if h["tick"] > 32 and h["stove_burning"]]
+        idle_setpoints = [h["raw_setpoint"] for h in history
+                         if h["tick"] > 32 and not h["stove_burning"]
                          and h["stove_thermostat_on"]]
 
         if burn_setpoints and idle_setpoints:
             avg_burn = sum(burn_setpoints) / len(burn_setpoints)
             avg_idle = sum(idle_setpoints) / len(idle_setpoints)
-            print(f"\n  Burn phase avg setpoint: {avg_burn:.1f}")
-            print(f"  Idle phase avg setpoint: {avg_idle:.1f}")
-            print(f"  Difference: {avg_idle - avg_burn:.1f}")
-            # During burn, stove adds heat → HP needs less → setpoint should be lower
+            print(f"\n  Burn phase avg raw setpoint: {avg_burn:.2f}")
+            print(f"  Idle phase avg raw setpoint: {avg_idle:.2f}")
+            print(f"  Difference: {avg_idle - avg_burn:.2f}")
+            # During burn, stove adds heat → HP needs less → raw setpoint should be lower
             assert avg_burn <= avg_idle + 0.5, (
-                f"Expected burn setpoint ≤ idle setpoint, got burn={avg_burn:.1f} idle={avg_idle:.1f}"
+                f"Expected burn raw setpoint ≤ idle, got burn={avg_burn:.2f} idle={avg_idle:.2f}"
             )
         else:
             print(f"\n  Burn ticks: {len(burn_setpoints)}, Idle ticks: {len(idle_setpoints)}")

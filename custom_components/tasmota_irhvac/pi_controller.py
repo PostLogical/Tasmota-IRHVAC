@@ -247,6 +247,7 @@ class PIController:
         self._pi_last_error: float = 0.0
         self._pi_d_filtered: float = 0.0    # Filtered derivative term
         self._pi_last_measurement: float | None = None  # Previous temperature measurement for derivative
+        self._last_raw_setpoint: float = 0.0  # Pre-quantization setpoint from last tick
 
         # Supplemental heat source selector/override control
         self._supplemental_sources: list[dict[str, Any]] = config.get("pi_supplemental_sources", [])
@@ -1269,26 +1270,32 @@ class PIController:
 
         abs_error = abs(error)
 
-        # Deadband: if error is small, skip P term and freeze integral.
+        # Deadband: if error is small, skip P term but integrate at reduced rate.
+        # Variable-rate integration replaces the old integral freeze (Åström §3.5
+        # warns against stopping integration near setpoint). Leaky decay bounds
+        # integral growth universally. P=0 in deadband is preserved — simulation
+        # confirmed it prevents quantization-driven limit cycles.
         in_deadband = abs_error < self._pi_deadband
+        avg_error = (error + self._pi_last_error) / 2.0
         if in_deadband:
-            # Freeze integral — system is close enough to target.
-            # Quantization-error feedback (below) handles the X.5 boundary.
-            # RLS learning absorbs persistent integral into FF over time.
             self._ff_settled_ticks += 1
-            # RLS learns when integral is stable (not still converging), regardless
-            # of magnitude. Large stable integral = FF is wrong, observation is valid.
-            integral_stable = abs(self._pi_integral - self._prev_integral_for_rls) < 0.5
+            # Variable-rate: smooth taper from full rate at deadband edge to 5%
+            # floor at setpoint. Prevents integral starvation while reducing
+            # accumulation speed near target.
+            rate = max(0.05, min(1.0, abs_error / self._pi_deadband))
+            self._pi_integral += avg_error * dt_factor * rate
+            # RLS learning gate: rate < 0.2 means error is small fraction of
+            # deadband, and integral change rate is low (not still converging).
+            integral_change = abs(self._pi_integral - self._prev_integral_for_rls)
+            integral_settling = rate < 0.2 and integral_change < 0.3
             # Room temperature must be genuinely settled — not coasting from a
-            # recent setpoint change or external disturbance.  The integral_stable
-            # check alone is a near-no-op in deadband (integral is frozen), so
-            # dT/dt is the primary equilibrium signal.
+            # recent setpoint change or external disturbance.
             room_settling = abs(self._room_temp_rate) < 0.02  # °C/min
             can_learn_rls = (
                 self._ff_settled_ticks >= 4
                 and self._outdoor_temp is not None
                 and not learning_suppressed
-                and integral_stable
+                and integral_settling
                 and room_settling
                 and not self._any_model_input_unavailable()
                 and not self._tracking_mode
@@ -1301,8 +1308,8 @@ class PIController:
                     reasons.append("no outdoor temp")
                 if learning_suppressed:
                     reasons.append("manually suppressed")
-                if not integral_stable:
-                    reasons.append(f"integral not stable (|I|={abs(self._pi_integral):.1f}, rate={abs(self._pi_integral - self._prev_integral_for_rls):.2f})")
+                if not integral_settling:
+                    reasons.append(f"integral not settled (rate={rate:.2f}, d_integral={integral_change:.2f})")
                 if not room_settling:
                     reasons.append(f"room not settled (dT/dt={self._room_temp_rate:.4f} °C/min)")
                 if self._any_model_input_unavailable():
@@ -1346,8 +1353,13 @@ class PIController:
             # integral drives steady-state accuracy. Standard 2-DOF technique
             # (Astrom & Hagglund). b < 1 reduces proportional kick.
             p_term = self._pi_kp * self._pi_setpoint_weight * error
-            avg_error = (error + self._pi_last_error) / 2.0
             self._pi_integral += avg_error * dt_factor
+
+        # Leaky integrator: weak decay bounds integral growth universally.
+        # α=0.999 per nominal tick ≈ 1000-tick time constant (~10 days at
+        # 15-min ticks). Scaled by dt_factor for variable sample intervals.
+        # Must be weak to avoid fighting quantization-error feedback.
+        self._pi_integral *= 0.999 ** dt_factor
 
         self._pi_last_error = error
 
@@ -1370,6 +1382,7 @@ class PIController:
         i_term = self._pi_ki * self._pi_integral
         d_term = self._pi_d_filtered
         raw_setpoint = desired_c + p_term + i_term + d_term + self._ff_offset
+        self._last_raw_setpoint = raw_setpoint
         clamped_setpoint = max(self._min_temp_c, min(self._max_temp_c, raw_setpoint))
 
         # Conditional anti-windup: stop integral from growing in the saturated

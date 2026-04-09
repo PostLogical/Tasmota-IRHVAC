@@ -82,6 +82,7 @@ class TasmotaPIAdapter:
             "rls_obs_count": self._pi._rls_heat.observation_count,
             "desired_temp": self._pi._desired_temp,
             "hp_setpoint": self._pi._hp_setpoint,
+            "raw_setpoint": getattr(self._pi, "_last_raw_setpoint", 0.0),
         }
 
     def __del__(self):

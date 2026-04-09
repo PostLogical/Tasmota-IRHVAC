@@ -184,6 +184,62 @@ class TestPIMath:
         assert integral_after_2 > integral_after_1
 
     @pytest.mark.asyncio
+    async def test_leaky_decay_always_active(self, pi_entity):
+        """Leaky integrator (α=0.999^dt_factor) should decay integral every tick.
+
+        Active both in and out of deadband. With dt_factor=1.0 (first tick),
+        integral *= 0.999. Weak enough to not fight q-feedback but bounds growth.
+        """
+        pi_entity._attr_current_temperature = 22.0  # Error = 0 (in deadband)
+        pi_entity._pi._desired_temp = 22.0
+        pi_entity._pi._hp_setpoint = 22.0
+        pi_entity._pi._pi_integral = 10.0
+        pi_entity._pi._pi_last_tick_time = 0
+        pi_entity._attr_hvac_mode = HVACMode.HEAT
+
+        await pi_entity._pi._pi_tick()
+
+        # Leak should reduce integral: 10.0 * 0.999 ≈ 9.99
+        # Variable-rate integration at rate=0.05 with error≈0 adds negligible amount
+        assert pi_entity._pi._pi_integral < 10.0
+        assert pi_entity._pi._pi_integral > 9.9  # Not a fast drain
+
+    @pytest.mark.asyncio
+    async def test_leaky_decay_scales_with_dt(self, pi_entity):
+        """Leaky decay should scale with dt_factor for variable sample rates."""
+        pi = pi_entity._pi
+        pi._desired_temp = 22.0
+        pi._pi_deadband = 0.5
+        pi_entity._attr_current_temperature = 22.0  # Error = 0
+        pi_entity._attr_hvac_mode = HVACMode.HEAT
+
+        # Use integral=1.0 with hp_setpoint that avoids q-feedback:
+        # raw = 22 + 0 + 0.15*1.0 = 22.15, q_error = 22 - 22.15 = -0.15 (< 0.3, no feedback)
+        # First tick: dt_factor = 1.0 (dt = min_interval)
+        pi._pi_integral = 1.0
+        pi._hp_setpoint = 22.0
+        pi._pi_last_tick_time = 0
+        await pi._pi_tick()
+        integral_normal_dt = pi._pi_integral
+
+        # Reset: simulate very short dt (dt_factor ≈ 0)
+        pi._pi_integral = 1.0
+        pi._hp_setpoint = 22.0
+        import time as time_mod
+        original = time_mod.monotonic
+        base = time_mod.monotonic()
+        pi._pi_last_tick_time = base - 1.0  # 1 second ago
+        time_mod.monotonic = lambda: base
+        try:
+            await pi._pi_tick()
+        finally:
+            time_mod.monotonic = original
+        integral_short_dt = pi._pi_integral
+
+        # Short dt → less decay → integral closer to 1.0
+        assert integral_short_dt > integral_normal_dt
+
+    @pytest.mark.asyncio
     @pytest.mark.asyncio
     async def test_setpoint_clamped_to_range(self, pi_entity):
         """HP setpoint should be clamped to °C limits (16-30)."""
@@ -878,9 +934,13 @@ class TestPIEdgeCases:
         assert pi_entity._pi._hp_setpoint == old_setpoint
 
     @pytest.mark.asyncio
-    async def test_integral_frozen_in_deadband(self, pi_entity):
-        """Integral should not accumulate or decay in deadband (only quantization feedback)."""
-        pi_entity._attr_current_temperature = 22.0
+    async def test_variable_rate_integration_in_deadband(self, pi_entity):
+        """In deadband, integral should accumulate at reduced rate, not freeze.
+
+        Variable-rate integration (Åström §3.5) replaces the old freeze.
+        Rate scales linearly with |error|/deadband, floor 0.05.
+        """
+        pi_entity._attr_current_temperature = 22.0  # Error = 0 → rate = 0.05 (floor)
         pi_entity._pi._desired_temp = 22.0
         pi_entity._pi._hp_setpoint = 22.0
         pi_entity._pi._pi_integral = -5.0
@@ -889,14 +949,41 @@ class TestPIEdgeCases:
 
         await pi_entity._pi._pi_tick()
 
-        # Integral may shift from quantization feedback but not from error accumulation.
-        # With hp=22 and raw≈22-0.375=21.625, q_error=22-21.625=0.375>0.3,
-        # so feedback pushes integral up. But no decay applied.
-        assert pi_entity._pi._pi_integral != 0  # Not zeroed
+        # Integral should change slightly from variable-rate integration + leaky decay,
+        # NOT be frozen. With error=0, rate=0.05, accumulation is minimal but leak applies.
+        # Leak: -5.0 * 0.999 = -4.995
+        assert pi_entity._pi._pi_integral != -5.0  # Not frozen
+        assert pi_entity._pi._pi_integral < -4.9  # Leak doesn't drain it quickly
 
     @pytest.mark.asyncio
-    async def test_integral_not_accumulated_in_deadband(self, pi_entity):
-        """Error should NOT accumulate into integral while in deadband."""
+    async def test_variable_rate_scales_with_error(self, pi_entity):
+        """Integration rate should scale with |error|/deadband in deadband."""
+        pi = pi_entity._pi
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22.0
+        pi._pi_last_tick_time = 0
+        pi._pi_deadband = 0.5
+        pi_entity._attr_hvac_mode = HVACMode.HEAT
+
+        # Small error (near setpoint): rate ≈ 0.1/0.5 = 0.2
+        pi._pi_integral = 0.0
+        pi_entity._attr_current_temperature = 21.9  # Error = +0.1
+        await pi._pi_tick()
+        integral_small_error = pi._pi_integral
+
+        # Larger error (near deadband edge): rate ≈ 0.4/0.5 = 0.8
+        pi._pi_integral = 0.0
+        pi._pi_last_tick_time = 0
+        pi_entity._attr_current_temperature = 21.6  # Error = +0.4
+        await pi._pi_tick()
+        integral_large_error = pi._pi_integral
+
+        # Larger error → faster integration → larger integral magnitude
+        assert abs(integral_large_error) > abs(integral_small_error)
+
+    @pytest.mark.asyncio
+    async def test_deadband_integration_small_near_setpoint(self, pi_entity):
+        """Error within deadband should accumulate slowly, not at full rate."""
         pi_entity._attr_current_temperature = 22.3  # Error = -0.3 (in deadband)
         pi_entity._pi._desired_temp = 22.0
         pi_entity._pi._hp_setpoint = 22.0
@@ -906,9 +993,9 @@ class TestPIEdgeCases:
 
         await pi_entity._pi._pi_tick()
 
-        # No error accumulation in deadband — integral stays near zero
-        # (quantization feedback may nudge it slightly but not from error)
-        assert abs(pi_entity._pi._pi_integral) < 1.0
+        # Variable-rate integration at rate = 0.3/0.5 = 0.6, so integral
+        # accumulates at 60% of full rate. Still small after one tick.
+        assert abs(pi_entity._pi._pi_integral) < 0.5
 
     @pytest.mark.asyncio
     async def test_ff_auto_learning_writes_bucket(self, pi_entity):
@@ -1135,9 +1222,14 @@ class TestPIEdgeCases:
         integral_before = pi._pi_integral
         await pi._pi_tick()
 
-        # Large gap should NOT modify integral via q_feedback
-        assert pi._pi_integral == integral_before, (
-            f"Large q_error triggered feedback: integral {integral_before} → {pi._pi_integral}"
+        # Large gap should NOT modify integral via q_feedback.
+        # The integral will change slightly due to variable-rate integration
+        # and leaky decay, but q_feedback for a 2.3°C gap would cause a
+        # much larger jump (~15.3 at 0.4 rate with ki=0.15).
+        integral_change = abs(pi._pi_integral - integral_before)
+        assert integral_change < 1.0, (
+            f"Large q_error triggered feedback: integral {integral_before} → {pi._pi_integral} "
+            f"(change={integral_change:.3f}, q_feedback would cause ~15)"
         )
 
     def test_set_temperature_none(self, pi_entity):
