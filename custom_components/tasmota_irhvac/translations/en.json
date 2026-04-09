@@ -19,7 +19,7 @@
       "comfort_violation_hours": {
         "name": "Comfort Violation Hours"
       },
-      "setpoint_changes_today": {
+      "setpoint_changes": {
         "name": "Setpoint Changes"
       },
       "health": {

@@ -95,9 +95,9 @@ PI_SENSOR_DESCRIPTIONS: tuple[TasmotaIrhvacPISensorDescription, ...] = (
         suggested_display_precision=2,
     ),
     TasmotaIrhvacPISensorDescription(
-        key="setpoint_changes_today",
-        translation_key="setpoint_changes_today",
-        climate_attr="_setpoint_changes_today",
+        key="setpoint_changes",
+        translation_key="setpoint_changes",
+        climate_attr="_setpoint_changes",
         device_class=None,
         native_unit_of_measurement=None,
         state_class=SensorStateClass.TOTAL_INCREASING,

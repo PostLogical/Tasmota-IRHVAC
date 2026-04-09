@@ -88,6 +88,9 @@ class PIExtraStoredData(ExtraStoredData):
     desired_temp: float | None
     hp_setpoint: float | None
     integral_convergence: float = 0.0
+    itae_accumulator: float = 0.0
+    comfort_violation_hours: float = 0.0
+    setpoint_changes: int = 0
     rls_heat_model: dict = dataclasses.field(default_factory=dict)
     rls_cool_model: dict = dataclasses.field(default_factory=dict)
     lag_filter_states: dict = dataclasses.field(default_factory=dict)
@@ -102,6 +105,9 @@ class PIExtraStoredData(ExtraStoredData):
             "desired_temp": self.desired_temp,
             "hp_setpoint": self.hp_setpoint,
             "integral_convergence": self.integral_convergence,
+            "itae_accumulator": self.itae_accumulator,
+            "comfort_violation_hours": self.comfort_violation_hours,
+            "setpoint_changes": self.setpoint_changes,
             "rls_heat_model": self.rls_heat_model,
             "rls_cool_model": self.rls_cool_model,
             "lag_filter_states": self.lag_filter_states,
@@ -123,6 +129,9 @@ class PIExtraStoredData(ExtraStoredData):
                 desired_temp=restored.get("desired_temp"),
                 hp_setpoint=restored.get("hp_setpoint"),
                 integral_convergence=float(restored.get("integral_convergence", 0.0)),
+                itae_accumulator=float(restored.get("itae_accumulator", 0.0)),
+                comfort_violation_hours=float(restored.get("comfort_violation_hours", 0.0)),
+                setpoint_changes=int(restored.get("setpoint_changes", 0)),
                 rls_heat_model=restored.get("rls_heat_model", {}),
                 rls_cool_model=restored.get("rls_cool_model", {}),
                 lag_filter_states=restored.get("lag_filter_states", {}),
@@ -337,11 +346,11 @@ class PIController:
         # Integral convergence tracking (EMA of abs(integral) over ~24hr)
         self._integral_convergence: float = 0.0
 
-        # Performance metrics (running accumulators, reset daily)
+        # Performance metrics (running totals, persisted via ExtraStoredData)
         self._itae_accumulator: float = 0.0      # Σ(tick * |effective_error|)
         self._itae_tick_count: int = 0         # ticks since last reset
         self._comfort_violation_hours: float = 0.0  # hours spent >1°C from setpoint
-        self._setpoint_changes_today: int = 0  # setpoint change count since reset
+        self._setpoint_changes: int = 0  # total setpoint change count
 
         # RLS learning gate: track integral stability
         self._prev_integral_for_rls: float = 0.0
@@ -469,6 +478,9 @@ class PIController:
             desired_temp=self._desired_temp,
             hp_setpoint=self._hp_setpoint,
             integral_convergence=self._integral_convergence,
+            itae_accumulator=self._itae_accumulator,
+            comfort_violation_hours=self._comfort_violation_hours,
+            setpoint_changes=self._setpoint_changes,
             rls_heat_model=self._rls_heat.as_dict(),
             rls_cool_model=self._rls_cool.as_dict(),
             lag_filter_states=lag_states,
@@ -495,6 +507,9 @@ class PIController:
         if data.hp_setpoint is not None:
             self._hp_setpoint = data.hp_setpoint
         self._integral_convergence = data.integral_convergence
+        self._itae_accumulator = data.itae_accumulator
+        self._comfort_violation_hours = data.comfort_violation_hours
+        self._setpoint_changes = data.setpoint_changes
         # Restore RLS models if available. Pass seed_coefficients so that
         # if model inputs changed (different vector length), new inputs get
         # seeded instead of zeroed.
@@ -1421,7 +1436,7 @@ class PIController:
                         self._hp_setpoint, new_setpoint,
                     )
                     self._last_setpoint_change_time = now_mono
-                    self._setpoint_changes_today += 1
+                    self._setpoint_changes += 1
                     return True
         else:
             _LOGGER.debug(
