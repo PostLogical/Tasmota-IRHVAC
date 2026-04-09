@@ -185,10 +185,10 @@ class TestPIMath:
 
     @pytest.mark.asyncio
     async def test_leaky_decay_always_active(self, pi_entity):
-        """Leaky integrator (α=0.999^dt_factor) should decay integral every tick.
+        """Leaky integrator (α=0.9999^dt_factor) should decay integral every tick.
 
         Active both in and out of deadband. With dt_factor=1.0 (first tick),
-        integral *= 0.999. Weak enough to not fight q-feedback but bounds growth.
+        integral *= 0.9999. Weak enough to not fight q-feedback but bounds growth.
         """
         pi_entity._attr_current_temperature = 22.0  # Error = 0 (in deadband)
         pi_entity._pi._desired_temp = 22.0
@@ -199,10 +199,10 @@ class TestPIMath:
 
         await pi_entity._pi._pi_tick()
 
-        # Leak should reduce integral: 10.0 * 0.999 ≈ 9.99
+        # Leak should reduce integral: 10.0 * 0.9999 ≈ 9.999
         # Variable-rate integration at rate=0.05 with error≈0 adds negligible amount
         assert pi_entity._pi._pi_integral < 10.0
-        assert pi_entity._pi._pi_integral > 9.9  # Not a fast drain
+        assert pi_entity._pi._pi_integral > 9.99  # Very weak drain
 
     @pytest.mark.asyncio
     async def test_leaky_decay_scales_with_dt(self, pi_entity):

@@ -1356,10 +1356,11 @@ class PIController:
             self._pi_integral += avg_error * dt_factor
 
         # Leaky integrator: weak decay bounds integral growth universally.
-        # α=0.999 per nominal tick ≈ 1000-tick time constant (~10 days at
+        # α=0.9999 per nominal tick ≈ 10000-tick time constant (~104 days at
         # 15-min ticks). Scaled by dt_factor for variable sample intervals.
-        # Must be weak to avoid fighting quantization-error feedback.
-        self._pi_integral *= 0.999 ** dt_factor
+        # Weaker than α=0.999 to avoid draining integral correction needed by
+        # slow-τ houses (well-insulated). Sim-validated across 3 profiles.
+        self._pi_integral *= 0.9999 ** dt_factor
 
         self._pi_last_error = error
 
