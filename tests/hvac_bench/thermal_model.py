@@ -56,7 +56,8 @@ class ThermalModel:
     def __init__(self, profile: HouseProfile, initial_temp: float = 20.0,
                  outdoor_temp: float = 5.0, cop_model: COPModel | None = None,
                  sensor_noise_sigma: float = 0.0, sensor_quantization: float = 0.0,
-                 noise_seed: int | None = None):
+                 noise_seed: int | None = None,
+                 hp_lag_minutes: float = 0.0):
         """Initialize thermal model.
 
         Args:
@@ -67,6 +68,8 @@ class ThermalModel:
             sensor_noise_sigma: Gaussian noise std dev on sensor readings (°C).
             sensor_quantization: Sensor resolution (e.g., 0.1°C). 0 = continuous.
             noise_seed: Random seed for reproducible noise. None = random.
+            hp_lag_minutes: First-order lag on HP response (minutes). 0 = instant.
+                Models the delay from setpoint change to room temperature effect.
         """
         self.profile = profile
         self.room_temp = initial_temp
@@ -75,6 +78,8 @@ class ThermalModel:
         self.sensor_noise_sigma = sensor_noise_sigma
         self.sensor_quantization = sensor_quantization
         self._rng = random.Random(noise_seed)
+        self.hp_lag_minutes = hp_lag_minutes
+        self._effective_setpoint: float = initial_temp
 
         # Energy tracking
         self.cumulative_kwh = 0.0
@@ -101,6 +106,15 @@ class ThermalModel:
             tick: Current tick number (for disturbance timing).
             mode: "heat" or "cool" (for COP calculation).
         """
+        # HP response lag: effective setpoint tracks commanded setpoint
+        if self.hp_lag_minutes > 0:
+            lag_decay = math.exp(-dt_minutes / self.hp_lag_minutes)
+            self._effective_setpoint = (
+                hp_setpoint + (self._effective_setpoint - hp_setpoint) * lag_decay
+            )
+        else:
+            self._effective_setpoint = hp_setpoint
+
         tau = self.profile.tau_minutes
         hp_gain = self.profile.hp_gain
 
@@ -125,7 +139,7 @@ class ThermalModel:
             return
         t_eq = (
             self.outdoor_temp / tau_eff
-            + hp_gain * hp_setpoint
+            + hp_gain * self._effective_setpoint
             + solar_heat / dt_minutes  # Convert back to rate
             + stove_heat / dt_minutes
             + extra_heat / dt_minutes
@@ -136,7 +150,7 @@ class ThermalModel:
         self.room_temp = t_eq + (self.room_temp - t_eq) * decay
 
         # Energy tracking
-        thermal_output = abs(hp_setpoint - self.room_temp) * hp_gain * dt_minutes
+        thermal_output = abs(self._effective_setpoint - self.room_temp) * hp_gain * dt_minutes
         cop = self.cop_model.cop(self.outdoor_temp, hp_setpoint, mode)
         if cop > 0:
             electrical_input = thermal_output / cop

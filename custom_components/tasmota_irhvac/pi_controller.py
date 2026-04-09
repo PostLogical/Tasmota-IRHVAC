@@ -1385,9 +1385,17 @@ class PIController:
         new_setpoint = int(max(self._min_temp_c, min(self._max_temp_c, new_setpoint)))
 
         if new_setpoint != self._hp_setpoint:
-            # Minimum hold time: don't change setpoint more often than every 30 min.
-            # A 1°C change takes 15-30 min to affect room temp — wait to see its effect.
-            # Bypass for large corrections (>1°C) and active ramps (error >> deadband).
+            # Minimum dwell time: wait 30 min after a setpoint change before
+            # allowing another. A 1°C setpoint change takes ~15-25 min to
+            # propagate through the HP response chain (compressor ramp → heat
+            # exchanger → room air → sensor) due to first-order lag. Without
+            # this hold, PI reacts to incomplete information and oscillates in
+            # the 0.3-1.0°C error band where hysteresis alone doesn't prevent
+            # changes. Validated via simulation with 15-min HP response lag
+            # (tools/sweep_cooldown_hold.py): 30 min matched or beat shorter
+            # values (0/10/15 min) across cold start, setpoint change,
+            # outdoor drop, mild disturbance, and solar gain scenarios.
+            # Bypass: error >1°C skips the hold (urgent demand).
             change = new_setpoint - self._hp_setpoint
             time_since_last = now_mono - self._last_setpoint_change_time
             can_change = time_since_last >= 1800.0  # 30 minutes
