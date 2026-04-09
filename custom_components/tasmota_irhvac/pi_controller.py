@@ -28,6 +28,7 @@ from homeassistant.core import callback
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.restore_state import ExtraStoredData
 from homeassistant.helpers.event import (
+    async_call_later,
     async_track_state_change_event,
 )
 from homeassistant.util.unit_conversion import TemperatureConverter
@@ -232,6 +233,8 @@ class PIController:
         self._recovery_check_needed: bool = False
         self._pi_paused: bool = False
         self._pi_last_tick_time: float = 0.0
+        self._pi_timer_unsub: Any | None = None    # cancel handle for fallback timer
+        self._pi_timer_callback: Any | None = None  # set by climate.py during setup
         self._pi_last_error: float = 0.0
         self._pi_d_filtered: float = 0.0    # Filtered derivative term
         self._pi_last_measurement: float | None = None  # Previous temperature measurement for derivative
@@ -448,7 +451,9 @@ class PIController:
 
     def async_will_remove_from_hass(self) -> None:
         """Clean up PI state."""
-        pass
+        if self._pi_timer_unsub:
+            self._pi_timer_unsub()
+            self._pi_timer_unsub = None
 
     # ── Hook methods (called by climate entity) ──────────────────────
 
@@ -1120,7 +1125,14 @@ class PIController:
             return False
         self._pi_tick_running = True
         try:
-            return await self._pi_tick_inner(now)
+            result = await self._pi_tick_inner(now)
+            # Reschedule fallback timer after every tick
+            if self._pi_timer_unsub:
+                self._pi_timer_unsub()
+            if self._pi_timer_callback:
+                self._pi_timer_unsub = async_call_later(
+                    self._hass, self._pi_min_interval, self._pi_timer_callback)
+            return result
         finally:
             self._pi_tick_running = False
 

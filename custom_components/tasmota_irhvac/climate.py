@@ -707,8 +707,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         self._has_sent_once: bool = False
         self._expected_state: dict[str, Any] = {}
 
-        # PI timer/recovery subscriptions (owned by climate.py, not PI)
-        self._pi_timer_unsub: CALLBACK_TYPE | None = None
+        # PI recovery subscription (PI owns its own fallback timer)
         self._pi_recovery_unsub: CALLBACK_TYPE | None = None
 
     async def async_added_to_hass(self) -> None:
@@ -817,14 +816,13 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         # Initialize PI controller (restores state, no I/O)
         await self._controller.async_added_to_hass(old_state=old_state)
 
-        # PI timer and initial tick — climate.py owns all I/O scheduling
+        # PI fallback timer — PI reschedules after every tick, climate.py
+        # provides the callback that bridges timer fire → send_ir.
         if self._controller.is_active and self._temp_sensor:
-            from datetime import timedelta
-            self._pi_timer_unsub = ha_event.async_track_time_interval(
-                self.hass,
-                self._on_pi_timer,
-                timedelta(seconds=self._controller._pi_min_interval),
-            )
+            @callback
+            def _pi_timer_fired(_now):
+                self.hass.async_create_task(self._on_pi_timer())
+            self._controller._pi_timer_callback = _pi_timer_fired
             if self._attr_current_temperature is not None:
                 @callback
                 def _deferred_initial_tick(_now):
@@ -1195,9 +1193,6 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         if hasattr(self, "_vendor_timer_unsub") and self._vendor_timer_unsub:
             self._vendor_timer_unsub()
             self._vendor_timer_unsub = None
-        if self._pi_timer_unsub:
-            self._pi_timer_unsub()
-            self._pi_timer_unsub = None
         if self._pi_recovery_unsub:
             self._pi_recovery_unsub()
             self._pi_recovery_unsub = None

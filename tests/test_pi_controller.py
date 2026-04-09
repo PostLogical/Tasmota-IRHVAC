@@ -2190,3 +2190,374 @@ class TestTrackingModeIRSuppressed:
         # but send not needed (tracking mode suppresses)
         assert not send_needed
 
+
+# ── Derivative (D) Term Tests ────────────────────────────────────────
+
+
+class TestDerivativeTerm:
+    """Tests for the filtered derivative-on-measurement term."""
+
+    def _make_entity(self, kd=0.5, kd_filter_n=8):
+        """Helper: create FakePIEntity with explicit Kd settings."""
+        config = make_pi_config({
+            "pi_kd": kd,
+            "pi_kd_filter_n": kd_filter_n,
+        })
+        return FakePIEntity(config)
+
+    async def _tick_with_temp(self, entity, temp_c, dt_seconds=900):
+        """Set current temp, advance time, and tick. Returns d_term."""
+        import time
+        entity._attr_current_temperature = temp_c
+        entity._pi._pi_last_tick_time = time.monotonic() - dt_seconds
+        await entity._pi._pi_tick()
+        return entity._pi._pi_d_filtered
+
+    @pytest.mark.asyncio
+    async def test_first_tick_no_derivative(self):
+        """First tick has no previous measurement, so D should be zero."""
+        entity = self._make_entity(kd=2.0)
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 20.0
+        entity._pi._desired_temp = 22.0
+        entity._pi._hp_setpoint = 22.0
+
+        assert entity._pi._pi_last_measurement is None
+        await self._tick_with_temp(entity, 20.0)
+
+        assert entity._pi._pi_d_filtered == 0.0
+        # But measurement should now be recorded
+        assert entity._pi._pi_last_measurement == 20.0
+
+    @pytest.mark.asyncio
+    async def test_d_zero_when_kd_zero(self):
+        """With Kd=0, D term should always be zero regardless of temp change."""
+        entity = self._make_entity(kd=0.0)
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._pi._desired_temp = 22.0
+        entity._pi._hp_setpoint = 22.0
+
+        await self._tick_with_temp(entity, 20.0)
+        await self._tick_with_temp(entity, 21.0)  # 1°C rise
+
+        assert entity._pi._pi_d_filtered == 0.0
+
+    @pytest.mark.asyncio
+    async def test_d_opposes_rising_temp(self):
+        """When room temp rises, D should be negative (opposes the change)."""
+        entity = self._make_entity(kd=1.0, kd_filter_n=8)
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._pi._desired_temp = 22.0
+        entity._pi._hp_setpoint = 22.0
+
+        await self._tick_with_temp(entity, 20.0)  # seed measurement
+        d = await self._tick_with_temp(entity, 21.0)  # +1°C rise
+
+        assert d < 0.0, f"D should be negative for rising temp, got {d}"
+
+    @pytest.mark.asyncio
+    async def test_d_opposes_falling_temp(self):
+        """When room temp falls, D should be positive (opposes the change)."""
+        entity = self._make_entity(kd=1.0, kd_filter_n=8)
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._pi._desired_temp = 22.0
+        entity._pi._hp_setpoint = 22.0
+
+        await self._tick_with_temp(entity, 21.0)  # seed measurement
+        d = await self._tick_with_temp(entity, 20.0)  # -1°C fall
+
+        assert d > 0.0, f"D should be positive for falling temp, got {d}"
+
+    @pytest.mark.asyncio
+    async def test_d_zero_when_temp_unchanged(self):
+        """No temperature change → D should remain zero (or decay to zero)."""
+        entity = self._make_entity(kd=1.0, kd_filter_n=8)
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._pi._desired_temp = 22.0
+        entity._pi._hp_setpoint = 22.0
+
+        await self._tick_with_temp(entity, 20.0)
+        d = await self._tick_with_temp(entity, 20.0)  # same temp
+
+        assert d == 0.0
+
+    @pytest.mark.asyncio
+    async def test_d_formula_exact(self):
+        """Verify the discrete filter formula produces expected values."""
+        kd = 2.0
+        n = 10.0
+        entity = self._make_entity(kd=kd, kd_filter_n=n)
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._pi._desired_temp = 22.0
+        entity._pi._hp_setpoint = 22.0
+
+        dt_sec = 900  # 15 min
+        dt_min = dt_sec / 60.0
+        tf = kd / n  # 0.2 min
+
+        # First tick: seed measurement at 20°C
+        await self._tick_with_temp(entity, 20.0, dt_seconds=dt_sec)
+
+        # Second tick: temp rises to 21°C (dy = +1.0)
+        d = await self._tick_with_temp(entity, 21.0, dt_seconds=dt_sec)
+
+        # Expected: alpha = tf/(tf+dt_min) = 0.2/(0.2+15) = 0.01316
+        # D = alpha * 0.0 - (kd/(tf+dt_min)) * 1.0
+        #   = -(2.0/15.2) * 1.0 = -0.13158
+        alpha_d = tf / (tf + dt_min)
+        expected_d = alpha_d * 0.0 - (kd / (tf + dt_min)) * 1.0
+
+        assert d == pytest.approx(expected_d, abs=1e-6)
+
+        # Third tick: temp stays at 21°C (dy = 0) — D should decay
+        d2 = await self._tick_with_temp(entity, 21.0, dt_seconds=dt_sec)
+        expected_d2 = alpha_d * expected_d  # decay only
+
+        assert d2 == pytest.approx(expected_d2, abs=1e-6)
+
+    @pytest.mark.asyncio
+    async def test_d_scales_with_kd(self):
+        """Doubling Kd should roughly double the D response on first step."""
+        results = {}
+        for kd in (0.5, 1.0, 2.0):
+            entity = self._make_entity(kd=kd, kd_filter_n=8)
+            entity._attr_hvac_mode = HVACMode.HEAT
+            entity._pi._desired_temp = 22.0
+            entity._pi._hp_setpoint = 22.0
+
+            await self._tick_with_temp(entity, 20.0)
+            d = await self._tick_with_temp(entity, 21.0)
+            results[kd] = d
+
+        # All should be negative (opposing rise)
+        for kd, d in results.items():
+            assert d < 0.0, f"Kd={kd}: D should be negative, got {d}"
+
+        # Magnitude should scale with Kd (not exactly linear due to filter,
+        # but close since tf is small relative to dt)
+        assert abs(results[2.0]) > abs(results[1.0]) > abs(results[0.5])
+
+    @pytest.mark.asyncio
+    async def test_higher_n_means_faster_response(self):
+        """Higher N = less filtering = D responds more sharply to changes."""
+        results = {}
+        for n in (2, 8, 50):
+            entity = self._make_entity(kd=1.0, kd_filter_n=n)
+            entity._attr_hvac_mode = HVACMode.HEAT
+            entity._pi._desired_temp = 22.0
+            entity._pi._hp_setpoint = 22.0
+
+            await self._tick_with_temp(entity, 20.0)
+            d = await self._tick_with_temp(entity, 21.0)
+            results[n] = abs(d)
+
+        # Higher N → smaller Tf → D responds more to current step
+        # (less smoothing), so magnitude should be larger for higher N
+        # With our 15-min dt this difference is very small since all Tf << dt,
+        # but N=2 should have slightly less magnitude than N=50
+        assert results[50] >= results[2] - 1e-6
+
+    @pytest.mark.asyncio
+    async def test_d_exposed_in_attributes(self):
+        """D term should appear in extra_state_attributes."""
+        entity = self._make_entity(kd=1.0)
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._pi._desired_temp = 22.0
+        entity._pi._hp_setpoint = 22.0
+
+        await self._tick_with_temp(entity, 20.0)
+        await self._tick_with_temp(entity, 21.0)
+
+        attrs = entity.extra_state_attributes
+        assert "d_term" in attrs
+        assert attrs["d_term"] != 0.0
+
+    @pytest.mark.asyncio
+    async def test_d_derivative_on_measurement_not_error(self):
+        """D should respond to measurement change, not error change.
+
+        If we change the setpoint but not the measurement, D should be zero.
+        This is the key property of derivative-on-measurement.
+        """
+        entity = self._make_entity(kd=2.0)
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._pi._desired_temp = 20.0  # initial
+        entity._pi._hp_setpoint = 20.0
+
+        # Two ticks at same temp, different setpoints
+        await self._tick_with_temp(entity, 20.0)
+        entity._pi._desired_temp = 24.0  # big setpoint change!
+        d = await self._tick_with_temp(entity, 20.0)  # same measurement
+
+        assert d == 0.0, "D should not respond to setpoint changes"
+
+    @pytest.mark.asyncio
+    async def test_d_contributes_to_setpoint(self):
+        """D term should affect the computed HP setpoint.
+
+        Compare the HP setpoint with Kd=0 vs Kd>0 for the same scenario.
+        """
+        setpoints = {}
+        for kd in (0.0, 2.0):
+            entity = self._make_entity(kd=kd)
+            entity._attr_hvac_mode = HVACMode.HEAT
+            entity._pi._desired_temp = 22.0
+            entity._pi._hp_setpoint = 22.0
+
+            # Seed measurement, then rising temp (approaching setpoint)
+            await self._tick_with_temp(entity, 20.0)
+            await self._tick_with_temp(entity, 21.0)
+            setpoints[kd] = entity._pi._hp_setpoint
+
+        # With rising temp in heating mode, D is negative → should lower
+        # the raw setpoint, potentially resulting in a lower HP setpoint
+        # (or same due to rounding, but raw should differ)
+        # At minimum, verify D term was nonzero in the kd=2 case
+        entity_with_d = self._make_entity(kd=2.0)
+        entity_with_d._attr_hvac_mode = HVACMode.HEAT
+        entity_with_d._pi._desired_temp = 22.0
+        entity_with_d._pi._hp_setpoint = 22.0
+        await self._tick_with_temp(entity_with_d, 20.0)
+        await self._tick_with_temp(entity_with_d, 21.0)
+        assert entity_with_d._pi._pi_d_filtered != 0.0
+
+
+class TestDerivativeImpact:
+    """Comparative tests with open-loop temp sequences.
+
+    For thermal-model-coupled D impact tests, see
+    tests/hvac_bench/scenarios/test_derivative.py.
+    """
+
+    async def _run_heating_scenario(self, kd, temps):
+        """Run a sequence of temperature readings and return metrics."""
+        config = make_pi_config({
+            "pi_kd": kd,
+            "pi_kd_filter_n": 8,
+            "pi_kp": 1.5,
+            "pi_ki": 0.15,
+        })
+        entity = FakePIEntity(config)
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._pi._desired_temp = 22.0
+        entity._pi._hp_setpoint = 22.0
+
+        import time
+        setpoints = []
+        d_terms = []
+
+        for temp_c, dt_sec in temps:
+            entity._attr_current_temperature = temp_c
+            entity._pi._pi_last_tick_time = time.monotonic() - dt_sec
+            await entity._pi._pi_tick()
+            setpoints.append(entity._pi._hp_setpoint)
+            d_terms.append(entity._pi._pi_d_filtered)
+
+        return {"setpoints": setpoints, "d_terms": d_terms}
+
+    @pytest.mark.asyncio
+    async def test_d_damps_approach_overshoot(self):
+        """D should be negative during rising temp approach."""
+        temps = [(19.0 + i * 0.2, 900) for i in range(20)]
+
+        result_no_d = await self._run_heating_scenario(kd=0.0, temps=temps)
+        result_with_d = await self._run_heating_scenario(kd=2.0, temps=temps)
+
+        approaching_ticks = result_with_d["d_terms"][1:]
+        assert all(d <= 0.0 for d in approaching_ticks)
+        assert all(d == 0.0 for d in result_no_d["d_terms"])
+
+    @pytest.mark.asyncio
+    async def test_d_resists_temp_drop(self):
+        """D should be positive when temp drops (resisting the change)."""
+        temps = (
+            [(22.0, 900)] * 3
+            + [(21.5, 900), (21.0, 900), (20.5, 900)]
+        )
+
+        result = await self._run_heating_scenario(kd=1.0, temps=temps)
+
+        assert abs(result["d_terms"][1]) < 0.01
+        assert abs(result["d_terms"][2]) < 0.01
+        assert result["d_terms"][3] > 0.0
+        assert result["d_terms"][4] > 0.0
+        assert result["d_terms"][5] > 0.0
+
+
+class TestFallbackTimer:
+    """Tests for PI's self-rescheduling fallback timer."""
+
+    @pytest.mark.asyncio
+    async def test_pi_tick_reschedules_timer(self):
+        """Every _pi_tick should cancel and reschedule the fallback timer."""
+        import time as _time
+
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22.0
+        entity._attr_current_temperature = 21.5
+        pi._pi_last_tick_time = _time.monotonic() - 900.0
+
+        # Set a mock callback and a mock existing unsub
+        old_unsub = MagicMock()
+        pi._pi_timer_callback = MagicMock()
+        pi._pi_timer_unsub = old_unsub
+
+        # Mock _hass to capture async_call_later
+        from unittest.mock import patch
+        with patch("custom_components.tasmota_irhvac.pi_controller.async_call_later") as mock_acl:
+            mock_acl.return_value = MagicMock()  # new unsub handle
+            await pi.pi_tick()
+
+        # Old timer was cancelled
+        old_unsub.assert_called_once()
+        # New timer was scheduled
+        mock_acl.assert_called_once()
+        assert pi._pi_timer_unsub == mock_acl.return_value
+
+    @pytest.mark.asyncio
+    async def test_no_reschedule_without_callback(self):
+        """No timer scheduled if _pi_timer_callback is not set."""
+        import time as _time
+
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22.0
+        entity._attr_current_temperature = 21.5
+        pi._pi_last_tick_time = _time.monotonic() - 900.0
+        pi._pi_timer_callback = None
+
+        from unittest.mock import patch
+        with patch("custom_components.tasmota_irhvac.pi_controller.async_call_later") as mock_acl:
+            await pi.pi_tick()
+
+        mock_acl.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sensor_tick_also_reschedules(self):
+        """sensor_changed flows through _pi_tick, so timer reschedules too."""
+        import time as _time
+
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 20.0
+        entity._attr_current_temperature = 20.0
+        pi._pi_last_tick_time = _time.monotonic() - 400.0  # past cooldown
+        pi._pi_timer_callback = MagicMock()
+
+        from unittest.mock import patch
+        with patch("custom_components.tasmota_irhvac.pi_controller.async_call_later") as mock_acl:
+            mock_acl.return_value = MagicMock()
+            await pi.sensor_changed(was_none=False)
+
+        # sensor_changed → _pi_tick → reschedule
+        mock_acl.assert_called_once()

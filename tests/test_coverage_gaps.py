@@ -186,13 +186,13 @@ class TestPIControllerGaps:
         entity = get_climate_entity(hass, entry)
         pi = entity._pi
 
-        # Simulate having active timers (owned by climate.py now)
-        entity._pi_timer_unsub = MagicMock()
+        # Simulate having active timers
+        pi._pi_timer_unsub = MagicMock()
         entity._pi_recovery_unsub = MagicMock()
 
         await entity.async_will_remove_from_hass()
 
-        assert entity._pi_timer_unsub is None
+        assert pi._pi_timer_unsub is None
         assert entity._pi_recovery_unsub is None
 
     @pytest.mark.asyncio
