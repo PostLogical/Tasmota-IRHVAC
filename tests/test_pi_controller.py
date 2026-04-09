@@ -1199,6 +1199,19 @@ class TestPIEdgeCases:
 class TestModelInputClamps:
     """Tests for model input clamp_min and clamp_max configuration (line 448)."""
 
+    def test_intercept_is_unclamped(self):
+        """Intercept (index 0) must not be clamped.
+
+        A clamped intercept forces the outdoor slope to compensate for
+        unmodeled offsets, causing slope overshoot. Verified by the
+        2026-04-08 LR runaway analysis (Scenario G).
+        """
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        assert pi._rls_heat_clamps[0] is None
+        assert pi._rls_cool_clamps[0] is None
+
     def test_model_input_with_both_clamps(self):
         """Model input with both clamp_min and clamp_max should create tuple clamp."""
         config = make_pi_config({

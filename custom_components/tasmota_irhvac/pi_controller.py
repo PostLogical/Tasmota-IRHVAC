@@ -284,8 +284,8 @@ class PIController:
         # Index 2+: model inputs in order
         self._heat_seeds = [0.0, self._ff_heat_slope]
         self._cool_seeds = [0.0, -self._ff_cool_slope]  # Negative: hotter outdoor → lower HP setpoint
-        self._rls_heat_clamps: list[tuple[float, float] | None] = [(-0.5, 0.5), (0.0, 2.0)]
-        self._rls_cool_clamps: list[tuple[float, float] | None] = [(-0.5, 0.5), (-2.0, 0.0)]
+        self._rls_heat_clamps: list[tuple[float, float] | None] = [None, (0.0, 2.0)]
+        self._rls_cool_clamps: list[tuple[float, float] | None] = [None, (-2.0, 0.0)]
         for m_input in self._model_inputs:
             self._heat_seeds.append(float(m_input.get("seed_heat", 0.0)))
             self._cool_seeds.append(float(m_input.get("seed_cool", 0.0)))
@@ -1218,11 +1218,11 @@ class PIController:
         seeds = self._heat_seeds if is_heating else self._cool_seeds
 
         # Blend seed prediction with RLS prediction based on observation count.
-        # Early RLS estimates are unstable (large P matrix gives each observation
-        # outsized influence). Linear blend from pure seeds to pure RLS over
-        # MIN_RLS_OBS observations prevents discontinuities when transitioning
-        # from prior knowledge to learned coefficients.
-        MIN_RLS_OBS = 10
+        # With few observations the RLS may have learned from narrow conditions
+        # (e.g. only mild weather) and extrapolation can be wrong. The blend
+        # anchors predictions to seeds until enough observations have covered
+        # a representative range of conditions (~1-2 weeks at ~6 obs/day).
+        MIN_RLS_OBS = 50
         seed_offset = sum(s * xi for s, xi in zip(seeds, x))
         rls_offset = rls.predict(x)
         alpha = min(rls.observation_count / MIN_RLS_OBS, 1.0)

@@ -614,3 +614,138 @@ class TestClosedLoopDisturbanceRejection:
         assert 0.2 < coeffs[1] < 0.7, (
             f"Outdoor coeff outside expected range: {coeffs[1]:.3f}"
         )
+
+
+# ── P_INIT Regression: LR Runaway (2026-04-08 incident) ────────────────
+
+
+class TestPInitRegression:
+    """Regression tests for the Living Room runaway incident.
+
+    With P_INIT=10 and a seed-truth mismatch, the outdoor_delta slope
+    overshot to the clamp (2.0) after just 21 observations, producing a
+    massive FF offset that maxed the HP setpoint while the room was 6°F
+    above target. The fix: P_INIT=1.0 limits how much each observation
+    can shift coefficients, preventing transient overshoot.
+    """
+
+    def test_seed_truth_mismatch_no_overshoot(self):
+        """With P_INIT=1.0, slope should not overshoot past true value.
+
+        Seed=0.35, true=0.6. With old P_INIT=10, slope reached 1.76 at
+        21 obs (403% drift, near clamp). With P_INIT=1.0, slope should
+        stay between seed and true, approaching truth gradually.
+        """
+        from custom_components.tasmota_irhvac.const import DEFAULT_RLS_P_INIT
+
+        model = RLSModel(
+            n_inputs=1,
+            seed_coefficients=[0.0, 0.35],
+            coeff_clamps=[None, (0.0, 2.0)],
+            feature_scales=[1.0, 10.0],
+            p_init=DEFAULT_RLS_P_INIT,
+        )
+        random.seed(42)
+
+        true_slope = 0.6
+        for i in range(21):
+            outdoor_delta = 8.0 + 4.0 * math.sin(i * 0.3) + random.gauss(0, 1.0)
+            outdoor_delta = max(0, outdoor_delta)
+            x = [1.0, outdoor_delta]
+            observed = true_slope * outdoor_delta + random.gauss(0, 1.5)
+            model.update(x, observed)
+
+        slope = model.get_coefficients()[1]
+
+        # Must not overshoot past true slope by more than 50%
+        assert slope < true_slope * 1.5, (
+            f"Slope {slope:.4f} overshot true {true_slope} — "
+            f"P_INIT regression (was the LR runaway bug)"
+        )
+        # Must be moving toward truth, not stuck at seed
+        assert slope > 0.35, (
+            f"Slope {slope:.4f} didn't move toward true {true_slope}"
+        )
+
+    def test_p_init_10_with_clamped_intercept_overshoots(self):
+        """P_INIT=10 + clamped intercept causes slope overshoot (the original bug).
+
+        The clamped intercept at (-0.5, 0.5) forces the slope to absorb
+        what should be intercept variance, causing massive overshoot.
+        This was the production configuration during the LR incident.
+        """
+        model = RLSModel(
+            n_inputs=1,
+            seed_coefficients=[0.0, 0.35],
+            coeff_clamps=[(-0.5, 0.5), (0.0, 2.0)],  # Old clamped intercept
+            feature_scales=[1.0, 10.0],
+            p_init=10.0,
+        )
+        random.seed(42)
+
+        true_slope = 0.6
+        for i in range(21):
+            outdoor_delta = 8.0 + 4.0 * math.sin(i * 0.3) + random.gauss(0, 1.0)
+            outdoor_delta = max(0, outdoor_delta)
+            x = [1.0, outdoor_delta]
+            observed = true_slope * outdoor_delta + random.gauss(0, 1.5)
+            model.update(x, observed)
+
+        slope = model.get_coefficients()[1]
+        # Clamped intercept + P_INIT=10 → slope overshoots far past truth
+        assert slope > 1.5, (
+            f"Expected overshoot with clamped intercept, got slope={slope:.4f}"
+        )
+
+    def test_blend_anchors_to_seeds_early(self):
+        """MIN_RLS_OBS=50 means the blend stays seed-dominant at 21 obs.
+
+        The blend pulls the prediction toward seed values in proportion
+        to (1 - alpha). With 21 obs and MIN_RLS_OBS=50, alpha=0.42,
+        so the blended prediction should be closer to seeds than to
+        the raw RLS prediction.
+        """
+        model = RLSModel(
+            n_inputs=1,
+            seed_coefficients=[0.0, 0.35],
+            coeff_clamps=[None, (0.0, 2.0)],
+            feature_scales=[1.0, 10.0],
+            p_init=10.0,  # Deliberately high to create seed-RLS divergence
+        )
+        random.seed(42)
+
+        seeds = [0.0, 0.35]
+        min_rls_obs = 50
+
+        # Feed 21 observations with a very different true slope
+        for i in range(21):
+            outdoor_delta = 8.0 + 4.0 * math.sin(i * 0.3) + random.gauss(0, 1.0)
+            outdoor_delta = max(0, outdoor_delta)
+            x = [1.0, outdoor_delta]
+            observed = 0.8 * outdoor_delta + random.gauss(0, 1.5)
+            model.update(x, observed)
+
+        # At obs_count=21, alpha = 21/50 = 0.42
+        alpha = min(model.observation_count / min_rls_obs, 1.0)
+        assert 0.4 < alpha < 0.5, f"Unexpected alpha: {alpha}"
+
+        # Blended prediction should be between seed and RLS predictions
+        x_cold = [1.0, 25.0]
+        seed_offset = sum(s * xi for s, xi in zip(seeds, x_cold))
+        rls_offset = model.predict(x_cold)
+        blended = (1.0 - alpha) * seed_offset + alpha * rls_offset
+
+        # Verify the blend math: blended is between seed and RLS
+        lo = min(seed_offset, rls_offset)
+        hi = max(seed_offset, rls_offset)
+        assert lo <= blended <= hi, (
+            f"Blend {blended:.2f} not between seed {seed_offset:.2f} "
+            f"and RLS {rls_offset:.2f}"
+        )
+        # And specifically closer to seeds than RLS (alpha < 0.5)
+        seed_distance = abs(blended - seed_offset)
+        rls_distance = abs(blended - rls_offset)
+        assert seed_distance < rls_distance, (
+            f"Blend should be closer to seeds at alpha={alpha:.2f}, "
+            f"but seed_dist={seed_distance:.2f} >= rls_dist={rls_distance:.2f}"
+        )

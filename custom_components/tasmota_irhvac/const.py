@@ -230,7 +230,7 @@ DEFAULT_PI_SETPOINT_WEIGHT = 0.3  # 2-DOF: p_term = kp * b * error. Lower b redu
 DEFAULT_RLS_LAMBDA_BASE = 0.999  # Base forgetting factor (~10 day effective memory)
 DEFAULT_RLS_LAMBDA_MIN = 0.995   # Minimum λ when residuals are large
 DEFAULT_RLS_DELTA = 0.001        # Covariance regularization (added to P diagonal each step)
-DEFAULT_RLS_P_INIT = 10.0        # Base initial covariance diagonal (scaled per feature)
+DEFAULT_RLS_P_INIT = 1.0         # Initial covariance diagonal (prior uncertainty per coeff)
 
 # PI controller extra state attributes
 ATTR_HP_SETPOINT = "hp_setpoint"
