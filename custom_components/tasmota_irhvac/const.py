@@ -192,6 +192,9 @@ CONF_PI_FF_HEAT_SLOPE = "pi_ff_heat_slope"
 CONF_PI_FF_COOL_REFERENCE = "pi_ff_cool_reference"
 CONF_PI_FF_COOL_SLOPE = "pi_ff_cool_slope"
 CONF_PI_SETPOINT_WEIGHT = "pi_setpoint_weight"
+CONF_PI_TAU_ESTIMATE = "pi_tau_estimate"
+CONF_PI_RESPONSE_LAG = "pi_response_lag"
+CONF_PI_IMC_LAMBDA = "pi_imc_lambda"
 CONF_PI_MODEL_INPUTS = "pi_model_inputs"
 
 # Subentry types
@@ -225,6 +228,9 @@ DEFAULT_PI_FF_HEAT_SLOPE = 0.3
 DEFAULT_PI_FF_COOL_REFERENCE = 25.0
 DEFAULT_PI_FF_COOL_SLOPE = 0.3
 DEFAULT_PI_SETPOINT_WEIGHT = 0.3  # 2-DOF: p_term = kp * b * error. Lower b reduces overshoot.
+DEFAULT_PI_TAU_ESTIMATE = 0.0      # Room thermal τ (minutes). 0 = disabled (use manual Kp/Ki).
+DEFAULT_PI_RESPONSE_LAG = 15.0     # HP response lag L (minutes). Compressor→room first-order lag.
+DEFAULT_PI_IMC_LAMBDA = 0.0        # IMC closed-loop speed λ (minutes). 0 = auto (τ/2).
 
 # RLS model defaults
 DEFAULT_RLS_LAMBDA_BASE = 0.999  # Base forgetting factor (~10 day effective memory)

@@ -47,25 +47,31 @@ from .const import (
     CONF_PI_FF_COOL_SLOPE,
     CONF_PI_FF_HEAT_REFERENCE,
     CONF_PI_FF_HEAT_SLOPE,
+    CONF_PI_IMC_LAMBDA,
     CONF_PI_KD,
     CONF_PI_KD_FILTER_N,
     CONF_PI_KI,
     CONF_PI_KP,
     CONF_PI_MIN_INTERVAL,
     CONF_PI_MODEL_INPUTS,
+    CONF_PI_RESPONSE_LAG,
     CONF_PI_SETPOINT_WEIGHT,
+    CONF_PI_TAU_ESTIMATE,
     DEFAULT_PI_DEADBAND,
     DEFAULT_PI_ENABLED,
     DEFAULT_PI_FF_COOL_REFERENCE,
     DEFAULT_PI_FF_COOL_SLOPE,
     DEFAULT_PI_FF_HEAT_REFERENCE,
     DEFAULT_PI_FF_HEAT_SLOPE,
+    DEFAULT_PI_IMC_LAMBDA,
     DEFAULT_PI_KD,
     DEFAULT_PI_KD_FILTER_N,
     DEFAULT_PI_KI,
     DEFAULT_PI_KP,
     DEFAULT_PI_MIN_INTERVAL,
+    DEFAULT_PI_RESPONSE_LAG,
     DEFAULT_PI_SETPOINT_WEIGHT,
+    DEFAULT_PI_TAU_ESTIMATE,
     SIGNAL_FF_SUPPRESS_UPDATE,
     SIGNAL_PI_UPDATE,
 )
@@ -97,6 +103,7 @@ class PIExtraStoredData(ExtraStoredData):
     heat_seeds_at_learn: list = dataclasses.field(default_factory=list)
     cool_seeds_at_learn: list = dataclasses.field(default_factory=list)
     ki_at_save: float = 0.0
+    tau_estimate: float = 0.0
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize to JSON-compatible dict."""
@@ -114,6 +121,7 @@ class PIExtraStoredData(ExtraStoredData):
             "heat_seeds_at_learn": self.heat_seeds_at_learn,
             "cool_seeds_at_learn": self.cool_seeds_at_learn,
             "ki_at_save": self.ki_at_save,
+            "tau_estimate": self.tau_estimate,
         }
 
     @classmethod
@@ -138,6 +146,7 @@ class PIExtraStoredData(ExtraStoredData):
                 heat_seeds_at_learn=restored.get("heat_seeds_at_learn", []),
                 cool_seeds_at_learn=restored.get("cool_seeds_at_learn", []),
                 ki_at_save=float(restored.get("ki_at_save", 0.0)),
+                tau_estimate=float(restored.get("tau_estimate", 0.0)),
             )
         except (KeyError, ValueError, TypeError, AttributeError):
             return None
@@ -193,11 +202,35 @@ class PIController:
 
         # PID controller config
         self._pi_enabled: bool = config.get(CONF_PI_ENABLED, DEFAULT_PI_ENABLED)
-        self._pi_kp: float = config.get(CONF_PI_KP, DEFAULT_PI_KP)
-        self._pi_ki: float = config.get(CONF_PI_KI, DEFAULT_PI_KI)
+        self._pi_kp_config: float = config.get(CONF_PI_KP, DEFAULT_PI_KP)
+        self._pi_ki_config: float = config.get(CONF_PI_KI, DEFAULT_PI_KI)
         self._pi_kd: float = config.get(CONF_PI_KD, DEFAULT_PI_KD)
         self._pi_kd_filter_n: float = config.get(CONF_PI_KD_FILTER_N, DEFAULT_PI_KD_FILTER_N)
         self._pi_min_interval: float = config.get(CONF_PI_MIN_INTERVAL, DEFAULT_PI_MIN_INTERVAL)
+
+        # IMC gain scheduling from τ estimate
+        self._tau_seed: float = config.get(CONF_PI_TAU_ESTIMATE, DEFAULT_PI_TAU_ESTIMATE)
+        self._response_lag: float = config.get(CONF_PI_RESPONSE_LAG, DEFAULT_PI_RESPONSE_LAG)
+        self._imc_lambda_config: float = config.get(CONF_PI_IMC_LAMBDA, DEFAULT_PI_IMC_LAMBDA)
+        self._tau_estimate: float = self._tau_seed  # Online estimate, updated by step-response
+        self._imc_enabled: bool = self._tau_seed > 0
+        # Derive effective Kp/Ki: IMC formula or manual config
+        self._pi_kp: float = 0.0
+        self._pi_ki: float = 0.0
+        if self._imc_enabled:
+            self._recompute_imc_gains()
+        else:
+            self._pi_kp = self._pi_kp_config
+            self._pi_ki = self._pi_ki_config
+
+        # Step-response τ observation state
+        self._tau_step_time: float = 0.0        # monotonic time of last HP setpoint change
+        self._tau_step_temp: float | None = None  # room temp at step time
+        self._tau_step_target: float | None = None  # expected final room temp (desired_c)
+        self._tau_step_magnitude: float = 0.0   # signed HP setpoint change (°C)
+        self._tau_step_active: bool = False      # True while observing a step response
+        self._tau_observations: int = 0          # total τ observations made
+
         # Control parameters are stored in °C always — read directly, no conversion
         self._pi_deadband: float = config.get(CONF_PI_DEADBAND, DEFAULT_PI_DEADBAND)
         self._ff_heat_reference: float = config.get(CONF_PI_FF_HEAT_REFERENCE, DEFAULT_PI_FF_HEAT_REFERENCE)
@@ -488,6 +521,7 @@ class PIController:
             heat_seeds_at_learn=list(self._heat_seeds),
             cool_seeds_at_learn=list(self._cool_seeds),
             ki_at_save=self._pi_ki,
+            tau_estimate=self._tau_estimate,
         )
 
     def restore_extra_stored_data(self, data: PIExtraStoredData) -> None:
@@ -539,6 +573,20 @@ class PIController:
                 key = m_input.get("name", str(i))
                 if key in data.lag_filter_states:
                     self._model_input_filtered[i] = float(data.lag_filter_states[key])
+        # Restore τ estimate and recompute IMC gains
+        if self._imc_enabled and data.tau_estimate > 0:
+            old_ki = self._pi_ki
+            self._tau_estimate = data.tau_estimate
+            self._recompute_imc_gains()
+            # Re-scale integral for the restored ki (overrides the earlier scaling
+            # which used the seed-derived ki, not the restored-τ-derived ki)
+            if old_ki > 0 and old_ki != self._pi_ki:
+                rescale = old_ki / self._pi_ki
+                self._pi_integral *= rescale
+                _LOGGER.debug(
+                    "PI: re-scaled integral for restored τ (ki %.4f → %.4f, scale %.2f)",
+                    old_ki, self._pi_ki, rescale,
+                )
 
     def _apply_seed_changes(
         self, old_seeds: list[float], new_seeds: list[float], rls_model: RLSModel
@@ -575,6 +623,7 @@ class PIController:
             await e.set_mode(hvac_mode)
         old_desired = self._desired_temp
         self._desired_temp = temperature
+        self._cancel_tau_observation()
         # Bumpless transfer (Åström & Hägglund): keep output continuous
         if old_desired is not None:
             old_c = TemperatureConverter.convert(
@@ -677,6 +726,10 @@ class PIController:
             "ff_learning_suppressed": self._disturbance_suppress_active,
             "integral_convergence": round(self._integral_convergence, 2),
             "room_temp_rate": round(self._room_temp_rate, 4),  # °C/min
+            "effective_kp": round(self._pi_kp, 3),
+            "effective_ki": round(self._pi_ki, 4),
+            "tau_estimate": round(self._tau_estimate, 1) if self._imc_enabled else None,
+            "tau_observations": self._tau_observations if self._imc_enabled else None,
         }
 
     def get_health_status(self) -> dict[str, Any]:
@@ -798,6 +851,7 @@ class PIController:
             "expected_slope": round(expected_slope, 4),
             "rls_obs_count": rls.observation_count,
             "integral_convergence": round(self._integral_convergence, 2),
+            "tau_estimate": round(self._tau_estimate, 1) if self._imc_enabled else None,
         }
 
     def filter_hvac_modes(self, modes: list[Any]) -> list[Any]:
@@ -979,6 +1033,126 @@ class PIController:
 
         return not self._tracking_mode
 
+    # ── IMC Gain Scheduling ─────────────────────────────────────────
+
+    def _recompute_imc_gains(self) -> None:
+        """Derive Kp and Ki from τ estimate via modified IMC tuning rule.
+
+        IMC for first-order + delay (FOPDT):
+            Kp = τ / (K_eff * (λ + L))
+
+        Integral time uses Ti = τ/3 instead of standard Ti = τ (Skogestad SIMC
+        modification for HVAC: faster integral action for disturbance rejection,
+        since HVAC systems face continuous disturbances from weather/occupancy):
+            Ki = Kp / (τ/3) = 3 * Kp / τ
+
+        K_eff = 1.0 (unit gain: 1°C HP setpoint offset → 1°C room temp at SS).
+        λ = closed-loop speed (user config, default τ/2 for moderate aggression).
+        L = HP response lag (compressor → room sensor, config, default 15 min).
+        """
+        tau = max(self._tau_estimate, 1.0)  # Floor at 1 min to avoid division issues
+        lag = self._response_lag
+        lam = self._imc_lambda_config if self._imc_lambda_config > 0 else tau / 2.0
+        k_eff = 1.0
+
+        old_kp = self._pi_kp
+        old_ki = self._pi_ki
+        self._pi_kp = tau / (k_eff * (lam + lag))
+        ti = tau / 3.0  # Aggressive integral time for HVAC disturbance rejection
+        self._pi_ki = self._pi_kp / ti
+
+        if old_kp > 0 and (abs(self._pi_kp - old_kp) / old_kp > 0.05):
+            _LOGGER.info(
+                "IMC gains updated: τ=%.1f λ=%.1f L=%.1f → Kp=%.3f Ki=%.4f (was Kp=%.3f Ki=%.4f)",
+                tau, lam, lag, self._pi_kp, self._pi_ki, old_kp, old_ki,
+            )
+
+    def _start_tau_observation(
+        self, now_mono: float, current_c: float, desired_c: float, step_magnitude: float
+    ) -> None:
+        """Begin observing a step response for τ estimation.
+
+        Called when hp_setpoint changes by ≥1°C. Records the starting conditions
+        so _check_tau_observation can detect when the room reaches 63.2% of the
+        expected response.
+        """
+        if not self._imc_enabled:
+            return
+        # Only observe steps with clear direction and magnitude
+        if abs(step_magnitude) < 1.0:
+            return
+        self._tau_step_time = now_mono
+        self._tau_step_temp = current_c
+        self._tau_step_target = desired_c
+        self._tau_step_magnitude = step_magnitude
+        self._tau_step_active = True
+        _LOGGER.debug(
+            "τ observation started: step=%.1f°C, room=%.1f°C, target=%.1f°C",
+            step_magnitude, current_c, desired_c,
+        )
+
+    def _check_tau_observation(self, now_mono: float, current_c: float) -> None:
+        """Check if the room has reached 63.2% of the step response.
+
+        τ is the time from setpoint change to 63.2% of the total expected
+        temperature change (first-order system definition). On observation,
+        update the running τ estimate with an EMA.
+        """
+        if not self._tau_step_active or self._tau_step_temp is None:
+            return
+
+        elapsed_min = (now_mono - self._tau_step_time) / 60.0
+
+        # Timeout: if we haven't seen 63.2% response in 4× the current estimate
+        # (or 4 hours if no estimate), abandon this observation.
+        timeout = max(4.0 * self._tau_estimate, 240.0) if self._tau_estimate > 0 else 240.0
+        if elapsed_min > timeout:
+            _LOGGER.debug("τ observation timed out after %.0f min", elapsed_min)
+            self._tau_step_active = False
+            return
+
+        # Expected total change: step drives room from step_temp toward target.
+        # For FOPDT, the expected SS change = step_magnitude * K_eff (K_eff=1).
+        expected_change = self._tau_step_magnitude  # K_eff = 1.0
+        if abs(expected_change) < 0.5:
+            self._tau_step_active = False
+            return
+
+        actual_change = current_c - self._tau_step_temp
+        fraction = actual_change / expected_change
+
+        # 63.2% threshold (1 - 1/e)
+        if fraction >= 0.632:
+            # Subtract response lag — τ is the thermal time constant, not
+            # including the HP's own delay to start affecting room temp.
+            raw_tau = elapsed_min - self._response_lag
+            observed_tau = max(raw_tau, 5.0)  # Floor: no house has τ < 5 min
+
+            # EMA update: weight new observations more when we have few
+            n = self._tau_observations
+            alpha = max(0.3, 1.0 / (1.0 + n))  # Starts at 0.5, decays to 0.3
+            old_tau = self._tau_estimate
+            self._tau_estimate = (1.0 - alpha) * old_tau + alpha * observed_tau
+            self._tau_observations += 1
+            self._tau_step_active = False
+
+            _LOGGER.info(
+                "τ observed: %.1f min (raw=%.1f, lag=%.1f). "
+                "EMA τ: %.1f → %.1f min (n=%d, α=%.2f). Kp=%.3f Ki=%.4f",
+                observed_tau, elapsed_min, self._response_lag,
+                old_tau, self._tau_estimate, self._tau_observations, alpha,
+                self._pi_kp, self._pi_ki,
+            )
+
+            # Recompute gains with updated τ
+            self._recompute_imc_gains()
+
+    def _cancel_tau_observation(self) -> None:
+        """Cancel any in-progress τ observation (e.g., mode change, setpoint change)."""
+        if self._tau_step_active:
+            _LOGGER.debug("τ observation cancelled")
+            self._tau_step_active = False
+
     # ── PI Internals ──────────────────────────────────────────────────
 
     @callback
@@ -1157,6 +1331,7 @@ class PIController:
         e = self._entity
         if e._attr_hvac_mode == HVACMode.OFF:
             self._pi_integral = 0.0
+            self._cancel_tau_observation()
             return False
         if self._desired_temp is None or self._hp_setpoint is None:
             return False
@@ -1204,6 +1379,9 @@ class PIController:
             elapsed_min = (t1 - t0) / 60.0
             if elapsed_min > 0:
                 self._room_temp_rate = (temp1 - temp0) / elapsed_min
+
+        # Check ongoing τ step-response observation
+        self._check_tau_observation(now_mono, current_c)
 
         # Evaluate supplemental heat source override (selector control)
         now_mono = time.monotonic()
@@ -1451,6 +1629,8 @@ class PIController:
                     )
                     self._last_setpoint_change_time = now_mono
                     self._setpoint_changes += 1
+                    # Start τ observation on significant setpoint changes
+                    self._start_tau_observation(now_mono, current_c, desired_c, float(change))
                     return True
         else:
             _LOGGER.debug(

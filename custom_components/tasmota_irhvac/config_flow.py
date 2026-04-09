@@ -101,10 +101,13 @@ from .const import (
     CONF_PI_FF_HEAT_SLOPE,
     CONF_PI_KD,
     CONF_PI_KD_FILTER_N,
+    CONF_PI_IMC_LAMBDA,
     CONF_PI_KI,
     CONF_PI_KP,
     CONF_PI_MIN_INTERVAL,
+    CONF_PI_RESPONSE_LAG,
     CONF_PI_SETPOINT_WEIGHT,
+    CONF_PI_TAU_ESTIMATE,
     CONF_PI_MODEL_INPUTS,
     CONF_SUPPLEMENTAL_AUTO_MODEL_INPUT,
     CONF_SUPPLEMENTAL_ENTITY,
@@ -141,10 +144,13 @@ from .const import (
     DEFAULT_PI_FF_HEAT_SLOPE,
     DEFAULT_PI_KD,
     DEFAULT_PI_KD_FILTER_N,
+    DEFAULT_PI_IMC_LAMBDA,
     DEFAULT_PI_KI,
     DEFAULT_PI_KP,
     DEFAULT_PI_MIN_INTERVAL,
+    DEFAULT_PI_RESPONSE_LAG,
     DEFAULT_PI_SETPOINT_WEIGHT,
+    DEFAULT_PI_TAU_ESTIMATE,
     DEFAULT_MIN_TEMP,
     DEFAULT_MQTT_DELAY,
     DEFAULT_NAME,
@@ -422,6 +428,15 @@ OPTIONS_PI_CONTROLLER_SCHEMA = vol.Schema(
         ),
         vol.Optional(CONF_PI_SETPOINT_WEIGHT, default=DEFAULT_PI_SETPOINT_WEIGHT): NumberSelector(
             NumberSelectorConfig(min=0, max=1, step=0.05, mode=NumberSelectorMode.BOX)
+        ),
+        vol.Optional(CONF_PI_TAU_ESTIMATE, default=DEFAULT_PI_TAU_ESTIMATE): NumberSelector(
+            NumberSelectorConfig(min=0, max=600, step=5, unit_of_measurement="min", mode=NumberSelectorMode.BOX)
+        ),
+        vol.Optional(CONF_PI_RESPONSE_LAG, default=DEFAULT_PI_RESPONSE_LAG): NumberSelector(
+            NumberSelectorConfig(min=0, max=60, step=1, unit_of_measurement="min", mode=NumberSelectorMode.BOX)
+        ),
+        vol.Optional(CONF_PI_IMC_LAMBDA, default=DEFAULT_PI_IMC_LAMBDA): NumberSelector(
+            NumberSelectorConfig(min=0, max=300, step=5, unit_of_measurement="min", mode=NumberSelectorMode.BOX)
         ),
     }
 )
@@ -771,6 +786,15 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ),
                     vol.Optional(CONF_PI_SETPOINT_WEIGHT, default=DEFAULT_PI_SETPOINT_WEIGHT): NumberSelector(
                         NumberSelectorConfig(min=0, max=1, step=0.05, mode=NumberSelectorMode.BOX)
+                    ),
+                    vol.Optional(CONF_PI_TAU_ESTIMATE, default=DEFAULT_PI_TAU_ESTIMATE): NumberSelector(
+                        NumberSelectorConfig(min=0, max=600, step=5, unit_of_measurement="min", mode=NumberSelectorMode.BOX)
+                    ),
+                    vol.Optional(CONF_PI_RESPONSE_LAG, default=DEFAULT_PI_RESPONSE_LAG): NumberSelector(
+                        NumberSelectorConfig(min=0, max=60, step=1, unit_of_measurement="min", mode=NumberSelectorMode.BOX)
+                    ),
+                    vol.Optional(CONF_PI_IMC_LAMBDA, default=DEFAULT_PI_IMC_LAMBDA): NumberSelector(
+                        NumberSelectorConfig(min=0, max=300, step=5, unit_of_measurement="min", mode=NumberSelectorMode.BOX)
                     ),
                 }
             ),
