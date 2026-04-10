@@ -30,14 +30,21 @@ def _make_flat_controller(seed_factor=1.0):
 
 
 def _make_imc_controller(profile: HouseProfile, seed_factor=1.0):
-    """Controller with IMC gains derived from profile τ."""
-    return TasmotaPIAdapter({
+    """Controller with IMC gains derived from profile τ.
+
+    Smith predictor is disabled: these tests validate gain scheduling
+    in isolation (hp_lag=0 in the thermal model, so there is no real
+    delay for Smith to compensate).
+    """
+    ctrl = TasmotaPIAdapter({
         "pi_ff_heat_slope": 0.35 * seed_factor,
         "pi_ff_cool_slope": 0.35 * seed_factor,
         "pi_tau_estimate": float(profile.tau_minutes),
         "pi_response_lag": 15.0,
         # lambda=0 → uses default L/3
     })
+    ctrl._pi._smith = None  # IMC-only: no Smith for lag-free thermal model
+    return ctrl
 
 
 def _run_pair(profile, initial, outdoor, desired, n_ticks, mode,

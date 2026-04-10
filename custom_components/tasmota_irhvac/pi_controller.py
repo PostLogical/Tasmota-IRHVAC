@@ -152,6 +152,109 @@ class PIExtraStoredData(ExtraStoredData):
             return None
 
 
+class SmithPredictor:
+    """Modified Smith predictor for dead-time compensation (Åström Ch. 7 §7.3).
+
+    Uses an internal FOPDT model to estimate the temperature change "in the
+    pipeline" — corrections that have been commanded but haven't reached the
+    sensor due to transport delay L.  Subtracting this from the PI error
+    signal lets the controller react as if there were no delay.
+
+    Two internal first-order models run in parallel:
+      nodelay  — receives current HP setpoint immediately
+      delayed  — receives HP setpoint from L minutes ago (ring buffer lookup)
+
+    The correction term (nodelay − delayed) represents the pending temperature
+    change.  At steady state the term is zero; after a setpoint change it
+    transiently grows then decays as the real plant catches up.
+
+    Robust to ±50% parameter mismatch: degrades gracefully (slower convergence)
+    without instability, because the outer PI loop still closes on the real
+    measurement.
+    """
+
+    def __init__(self, tau: float, lag: float, k_eff: float = 1.0) -> None:
+        self.tau: float = max(tau, 1.0)   # thermal time constant (minutes)
+        self.lag: float = lag             # transport delay L (minutes)
+        self.k_eff: float = k_eff        # process gain (1.0 = unit gain)
+        self._model_nodelay: float = 0.0  # no-delay model state (°C)
+        self._model_delayed: float = 0.0  # delayed model state (°C)
+        # Ring buffer: (monotonic_time, hp_setpoint) for delayed lookup
+        self._setpoint_history: list[tuple[float, float]] = []
+        self._initialized: bool = False
+
+    def initialize(self, room_temp: float, hp_setpoint: float, now_mono: float) -> None:
+        """Initialize model states to current room temperature.
+
+        Both models start at the same value so correction = 0 on first tick.
+        The Smith predictor is inert until the first setpoint change creates
+        a divergence between the nodelay and delayed models.
+        """
+        self._model_nodelay = room_temp
+        self._model_delayed = room_temp
+        self._setpoint_history = [(now_mono, hp_setpoint)]
+        self._initialized = True
+
+    def update_params(self, tau: float, lag: float) -> None:
+        """Update model parameters when τ estimate changes."""
+        self.tau = max(tau, 1.0)
+        self.lag = lag
+
+    def record_setpoint(self, hp_setpoint: float, now_mono: float) -> None:
+        """Record current HP setpoint for delayed lookup."""
+        self._setpoint_history.append((now_mono, hp_setpoint))
+        # Trim: keep enough history to look back L + margin
+        cutoff = now_mono - (self.lag + 5.0) * 60.0
+        while len(self._setpoint_history) > 2 and self._setpoint_history[0][0] < cutoff:
+            self._setpoint_history.pop(0)
+
+    def _delayed_setpoint(self, now_mono: float) -> float:
+        """Look up HP setpoint from L minutes ago."""
+        target_time = now_mono - self.lag * 60.0
+        if not self._setpoint_history:
+            return 0.0
+        # Find last entry at or before target_time
+        result = self._setpoint_history[0][1]
+        for t, sp in self._setpoint_history:
+            if t <= target_time:
+                result = sp
+            else:
+                break
+        return result
+
+    def step(self, hp_setpoint: float, dt_seconds: float, now_mono: float) -> None:
+        """Advance both internal models by one time step (exact exponential)."""
+        if not self._initialized:
+            return
+        dt_min = dt_seconds / 60.0
+        tau = self.tau
+        decay = math.exp(-dt_min / tau) if tau > 0 else 0.0
+
+        # No-delay model: receives current setpoint immediately
+        eq_nd = self.k_eff * hp_setpoint
+        self._model_nodelay = eq_nd + (self._model_nodelay - eq_nd) * decay
+
+        # Delayed model: receives setpoint from L minutes ago
+        u_delayed = self._delayed_setpoint(now_mono)
+        eq_d = self.k_eff * u_delayed
+        self._model_delayed = eq_d + (self._model_delayed - eq_d) * decay
+
+    @property
+    def correction(self) -> float:
+        """Pipeline temperature: pending change that hasn't reached the sensor.
+
+        Returns nodelay − delayed model prediction.  Positive means the room
+        should get warmer than the sensor currently reads (heating in pipeline).
+        """
+        if not self._initialized:
+            return 0.0
+        return self._model_nodelay - self._model_delayed
+
+    def reset(self, room_temp: float, hp_setpoint: float, now_mono: float) -> None:
+        """Reset model states (mode change, large regime shift)."""
+        self.initialize(room_temp, hp_setpoint, now_mono)
+
+
 class PIController:
     """PI + feedforward temperature controller for IRHVAC climate entities.
 
@@ -214,6 +317,15 @@ class PIController:
         self._imc_lambda_config: float = config.get(CONF_PI_IMC_LAMBDA, DEFAULT_PI_IMC_LAMBDA)
         self._tau_estimate: float = self._tau_seed  # Online estimate, updated by step-response
         self._imc_enabled: bool = self._tau_seed > 0
+
+        # Smith predictor for dead-time compensation (active when IMC enabled).
+        # Must be created before _recompute_imc_gains which calls update_params.
+        self._smith: SmithPredictor | None = None
+        if self._imc_enabled:
+            self._smith = SmithPredictor(
+                tau=self._tau_estimate, lag=self._response_lag
+            )
+
         # Derive effective Kp/Ki: IMC formula or manual config
         self._pi_kp: float = 0.0
         self._pi_ki: float = 0.0
@@ -633,8 +745,10 @@ class PIController:
                 temperature, e.temperature_unit, UnitOfTemperature.CELSIUS,
             )
             if abs(old_c - new_c) > 2.0:
-                # Large regime shift — zero integral
+                # Large regime shift — zero integral and reset Smith model
                 self._pi_integral = 0.0
+                if self._smith is not None:
+                    self._smith._initialized = False
             else:
                 # Adjust integral to keep output continuous
                 self._pi_integral += self._pi_kp * (1 - self._pi_setpoint_weight) * (old_c - new_c)
@@ -730,6 +844,9 @@ class PIController:
             "effective_ki": round(self._pi_ki, 4),
             "tau_estimate": round(self._tau_estimate, 1) if self._imc_enabled else None,
             "tau_observations": self._tau_observations if self._imc_enabled else None,
+            "smith_correction": (
+                round(self._smith.correction, 3) if self._smith is not None else None
+            ),
         }
 
     def get_health_status(self) -> dict[str, Any]:
@@ -852,6 +969,9 @@ class PIController:
             "rls_obs_count": rls.observation_count,
             "integral_convergence": round(self._integral_convergence, 2),
             "tau_estimate": round(self._tau_estimate, 1) if self._imc_enabled else None,
+            "smith_correction": (
+                round(self._smith.correction, 3) if self._smith is not None else None
+            ),
         }
 
     def filter_hvac_modes(self, modes: list[Any]) -> list[Any]:
@@ -1074,6 +1194,10 @@ class PIController:
                 "IMC gains updated: τ=%.1f λ=%.1f L=%.1f → Kp=%.3f Ki=%.4f (was Kp=%.3f Ki=%.4f)",
                 tau, lam, lag, self._pi_kp, self._pi_ki, old_kp, old_ki,
             )
+
+        # Keep Smith predictor model in sync with updated τ
+        if self._smith is not None:
+            self._smith.update_params(tau=tau, lag=lag)
 
     def _start_tau_observation(
         self, now_mono: float, current_c: float, desired_c: float, step_magnitude: float
@@ -1340,6 +1464,8 @@ class PIController:
         if e._attr_hvac_mode == HVACMode.OFF:
             self._pi_integral = 0.0
             self._cancel_tau_observation()
+            if self._smith is not None:
+                self._smith._initialized = False
             return False
         if self._desired_temp is None or self._hp_setpoint is None:
             return False
@@ -1394,6 +1520,24 @@ class PIController:
         # Evaluate supplemental heat source override (selector control)
         now_mono = time.monotonic()
         hp_should_send_ir = self._evaluate_supplemental_override(error, now_mono)
+
+        # Smith predictor: compensate transport delay (Åström Ch. 7 §7.3,
+        # I-PI variant per Normey-Rico & Camacho 2007).
+        #
+        # The correction term (nodelay − delayed model) represents temperature
+        # change in the pipeline.  Applied ONLY to the P-term — the integral
+        # accumulates on raw error for robustness to model mismatch:
+        #   - Deadband uses raw error (physical room state)
+        #   - P-term uses Smith-corrected error (anticipatory action)
+        #   - Integral uses raw error (correct steady-state, mismatch-robust)
+        #   - Metrics use raw error (actual comfort)
+        smith_correction = 0.0
+        if self._smith is not None:
+            if not self._smith._initialized:
+                self._smith.initialize(current_c, float(self._hp_setpoint), now_mono)
+            self._smith.record_setpoint(float(self._hp_setpoint), now_mono)
+            self._smith.step(float(self._hp_setpoint), dt_seconds, now_mono)
+            smith_correction = self._smith.correction
 
         # Filtered derivative on measurement (not error — avoids derivative kick).
         # D(s) = -Kd * s / (1 + Tf*s) where Tf = Kd/N.
@@ -1538,7 +1682,13 @@ class PIController:
             # Setpoint weighting: reduce P-term to prevent overshoot while
             # integral drives steady-state accuracy. Standard 2-DOF technique
             # (Astrom & Hagglund). b < 1 reduces proportional kick.
-            p_term = self._pi_kp * self._pi_setpoint_weight * error
+            # Smith predictor I-PI variant: only apply correction when it
+            # prevents overshoot (same sign as error). When signs differ, the
+            # correction would fight the current control direction — ignore it.
+            # Heating + warming in pipeline → reduce P (prevent overshoot). ✓
+            # Heating + cooling in pipeline → ignore (don't fight recovery). ✓
+            effective_smith = smith_correction if smith_correction * error > 0 else 0.0
+            p_term = self._pi_kp * self._pi_setpoint_weight * (error - effective_smith)
             self._pi_integral += avg_error * dt_factor
 
         # Leaky integrator: weak decay bounds integral growth universally.
@@ -1631,9 +1781,9 @@ class PIController:
                     )
                 else:
                     _LOGGER.info(
-                        "PI: error=%.1f P=%.1f I=%.1f D=%.1f FF=%.1f raw=%.1f setpoint %s -> %s",
-                        error, p_term, i_term, d_term, self._ff_offset, clamped_setpoint,
-                        self._hp_setpoint, new_setpoint,
+                        "PI: error=%.1f smith=%.2f P=%.1f I=%.1f D=%.1f FF=%.1f raw=%.1f setpoint %s -> %s",
+                        error, smith_correction, p_term, i_term, d_term, self._ff_offset,
+                        clamped_setpoint, self._hp_setpoint, new_setpoint,
                     )
                     self._last_setpoint_change_time = now_mono
                     self._setpoint_changes += 1

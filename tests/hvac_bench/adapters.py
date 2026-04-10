@@ -75,6 +75,7 @@ class TasmotaPIAdapter:
             self._entity._attr_hvac_mode = HVACMode.HEAT
 
     def get_state(self):
+        smith = self._pi._smith
         return {
             "integral": self._pi._pi_integral,
             "ff_offset": self._pi._ff_offset,
@@ -83,6 +84,7 @@ class TasmotaPIAdapter:
             "desired_temp": self._pi._desired_temp,
             "hp_setpoint": self._pi._hp_setpoint,
             "raw_setpoint": getattr(self._pi, "_last_raw_setpoint", 0.0),
+            "smith_correction": smith.correction if smith is not None else 0.0,
         }
 
     def __del__(self):
