@@ -107,7 +107,9 @@ from .const import (
     CONF_PI_MIN_INTERVAL,
     CONF_PI_RESPONSE_LAG,
     CONF_PI_SENSOR_FILTER_TAU,
+    CONF_PI_SETPOINT_HOLD,
     CONF_PI_SETPOINT_WEIGHT,
+    CONF_PI_SMITH_ENABLED,
     CONF_PI_TAU_ESTIMATE,
     CONF_PI_MODEL_INPUTS,
     CONF_SUPPLEMENTAL_AUTO_MODEL_INPUT,
@@ -151,7 +153,9 @@ from .const import (
     DEFAULT_PI_MIN_INTERVAL,
     DEFAULT_PI_RESPONSE_LAG,
     DEFAULT_PI_SENSOR_FILTER_TAU,
+    DEFAULT_PI_SETPOINT_HOLD,
     DEFAULT_PI_SETPOINT_WEIGHT,
+    DEFAULT_PI_SMITH_ENABLED,
     DEFAULT_PI_TAU_ESTIMATE,
     DEFAULT_MIN_TEMP,
     DEFAULT_MQTT_DELAY,
@@ -442,6 +446,10 @@ OPTIONS_PI_CONTROLLER_SCHEMA = vol.Schema(
         ),
         vol.Optional(CONF_PI_SENSOR_FILTER_TAU, default=DEFAULT_PI_SENSOR_FILTER_TAU): NumberSelector(
             NumberSelectorConfig(min=0, max=600, step=10, unit_of_measurement="s", mode=NumberSelectorMode.BOX)
+        ),
+        vol.Optional(CONF_PI_SMITH_ENABLED, default=DEFAULT_PI_SMITH_ENABLED): BooleanSelector(),
+        vol.Optional(CONF_PI_SETPOINT_HOLD, default=DEFAULT_PI_SETPOINT_HOLD): NumberSelector(
+            NumberSelectorConfig(min=0, max=3600, step=60, unit_of_measurement="s", mode=NumberSelectorMode.BOX)
         ),
     }
 )
@@ -803,6 +811,10 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ),
                     vol.Optional(CONF_PI_SENSOR_FILTER_TAU, default=DEFAULT_PI_SENSOR_FILTER_TAU): NumberSelector(
                         NumberSelectorConfig(min=0, max=600, step=10, unit_of_measurement="s", mode=NumberSelectorMode.BOX)
+                    ),
+                    vol.Optional(CONF_PI_SMITH_ENABLED, default=DEFAULT_PI_SMITH_ENABLED): BooleanSelector(),
+                    vol.Optional(CONF_PI_SETPOINT_HOLD, default=DEFAULT_PI_SETPOINT_HOLD): NumberSelector(
+                        NumberSelectorConfig(min=0, max=3600, step=60, unit_of_measurement="s", mode=NumberSelectorMode.BOX)
                     ),
                 }
             ),

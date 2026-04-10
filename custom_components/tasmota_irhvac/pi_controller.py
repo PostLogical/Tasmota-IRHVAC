@@ -56,7 +56,9 @@ from .const import (
     CONF_PI_MIN_INTERVAL,
     CONF_PI_MODEL_INPUTS,
     CONF_PI_RESPONSE_LAG,
+    CONF_PI_SETPOINT_HOLD,
     CONF_PI_SETPOINT_WEIGHT,
+    CONF_PI_SMITH_ENABLED,
     CONF_PI_TAU_ESTIMATE,
     DEFAULT_PI_DEADBAND,
     DEFAULT_PI_ENABLED,
@@ -72,7 +74,9 @@ from .const import (
     DEFAULT_PI_KP,
     DEFAULT_PI_MIN_INTERVAL,
     DEFAULT_PI_RESPONSE_LAG,
+    DEFAULT_PI_SETPOINT_HOLD,
     DEFAULT_PI_SETPOINT_WEIGHT,
+    DEFAULT_PI_SMITH_ENABLED,
     DEFAULT_PI_TAU_ESTIMATE,
     SIGNAL_FF_SUPPRESS_UPDATE,
     SIGNAL_PI_UPDATE,
@@ -280,12 +284,6 @@ class PIController:
     Vendor subclasses use: pi_pause(), pi_resume(), pi_reset_integral()
     """
 
-    # Setpoint hold: safety net after Smith predictor delay compensation.
-    # 20 min (was 30 min pre-Smith).  Short enough to benefit from Smith,
-    # long enough to filter sensor noise bounces at typical tick intervals.
-    # 1°C urgent bypass still active.
-    _SETPOINT_HOLD_SECONDS: float = 1200.0
-
     # Health check thresholds
     HEALTH_COMFORT_WARN: float = 1.1        # °C error (~2°F)
     HEALTH_COMFORT_CRIT: float = 1.7        # °C error (~3°F)
@@ -320,6 +318,10 @@ class PIController:
         self._sensor_filter_tau: float = config.get(
             CONF_PI_SENSOR_FILTER_TAU, DEFAULT_PI_SENSOR_FILTER_TAU
         )  # Low-pass filter τ on room temperature (seconds). 0 = disabled.
+        self._smith_enabled: bool = config.get(CONF_PI_SMITH_ENABLED, DEFAULT_PI_SMITH_ENABLED)
+        self._SETPOINT_HOLD_SECONDS: float = float(
+            config.get(CONF_PI_SETPOINT_HOLD, DEFAULT_PI_SETPOINT_HOLD)
+        )
         self._pi_min_interval: float = config.get(CONF_PI_MIN_INTERVAL, DEFAULT_PI_MIN_INTERVAL)
 
         # IMC gain scheduling from τ estimate
@@ -329,10 +331,11 @@ class PIController:
         self._tau_estimate: float = self._tau_seed  # Online estimate, updated by step-response
         self._imc_enabled: bool = self._tau_seed > 0
 
-        # Smith predictor for dead-time compensation (active when IMC enabled).
+        # Smith predictor for dead-time compensation.
+        # Requires IMC (tau > 0) AND pi_smith_enabled=true.
         # Must be created before _recompute_imc_gains which calls update_params.
         self._smith: SmithPredictor | None = None
-        if self._imc_enabled:
+        if self._imc_enabled and self._smith_enabled:
             self._smith = SmithPredictor(
                 tau=self._tau_estimate, lag=self._response_lag
             )

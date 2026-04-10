@@ -196,6 +196,8 @@ CONF_PI_TAU_ESTIMATE = "pi_tau_estimate"
 CONF_PI_RESPONSE_LAG = "pi_response_lag"
 CONF_PI_IMC_LAMBDA = "pi_imc_lambda"
 CONF_PI_SENSOR_FILTER_TAU = "pi_sensor_filter_tau"
+CONF_PI_SMITH_ENABLED = "pi_smith_enabled"
+CONF_PI_SETPOINT_HOLD = "pi_setpoint_hold"
 CONF_PI_MODEL_INPUTS = "pi_model_inputs"
 
 # Subentry types
@@ -233,6 +235,8 @@ DEFAULT_PI_TAU_ESTIMATE = 0.0      # Room thermal τ (minutes). 0 = disabled (us
 DEFAULT_PI_RESPONSE_LAG = 15.0     # HP response lag L (minutes). Compressor→room first-order lag.
 DEFAULT_PI_IMC_LAMBDA = 0.0        # IMC closed-loop speed λ (minutes). 0 = auto (τ/2).
 DEFAULT_PI_SENSOR_FILTER_TAU = 120  # Measurement low-pass filter τ (seconds). 0 = disabled.
+DEFAULT_PI_SMITH_ENABLED = True     # Smith predictor for dead-time compensation. Requires IMC (tau>0).
+DEFAULT_PI_SETPOINT_HOLD = 1200     # Min seconds between HP setpoint changes. 0 = disabled.
 
 # RLS model defaults
 DEFAULT_RLS_LAMBDA_BASE = 0.999  # Base forgetting factor (~10 day effective memory)

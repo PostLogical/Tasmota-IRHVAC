@@ -156,7 +156,9 @@
           "pi_ff_cool_reference": "FF Cool Reference Temp (°C)",
           "pi_ff_cool_slope": "FF Cool Slope",
           "pi_setpoint_weight": "Setpoint Weight (0-1)",
-          "pi_sensor_filter_tau": "Sensor Filter (seconds)"
+          "pi_sensor_filter_tau": "Sensor Filter (seconds)",
+          "pi_smith_enabled": "Smith Predictor",
+          "pi_setpoint_hold": "Setpoint Hold (seconds)"
         },
         "data_description": {
           "pi_enabled": "Enable the PI+feedforward controller for automatic temperature regulation.",
@@ -172,7 +174,9 @@
           "pi_ff_cool_reference": "Outdoor temperature (°C) at which no feedforward cooling offset is needed. Always in °C regardless of system unit.",
           "pi_ff_cool_slope": "Degrees of cooling offset per degree above the cool reference.",
           "pi_setpoint_weight": "2-DOF PI setpoint weighting. At 1.0 (default), P reacts fully to setpoint changes. At 0.0, P only reacts to disturbances. Try 0.5 for less overshoot on setpoint changes.",
-          "pi_sensor_filter_tau": "Low-pass filter time constant on room temperature sensor (seconds). Smooths noise without adding significant lag. 0 = disabled. Default 120s (2 min)."
+          "pi_sensor_filter_tau": "Low-pass filter time constant on room temperature sensor (seconds). Smooths noise without adding significant lag. 0 = disabled. Default 120s (2 min).",
+          "pi_smith_enabled": "Enable Smith predictor for dead-time compensation. Requires IMC (τ estimate > 0). Adjusts proportional term to anticipate HP pipeline delay.",
+          "pi_setpoint_hold": "Minimum seconds between HP setpoint changes. Prevents oscillation from incomplete information. 0 = no hold (not recommended). Default 1200s (20 min)."
         }
       },
       "reconfigure": {
@@ -420,7 +424,9 @@
           "pi_ff_cool_reference": "FF Cool Reference Temp (°C)",
           "pi_ff_cool_slope": "FF Cool Slope",
           "pi_setpoint_weight": "Setpoint Weight (0-1)",
-          "pi_sensor_filter_tau": "Sensor Filter (seconds)"
+          "pi_sensor_filter_tau": "Sensor Filter (seconds)",
+          "pi_smith_enabled": "Smith Predictor",
+          "pi_setpoint_hold": "Setpoint Hold (seconds)"
         },
         "data_description": {
           "pi_enabled": "Enable the PI+feedforward controller for automatic temperature regulation.",
@@ -436,7 +442,9 @@
           "pi_ff_cool_reference": "Outdoor temperature (°C) at which no feedforward cooling offset is needed. Always in °C regardless of system unit.",
           "pi_ff_cool_slope": "Degrees of cooling offset per degree above the cool reference.",
           "pi_setpoint_weight": "2-DOF PI setpoint weighting. At 1.0 (default), P reacts fully to setpoint changes. At 0.0, P only reacts to disturbances. Try 0.5 for less overshoot on setpoint changes.",
-          "pi_sensor_filter_tau": "Low-pass filter time constant on room temperature sensor (seconds). Smooths noise without adding significant lag. 0 = disabled. Default 120s (2 min)."
+          "pi_sensor_filter_tau": "Low-pass filter time constant on room temperature sensor (seconds). Smooths noise without adding significant lag. 0 = disabled. Default 120s (2 min).",
+          "pi_smith_enabled": "Enable Smith predictor for dead-time compensation. Requires IMC (τ estimate > 0). Adjusts proportional term to anticipate HP pipeline delay.",
+          "pi_setpoint_hold": "Minimum seconds between HP setpoint changes. Prevents oscillation from incomplete information. 0 = no hold (not recommended). Default 1200s (20 min)."
         }
       }
     }
