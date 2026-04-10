@@ -113,21 +113,32 @@ def interpolate_at(ts_points, target_epoch):
 
 
 def replay_with_params(climate_ts, outdoor_ts, model_input_ts_list,
-                       config_overrides, tick_interval_s=900):
+                       config_overrides, tick_interval_s=900,
+                       room_sensor_ts=None):
     """Replay real-world history through PI controller with given params.
 
     Instead of using a thermal model, we feed real room temperatures directly.
     The PI controller sees the actual room temp at each tick and computes
     what HP setpoint it would have commanded.
 
+    Args:
+        room_sensor_ts: Optional [(epoch, temp_c)] from the raw temperature
+            sensor. If provided, room temperature is interpolated from this
+            instead of from the climate entity's current_temperature attribute,
+            which HA rounds to the entity's precision (often whole degrees).
+
     Returns history list compatible with benchmark_metrics.
     """
     if not climate_ts or not outdoor_ts:
         return []
 
-    # Determine time range
-    start_epoch = climate_ts[0][0]
-    end_epoch = climate_ts[-1][0]
+    # Determine time range from raw sensor if available, else climate entity
+    if room_sensor_ts:
+        start_epoch = max(climate_ts[0][0], room_sensor_ts[0][0])
+        end_epoch = min(climate_ts[-1][0], room_sensor_ts[-1][0])
+    else:
+        start_epoch = climate_ts[0][0]
+        end_epoch = climate_ts[-1][0]
 
     # Build config
     seed_slope = config_overrides.pop("seed_slope", 0.35)
@@ -152,7 +163,7 @@ def replay_with_params(climate_ts, outdoor_ts, model_input_ts_list,
     loop = asyncio.new_event_loop()
 
     while current_epoch <= end_epoch:
-        # Get real room temp at this time
+        # Get desired temp from climate entity
         climate_state = None
         for i, (t, state) in enumerate(climate_ts):
             if t >= current_epoch:
@@ -161,10 +172,20 @@ def replay_with_params(climate_ts, outdoor_ts, model_input_ts_list,
         if climate_state is None:
             climate_state = climate_ts[-1][1]
 
-        room_temp_c = climate_state["room_temp_c"]
         desired_c = climate_state.get("desired_c")
         if desired_c is not None:
             pi._desired_temp = desired_c
+
+        # Get room temp: prefer raw sensor (full precision) over climate
+        # entity attribute (rounded to entity precision, often whole degrees)
+        if room_sensor_ts:
+            room_temp_c = interpolate_at(room_sensor_ts, current_epoch)
+        else:
+            room_temp_c = climate_state["room_temp_c"]
+
+        if room_temp_c is None:
+            current_epoch += tick_interval_s
+            continue
 
         # Set entity state
         entity._attr_current_temperature = room_temp_c
@@ -222,6 +243,28 @@ def find_climate_entities(data):
     return [k for k in data.keys() if k.startswith("climate.")]
 
 
+def find_room_sensor(data, zone):
+    """Find the raw temperature sensor for a climate zone.
+
+    HA's climate entity rounds current_temperature to entity precision
+    (often whole degrees). The raw sensor has full precision (e.g. 0.01°F).
+    """
+    # Extract zone name (e.g. "living_room" from "climate.living_room_heat_pump")
+    zone_name = zone.replace("climate.", "").replace("_heat_pump", "")
+
+    # Common sensor naming patterns
+    candidates = [
+        k for k in data.keys()
+        if k.startswith("sensor.") and "temperature" in k.lower()
+        and zone_name.replace("_", " ").split()[0] in k.lower()
+    ]
+    # Prefer air/room sensors over weather sensors
+    for c in candidates:
+        if "air_sensor" in c or "room" in c:
+            return c
+    return candidates[0] if candidates else None
+
+
 def find_outdoor_sensor(data):
     """Find outdoor temperature sensor in the data."""
     candidates = [
@@ -239,6 +282,8 @@ def main():
     parser.add_argument("data_file", nargs="?", default="pi_regression_data.json",
                         help="Path to HA history JSON file")
     parser.add_argument("--zone", default=None, help="Climate entity to replay (default: first found)")
+    parser.add_argument("--room-sensor", default=None,
+                        help="Raw room temperature sensor entity_id (overrides auto-detect)")
     parser.add_argument("--unit-f", action="store_true", default=True,
                         help="HA temperatures are in °F (default: True)")
     args = parser.parse_args()
@@ -263,8 +308,10 @@ def main():
         zone = climate_entities[0]
 
     outdoor_sensor = find_outdoor_sensor(data)
+    room_sensor = args.room_sensor or find_room_sensor(data, zone)
 
     print(f"Climate entity: {zone}")
+    print(f"Room sensor:    {room_sensor or '(none — using climate entity, WARNING: rounded)'}")
     print(f"Outdoor sensor: {outdoor_sensor}")
     print(f"Available zones: {climate_entities}")
     print()
@@ -272,6 +319,7 @@ def main():
     # Parse timeseries
     climate_ts = parse_climate_ts(data[zone], ha_unit_f=args.unit_f)
     outdoor_ts = parse_sensor_ts(data[outdoor_sensor], convert_f_to_c=args.unit_f) if outdoor_sensor else []
+    room_sensor_ts = parse_sensor_ts(data[room_sensor], convert_f_to_c=args.unit_f) if room_sensor else None
 
     if not climate_ts:
         print("No climate data points found!")
@@ -282,6 +330,8 @@ def main():
     duration_h = (climate_ts[-1][0] - climate_ts[0][0]) / 3600
     print(f"Time range: {t0} to {t1} ({duration_h:.0f} hours)")
     print(f"Climate data points: {len(climate_ts)}")
+    if room_sensor_ts:
+        print(f"Room sensor points: {len(room_sensor_ts)} (full precision)")
     print(f"Outdoor data points: {len(outdoor_ts)}")
     print()
 
@@ -319,6 +369,7 @@ def main():
             climate_ts, outdoor_ts, [],
             config_overrides=config,
             tick_interval_s=900,
+            room_sensor_ts=room_sensor_ts,
         )
 
         if not history:
