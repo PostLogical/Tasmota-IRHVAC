@@ -87,6 +87,10 @@ class TasmotaPIAdapter:
             "smith_correction": smith.correction if smith is not None else 0.0,
         }
 
+    def set_hold_time(self, seconds: float):
+        """Override the setpoint hold timer for testing."""
+        self._pi._SETPOINT_HOLD_SECONDS = seconds
+
     def __del__(self):
         if hasattr(self, "_loop") and self._loop and not self._loop.is_closed():
             self._loop.close()

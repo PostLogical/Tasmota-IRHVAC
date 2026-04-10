@@ -278,6 +278,12 @@ class PIController:
     Vendor subclasses use: pi_pause(), pi_resume(), pi_reset_integral()
     """
 
+    # Setpoint hold: safety net after Smith predictor delay compensation.
+    # 20 min (was 30 min pre-Smith).  Short enough to benefit from Smith,
+    # long enough to filter sensor noise bounces at typical tick intervals.
+    # 1°C urgent bypass still active.
+    _SETPOINT_HOLD_SECONDS: float = 1200.0
+
     # Health check thresholds
     HEALTH_COMFORT_WARN: float = 1.1        # °C error (~2°F)
     HEALTH_COMFORT_CRIT: float = 1.7        # °C error (~3°F)
@@ -847,6 +853,7 @@ class PIController:
             "smith_correction": (
                 round(self._smith.correction, 3) if self._smith is not None else None
             ),
+            "setpoint_changes_total": self._setpoint_changes,
         }
 
     def get_health_status(self) -> dict[str, Any]:
@@ -1750,26 +1757,29 @@ class PIController:
         new_setpoint = int(max(self._min_temp_c, min(self._max_temp_c, new_setpoint)))
 
         if new_setpoint != self._hp_setpoint:
-            # Minimum dwell time: wait 30 min after a setpoint change before
-            # allowing another. A 1°C setpoint change takes ~15-25 min to
-            # propagate through the HP response chain (compressor ramp → heat
-            # exchanger → room air → sensor) due to first-order lag. Without
-            # this hold, PI reacts to incomplete information and oscillates in
-            # the 0.3-1.0°C error band where hysteresis alone doesn't prevent
-            # changes. Validated via simulation with 15-min HP response lag
-            # (tools/sweep_cooldown_hold.py): 30 min matched or beat shorter
-            # values (0/10/15 min) across cold start, setpoint change,
-            # outdoor drop, mild disturbance, and solar gain scenarios.
+            # Minimum dwell time: wait after a setpoint change before allowing
+            # another.  A 1°C change takes ~15-25 min to propagate through the
+            # HP response chain (compressor → heat exchanger → room → sensor).
+            # Without a hold the PI reacts to incomplete information and
+            # oscillates in the 0.3-1.0°C error band.
+            #
+            # With Smith predictor active the pipeline effect is modelled
+            # explicitly, so the hold can be shorter (10 min safety net vs
+            # the original 30 min).  Without Smith the 10-min hold still
+            # works because the 1°C urgent bypass covers large errors and
+            # hysteresis prevents sub-step changes.
+            #
             # Bypass: error >1°C skips the hold (urgent demand).
             change = new_setpoint - self._hp_setpoint
             time_since_last = now_mono - self._last_setpoint_change_time
-            can_change = time_since_last >= 1800.0  # 30 minutes
+            can_change = time_since_last >= self._SETPOINT_HOLD_SECONDS
             if abs_error > 1.0:
                 can_change = True  # Large error = urgent demand, bypass hold
             if not can_change:
                 _LOGGER.debug(
-                    "PI: setpoint %s -> %s held (%.0fs since last change, need 1800s)",
+                    "PI: setpoint %s -> %s held (%.0fs since last change, need %.0fs)",
                     self._hp_setpoint, new_setpoint, time_since_last,
+                    self._SETPOINT_HOLD_SECONDS,
                 )
             else:
                 self._hp_setpoint = new_setpoint

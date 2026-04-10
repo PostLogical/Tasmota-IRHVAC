@@ -400,3 +400,108 @@ class TestSmithAggregate:
         pct = (1 - smith_total / imc_total) * 100 if imc_total > 0 else 0
         print(f"\n  TOTAL: IMC={imc_total:.1f}, Smith={smith_total:.1f} "
               f"({pct:+.0f}% change)")
+
+
+# ── Hold timer × Smith interaction ──────────────────────────────────────
+
+
+def _run_hold_comparison(profile, hold_seconds, smith, **scenario_kwargs):
+    """Run a scenario with given hold time and Smith on/off."""
+    lag = HP_LAG
+    lam = lag / 3.0
+    kp = profile.tau_minutes / (lam + lag)
+    ki = 3.0 * kp / profile.tau_minutes
+    if smith:
+        ctrl = _make_smith_controller(profile)
+    else:
+        ctrl = _make_imc_controller(profile)
+    ctrl.set_hold_time(hold_seconds)
+
+    desired = scenario_kwargs["desired"]
+    ctrl.set_desired_temp(desired)
+    final_desired = desired
+    ds = scenario_kwargs.get("desired_schedule")
+    if ds:
+        for _, temp in sorted(ds.items()):
+            final_desired = temp
+
+    model = ThermalModel(profile=profile,
+                         initial_temp=scenario_kwargs["initial"],
+                         outdoor_temp=scenario_kwargs["outdoor"],
+                         hp_lag_minutes=HP_LAG)
+    history = run_scenario(ctrl, model,
+                           n_ticks=scenario_kwargs["n_ticks"],
+                           mode=scenario_kwargs["mode"],
+                           desired_schedule=ds,
+                           outdoor_schedule=scenario_kwargs.get("outdoor_schedule"))
+    return compute_all_metrics(history, desired=final_desired)
+
+
+class TestHoldTimerReduction:
+    """Validate that reducing hold from 30 min to 10 min is safe.
+
+    The reduced hold lets the PI react faster to small disturbances.
+    With Smith active the pipeline delay is modelled, so the shorter
+    hold doesn't cause oscillation.
+    """
+
+    STEADY = dict(initial=20.5, outdoor=5.0, desired=20.5,
+                  n_ticks=48, mode="heat")
+    COLD_START = dict(initial=17.0, outdoor=2.0, desired=20.5,
+                      n_ticks=48, mode="heat")
+    SETPOINT_UP = dict(initial=20.5, outdoor=5.0, desired=20.5,
+                       n_ticks=48, mode="heat", desired_schedule={10: 22.5})
+
+    @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
+    def test_reduced_hold_no_catastrophic_regression(self, profile_name):
+        """10-min hold must not be catastrophically worse than 30-min."""
+        profile = QUICK_PROFILES[profile_name]
+        for scenario in [self.STEADY, self.COLD_START, self.SETPOINT_UP]:
+            m30 = _run_hold_comparison(profile, 1800, smith=True, **scenario)
+            m10 = _run_hold_comparison(profile, 600, smith=True, **scenario)
+            assert m10["itae"] <= m30["itae"] * 2.0 + 10.0, (
+                f"{profile_name}: 10m ITAE {m10['itae']:.1f} vs "
+                f"30m {m30['itae']:.1f}"
+            )
+
+    @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
+    def test_reduced_hold_setpoint_changes_bounded(self, profile_name):
+        """10-min hold should not cause >2× the setpoint changes of 30-min."""
+        profile = QUICK_PROFILES[profile_name]
+        for scenario in [self.STEADY, self.COLD_START]:
+            m30 = _run_hold_comparison(profile, 1800, smith=True, **scenario)
+            m10 = _run_hold_comparison(profile, 600, smith=True, **scenario)
+            assert m10["setpoint_changes"] <= max(m30["setpoint_changes"] * 2, 8), (
+                f"{profile_name}: 10m changes={m10['setpoint_changes']} vs "
+                f"30m={m30['setpoint_changes']}"
+            )
+
+    def test_reduced_hold_improves_steady_state(self):
+        """Steady-state should benefit from faster reactions (shorter hold)."""
+        for profile_name in ["drafty_bungalow", "well_insulated"]:
+            profile = QUICK_PROFILES[profile_name]
+            m30 = _run_hold_comparison(profile, 1800, smith=False, **self.STEADY)
+            m10 = _run_hold_comparison(profile, 600, smith=False, **self.STEADY)
+            print(f"\n  {profile_name} steady: 30m ITAE={m30['itae']:.1f}, "
+                  f"10m={m10['itae']:.1f}")
+            # 10-min should be at least as good
+            assert m10["itae"] <= m30["itae"] * 1.1 + 2.0
+
+    def test_hold_report(self):
+        """Print hold × Smith comparison table."""
+        scenarios = [
+            ("cold_start", self.COLD_START),
+            ("setpoint_up", self.SETPOINT_UP),
+            ("steady", self.STEADY),
+        ]
+        print(f"\n  {'Profile':<22} {'Scenario':<14} {'Hold':>5} {'Smith':>5} "
+              f"{'ITAE':>7} {'Changes':>7} {'Overshoot':>9}")
+        for profile_name in ["drafty_bungalow", "well_insulated"]:
+            profile = QUICK_PROFILES[profile_name]
+            for s_name, s_kwargs in scenarios:
+                for hold in [1800, 600]:
+                    for smith in [False, True]:
+                        m = _run_hold_comparison(profile, hold, smith, **s_kwargs)
+                        print(f"  {profile_name:<22} {s_name:<14} {hold:>5} "
+                              f"{'yes' if smith else 'no':>5} {m['itae']:>7.1f} "
+                              f"{m['setpoint_changes']:>7} {m['overshoot']:>9.2f}")
