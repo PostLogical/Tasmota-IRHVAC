@@ -46,9 +46,9 @@ PROFILES = {
     "drafty_bungalow": HouseProfile(
         name="Drafty Bungalow",
         tau_minutes=25,
-        hp_gain=0.05,
+        hp_gain=0.12,
         solar_gain=0.5,
-        description="Older construction, poor insulation, single story",
+        description="Older construction, poor insulation, single story — HP sized for -5°C design",
     ),
     "standard_residential": HouseProfile(
         name="Standard Residential",
