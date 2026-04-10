@@ -2294,6 +2294,7 @@ class TestDerivativeTerm:
         config = make_pi_config({
             "pi_kd": kd,
             "pi_kd_filter_n": kd_filter_n,
+            "pi_sensor_filter_tau": 0,  # Disable low-pass for exact derivative tests
         })
         return FakePIEntity(config)
 
@@ -3017,3 +3018,126 @@ class TestIMCStateAttributes:
         status = pi.get_health_status()
         assert "tau_estimate" in status
         assert status["tau_estimate"] == 120.0
+
+
+# ── Sensor Low-Pass Filter Tests ──────────────────────────────────────
+
+
+class TestSensorFilter:
+    """Test the exponential low-pass filter on room temperature measurement."""
+
+    @pytest.mark.asyncio
+    async def test_filter_smooths_noisy_signal(self):
+        """Filter should reduce variance of a noisy signal."""
+        import time
+        config = make_pi_config({"pi_sensor_filter_tau": 120})
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 20.0
+        pi._hp_setpoint = 20.0
+        entity._attr_hvac_mode = HVACMode.HEAT
+
+        # Feed alternating temps (simulating noise)
+        readings = [20.0, 20.3, 19.9, 20.2, 20.0, 20.4, 19.8, 20.1, 20.0, 20.3]
+        filtered_vals = []
+        t = 1000.0
+        for temp in readings:
+            t += 300.0  # 5-min intervals
+            entity._attr_current_temperature = temp
+            pi._pi_last_tick_time = t - 300.0
+            with patch("time.monotonic", return_value=t):
+                await pi._pi_tick()
+            filtered_vals.append(pi._sensor_filtered)
+
+        # Filter output should have less variance than input
+        import statistics
+        raw_var = statistics.variance(readings)
+        filt_var = statistics.variance(filtered_vals)
+        assert filt_var < raw_var, (
+            f"Filter should reduce variance: raw={raw_var:.4f}, filtered={filt_var:.4f}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_filter_disabled_when_tau_zero(self):
+        """tau=0 should pass raw values through unchanged."""
+        import time
+        config = make_pi_config({"pi_sensor_filter_tau": 0})
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 20.0
+        pi._hp_setpoint = 20.0
+        entity._attr_hvac_mode = HVACMode.HEAT
+
+        entity._attr_current_temperature = 19.5
+        pi._pi_last_tick_time = 900.0
+        with patch("time.monotonic", return_value=1800.0):
+            await pi._pi_tick()
+
+        # With no filter, _sensor_filtered stays None
+        assert pi._sensor_filtered is None
+
+    @pytest.mark.asyncio
+    async def test_filter_initializes_to_first_reading(self):
+        """First tick should set filter to raw reading (no lag on startup)."""
+        import time
+        config = make_pi_config({"pi_sensor_filter_tau": 120})
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 20.0
+        pi._hp_setpoint = 20.0
+        entity._attr_hvac_mode = HVACMode.HEAT
+
+        entity._attr_current_temperature = 19.7
+        pi._pi_last_tick_time = 0.0
+        with patch("time.monotonic", return_value=900.0):
+            await pi._pi_tick()
+
+        assert pi._sensor_filtered == pytest.approx(19.7, abs=0.01)
+
+    @pytest.mark.asyncio
+    async def test_filter_converges_to_step(self):
+        """After a step change, filter should converge toward the new value."""
+        import time
+        config = make_pi_config({"pi_sensor_filter_tau": 120})
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 20.0
+        pi._hp_setpoint = 20.0
+        entity._attr_hvac_mode = HVACMode.HEAT
+
+        # Initialize at 20.0
+        entity._attr_current_temperature = 20.0
+        pi._pi_last_tick_time = 0.0
+        with patch("time.monotonic", return_value=900.0):
+            await pi._pi_tick()
+        assert pi._sensor_filtered == pytest.approx(20.0, abs=0.01)
+
+        # Step to 21.0 — filter should move toward 21 but not reach it
+        entity._attr_current_temperature = 21.0
+        pi._pi_last_tick_time = 900.0
+        with patch("time.monotonic", return_value=1800.0):
+            await pi._pi_tick()
+        # After 900s with τ=120s: α = 1-exp(-900/120) ≈ 0.9994
+        # So filtered ≈ 0.9994*21 + 0.0006*20 ≈ 20.999
+        assert pi._sensor_filtered > 20.9
+        assert pi._sensor_filtered <= 21.0
+
+    @pytest.mark.asyncio
+    async def test_filter_exposed_in_attributes(self):
+        """sensor_filtered should appear in extra state attributes."""
+        import time
+        config = make_pi_config({"pi_sensor_filter_tau": 120})
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 20.0
+        pi._hp_setpoint = 20.0
+        entity._attr_hvac_mode = HVACMode.HEAT
+
+        entity._attr_current_temperature = 20.5
+        pi._pi_last_tick_time = 0.0
+        with patch("time.monotonic", return_value=900.0):
+            await pi._pi_tick()
+
+        attrs = pi.get_extra_state_attributes()
+        assert "sensor_filtered" in attrs
+        assert attrs["sensor_filtered"] is not None

@@ -195,6 +195,7 @@ CONF_PI_SETPOINT_WEIGHT = "pi_setpoint_weight"
 CONF_PI_TAU_ESTIMATE = "pi_tau_estimate"
 CONF_PI_RESPONSE_LAG = "pi_response_lag"
 CONF_PI_IMC_LAMBDA = "pi_imc_lambda"
+CONF_PI_SENSOR_FILTER_TAU = "pi_sensor_filter_tau"
 CONF_PI_MODEL_INPUTS = "pi_model_inputs"
 
 # Subentry types
@@ -231,6 +232,7 @@ DEFAULT_PI_SETPOINT_WEIGHT = 0.3  # 2-DOF: p_term = kp * b * error. Lower b redu
 DEFAULT_PI_TAU_ESTIMATE = 0.0      # Room thermal τ (minutes). 0 = disabled (use manual Kp/Ki).
 DEFAULT_PI_RESPONSE_LAG = 15.0     # HP response lag L (minutes). Compressor→room first-order lag.
 DEFAULT_PI_IMC_LAMBDA = 0.0        # IMC closed-loop speed λ (minutes). 0 = auto (τ/2).
+DEFAULT_PI_SENSOR_FILTER_TAU = 120  # Measurement low-pass filter τ (seconds). 0 = disabled.
 
 # RLS model defaults
 DEFAULT_RLS_LAMBDA_BASE = 0.999  # Base forgetting factor (~10 day effective memory)

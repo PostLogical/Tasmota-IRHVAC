@@ -49,6 +49,7 @@ from .const import (
     CONF_PI_FF_HEAT_SLOPE,
     CONF_PI_IMC_LAMBDA,
     CONF_PI_KD,
+    CONF_PI_SENSOR_FILTER_TAU,
     CONF_PI_KD_FILTER_N,
     CONF_PI_KI,
     CONF_PI_KP,
@@ -65,6 +66,7 @@ from .const import (
     DEFAULT_PI_FF_HEAT_SLOPE,
     DEFAULT_PI_IMC_LAMBDA,
     DEFAULT_PI_KD,
+    DEFAULT_PI_SENSOR_FILTER_TAU,
     DEFAULT_PI_KD_FILTER_N,
     DEFAULT_PI_KI,
     DEFAULT_PI_KP,
@@ -315,6 +317,9 @@ class PIController:
         self._pi_ki_config: float = config.get(CONF_PI_KI, DEFAULT_PI_KI)
         self._pi_kd: float = config.get(CONF_PI_KD, DEFAULT_PI_KD)
         self._pi_kd_filter_n: float = config.get(CONF_PI_KD_FILTER_N, DEFAULT_PI_KD_FILTER_N)
+        self._sensor_filter_tau: float = config.get(
+            CONF_PI_SENSOR_FILTER_TAU, DEFAULT_PI_SENSOR_FILTER_TAU
+        )  # Low-pass filter τ on room temperature (seconds). 0 = disabled.
         self._pi_min_interval: float = config.get(CONF_PI_MIN_INTERVAL, DEFAULT_PI_MIN_INTERVAL)
 
         # IMC gain scheduling from τ estimate
@@ -398,6 +403,7 @@ class PIController:
         self._pi_last_error: float = 0.0
         self._pi_d_filtered: float = 0.0    # Filtered derivative term
         self._pi_last_measurement: float | None = None  # Previous temperature measurement for derivative
+        self._sensor_filtered: float | None = None  # Low-pass filtered room temp (°C)
         self._last_raw_setpoint: float = 0.0  # Pre-quantization setpoint from last tick
 
         # Supplemental heat source selector/override control
@@ -854,6 +860,10 @@ class PIController:
                 round(self._smith.correction, 3) if self._smith is not None else None
             ),
             "setpoint_changes_total": self._setpoint_changes,
+            "sensor_filtered": (
+                round(self._sensor_filtered, 3)
+                if self._sensor_filtered is not None else None
+            ),
         }
 
     def get_health_status(self) -> dict[str, Any]:
@@ -1497,7 +1507,7 @@ class PIController:
         dt_factor = dt_seconds / float(self._pi_min_interval)
 
         # Convert both to °C for PI math
-        current_c = TemperatureConverter.convert(
+        raw_c = TemperatureConverter.convert(
             e._attr_current_temperature,
             e.temperature_unit,
             UnitOfTemperature.CELSIUS,
@@ -1507,11 +1517,25 @@ class PIController:
             e.temperature_unit,
             UnitOfTemperature.CELSIUS,
         )
+
+        # Low-pass filter on room temperature measurement.
+        # Reduces sensor noise amplified through Kp.  Uses raw reading for
+        # room_temp_history (rate calc, RLS gate) so those reflect reality.
+        # α = 1 - exp(-dt/τ): short dt → small α (gentle), long dt → large α.
+        if self._sensor_filter_tau > 0 and dt_seconds > 0:
+            if self._sensor_filtered is None:
+                self._sensor_filtered = raw_c  # Initialize on first reading
+            alpha = 1.0 - math.exp(-dt_seconds / self._sensor_filter_tau)
+            self._sensor_filtered = alpha * raw_c + (1.0 - alpha) * self._sensor_filtered
+            current_c = self._sensor_filtered
+        else:
+            current_c = raw_c
+
         error = desired_c - current_c
 
-        # Track room temperature rate of change (°C/min).
+        # Track room temperature rate of change (°C/min) from RAW readings.
         # Keep last 5 readings (~5 ticks). Compute rate from oldest to newest.
-        self._room_temp_history.append((now_mono, current_c))
+        self._room_temp_history.append((now_mono, raw_c))
         if len(self._room_temp_history) > 5:
             self._room_temp_history.pop(0)
         if len(self._room_temp_history) >= 2:
@@ -1521,8 +1545,8 @@ class PIController:
             if elapsed_min > 0:
                 self._room_temp_rate = (temp1 - temp0) / elapsed_min
 
-        # Check ongoing τ step-response observation
-        self._check_tau_observation(now_mono, current_c)
+        # Check ongoing τ step-response observation (raw — measures real plant)
+        self._check_tau_observation(now_mono, raw_c)
 
         # Evaluate supplemental heat source override (selector control)
         now_mono = time.monotonic()
@@ -1541,7 +1565,7 @@ class PIController:
         smith_correction = 0.0
         if self._smith is not None:
             if not self._smith._initialized:
-                self._smith.initialize(current_c, float(self._hp_setpoint), now_mono)
+                self._smith.initialize(raw_c, float(self._hp_setpoint), now_mono)
             self._smith.record_setpoint(float(self._hp_setpoint), now_mono)
             self._smith.step(float(self._hp_setpoint), dt_seconds, now_mono)
             smith_correction = self._smith.correction

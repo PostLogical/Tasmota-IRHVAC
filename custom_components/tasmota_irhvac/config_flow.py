@@ -106,6 +106,7 @@ from .const import (
     CONF_PI_KP,
     CONF_PI_MIN_INTERVAL,
     CONF_PI_RESPONSE_LAG,
+    CONF_PI_SENSOR_FILTER_TAU,
     CONF_PI_SETPOINT_WEIGHT,
     CONF_PI_TAU_ESTIMATE,
     CONF_PI_MODEL_INPUTS,
@@ -149,6 +150,7 @@ from .const import (
     DEFAULT_PI_KP,
     DEFAULT_PI_MIN_INTERVAL,
     DEFAULT_PI_RESPONSE_LAG,
+    DEFAULT_PI_SENSOR_FILTER_TAU,
     DEFAULT_PI_SETPOINT_WEIGHT,
     DEFAULT_PI_TAU_ESTIMATE,
     DEFAULT_MIN_TEMP,
@@ -437,6 +439,9 @@ OPTIONS_PI_CONTROLLER_SCHEMA = vol.Schema(
         ),
         vol.Optional(CONF_PI_IMC_LAMBDA, default=DEFAULT_PI_IMC_LAMBDA): NumberSelector(
             NumberSelectorConfig(min=0, max=300, step=5, unit_of_measurement="min", mode=NumberSelectorMode.BOX)
+        ),
+        vol.Optional(CONF_PI_SENSOR_FILTER_TAU, default=DEFAULT_PI_SENSOR_FILTER_TAU): NumberSelector(
+            NumberSelectorConfig(min=0, max=600, step=10, unit_of_measurement="s", mode=NumberSelectorMode.BOX)
         ),
     }
 )
@@ -795,6 +800,9 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ),
                     vol.Optional(CONF_PI_IMC_LAMBDA, default=DEFAULT_PI_IMC_LAMBDA): NumberSelector(
                         NumberSelectorConfig(min=0, max=300, step=5, unit_of_measurement="min", mode=NumberSelectorMode.BOX)
+                    ),
+                    vol.Optional(CONF_PI_SENSOR_FILTER_TAU, default=DEFAULT_PI_SENSOR_FILTER_TAU): NumberSelector(
+                        NumberSelectorConfig(min=0, max=600, step=10, unit_of_measurement="s", mode=NumberSelectorMode.BOX)
                     ),
                 }
             ),

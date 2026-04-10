@@ -155,7 +155,8 @@
           "pi_ff_heat_slope": "FF Heat Slope",
           "pi_ff_cool_reference": "FF Cool Reference Temp (°C)",
           "pi_ff_cool_slope": "FF Cool Slope",
-          "pi_setpoint_weight": "Setpoint Weight (0-1)"
+          "pi_setpoint_weight": "Setpoint Weight (0-1)",
+          "pi_sensor_filter_tau": "Sensor Filter (seconds)"
         },
         "data_description": {
           "pi_enabled": "Enable the PI+feedforward controller for automatic temperature regulation.",
@@ -170,7 +171,8 @@
           "pi_ff_heat_slope": "Degrees of heating offset per degree below the heat reference.",
           "pi_ff_cool_reference": "Outdoor temperature (°C) at which no feedforward cooling offset is needed. Always in °C regardless of system unit.",
           "pi_ff_cool_slope": "Degrees of cooling offset per degree above the cool reference.",
-          "pi_setpoint_weight": "2-DOF PI setpoint weighting. At 1.0 (default), P reacts fully to setpoint changes. At 0.0, P only reacts to disturbances. Try 0.5 for less overshoot on setpoint changes."
+          "pi_setpoint_weight": "2-DOF PI setpoint weighting. At 1.0 (default), P reacts fully to setpoint changes. At 0.0, P only reacts to disturbances. Try 0.5 for less overshoot on setpoint changes.",
+          "pi_sensor_filter_tau": "Low-pass filter time constant on room temperature sensor (seconds). Smooths noise without adding significant lag. 0 = disabled. Default 120s (2 min)."
         }
       },
       "reconfigure": {
@@ -417,7 +419,8 @@
           "pi_ff_heat_slope": "FF Heat Slope",
           "pi_ff_cool_reference": "FF Cool Reference Temp (°C)",
           "pi_ff_cool_slope": "FF Cool Slope",
-          "pi_setpoint_weight": "Setpoint Weight (0-1)"
+          "pi_setpoint_weight": "Setpoint Weight (0-1)",
+          "pi_sensor_filter_tau": "Sensor Filter (seconds)"
         },
         "data_description": {
           "pi_enabled": "Enable the PI+feedforward controller for automatic temperature regulation.",
@@ -432,7 +435,8 @@
           "pi_ff_heat_slope": "Degrees of heating offset per degree below the heat reference.",
           "pi_ff_cool_reference": "Outdoor temperature (°C) at which no feedforward cooling offset is needed. Always in °C regardless of system unit.",
           "pi_ff_cool_slope": "Degrees of cooling offset per degree above the cool reference.",
-          "pi_setpoint_weight": "2-DOF PI setpoint weighting. At 1.0 (default), P reacts fully to setpoint changes. At 0.0, P only reacts to disturbances. Try 0.5 for less overshoot on setpoint changes."
+          "pi_setpoint_weight": "2-DOF PI setpoint weighting. At 1.0 (default), P reacts fully to setpoint changes. At 0.0, P only reacts to disturbances. Try 0.5 for less overshoot on setpoint changes.",
+          "pi_sensor_filter_tau": "Low-pass filter time constant on room temperature sensor (seconds). Smooths noise without adding significant lag. 0 = disabled. Default 120s (2 min)."
         }
       }
     }
