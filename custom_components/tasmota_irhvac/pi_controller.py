@@ -300,6 +300,7 @@ class PIController:
             config: Merged config dict (entry.data + entry.options).
         """
         self._entity = entity
+        self._log_prefix: str = ""  # set in async_added when entity_id is known
 
         # Convert entity temp limits to °C for internal PI math
         self._min_temp_c: float = TemperatureConverter.convert(
@@ -548,6 +549,11 @@ class PIController:
 
     async def async_added_to_hass(self, old_state: State | None = None) -> None:
         """Set up PI after entity is added to HA."""
+        # Build log prefix from entity name (e.g. "Dining Room" from "climate.dining_room")
+        eid = getattr(self._entity, "entity_id", None) or ""
+        short = eid.removeprefix("climate.").replace("_", " ").title()
+        self._log_prefix = f"[{short}] " if short else ""
+
         if not self._pi_enabled:
             return
 
@@ -785,8 +791,8 @@ class PIController:
             reported_temp_ir_unit, e._ir_temp_unit, e.temperature_unit
         )
         _LOGGER.info(
-            "Physical remote detected: reported=%s -> desired=%s",
-            reported_temp_ir_unit, desired_in_entity_unit,
+            "%sPhysical remote detected: reported=%s -> desired=%s",
+            self._log_prefix, reported_temp_ir_unit, desired_in_entity_unit,
         )
         old_desired = self._desired_temp
         self._desired_temp = desired_in_entity_unit
@@ -1401,7 +1407,7 @@ class PIController:
             self._sensor_recovery_pending = False
             self._recovery_check_needed = False
             if self._sensor_unavailable:
-                _LOGGER.info("PI: temp sensor recovered, resuming full PI control")
+                _LOGGER.info("%sPI: temp sensor recovered, resuming full PI control", self._log_prefix)
                 self._sensor_unavailable = False
             else:
                 _LOGGER.debug("PI: temp sensor just became available, running immediate tick")
@@ -1426,10 +1432,10 @@ class PIController:
         self._sensor_recovery_unsub = None
         e = self._entity
         if e._attr_current_temperature is not None:
-            _LOGGER.info("PI: temp sensor recovered during grace period")
+            _LOGGER.info("%sPI: temp sensor recovered during grace period", self._log_prefix)
             return await self._pi_tick()
         self._sensor_unavailable = True
-        _LOGGER.warning("PI: temp sensor confirmed unavailable, using feedforward-only fallback")
+        _LOGGER.warning("%sPI: temp sensor confirmed unavailable, using feedforward-only fallback", self._log_prefix)
         if self._desired_temp is None:
             return False
         desired_c = TemperatureConverter.convert(
@@ -1453,7 +1459,7 @@ class PIController:
         self._pi_integral = 0.0
         new_setpoint = round(max(self._min_temp_c, min(self._max_temp_c, desired_c + self._ff_offset)))
         if new_setpoint != self._hp_setpoint:
-            _LOGGER.info("PI fallback: setpoint %s -> %s (FF only)", self._hp_setpoint, new_setpoint)
+            _LOGGER.info("%sPI fallback: setpoint %s -> %s (FF only)", self._log_prefix, self._hp_setpoint, new_setpoint)
             self._hp_setpoint = new_setpoint
             return True
         return False
@@ -1463,7 +1469,7 @@ class PIController:
         if not self._pi_enabled:
             return False
         if self._pi_tick_running:
-            _LOGGER.debug("PI tick: skipping, already running (reentrant call)")
+            _LOGGER.debug("%sPI tick: skipping, already running (reentrant call)", self._log_prefix)
             return False
         self._pi_tick_running = True
         try:
@@ -1492,12 +1498,12 @@ class PIController:
         if e._attr_current_temperature is None:
             if self._sensor_unavailable or self._sensor_recovery_pending:
                 return False
-            _LOGGER.info("PI: temp sensor unavailable, requesting 60s recovery check")
+            _LOGGER.info("%sPI: temp sensor unavailable, requesting 60s recovery check", self._log_prefix)
             self._sensor_recovery_pending = True
             self._recovery_check_needed = True
             return False
         if self._pi_paused:
-            _LOGGER.debug("PI tick: skipping, paused by vendor")
+            _LOGGER.debug("%sPI tick: skipping, paused by vendor", self._log_prefix)
             return False
 
         # Time since last tick (for time-normalized integral)
@@ -1804,23 +1810,24 @@ class PIController:
                 can_change = True  # Large error = urgent demand, bypass hold
             if not can_change:
                 _LOGGER.debug(
-                    "PI: setpoint %s -> %s held (%.0fs since last change, need %.0fs)",
-                    self._hp_setpoint, new_setpoint, time_since_last,
+                    "%sPI: setpoint %s -> %s held (%.0fs since last change, need %.0fs)",
+                    self._log_prefix, self._hp_setpoint, new_setpoint, time_since_last,
                     self._SETPOINT_HOLD_SECONDS,
                 )
             else:
+                old_setpoint = self._hp_setpoint
                 self._hp_setpoint = new_setpoint
                 if not hp_should_send_ir:
                     # Tracking mode: update internal setpoint but don't send IR
                     _LOGGER.debug(
-                        "PI tracking: setpoint %s -> %s (IR suppressed, override by %s)",
-                        self._hp_setpoint, new_setpoint, ", ".join(self._tracking_sources),
+                        "%sPI tracking: setpoint %s -> %s (IR suppressed, override by %s)",
+                        self._log_prefix, old_setpoint, new_setpoint, ", ".join(self._tracking_sources),
                     )
                 else:
                     _LOGGER.info(
-                        "PI: error=%.1f smith=%.2f P=%.1f I=%.1f D=%.1f FF=%.1f raw=%.1f setpoint %s -> %s",
-                        error, smith_correction, p_term, i_term, d_term, self._ff_offset,
-                        clamped_setpoint, self._hp_setpoint, new_setpoint,
+                        "%sPI: error=%.1f smith=%.2f P=%.1f I=%.1f D=%.1f FF=%.1f raw=%.1f setpoint %s -> %s",
+                        self._log_prefix, error, smith_correction, p_term, i_term, d_term, self._ff_offset,
+                        clamped_setpoint, old_setpoint, new_setpoint,
                     )
                     self._last_setpoint_change_time = now_mono
                     self._setpoint_changes += 1
@@ -1829,8 +1836,8 @@ class PIController:
                     return True
         else:
             _LOGGER.debug(
-                "PI: error=%.1f raw=%.1f setpoint=%s (held)",
-                error, clamped_setpoint, self._hp_setpoint,
+                "%sPI: error=%.1f raw=%.1f setpoint=%s (held)",
+                self._log_prefix, error, clamped_setpoint, self._hp_setpoint,
             )
 
         return False

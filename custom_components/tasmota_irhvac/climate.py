@@ -910,8 +910,9 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                 if round(incoming / prec) * prec != round(expected / prec) * prec:
                     return False
             elif key == "Sleep":
-                # Sleep is numeric, not a string
-                if str(incoming) != str(expected):
+                # We send "off", Tasmota echoes -1; both mean "no timer"
+                _SLEEP_OFF = {-1, "-1", "off"}
+                if (incoming in _SLEEP_OFF) != (expected in _SLEEP_OFF):
                     return False
             else:
                 # String fields: case-insensitive
@@ -931,18 +932,19 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                 if matches:
                     # Cases 1 & 3: echo or confirmation — no state change
                     _LOGGER.debug(
-                        "MQTT %s: payload matches expected, ignoring",
-                        "echo" if ir_received else "confirmation",
+                        "%s MQTT %s: payload matches expected, ignoring",
+                        self.entity_id, "echo" if ir_received else "confirmation",
                     )
                     return
                 if ir_received:
                     # Case 2: physical remote — state changed via IrReceived
-                    _LOGGER.info("Physical remote detected (state diff)")
+                    _LOGGER.info("%s Physical remote detected (state diff)", self.entity_id)
                     # Fall through to apply state, then notify PI
                 else:
                     # Case 4: mismatch without IrReceived — resend
                     _LOGGER.warning(
-                        "Telemetry mismatch (no IrReceived), resending"
+                        "%s Telemetry mismatch (no IrReceived), resending",
+                        self.entity_id,
                     )
                     await self.send_ir()
                     return
@@ -1087,7 +1089,6 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             else:
                 self._enabled = True
 
-            # Set toggles to 'off'
             for key in self._toggle_list:
                 setattr(self, "_" + key.lower(), "off")
 
@@ -1841,9 +1842,9 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             await asyncio.sleep(float(self._mqtt_delay))
 
         _LOGGER.debug(
-            "send_ir: Temp=%s Power=%s Mode=%s topic=%s",
-            payload_data["Temp"], payload_data["Power"], payload_data["Mode"],
-            self.topic,
+            "%s send_ir: Temp=%s Power=%s Mode=%s topic=%s",
+            self.entity_id, payload_data["Temp"], payload_data["Power"],
+            payload_data["Mode"], self.topic,
         )
 
         await mqtt.async_publish(self.hass, self.topic, payload)

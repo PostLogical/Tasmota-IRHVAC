@@ -218,6 +218,44 @@ class TestEchoClassification:
             assert mock_send.called, "Mode mismatch should trigger resend"
 
     @pytest.mark.asyncio
+    async def test_sleep_off_vs_minus1_no_resend(self, hass, setup_pi_integration):
+        """Sleep "off" (toggle reset) vs -1 (Tasmota echo) must not resend.
+
+        Regression: toggle_list resets self._sleep to "off" after send.
+        On the next send, expected_state captures "off". Tasmota echoes
+        Sleep: -1 (int). Both mean "no timer" but the old comparison
+        saw "off" != "-1" → mismatch → resend → double beep.
+        """
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+
+        await entity.async_set_hvac_mode(HVACMode.HEAT)
+        entity._toggle_list = ["Sleep"]
+        # First send: expected_state gets "-1" (config default), then toggle resets to "off"
+        await entity.send_ir()
+        await hass.async_block_till_done()
+        assert entity._sleep == "off"
+        # Second send: expected_state now captures "off"
+        await entity.send_ir()
+        await hass.async_block_till_done()
+        assert entity._expected_state["Sleep"] == "off"
+
+        with patch.object(entity, 'send_ir', wraps=entity.send_ir) as mock_send:
+            _fire_tele(hass, {
+                "Power": entity._expected_state.get("Power", "On"),
+                "Mode": entity._expected_state.get("Mode", "Heat"),
+                "Temp": entity._expected_state.get("Temp", 22),
+                "FanSpeed": entity._expected_state.get("FanSpeed", "Auto"),
+                "SwingV": entity._expected_state.get("SwingV", "Auto"),
+                "SwingH": entity._expected_state.get("SwingH", "Off"),
+                "Quiet": "Off", "Turbo": "Off", "Econo": "Off",
+                "Light": "Off", "Filter": "Off", "Clean": "Off",
+                "Beep": "Off", "Sleep": -1,
+            })
+            await hass.async_block_till_done()
+            assert not mock_send.called, "Sleep 'off' vs -1 must not trigger resend"
+
+    @pytest.mark.asyncio
     async def test_before_first_send_all_accepted(self, hass, setup_pi_integration):
         """Before first send, all MQTT messages accepted as new info."""
         entry = await setup_pi_integration()
