@@ -292,7 +292,7 @@ class PIController:
     # Health check thresholds
     HEALTH_COMFORT_WARN: float = 1.1        # °C error (~2°F)
     HEALTH_COMFORT_CRIT: float = 1.7        # °C error (~3°F)
-    HEALTH_INTEGRAL_WARN: float = 5.0       # PI integral magnitude
+    HEALTH_INTEGRAL_WARN: float = 2.0       # |ki × integral| correction in °C
     HEALTH_INTERCEPT_WARN: float = 1.0      # RLS intercept drift
     HEALTH_SLOPE_DRIFT_PCT: float = 30.0    # % drift from configured ff slope
     HEALTH_SLOPE_DRIFT_FLOOR: float = 0.05  # minimum absolute drift to trigger
@@ -1056,14 +1056,27 @@ class PIController:
                 )
                 reasons.append("comfort_warn")
 
-        # Check 2: PI integral magnitude
-        if abs(self._pi_integral) > self.HEALTH_INTEGRAL_WARN:
+        # Check 2: PI integral correction magnitude (in °C, not raw integral)
+        # With FF confidence scaling, large integrals are expected when the
+        # model is adapting — the system is handling it.  Alert on the actual
+        # correction the integral is applying, which is the real load.
+        ki_integral = abs(self._pi_ki * self._pi_integral)
+        if ki_integral > self.HEALTH_INTEGRAL_WARN:
             if severity != "Critical":
                 severity = "Warning"
             alerts.append(
-                f"PI integral at {self._pi_integral:.2f} — controller struggling"
+                f"PI integral correction {ki_integral:.1f}°C — controller struggling"
             )
             reasons.append("integral_high")
+
+        # Check 2b: FF confidence sustained low
+        if self._ff_confidence < 0.5:
+            if severity != "Critical":
+                severity = "Warning"
+            alerts.append(
+                f"FF confidence at {self._ff_confidence:.0%} — model prediction unreliable"
+            )
+            reasons.append("ff_confidence_low")
 
         # Determine active RLS model for checks 3 & 4
         is_heating = e._attr_hvac_mode in (HVACMode.HEAT, HVACMode.HEAT_COOL, None)
@@ -1114,6 +1127,7 @@ class PIController:
             "rls_outdoor_slope": round(outdoor_slope, 4),
             "expected_slope": round(expected_slope, 4),
             "rls_obs_count": rls.observation_count,
+            "ff_confidence": round(self._ff_confidence, 3),
             "integral_convergence": round(self._integral_convergence, 2),
             "tau_estimate": round(self._tau_estimate, 1) if self._imc_enabled else None,
             "smith_correction": (
