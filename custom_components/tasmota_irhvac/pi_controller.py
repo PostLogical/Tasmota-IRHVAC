@@ -958,6 +958,44 @@ class PIController:
             ),
         }
 
+    def get_diagnostic_dump(self) -> dict[str, Any]:
+        """Return full diagnostic state for offline analysis.
+
+        Contains the observation buffer, current RLS coefficients, and
+        config — everything needed to reproduce this session's debug
+        bundle without manual HA CLI work.
+        """
+        coeff_names = ["intercept", "outdoor_delta"]
+        for m in self._model_inputs:
+            coeff_names.append(m.get("name", "input"))
+        heat_dict = self._rls_heat.get_coefficients()
+        cool_dict = self._rls_cool.get_coefficients()
+        return {
+            "observation_buffer": self._observation_buffer.as_list(),
+            "buffer_size": len(self._observation_buffer),
+            "rls_heat": {
+                "coefficients": {coeff_names[i] if i < len(coeff_names) else f"β{i}": heat_dict[i]
+                                 for i in range(self._rls_heat.n)},
+                "observation_count": self._rls_heat.observation_count,
+            },
+            "rls_cool": {
+                "coefficients": {coeff_names[i] if i < len(coeff_names) else f"β{i}": cool_dict[i]
+                                 for i in range(self._rls_cool.n)},
+                "observation_count": self._rls_cool.observation_count,
+            },
+            "pi_state": {
+                "integral": self._pi_integral,
+                "ff_offset": round(self._ff_offset, 4),
+                "ff_confidence": round(self._ff_confidence, 4),
+                "hp_setpoint": self._hp_setpoint,
+                "desired_temp": self._desired_temp,
+                "outdoor_temp": self._outdoor_temp,
+                "room_temp_rate": round(self._room_temp_rate, 6),
+                "integral_convergence": round(self._integral_convergence, 4),
+                "tau_estimate": round(self._tau_estimate, 1) if self._imc_enabled else None,
+            },
+        }
+
     def get_health_status(self) -> dict[str, Any]:
         """Evaluate PI controller health and return status with alerts."""
         if not self._pi_enabled:
@@ -1972,6 +2010,10 @@ class PIController:
                 self._hp_setpoint <= self._min_temp_c
                 or self._hp_setpoint >= self._max_temp_c
             ),
+            pi_integral=self._pi_integral,
+            ff_offset=self._ff_offset,
+            ff_confidence=self._ff_confidence,
+            raw_c=raw_c,
         ))
 
         # Midpoint-crossing hysteresis

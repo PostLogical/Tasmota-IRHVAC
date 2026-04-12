@@ -27,15 +27,20 @@ MAX_BUFFER_SIZE = 300
 
 @dataclass
 class Observation:
-    """A single near-equilibrium observation for batch learning."""
+    """A single observation for batch learning and debug analysis."""
 
     timestamp: float  # monotonic time
     features: list[float]  # [1, outdoor_delta, model_input_1, ...]
     hp_setpoint: float  # integer HP setpoint (°C)
-    current_c: float  # room temperature (°C)
+    current_c: float  # filtered room temperature (°C)
     desired_c: float  # target temperature (°C)
-    room_rate: float  # |dT/dt| in °C/min at observation time
+    room_rate: float  # dT/dt in °C/min at observation time
     clamped: bool  # True if HP setpoint was at min or max
+    # Debug fields (not used by WLS, but needed for diagnostics)
+    pi_integral: float = 0.0
+    ff_offset: float = 0.0
+    ff_confidence: float = 1.0
+    raw_c: float = 0.0  # unfiltered room temperature
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -46,6 +51,10 @@ class Observation:
             "des": self.desired_c,
             "rate": self.room_rate,
             "clamp": self.clamped,
+            "integ": self.pi_integral,
+            "ff": self.ff_offset,
+            "ffc": self.ff_confidence,
+            "raw": self.raw_c,
         }
 
     @classmethod
@@ -58,6 +67,10 @@ class Observation:
             desired_c=d["des"],
             room_rate=d["rate"],
             clamped=d["clamp"],
+            pi_integral=d.get("integ", 0.0),
+            ff_offset=d.get("ff", 0.0),
+            ff_confidence=d.get("ffc", 1.0),
+            raw_c=d.get("raw", d["cur"]),
         )
 
 
