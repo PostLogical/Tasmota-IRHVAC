@@ -80,7 +80,7 @@ class TestSteadyStateLimitCycleProbability:
             ctrl = _make_controller(seed_factor=1.0)
             ctrl.set_desired_temp(20.5)
             model = ThermalModel(
-                profile=profile, initial_temp=20.5, outdoor_temp=5.0,
+                profile=profile, initial_temp=20.5, outdoor_temp=7.0,
                 sensor_noise_sigma=0.1, sensor_quantization=0.1,
                 noise_seed=seed,
             )

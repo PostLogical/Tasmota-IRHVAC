@@ -516,6 +516,14 @@ class PIController:
 
         # RLS learning gate: track integral stability
         self._prev_integral_for_rls: float = 0.0
+        # Out-of-deadband steady-state learning: consecutive ticks with
+        # low room_temp_rate while outside deadband but within learning zone.
+        self._stable_oodb_ticks: int = 0
+        self._prev_integral_for_oodb: float = 0.0  # separate from deadband tracker
+
+        # FF confidence (EMA-smoothed to prevent limit cycling from
+        # tick-to-tick confidence changes near integer setpoint boundaries)
+        self._ff_confidence: float = 1.0
 
         # Room temperature rate of change tracking (°C/min)
         self._room_temp_history: list[tuple[float, float]] = []  # [(monotonic_time, temp_c), ...]
@@ -1624,7 +1632,32 @@ class PIController:
         seed_offset = sum(s * xi for s, xi in zip(seeds, x))
         rls_offset = rls.predict(x)
         alpha = min(rls.observation_count / MIN_RLS_OBS, 1.0)
-        self._ff_offset = (1.0 - alpha) * seed_offset + alpha * rls_offset
+        blended_offset = (1.0 - alpha) * seed_offset + alpha * rls_offset
+
+        # Integral-based FF confidence: when the integral opposes the FF
+        # offset direction, the model prediction is wrong in sign/magnitude
+        # and the feedback loop is fighting it.  Scale FF down so the
+        # integral has less to correct, accelerating convergence.
+        #
+        # Only activates when integral OPPOSES FF — meaning FF predicts
+        # an offset the integral is trying to undo.  When they agree
+        # (both wanting more/less heat), the model direction is right
+        # and reducing FF would worsen an undersized-HP situation.
+        #
+        # Threshold of 3°C: below this, full FF trust (the integral is
+        # handling normal residuals).  Above, FF scales smoothly toward
+        # the integral-corrected value.  EMA-smoothed to prevent
+        # limit cycling at integer setpoint boundaries.
+        FF_CONFIDENCE_THRESHOLD = 3.0
+        integral_opposes_ff = (self._pi_integral * blended_offset) < 0
+        if integral_opposes_ff:
+            model_error = abs(self._pi_ki * self._pi_integral)
+            raw_confidence = 1.0 / (1.0 + max(0.0, model_error - FF_CONFIDENCE_THRESHOLD) / FF_CONFIDENCE_THRESHOLD)
+        else:
+            raw_confidence = 1.0
+        # EMA smoothing (~10 ticks ≈ 2.5h) prevents tick-to-tick jitter
+        self._ff_confidence += 0.1 * (raw_confidence - self._ff_confidence)
+        self._ff_offset = blended_offset * self._ff_confidence
 
         # Learning suppression: manual service + per-input suppress_learning flag
         learning_suppressed = self._manual_ff_suppress
@@ -1654,10 +1687,14 @@ class PIController:
             # accumulation speed near target.
             rate = max(0.05, min(1.0, abs_error / self._pi_deadband))
             self._pi_integral += avg_error * dt_factor * rate
-            # RLS learning gate: rate < 0.2 means error is small fraction of
-            # deadband, and integral change rate is low (not still converging).
+            # RLS learning gate: require integral settled and room temp stable.
+            # The old gate also required rate < 0.2 (error < 10% of deadband),
+            # but that starved zones with coarse sensors (1°F) that only briefly
+            # sit at exact target.  Being inside deadband (< 0.5°C) with stable
+            # room temp and low integral change is sufficient for a valid
+            # observation.
             integral_change = abs(self._pi_integral - self._prev_integral_for_rls)
-            integral_settling = rate < 0.2 and integral_change < 0.3
+            integral_settling = integral_change < 0.3
             # Room temperature must be genuinely settled — not coasting from a
             # recent setpoint change or external disturbance.
             room_settling = abs(self._room_temp_rate) < 0.02  # °C/min
@@ -1687,9 +1724,10 @@ class PIController:
                 if reasons:
                     _LOGGER.debug("RLS learning blocked: %s", ", ".join(reasons))
             if can_learn_rls:
-                # Observe what actually worked: the HP setpoint that achieved
-                # the target temperature. This directly measures the needed
-                # offset without coupling to integral state or ki.
+                # Observe what the plant actually experienced: the integer
+                # HP setpoint that maintained the target temperature.
+                # This is a direct input-output observation at the operating
+                # point (Ljung, System Identification §7.4).
                 observed_offset = float(self._hp_setpoint) - desired_c
                 beta_before = list(rls.beta)
                 residual = rls.update(x, observed_offset)
@@ -1719,6 +1757,72 @@ class PIController:
             p_term = 0.0
         else:
             self._ff_settled_ticks = 0
+            # Out-of-deadband steady-state learning: when the room is at
+            # thermal equilibrium but outside the control deadband, feed a
+            # corrected observation to the RLS.  This breaks the vicious cycle
+            # where a miscalibrated model keeps the room away from target,
+            # preventing the normal learning gate from opening.
+            #
+            # Corrected observation: hp_setpoint - current_c tells the RLS
+            # "what offset maintains room temp at current conditions."  At
+            # equilibrium this mapping is valid at any operating point (Ljung,
+            # System Identification §7.4).  Bias grows with distance from
+            # target (~K_loss/K_hp × |error|), so we require proportionally
+            # more settling ticks at larger errors.
+            #
+            # Gate on clamping: if the HP setpoint is at min/max the
+            # observation is censored — the controller wanted to go further
+            # but couldn't — so the learned offset would be biased.
+            room_stable = abs(self._room_temp_rate) < 0.015  # stricter than deadband gate
+            # Use a separate integral baseline for oodb — the deadband
+            # tracker (_prev_integral_for_rls) goes stale for zones that
+            # rarely enter deadband, making integral_change enormous.
+            # This tracker updates every tick outside deadband so it
+            # measures RECENT integral movement, not cumulative drift.
+            integral_change = abs(self._pi_integral - self._prev_integral_for_oodb)
+            integral_stable = integral_change < 0.5  # integral not actively winding
+            self._prev_integral_for_oodb = self._pi_integral
+            setpoint_clamped = (
+                self._hp_setpoint <= self._min_temp_c
+                or self._hp_setpoint >= self._max_temp_c
+            )
+            if room_stable and integral_stable and not setpoint_clamped:
+                self._stable_oodb_ticks += 1
+            else:
+                self._stable_oodb_ticks = 0
+            # Require more settling at larger errors: the equilibrium offset
+            # has bias ~(K_loss/K_hp)×|error| from using current_c instead of
+            # desired_c (linear heat-loss approximation).  Longer settling
+            # ensures we only learn from genuinely stable states at larger
+            # deviations, and naturally reduces the frequency of noisier
+            # far-from-target observations.
+            min_oodb_ticks = 8 + int(abs_error * 4)  # +4 ticks per °C of error
+            if (
+                self._stable_oodb_ticks >= min_oodb_ticks
+                and self._outdoor_temp is not None
+                and not learning_suppressed
+                and not self._any_model_input_unavailable()
+                and not self._tracking_mode
+                and not self._supplemental_assist_active
+            ):
+                corrected_offset = float(self._hp_setpoint) - current_c
+                beta_before = list(rls.beta)
+                residual = rls.update(x, corrected_offset)
+                _LOGGER.debug(
+                    "RLS steady-state update (oodb): observed=%.2f predicted=%.2f "
+                    "residual=%.2f obs_count=%d error=%.2f dT_dt=%.4f",
+                    corrected_offset, corrected_offset - residual, residual,
+                    rls.observation_count, error, self._room_temp_rate,
+                )
+                for idx in range(len(rls.beta)):
+                    if beta_before[idx] != 0 and abs(rls.beta[idx] - beta_before[idx]) / abs(beta_before[idx]) > 0.1:
+                        _LOGGER.info(
+                            "RLS coefficient[%d] changed %.3f -> %.3f (%.0f%%)",
+                            idx, beta_before[idx], rls.beta[idx],
+                            100 * (rls.beta[idx] - beta_before[idx]) / beta_before[idx],
+                        )
+                self._stable_oodb_ticks = 0  # one observation per settled window
+
             # Setpoint weighting: reduce P-term to prevent overshoot while
             # integral drives steady-state accuracy. Standard 2-DOF technique
             # (Astrom & Hagglund). b < 1 reduces proportional kick.

@@ -53,9 +53,9 @@ PROFILES = {
     "standard_residential": HouseProfile(
         name="Standard Residential",
         tau_minutes=50,
-        hp_gain=0.04,
+        hp_gain=0.06,
         solar_gain=0.4,
-        description="Typical modern home with decent insulation",
+        description="Typical modern home with decent insulation, HP sized for -5°C design",
     ),
     "well_insulated": HouseProfile(
         name="Well Insulated",
