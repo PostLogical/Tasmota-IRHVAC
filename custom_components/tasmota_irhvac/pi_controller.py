@@ -35,6 +35,8 @@ from homeassistant.util.unit_conversion import TemperatureConverter
 
 import math
 
+from .batch_learning import Observation, ObservationBuffer, weighted_least_squares, compare_and_report
+
 from .const import (
     ATTR_DESIRED_TEMP,
     ATTR_FF_OFFSET,
@@ -110,6 +112,7 @@ class PIExtraStoredData(ExtraStoredData):
     cool_seeds_at_learn: list = dataclasses.field(default_factory=list)
     ki_at_save: float = 0.0
     tau_estimate: float = 0.0
+    observation_buffer: list = dataclasses.field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize to JSON-compatible dict."""
@@ -128,6 +131,7 @@ class PIExtraStoredData(ExtraStoredData):
             "cool_seeds_at_learn": self.cool_seeds_at_learn,
             "ki_at_save": self.ki_at_save,
             "tau_estimate": self.tau_estimate,
+            "observation_buffer": self.observation_buffer,
         }
 
     @classmethod
@@ -153,6 +157,7 @@ class PIExtraStoredData(ExtraStoredData):
                 cool_seeds_at_learn=restored.get("cool_seeds_at_learn", []),
                 ki_at_save=float(restored.get("ki_at_save", 0.0)),
                 tau_estimate=float(restored.get("tau_estimate", 0.0)),
+                observation_buffer=restored.get("observation_buffer", []),
             )
         except (KeyError, ValueError, TypeError, AttributeError):
             return None
@@ -525,6 +530,11 @@ class PIController:
         # tick-to-tick confidence changes near integer setpoint boundaries)
         self._ff_confidence: float = 1.0
 
+        # Batch learning: ring buffer of every tick's state for periodic
+        # offline WLS analysis.  Records regardless of learning gate.
+        self._observation_buffer = ObservationBuffer()
+        self._batch_analysis_timer: Any | None = None
+
         # Room temperature rate of change tracking (°C/min)
         self._room_temp_history: list[tuple[float, float]] = []  # [(monotonic_time, temp_c), ...]
         self._room_temp_rate: float = 0.0  # °C/min, updated each tick
@@ -638,6 +648,67 @@ class PIController:
         if self._pi_timer_unsub:
             self._pi_timer_unsub()
             self._pi_timer_unsub = None
+        if self._batch_analysis_timer:
+            self._batch_analysis_timer()
+            self._batch_analysis_timer = None
+
+    def schedule_batch_analysis(self) -> None:
+        """Schedule periodic batch WLS analysis (called by climate.py after setup)."""
+        from datetime import timedelta
+        from homeassistant.helpers.event import async_track_time_interval
+
+        BATCH_INTERVAL = timedelta(hours=12)
+
+        @callback
+        def _run_batch(_now: Any) -> None:
+            self._run_batch_analysis()
+
+        self._batch_analysis_timer = async_track_time_interval(
+            self._hass, _run_batch, BATCH_INTERVAL,
+        )
+
+    def _run_batch_analysis(self) -> None:
+        """Run batch WLS analysis on accumulated observations.
+
+        Observe-only mode: logs what the batch estimate would recommend
+        but does not modify the RLS model.  Set apply_updates on the
+        compare_and_report call to enable automatic updates (future).
+        """
+        e = self._entity
+        is_heating = e._attr_hvac_mode == HVACMode.HEAT
+        rls = self._rls_heat if is_heating else self._rls_cool
+
+        observations = self._observation_buffer.get_all()
+        if len(observations) < 20:
+            _LOGGER.debug(
+                "%sBatch WLS: insufficient observations (%d < 20)",
+                self._log_prefix, len(observations),
+            )
+            return
+
+        result = weighted_least_squares(
+            observations, n_features=rls.n, room_rate_threshold=0.02,
+            min_observations=20,
+        )
+        if result is None:
+            _LOGGER.debug(
+                "%sBatch WLS: insufficient eligible observations after filtering",
+                self._log_prefix,
+            )
+            return
+
+        # Get current physical coefficients as a list for comparison
+        coeff_dict = rls.get_coefficients()
+        current_phys = [coeff_dict[i] for i in range(rls.n)]
+        coeff_names = ["intercept", "outdoor_delta"]
+        for m in self._model_inputs:
+            coeff_names.append(m.get("name", "input"))
+
+        compare_and_report(
+            result, current_phys, coeff_names,
+            change_threshold_pct=20.0, min_observations=20,
+            log_prefix=self._log_prefix,
+        )
 
     # ── Hook methods (called by climate entity) ──────────────────────
 
@@ -663,6 +734,7 @@ class PIController:
             cool_seeds_at_learn=list(self._cool_seeds),
             ki_at_save=self._pi_ki,
             tau_estimate=self._tau_estimate,
+            observation_buffer=self._observation_buffer.as_list(),
         )
 
     def restore_extra_stored_data(self, data: PIExtraStoredData) -> None:
@@ -703,6 +775,9 @@ class PIController:
                 coeff_clamps=self._rls_cool_clamps,
                 feature_scales=self._feature_scales,
             )
+        # Restore observation buffer for batch learning
+        if data.observation_buffer:
+            self._observation_buffer = ObservationBuffer.from_list(data.observation_buffer)
         # Seed change detection: if user edited a seed since last save,
         # reset that coefficient to the new seed and increase its uncertainty.
         # Coefficients with unchanged seeds keep their learned values.
@@ -1884,6 +1959,20 @@ class PIController:
             q_error = float(self._hp_setpoint) - clamped_setpoint
             if 0.3 < abs(q_error) <= 0.5:
                 self._pi_integral += (q_error / self._pi_ki) * 0.4
+
+        # Record observation for batch learning (every tick, regardless of gate)
+        self._observation_buffer.add(Observation(
+            timestamp=now_mono,
+            features=list(x),
+            hp_setpoint=float(self._hp_setpoint),
+            current_c=current_c,
+            desired_c=desired_c,
+            room_rate=self._room_temp_rate,
+            clamped=(
+                self._hp_setpoint <= self._min_temp_c
+                or self._hp_setpoint >= self._max_temp_c
+            ),
+        ))
 
         # Midpoint-crossing hysteresis
         new_setpoint = self._hp_setpoint

@@ -823,6 +823,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             def _pi_timer_fired(_now):
                 self.hass.async_create_task(self._on_pi_timer())
             self._controller._pi_timer_callback = _pi_timer_fired
+            self._controller.schedule_batch_analysis()
             if self._attr_current_temperature is not None:
                 @callback
                 def _deferred_initial_tick(_now):

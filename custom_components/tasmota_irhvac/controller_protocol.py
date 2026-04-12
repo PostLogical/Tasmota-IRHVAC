@@ -120,6 +120,9 @@ class NullController:
     def async_will_remove_from_hass(self):
         pass
 
+    def schedule_batch_analysis(self):
+        pass
+
     # ── State processing ─────────────────────────────────────────────
 
     async def on_remote_change(self, reported_temp):
