@@ -462,6 +462,10 @@ SERVICE_TO_METHOD = {
         "method": "async_resume_ff_learning",
         "schema": IRHVAC_SERVICE_SCHEMA,
     },
+    "diagnostic_dump": {
+        "method": "async_diagnostic_dump",
+        "schema": IRHVAC_SERVICE_SCHEMA,
+    },
 }
 
 
@@ -1722,6 +1726,38 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
     async def async_resume_ff_learning(self) -> None:
         """Resume FF learning after manual suppression."""
         await self._controller.async_resume_ff_learning()
+
+    async def async_diagnostic_dump(self) -> None:
+        """Write PI diagnostic dump to a JSON file for offline analysis."""
+        import json
+        from pathlib import Path
+
+        dump = self._controller.get_diagnostic_dump()
+        if not dump:
+            _LOGGER.warning("Diagnostic dump: no PI controller data available")
+            return
+
+        # Write to config/.storage/ alongside other HA data
+        storage_dir = Path(self.hass.config.config_dir) / ".storage"
+        safe_name = self.entity_id.replace(".", "_")
+        path = storage_dir / f"tasmota_irhvac_diagnostic_{safe_name}.json"
+        await self.hass.async_add_executor_job(
+            lambda: path.write_text(json.dumps(dump, indent=2))
+        )
+        _LOGGER.info("Diagnostic dump written to %s (%d observations)", path, dump.get("buffer_size", 0))
+
+        # Fire persistent notification so the user knows where to find it
+        await self.hass.services.async_call(
+            "persistent_notification", "create",
+            {
+                "title": f"PI Diagnostic Dump: {self.name}",
+                "message": f"Written to `{path}`\n\n"
+                           f"Buffer: {dump.get('buffer_size', 0)} observations\n"
+                           f"RLS heat obs: {dump.get('rls_heat', {}).get('observation_count', '?')}\n"
+                           f"Integral: {dump.get('pi_state', {}).get('integral', '?')}\n"
+                           f"FF confidence: {dump.get('pi_state', {}).get('ff_confidence', '?')}",
+            },
+        )
 
     async def set_mode(self, hvac_mode: str) -> None:
         """Set hvac mode."""

@@ -123,6 +123,9 @@ class NullController:
     def schedule_batch_analysis(self):
         pass
 
+    def get_diagnostic_dump(self):
+        return None
+
     # ── State processing ─────────────────────────────────────────────
 
     async def on_remote_change(self, reported_temp):
