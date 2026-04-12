@@ -686,9 +686,14 @@ class PIController:
             )
             return
 
+        # Get current physical coefficients before WLS so held features
+        # can be filled from the online model (persistent excitation filter).
+        coeff_dict = rls.get_coefficients()
+        current_phys = [coeff_dict[i] for i in range(rls.n)]
+
         result = weighted_least_squares(
-            observations, n_features=rls.n, room_rate_threshold=0.02,
-            min_observations=20,
+            observations, n_features=rls.n, current_beta=current_phys,
+            room_rate_threshold=0.02, min_observations=20,
         )
         if result is None:
             _LOGGER.debug(
@@ -696,10 +701,6 @@ class PIController:
                 self._log_prefix,
             )
             return
-
-        # Get current physical coefficients as a list for comparison
-        coeff_dict = rls.get_coefficients()
-        current_phys = [coeff_dict[i] for i in range(rls.n)]
         coeff_names = ["intercept", "outdoor_delta"]
         for m in self._model_inputs:
             coeff_names.append(m.get("name", "input"))
