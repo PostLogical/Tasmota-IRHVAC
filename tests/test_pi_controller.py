@@ -3141,3 +3141,264 @@ class TestSensorFilter:
         attrs = pi.get_extra_state_attributes()
         assert "sensor_filtered" in attrs
         assert attrs["sensor_filtered"] is not None
+
+
+class TestOneSidedAntiWindup:
+    """Tests for bidirectional one-sided actuator anti-windup (conditional integration)."""
+
+    @pytest.mark.asyncio
+    async def test_heat_mode_negative_error_limited_windup(self, pi_entity):
+        """In heat mode with room above target, integral windup should be limited by decay."""
+        pi_entity._attr_hvac_mode = HVACMode.HEAT
+        pi_entity._attr_current_temperature = 24.0  # °C, well above target
+        pi_entity._pi._desired_temp = 22.0  # error = -2.0°C, outside deadband
+        pi_entity._pi._hp_setpoint = 22.0
+        pi_entity._pi._pi_integral = 0.0
+
+        # Run multiple ticks — integral should NOT wind deeply negative
+        for _ in range(10):
+            await pi_entity._pi._pi_tick()
+
+        integral_after = pi_entity._pi._pi_integral
+
+        # With accumulate-then-decay, integral settles at a bounded value
+        # instead of winding unboundedly.  With tau=60min and error=-2,
+        # equilibrium ≈ -error * dt / (1 - decay) ≈ -9.
+        # Must be much less extreme than the -28.6 seen without anti-windup.
+        assert integral_after > -15.0, (
+            f"Integral should be bounded by accelerated decay, got {integral_after}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_heat_mode_negative_error_decays_existing_integral(self, pi_entity):
+        """Pre-wound negative integral should decay toward zero in heat mode."""
+        pi_entity._attr_hvac_mode = HVACMode.HEAT
+        pi_entity._attr_current_temperature = 24.0  # °C, above target
+        pi_entity._pi._desired_temp = 22.0  # error = -2.0°C
+        pi_entity._pi._hp_setpoint = 22.0
+        pi_entity._pi._pi_integral = -10.0  # Pre-wound negative
+        pi_entity._pi._tau_estimate = 60.0  # 60 min time constant
+
+        await pi_entity._pi._pi_tick()
+        integral_after = pi_entity._pi._pi_integral
+
+        # Integral should have decayed toward zero
+        assert integral_after > -10.0, (
+            f"Integral should decay toward zero, got {integral_after}"
+        )
+        # Should still be negative (one tick won't fully unwind)
+        assert integral_after < 0.0
+
+    @pytest.mark.asyncio
+    async def test_heat_mode_positive_error_normal_accumulation(self, pi_entity):
+        """In heat mode with room below target, integral should accumulate normally."""
+        pi_entity._attr_hvac_mode = HVACMode.HEAT
+        pi_entity._attr_current_temperature = 20.0  # °C, below target
+        pi_entity._pi._desired_temp = 22.0  # error = +2.0°C
+        pi_entity._pi._hp_setpoint = 22.0
+        pi_entity._pi._pi_integral = 1.0
+
+        await pi_entity._pi._pi_tick()
+        integral_after = pi_entity._pi._pi_integral
+
+        # Integral should have grown (normal positive error accumulation)
+        assert integral_after > 1.0, (
+            f"Integral should accumulate normally with positive error, got {integral_after}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_cool_mode_positive_error_limited_windup(self, pi_entity):
+        """In cool mode with room below target, integral windup should be limited."""
+        pi_entity._attr_hvac_mode = HVACMode.COOL
+        pi_entity._attr_current_temperature = 20.0  # °C, below target
+        pi_entity._pi._desired_temp = 22.0  # error = +2.0°C
+        pi_entity._pi._hp_setpoint = 22.0
+        pi_entity._pi._pi_integral = 0.0
+
+        for _ in range(10):
+            await pi_entity._pi._pi_tick()
+
+        integral_after = pi_entity._pi._pi_integral
+
+        # Integral should be bounded by decay, not wind to +28
+        assert integral_after < 15.0, (
+            f"Integral should be bounded by accelerated decay, got {integral_after}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_cool_mode_negative_error_normal_accumulation(self, pi_entity):
+        """In cool mode with room above target, integral should accumulate normally."""
+        pi_entity._attr_hvac_mode = HVACMode.COOL
+        pi_entity._attr_current_temperature = 25.0  # °C, above target
+        pi_entity._pi._desired_temp = 22.0  # error = -3.0°C
+        pi_entity._pi._hp_setpoint = 24.0
+        pi_entity._pi._pi_integral = -1.0
+
+        await pi_entity._pi._pi_tick()
+        integral_after = pi_entity._pi._pi_integral
+
+        # Integral should have grown more negative (normal cooling behavior)
+        assert integral_after < -1.0, (
+            f"Integral should accumulate normally with negative error in cool mode, "
+            f"got {integral_after}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_heat_mode_deadband_normal_accumulation(self, pi_entity):
+        """In deadband, integral accumulates normally even with no-authority error.
+
+        Small overshoots within deadband are normal control behavior, not
+        actuator saturation. Accelerated decay only applies outside deadband.
+        """
+        pi_entity._attr_hvac_mode = HVACMode.HEAT
+        pi_entity._attr_current_temperature = 22.3  # °C, slightly above target
+        pi_entity._pi._desired_temp = 22.0  # error = -0.3°C (within 0.5 deadband)
+        pi_entity._pi._hp_setpoint = 22.0
+        pi_entity._pi._pi_integral = 0.0
+
+        await pi_entity._pi._pi_tick()
+        integral_after = pi_entity._pi._pi_integral
+
+        # Integral accumulates at reduced variable rate (normal deadband behavior)
+        assert integral_after < 0, (
+            f"Integral should accumulate normally in deadband, got {integral_after}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_decay_rate_matches_tau(self):
+        """Accelerated decay rate should use tau_estimate as time constant."""
+        import math
+        # Use small error and moderate integral to avoid triggering the
+        # separate back-calculation anti-windup (setpoint clamp).
+        config = make_pi_config({"pi_tau_estimate": 60.0, "min_temp": 0})
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 20.0
+        pi._hp_setpoint = 20.0
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 21.0  # error = -1.0°C, outside deadband
+        pi._pi_integral = -5.0
+
+        # Run one tick (default interval ~900s = 15min)
+        await pi._pi_tick()
+        integral_after = pi._pi_integral
+
+        # Process: accumulate error (-1.0 * dt_factor=1), then decay, then leaky
+        # (-5 + -1.0) * exp(-15/60) * 0.9999 ≈ -6 * 0.778 * 0.9999 ≈ -4.67
+        expected = (-5.0 + -1.0) * math.exp(-15.0 / 60.0) * (0.9999 ** 1.0)
+        assert abs(integral_after - expected) < 0.5, (
+            f"Integral should decay with tau=60min, expected ~{expected:.2f}, got {integral_after:.2f}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_existing_clamp_antiwindup_still_works(self, pi_entity):
+        """Original back-calculation anti-windup should still function."""
+        # Force saturation: huge positive integral → raw > max_temp
+        pi_entity._attr_current_temperature = 10.0  # cold
+        pi_entity._pi._desired_temp = 28.0
+        pi_entity._pi._hp_setpoint = 22.0
+        pi_entity._pi._pi_integral = 40.0
+
+        await pi_entity._pi._pi_tick()
+
+        # Setpoint clamped at max
+        assert pi_entity._pi._hp_setpoint <= 30
+        # Integral should have been back-calculated down
+        assert pi_entity._pi._pi_integral < 40.0
+
+    @pytest.mark.asyncio
+    async def test_recovery_after_sustained_overshoot(self):
+        """After sustained no-authority period, integral should be near zero for fast recovery."""
+        import math
+        config = make_pi_config({"pi_tau_estimate": 60.0})
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 20.0
+        pi._hp_setpoint = 20.0
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 24.0  # room well above target
+        pi._pi_integral = -25.0
+
+        # Simulate ~3 hours of no-authority (12 ticks at 15min)
+        for i in range(12):
+            pi._pi_last_tick_time = float(i * 900)
+            with patch("time.monotonic", return_value=float((i + 1) * 900)):
+                await pi._pi_tick()
+
+        # With accumulate-then-decay, integral settles at a bounded
+        # equilibrium rather than winding to -48 (12 × -4).  The exact
+        # value depends on tau, error, and back-calculation anti-windup.
+        assert abs(pi._pi_integral) < 10.0, (
+            f"Integral should be bounded after 3h of no-authority, got {pi._pi_integral}"
+        )
+
+
+class TestGateLogging:
+    """Tests for RLS gate decision logging."""
+
+    @pytest.mark.asyncio
+    async def test_deadband_gate_logs_periodically(self, pi_entity, caplog):
+        """Gate block log should fire at tick 4, 8, 12 — not every tick."""
+        import logging
+        pi_entity._attr_hvac_mode = HVACMode.HEAT
+        pi_entity._attr_current_temperature = 22.1  # in deadband (error = -0.1)
+        pi_entity._pi._desired_temp = 22.0
+        pi_entity._pi._hp_setpoint = 22.0
+        # Force a condition that blocks learning
+        pi_entity._pi._outdoor_temp = None  # blocks "no outdoor temp"
+
+        with caplog.at_level(logging.DEBUG):
+            for i in range(16):
+                pi_entity._pi._pi_last_tick_time = float(i * 900)
+                with patch("time.monotonic", return_value=float((i + 1) * 900)):
+                    await pi_entity._pi._pi_tick()
+
+        blocked_msgs = [r for r in caplog.records if "RLS learning blocked" in r.message]
+        # Should fire at ticks 4, 8, 12 (every 4th tick)
+        assert len(blocked_msgs) >= 2, (
+            f"Expected periodic gate block logs, got {len(blocked_msgs)}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_oodb_gate_reset_logged(self, pi_entity, caplog):
+        """OODB gate reset should log when counter was accumulating."""
+        import logging
+        pi_entity._attr_hvac_mode = HVACMode.HEAT
+        pi_entity._attr_current_temperature = 19.0  # outside deadband
+        pi_entity._pi._desired_temp = 22.0
+        pi_entity._pi._hp_setpoint = 22.0
+        pi_entity._pi._outdoor_temp = 5.0
+        # Simulate some stable ticks to build up counter
+        pi_entity._pi._stable_oodb_ticks = 3
+
+        with caplog.at_level(logging.DEBUG):
+            # Break stability by making room rate unstable
+            pi_entity._pi._room_temp_rate = 0.05  # > 0.015 threshold
+            pi_entity._pi._pi_last_tick_time = 0.0
+            with patch("time.monotonic", return_value=900.0):
+                await pi_entity._pi._pi_tick()
+
+        reset_msgs = [r for r in caplog.records if "OODB gate reset" in r.message]
+        assert len(reset_msgs) >= 1, (
+            f"Expected OODB gate reset log, got {len(reset_msgs)}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_oodb_gate_no_log_when_counter_zero(self, pi_entity, caplog):
+        """No OODB reset log when counter was already at zero."""
+        import logging
+        pi_entity._attr_hvac_mode = HVACMode.HEAT
+        pi_entity._attr_current_temperature = 19.0
+        pi_entity._pi._desired_temp = 22.0
+        pi_entity._pi._hp_setpoint = 22.0
+        pi_entity._pi._outdoor_temp = 5.0
+        pi_entity._pi._stable_oodb_ticks = 0  # already zero
+        pi_entity._pi._room_temp_rate = 0.05  # unstable
+
+        with caplog.at_level(logging.DEBUG):
+            await pi_entity._pi._pi_tick()
+
+        reset_msgs = [r for r in caplog.records if "OODB gate reset" in r.message]
+        assert len(reset_msgs) == 0, (
+            f"Should not log OODB reset when counter was already 0"
+        )

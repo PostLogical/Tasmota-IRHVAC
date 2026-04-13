@@ -67,3 +67,41 @@ class TestDiagnosticsWithEntity:
 
         assert "config_entry" in diag
         assert "entity" in diag
+
+    @pytest.mark.asyncio
+    async def test_diagnostics_batch_state_none_before_run(self, hass, setup_pi_integration):
+        """Batch learning section should be None when no batch has run."""
+        entry = await setup_pi_integration()
+        diag = await async_get_config_entry_diagnostics(hass, entry)
+
+        assert "pi_controller" in diag
+        assert diag["pi_controller"]["batch_learning"] is None
+
+    @pytest.mark.asyncio
+    async def test_diagnostics_observation_buffer_present(self, hass, setup_pi_integration):
+        """Observation buffer stats should appear in diagnostics."""
+        entry = await setup_pi_integration()
+        diag = await async_get_config_entry_diagnostics(hass, entry)
+
+        assert "observation_buffer" in diag["pi_controller"]
+        buf = diag["pi_controller"]["observation_buffer"]
+        assert "total" in buf
+        assert "eligible" in buf
+        assert buf["total"] >= 0
+
+    @pytest.mark.asyncio
+    async def test_diagnostics_performance_fields(self, hass, setup_pi_integration):
+        """Performance metrics should appear in diagnostics."""
+        entry = await setup_pi_integration()
+        diag = await async_get_config_entry_diagnostics(hass, entry)
+
+        pi_diag = diag["pi_controller"]
+        assert "performance" in pi_diag
+        perf = pi_diag["performance"]
+        assert "itae_accumulator" in perf
+        assert "comfort_violation_hours" in perf
+        assert "setpoint_changes" in perf
+
+        assert "ff_confidence" in pi_diag
+        assert "room_temp_rate" in pi_diag
+        assert "tau_estimate" in pi_diag

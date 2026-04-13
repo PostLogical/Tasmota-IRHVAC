@@ -234,9 +234,10 @@ class TestPIControllerGaps:
         await pi._pi_tick()
 
         # FF is based on outdoor temp, not room temp — stays constant
-        # PI integral goes negative to handle the overshoot
+        # One-sided anti-windup: integral may go briefly negative (for
+        # overshoot correction) but is bounded by accelerated decay.
         assert pi._ff_offset > 0  # FF still active
-        assert pi._pi_integral < 0  # Integral compensating for overshoot
+        assert pi._pi_integral > -5.0  # Bounded, not winding to -28
 
     @pytest.mark.asyncio
     async def test_ff_ramp_gradient_cooling(self, hass, setup_pi_integration):

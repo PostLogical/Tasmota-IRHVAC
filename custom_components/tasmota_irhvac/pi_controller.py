@@ -35,7 +35,7 @@ from homeassistant.util.unit_conversion import TemperatureConverter
 
 import math
 
-from .batch_learning import Observation, ObservationBuffer, weighted_least_squares, compare_and_report
+from .batch_learning import BatchResult, Observation, ObservationBuffer, weighted_least_squares, compare_and_report
 
 from .const import (
     ATTR_DESIRED_TEMP,
@@ -534,6 +534,8 @@ class PIController:
         # offline WLS analysis.  Records regardless of learning gate.
         self._observation_buffer = ObservationBuffer()
         self._batch_analysis_timer: Any | None = None
+        self._last_batch_result: BatchResult | None = None
+        self._last_batch_timestamp: float | None = None
 
         # Room temperature rate of change tracking (°C/min)
         self._room_temp_history: list[tuple[float, float]] = []  # [(monotonic_time, temp_c), ...]
@@ -710,6 +712,8 @@ class PIController:
             change_threshold_pct=20.0, min_observations=20,
             log_prefix=self._log_prefix,
         )
+        self._last_batch_result = result
+        self._last_batch_timestamp = time.monotonic()
 
     # ── Hook methods (called by climate entity) ──────────────────────
 
@@ -1808,6 +1812,19 @@ class PIController:
         # confirmed it prevents quantization-driven limit cycles.
         in_deadband = abs_error < self._pi_deadband
         avg_error = (error + self._pi_last_error) / 2.0
+
+        # One-sided actuator anti-windup (Astrom & Hagglund, "Advanced PID
+        # Control" §3.5 — conditional integration): heat-only HP cannot cool,
+        # cool-only cannot heat.  When the integral has wound up significantly
+        # in the direction the actuator cannot act, accelerated decay limits
+        # the windup while still allowing brief overshoot correction.
+        # Threshold: |ki*integral| > deadband in the constrained direction.
+        _ki_integral = self._pi_ki * self._pi_integral
+        integral_wound_against_actuator = (
+            (is_heating and error < 0 and _ki_integral < -self._pi_deadband)
+            or (is_cooling and error > 0 and _ki_integral > self._pi_deadband)
+        )
+
         if in_deadband:
             self._ff_settled_ticks += 1
             # Variable-rate: smooth taper from full rate at deadband edge to 5%
@@ -1815,6 +1832,9 @@ class PIController:
             # accumulation speed near target.
             rate = max(0.05, min(1.0, abs_error / self._pi_deadband))
             self._pi_integral += avg_error * dt_factor * rate
+            # No accelerated decay in deadband — small overshoots are normal
+            # control behavior, not actuator saturation.  The variable-rate
+            # integration (5% floor) already limits accumulation speed.
             # RLS learning gate: require integral settled and room temp stable.
             # The old gate also required rate < 0.2 (error < 10% of deadband),
             # but that starved zones with coarse sensors (1°F) that only briefly
@@ -1836,8 +1856,8 @@ class PIController:
                 and not self._tracking_mode
                 and not self._supplemental_assist_active
             )
-            if not can_learn_rls and self._ff_settled_ticks == 4:
-                # Log why learning was blocked (once, at the gate threshold)
+            if not can_learn_rls and self._ff_settled_ticks >= 4 and self._ff_settled_ticks % 4 == 0:
+                # Log why learning was blocked (every 4th tick ≈ 60min)
                 reasons = []
                 if self._outdoor_temp is None:
                     reasons.append("no outdoor temp")
@@ -1849,6 +1869,10 @@ class PIController:
                     reasons.append(f"room not settled (dT/dt={self._room_temp_rate:.4f} °C/min)")
                 if self._any_model_input_unavailable():
                     reasons.append("model input unavailable")
+                if (is_heating and error < 0) or (is_cooling and error > 0):
+                    reasons.append(
+                        f"actuator no authority ({'heating' if is_heating else 'cooling'}, error={error:.2f})"
+                    )
                 if reasons:
                     _LOGGER.debug("RLS learning blocked: %s", ", ".join(reasons))
             if can_learn_rls:
@@ -1914,10 +1938,6 @@ class PIController:
                 self._hp_setpoint <= self._min_temp_c
                 or self._hp_setpoint >= self._max_temp_c
             )
-            if room_stable and integral_stable and not setpoint_clamped:
-                self._stable_oodb_ticks += 1
-            else:
-                self._stable_oodb_ticks = 0
             # Require more settling at larger errors: the equilibrium offset
             # has bias ~(K_loss/K_hp)×|error| from using current_c instead of
             # desired_c (linear heat-loss approximation).  Longer settling
@@ -1925,6 +1945,23 @@ class PIController:
             # deviations, and naturally reduces the frequency of noisier
             # far-from-target observations.
             min_oodb_ticks = 8 + int(abs_error * 4)  # +4 ticks per °C of error
+            if room_stable and integral_stable and not setpoint_clamped:
+                self._stable_oodb_ticks += 1
+            else:
+                if self._stable_oodb_ticks > 0:
+                    reasons = []
+                    if not room_stable:
+                        reasons.append(f"room not settled (dT/dt={self._room_temp_rate:.4f})")
+                    if not integral_stable:
+                        reasons.append(f"integral not settled (d_integral={integral_change:.2f})")
+                    if setpoint_clamped:
+                        reasons.append("setpoint clamped")
+                    _LOGGER.debug(
+                        "OODB gate reset at %d/%d ticks: %s",
+                        self._stable_oodb_ticks, min_oodb_ticks,
+                        ", ".join(reasons) if reasons else "conditions changed",
+                    )
+                self._stable_oodb_ticks = 0
             if (
                 self._stable_oodb_ticks >= min_oodb_ticks
                 and self._outdoor_temp is not None
@@ -1962,6 +1999,18 @@ class PIController:
             effective_smith = smith_correction if smith_correction * error > 0 else 0.0
             p_term = self._pi_kp * self._pi_setpoint_weight * (error - effective_smith)
             self._pi_integral += avg_error * dt_factor
+            if integral_wound_against_actuator:
+                # Accelerated decay: exponential toward zero limits windup
+                # while still allowing the integral to correct brief
+                # overshoot.  Time constant matches the building's thermal
+                # response (Astrom back-calculation Tt ≈ Ti; tau_estimate
+                # ~60min is same order as Ti = 1/ki ~100min).  Floor at
+                # 10min prevents bumps on recovery if tau is very small.
+                tau_min = max(
+                    self._tau_estimate if self._tau_estimate > 0 else 60.0,
+                    10.0,
+                )
+                self._pi_integral *= math.exp(-(dt_seconds / 60.0) / tau_min)
 
         # Leaky integrator: weak decay bounds integral growth universally.
         # α=0.9999 per nominal tick ≈ 10000-tick time constant (~104 days at

@@ -7,6 +7,7 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
+from .batch_learning import BatchResult
 from .const import DATA_KEY
 from .pi_controller import PIController
 
@@ -88,6 +89,56 @@ async def async_get_config_entry_diagnostics(
                 "manual_suppress_reason": pi._manual_ff_suppress_reason,
             },
         }
+
+        # Batch learning state
+        if pi._last_batch_result is not None:
+            br = pi._last_batch_result
+            batch_names = coeff_names[:len(br.beta_batch)]
+            data["pi_controller"]["batch_learning"] = {
+                "last_run_mono": pi._last_batch_timestamp,
+                "n_total": br.n_total,
+                "n_eligible": br.n_eligible,
+                "residual_rms": round(br.residual_rms, 4),
+                "recommend_update": br.recommend_update,
+                "max_coeff_change_pct": round(br.max_coeff_change_pct, 1),
+                "coefficients": {
+                    batch_names[i]: {
+                        "current": round(br.beta_current[i], 4),
+                        "batch": round(br.beta_batch[i], 4),
+                    }
+                    for i in range(len(batch_names))
+                    if i < len(br.beta_current)
+                },
+                "held_features": [
+                    batch_names[i] for i in br.held_features
+                    if i < len(batch_names)
+                ],
+            }
+        else:
+            data["pi_controller"]["batch_learning"] = None
+
+        # Observation buffer stats
+        obs = pi._observation_buffer.get_all()
+        n_eligible = sum(
+            1 for o in obs
+            if not o.clamped and abs(o.room_rate) < 0.02
+        )
+        data["pi_controller"]["observation_buffer"] = {
+            "total": len(obs),
+            "eligible": n_eligible,
+        }
+
+        # PI performance metrics
+        data["pi_controller"]["performance"] = {
+            "itae_accumulator": round(pi._itae_accumulator, 2),
+            "comfort_violation_hours": round(pi._comfort_violation_hours, 2),
+            "setpoint_changes": pi._setpoint_changes,
+        }
+        data["pi_controller"]["ff_confidence"] = round(pi._ff_confidence, 4)
+        data["pi_controller"]["room_temp_rate"] = round(pi._room_temp_rate, 4)
+        data["pi_controller"]["tau_estimate"] = (
+            round(pi._tau_estimate, 1) if pi._imc_enabled else None
+        )
 
     return data
 
