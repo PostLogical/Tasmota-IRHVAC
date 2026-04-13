@@ -35,7 +35,7 @@ from homeassistant.util.unit_conversion import TemperatureConverter
 
 import math
 
-from .batch_learning import BatchResult, Observation, ObservationBuffer, weighted_least_squares, compare_and_report
+from .batch_learning import BatchResult, Observation, ObservationBuffer, weighted_least_squares, compare_and_report, compute_blended_update
 
 from .const import (
     ATTR_DESIRED_TEMP,
@@ -670,11 +670,12 @@ class PIController:
         )
 
     def _run_batch_analysis(self) -> None:
-        """Run batch WLS analysis on accumulated observations.
+        """Run batch WLS analysis and apply blended updates to RLS.
 
-        Observe-only mode: logs what the batch estimate would recommend
-        but does not modify the RLS model.  Set apply_updates on the
-        compare_and_report call to enable automatic updates (future).
+        Analyzes accumulated near-equilibrium observations via weighted
+        least squares, then applies covariance-weighted Kalman fusion
+        to blend batch estimates with the current online model.  Safety:
+        ±1.0°C step cap per coefficient per 12h cycle.
         """
         e = self._entity
         is_heating = e._attr_hvac_mode == HVACMode.HEAT
@@ -712,6 +713,17 @@ class PIController:
             change_threshold_pct=20.0, min_observations=20,
             log_prefix=self._log_prefix,
         )
+
+        compute_blended_update(result, prior_std=1.0, max_step=1.0)
+        if result.recommend_update and result.beta_blended:
+            for i, val in enumerate(result.beta_blended):
+                if i < rls.n:
+                    rls.beta[i] = val * rls.feature_scales[i]
+            _LOGGER.info(
+                "%sBatch WLS: applied blended update to %s model",
+                self._log_prefix, "heat" if is_heating else "cool",
+            )
+
         self._last_batch_result = result
         self._last_batch_timestamp = time.monotonic()
 
@@ -1825,13 +1837,33 @@ class PIController:
             or (is_cooling and error > 0 and _ki_integral > self._pi_deadband)
         )
 
+        # Conditional integration (Åström & Hägglund, "Advanced PID
+        # Control" §3.5): freeze the integrator when the HP is at the
+        # limit opposite to what its mode can deliver AND the error is
+        # in the direction the actuator can't help.
+        #
+        # Heating at min + room above target: HP can only heat but the
+        # room is already too hot.  Integration is pointless and creates
+        # an integral debt that delays recovery at sunset.
+        #
+        # Heating at min + room BELOW target: HP IS helping (heating a
+        # cold room at its minimum output).  Integration must continue
+        # so the integral can recover and drive the setpoint up.
+        #
+        # Symmetric for cooling mode at max setpoint.
+        skip_integration = (
+            (is_heating and self._hp_setpoint <= self._min_temp_c and error < 0)
+            or (is_cooling and self._hp_setpoint >= self._max_temp_c and error > 0)
+        )
+
         if in_deadband:
             self._ff_settled_ticks += 1
             # Variable-rate: smooth taper from full rate at deadband edge to 5%
             # floor at setpoint. Prevents integral starvation while reducing
             # accumulation speed near target.
             rate = max(0.05, min(1.0, abs_error / self._pi_deadband))
-            self._pi_integral += avg_error * dt_factor * rate
+            if not skip_integration:
+                self._pi_integral += avg_error * dt_factor * rate
             # No accelerated decay in deadband — small overshoots are normal
             # control behavior, not actuator saturation.  The variable-rate
             # integration (5% floor) already limits accumulation speed.
@@ -1998,8 +2030,9 @@ class PIController:
             # Heating + cooling in pipeline → ignore (don't fight recovery). ✓
             effective_smith = smith_correction if smith_correction * error > 0 else 0.0
             p_term = self._pi_kp * self._pi_setpoint_weight * (error - effective_smith)
-            self._pi_integral += avg_error * dt_factor
-            if integral_wound_against_actuator:
+            if not skip_integration:
+                self._pi_integral += avg_error * dt_factor
+            if integral_wound_against_actuator and not skip_integration:
                 # Accelerated decay: exponential toward zero limits windup
                 # while still allowing the integral to correct brief
                 # overshoot.  Time constant matches the building's thermal
@@ -2043,9 +2076,11 @@ class PIController:
         self._last_raw_setpoint = raw_setpoint
         clamped_setpoint = max(self._min_temp_c, min(self._max_temp_c, raw_setpoint))
 
-        # Conditional anti-windup: stop integral from growing in the saturated
-        # direction. Freeze at the value that would produce the clamped output.
-        if clamped_setpoint != raw_setpoint and self._pi_ki != 0:
+        # Back-calculation anti-windup: cap integral at the value that
+        # produces the clamped output.  Skipped when conditional integration
+        # already froze the integrator — the two mechanisms serve the same
+        # purpose and the freeze is the tighter constraint.
+        if clamped_setpoint != raw_setpoint and self._pi_ki != 0 and not skip_integration:
             if raw_setpoint > clamped_setpoint and self._pi_integral > 0:
                 max_i = (clamped_setpoint - desired_c - p_term - self._ff_offset) / self._pi_ki
                 self._pi_integral = min(self._pi_integral, max_i)

@@ -3333,6 +3333,227 @@ class TestOneSidedAntiWindup:
         )
 
 
+class TestConditionalIntegration:
+    """Tests for conditional integration on output saturation (Åström §3.5)."""
+
+    @pytest.mark.asyncio
+    async def test_solar_gain_cycle_integral_frozen_then_recovers(self):
+        """Full solar gain cycle: HP at min (frozen) → above min (integrates) → min again → sunset recovery."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        entity._attr_hvac_mode = HVACMode.HEAT
+        # Start with integral at -40 so HP stays clamped at min
+        pi._pi_integral = -40.0
+        pi._hp_setpoint = 16
+        entity._attr_current_temperature = 24.0  # room well above target
+
+        # Phase 1: HP at min, room above target — integral should freeze
+        integral_phase1_start = pi._pi_integral
+        for i in range(4):
+            pi._pi_last_tick_time = float(i * 900)
+            with patch("time.monotonic", return_value=float((i + 1) * 900)):
+                await pi._pi_tick()
+        integral_phase1_end = pi._pi_integral
+
+        assert integral_phase1_end > integral_phase1_start - 0.1, (
+            f"Phase 1: integral should be frozen at min, got {integral_phase1_end}"
+        )
+
+        # Phase 2: Room cools slightly, HP rises above min — integration resumes
+        entity._attr_current_temperature = 21.5  # error = -0.5, still above target
+        pi._pi_integral = -3.0  # simulate partial recovery
+        pi._hp_setpoint = 20  # NOT at min anymore
+        integral_phase2_start = pi._pi_integral
+        for i in range(4, 8):
+            pi._pi_last_tick_time = float(i * 900)
+            with patch("time.monotonic", return_value=float((i + 1) * 900)):
+                await pi._pi_tick()
+        integral_phase2_end = pi._pi_integral
+
+        # HP not at min → should integrate normally (more negative, error < 0)
+        assert integral_phase2_end < integral_phase2_start, (
+            f"Phase 2: should integrate normally when HP above min, got {integral_phase2_end}"
+        )
+
+        # Phase 3: Solar intensifies again, HP back to min — freeze again
+        entity._attr_current_temperature = 25.0  # room way above target
+        pi._pi_integral = -40.0
+        pi._hp_setpoint = 16
+        integral_phase3_start = pi._pi_integral
+        for i in range(8, 12):
+            pi._pi_last_tick_time = float(i * 900)
+            with patch("time.monotonic", return_value=float((i + 1) * 900)):
+                await pi._pi_tick()
+        integral_phase3_end = pi._pi_integral
+
+        assert integral_phase3_end > integral_phase3_start - 0.1, (
+            f"Phase 3: integral should freeze again at min, got {integral_phase3_end}"
+        )
+
+        # Phase 4: Sunset — room drops below target, HP still at min but
+        # error is now positive → skip_integration does NOT fire (error
+        # helps recovery), normal integration resumes
+        entity._attr_current_temperature = 20.0  # error = +1.0
+        pi._pi_integral = -5.0  # still wound from solar
+        pi._hp_setpoint = 16  # HP at min but error positive
+        integral_phase4_start = pi._pi_integral
+        for i in range(12, 16):
+            pi._pi_last_tick_time = float(i * 900)
+            with patch("time.monotonic", return_value=float((i + 1) * 900)):
+                await pi._pi_tick()
+        integral_phase4_end = pi._pi_integral
+
+        # Error is positive (room below target) → skip_integration is FALSE
+        # (heating at min but error > 0 — HP IS helping, room needs heat).
+        # Integration resumes, integral grows toward zero.
+        assert integral_phase4_end > integral_phase4_start, (
+            f"Phase 4: integral should recover (positive integration) when error > 0, got {integral_phase4_end}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_hp_at_max_heating_keeps_integrating(self):
+        """HP at max in heating mode → HP IS controlling, keep integrating."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 30  # At maximum — but HP is actively heating
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 17.0  # error = +4.0 (cold start)
+        pi._pi_integral = 2.0
+
+        integral_before = pi._pi_integral
+        await pi._pi_tick()
+
+        # HP at max in heating = actively controlling at full power
+        # Integral should keep growing (NOT frozen)
+        assert pi._pi_integral > integral_before, (
+            f"Integral should keep growing at max in heating, got {pi._pi_integral}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_hp_not_at_limit_integrates_normally(self):
+        """HP not at physical limit → normal integration."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 22  # NOT at limit
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 19.0  # error = +2.0
+        pi._pi_integral = 1.0
+
+        await pi._pi_tick()
+
+        # Normal integration should grow the integral
+        assert pi._pi_integral > 1.0, (
+            f"Integral should grow normally when not saturated, got {pi._pi_integral}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_hp_at_min_but_error_positive_integrates(self):
+        """HP at min but error is positive (recovery) → integration continues."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 16  # At minimum
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 19.0  # error = +2.0, room BELOW target
+        pi._pi_integral = -3.0
+
+        integral_before = pi._pi_integral
+        await pi._pi_tick()
+
+        # Error is positive (room below target) — integration helps recovery
+        # skip_integration should NOT fire
+        assert pi._pi_integral > integral_before, (
+            f"Should integrate when error helps recovery, got {pi._pi_integral}"
+        )
+
+
+class TestBatchWLSApply:
+    """Tests for batch WLS apply integration in _run_batch_analysis."""
+
+    @pytest.mark.asyncio
+    async def test_batch_apply_updates_rls_betas(self):
+        """When batch recommends update, RLS betas should change."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        entity._attr_hvac_mode = HVACMode.HEAT
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 21.0
+        rls = pi._rls_heat
+
+        # Seed the observation buffer with enough eligible data
+        import time as time_mod
+        from custom_components.tasmota_irhvac.batch_learning import Observation
+        now = time_mod.monotonic()
+        for i in range(30):
+            obs = Observation(
+                timestamp=now + i * 900,
+                features=[1.0, float(i % 5 - 2)],  # intercept + varying outdoor_delta
+                hp_setpoint=22.0,
+                current_c=21.0 + (i % 3) * 0.1,
+                desired_c=21.0,
+                room_rate=0.001,  # stable
+                clamped=False,
+            )
+            pi._observation_buffer.add(obs)
+
+        beta_before = list(rls.beta)
+        pi._run_batch_analysis()
+
+        # If batch recommended update, betas should have changed
+        if pi._last_batch_result and pi._last_batch_result.recommend_update:
+            beta_after = list(rls.beta)
+            assert beta_after != beta_before, (
+                "RLS betas should change when batch recommends update"
+            )
+
+    @pytest.mark.asyncio
+    async def test_batch_apply_respects_step_cap(self):
+        """Batch apply should not move any coefficient more than max_step."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        entity._attr_hvac_mode = HVACMode.HEAT
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 21.0
+        rls = pi._rls_heat
+
+        beta_phys_before = rls.get_coefficients()
+
+        # Seed with biased data that would suggest large coefficient changes
+        import time as time_mod
+        from custom_components.tasmota_irhvac.batch_learning import Observation
+        now = time_mod.monotonic()
+        for i in range(40):
+            obs = Observation(
+                timestamp=now + i * 900,
+                features=[1.0, float(i % 8 - 4)],
+                hp_setpoint=25.0,  # biased high
+                current_c=21.0,
+                desired_c=21.0,
+                room_rate=0.005,
+                clamped=False,
+            )
+            pi._observation_buffer.add(obs)
+
+        pi._run_batch_analysis()
+
+        beta_phys_after = rls.get_coefficients()
+        max_step = 1.0
+        for idx in range(rls.n):
+            delta = abs(beta_phys_after[idx] - beta_phys_before[idx])
+            assert delta <= max_step + 1e-6, (
+                f"Coefficient {idx} moved {delta:.4f}, exceeds step cap {max_step}"
+            )
+
+
 class TestGateLogging:
     """Tests for RLS gate decision logging."""
 
