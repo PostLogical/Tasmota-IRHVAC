@@ -561,6 +561,14 @@ class PIController:
         # Conditional integration freeze: track state for edge-triggered logging.
         self._integration_frozen: bool = False
 
+        # Drift detection: per-coefficient history of batch correction signs.
+        # Each entry is +1 (batch pushed up), -1 (batch pushed down), or 0.
+        # Tracked across batch cycles to detect persistent same-direction
+        # corrections that indicate a physical change.
+        self._drift_correction_signs: list[list[int]] = []
+        # Number of consecutive same-direction corrections to trigger alert.
+        self._drift_threshold: int = 5
+
         # Batch learning: diversity-aware buffer of every tick's state for
         # periodic offline WLS analysis.  Records regardless of learning gate.
         # n_features = intercept + outdoor_delta + model_inputs
@@ -766,6 +774,55 @@ class PIController:
         self._last_batch_result = result
         self._last_batch_timestamp = time.monotonic()
         self._batch_model_rms = result.residual_rms
+
+        # ── Drift detection: track per-coefficient correction direction ──
+        if result.beta_blended and result.beta_current:
+            n = min(len(result.beta_blended), len(result.beta_current))
+            signs = []
+            for i in range(n):
+                delta = result.beta_blended[i] - result.beta_current[i]
+                if abs(delta) < 1e-4:
+                    signs.append(0)
+                elif delta > 0:
+                    signs.append(1)
+                else:
+                    signs.append(-1)
+            # Initialize history on first cycle
+            if not self._drift_correction_signs:
+                self._drift_correction_signs = [[] for _ in range(n)]
+            # Extend history if model grew (new input added)
+            while len(self._drift_correction_signs) < n:
+                self._drift_correction_signs.append([])
+            for i in range(n):
+                self._drift_correction_signs[i].append(signs[i])
+                # Keep only the last 10 cycles (5 days) of history
+                if len(self._drift_correction_signs[i]) > 10:
+                    self._drift_correction_signs[i].pop(0)
+
+    def get_drifting_coefficients(self) -> list[tuple[int, str, int]]:
+        """Return coefficients with persistent same-direction correction.
+
+        Returns list of (index, direction_label, consecutive_count) for
+        coefficients that have been corrected in the same direction for
+        >= drift_threshold consecutive cycles.
+        """
+        drifting = []
+        coeff_names = ["intercept", "outdoor_delta"]
+        for m in self._model_inputs:
+            coeff_names.append(m.get("name", "input"))
+
+        for i, history in enumerate(self._drift_correction_signs):
+            if len(history) < self._drift_threshold:
+                continue
+            # Check the most recent drift_threshold entries
+            recent = history[-self._drift_threshold:]
+            if all(s == 1 for s in recent):
+                name = coeff_names[i] if i < len(coeff_names) else f"β{i}"
+                drifting.append((i, name, len([s for s in history if s == recent[0]])))
+            elif all(s == -1 for s in recent):
+                name = coeff_names[i] if i < len(coeff_names) else f"β{i}"
+                drifting.append((i, name, len([s for s in history if s == recent[0]])))
+        return drifting
 
     # ── Hook methods (called by climate entity) ──────────────────────
 
@@ -1185,6 +1242,18 @@ class PIController:
                     f"{drift_pct:.0f}% from seed {expected_slope:.4f}"
                 )
                 reasons.append("slope_drift")
+
+        # Check 5: Persistent same-direction batch correction (model drift)
+        drifting = self.get_drifting_coefficients()
+        if drifting:
+            if severity != "Critical":
+                severity = "Warning"
+            for _idx, name, count in drifting:
+                alerts.append(
+                    f"Batch consistently correcting {name} in same direction "
+                    f"({count} cycles) — possible physical change"
+                )
+            reasons.append("model_drift")
 
         return {
             "state": severity,

@@ -3997,3 +3997,171 @@ class TestStoredDataNewFields:
         assert pi._controllable_cvh == pytest.approx(2.0)
         assert pi._uncontrollable_cvh == pytest.approx(4.0)
         assert pi._ff_load_fraction == pytest.approx(0.65)
+
+
+class TestDriftDetection:
+    """Tests for persistent same-direction batch correction detection."""
+
+    def test_no_drift_with_empty_history(self):
+        """No drift alert when no batch cycles have run."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        assert pi.get_drifting_coefficients() == []
+        status = pi.get_health_status()
+        assert "model_drift" not in status["reasons"]
+
+    def test_no_drift_with_insufficient_cycles(self):
+        """No drift alert before threshold cycles."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        # Simulate 3 cycles of same-direction correction (below threshold of 5)
+        pi._drift_correction_signs = [[1, 1, 1], [0, 0, -1]]
+
+        assert pi.get_drifting_coefficients() == []
+
+    def test_drift_detected_after_threshold(self):
+        """Drift detected after 5 consecutive same-direction corrections."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        # Coefficient 0 (intercept) corrected downward 5 times
+        # Coefficient 1 (outdoor_delta) mixed — no drift
+        pi._drift_correction_signs = [
+            [-1, -1, -1, -1, -1],
+            [1, -1, 1, -1, 1],
+        ]
+
+        drifting = pi.get_drifting_coefficients()
+        assert len(drifting) == 1
+        assert drifting[0][0] == 0  # index
+        assert drifting[0][1] == "intercept"  # name
+
+    def test_drift_surfaces_in_health_sensor(self):
+        """Drift alert appears in health sensor output."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        entity._attr_hvac_mode = HVACMode.HEAT
+        pi._drift_correction_signs = [
+            [-1, -1, -1, -1, -1],  # intercept drifting
+            [0, 0, 0, 0, 0],       # outdoor_delta stable
+        ]
+
+        status = pi.get_health_status()
+        assert "model_drift" in status["reasons"]
+        assert any("intercept" in a for a in status["alerts"])
+        assert status["state"] == "Warning"
+
+    def test_no_drift_with_zeros(self):
+        """Zero corrections (no change) don't trigger drift."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._drift_correction_signs = [
+            [0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0],
+        ]
+
+        assert pi.get_drifting_coefficients() == []
+
+    def test_drift_clears_when_direction_changes(self):
+        """Drift clears when correction direction reverses."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        # 5 downward, then 1 upward — no longer 5 consecutive
+        pi._drift_correction_signs = [
+            [-1, -1, -1, -1, -1, 1],
+        ]
+
+        drifting = pi.get_drifting_coefficients()
+        assert len(drifting) == 0
+
+    def test_multiple_coefficients_can_drift(self):
+        """Multiple coefficients can drift simultaneously."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._drift_correction_signs = [
+            [-1, -1, -1, -1, -1],  # intercept down
+            [1, 1, 1, 1, 1],       # outdoor_delta up
+        ]
+
+        drifting = pi.get_drifting_coefficients()
+        assert len(drifting) == 2
+        indices = {d[0] for d in drifting}
+        assert indices == {0, 1}
+
+    def test_drift_history_from_batch_analysis(self):
+        """_run_batch_analysis populates drift history."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        entity._attr_hvac_mode = HVACMode.HEAT
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 21.0
+
+        import time as time_mod
+        from custom_components.tasmota_irhvac.batch_learning import Observation
+        now = time_mod.monotonic()
+        for i in range(30):
+            obs = Observation(
+                timestamp=now + i * 900,
+                features=[1.0, float(i % 5 - 2)],
+                hp_setpoint=22.0,
+                current_c=21.0 + (i % 3) * 0.1,
+                desired_c=21.0,
+                room_rate=0.001,
+                clamped=False,
+            )
+            pi._observation_buffer.add(obs)
+
+        pi._run_batch_analysis()
+
+        assert len(pi._drift_correction_signs) > 0, (
+            "Batch analysis should populate drift history"
+        )
+        # Each coefficient should have exactly 1 entry after 1 cycle
+        for signs in pi._drift_correction_signs:
+            assert len(signs) == 1
+
+    def test_drift_history_truncated_at_10(self):
+        """History is capped at 10 cycles per coefficient."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        entity._attr_hvac_mode = HVACMode.HEAT
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 21.0
+
+        # Pre-fill with 10 entries (the cap)
+        pi._drift_correction_signs = [
+            [1] * 10,
+            [-1] * 10,
+        ]
+
+        import time as time_mod
+        from custom_components.tasmota_irhvac.batch_learning import Observation
+        now = time_mod.monotonic()
+        for i in range(30):
+            obs = Observation(
+                timestamp=now + i * 900,
+                features=[1.0, float(i % 5 - 2)],
+                hp_setpoint=22.0,
+                current_c=21.0 + (i % 3) * 0.1,
+                desired_c=21.0,
+                room_rate=0.001,
+                clamped=False,
+            )
+            pi._observation_buffer.add(obs)
+
+        # Run a batch cycle — should append and truncate
+        pi._run_batch_analysis()
+
+        for signs in pi._drift_correction_signs:
+            assert len(signs) <= 10, (
+                f"History should be capped at 10, got {len(signs)}"
+            )
