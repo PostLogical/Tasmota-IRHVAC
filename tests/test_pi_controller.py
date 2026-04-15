@@ -3623,3 +3623,377 @@ class TestGateLogging:
         assert len(reset_msgs) == 0, (
             f"Should not log OODB reset when counter was already 0"
         )
+
+
+class TestControllableUncontrollableMetrics:
+    """Tests for controllable/uncontrollable ITAE and CVH split."""
+
+    @pytest.mark.asyncio
+    async def test_uncontrollable_itae_accumulates_at_min_setpoint(self):
+        """Error while HP is clamped at min and room above target → uncontrollable."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = pi._min_temp_c  # At minimum
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 24.0  # 3°C above target → error < 0
+        pi._pi_integral = -50.0  # deep enough to keep HP clamped at min
+
+        # Reset counters
+        pi._controllable_itae = 0.0
+        pi._uncontrollable_itae = 0.0
+        pi._itae_tick_count = 0
+
+        for i in range(4):
+            pi._pi_last_tick_time = float(i * 900)
+            with patch("time.monotonic", return_value=float((i + 1) * 900)):
+                await pi._pi_tick()
+
+        assert pi._uncontrollable_itae > 0, "Should accumulate uncontrollable ITAE"
+        assert pi._controllable_itae == 0.0, "Should NOT accumulate controllable ITAE"
+
+    @pytest.mark.asyncio
+    async def test_controllable_itae_accumulates_above_min_setpoint(self):
+        """Error while HP has headroom → controllable."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 22.0  # NOT at minimum
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 24.0  # above target
+        pi._pi_integral = -2.0
+
+        pi._controllable_itae = 0.0
+        pi._uncontrollable_itae = 0.0
+        pi._itae_tick_count = 0
+
+        for i in range(4):
+            pi._pi_last_tick_time = float(i * 900)
+            with patch("time.monotonic", return_value=float((i + 1) * 900)):
+                await pi._pi_tick()
+
+        assert pi._controllable_itae > 0, "Should accumulate controllable ITAE"
+        assert pi._uncontrollable_itae == 0.0, "Should NOT accumulate uncontrollable ITAE"
+
+    @pytest.mark.asyncio
+    async def test_uncontrollable_cvh_at_min_above_threshold(self):
+        """CVH accumulates as uncontrollable when at min and room well above target."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = pi._min_temp_c
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 23.0  # 2°C above → abs_error > 1.0
+        pi._pi_integral = -50.0
+
+        pi._controllable_cvh = 0.0
+        pi._uncontrollable_cvh = 0.0
+
+        for i in range(4):
+            pi._pi_last_tick_time = float(i * 900)
+            with patch("time.monotonic", return_value=float((i + 1) * 900)):
+                await pi._pi_tick()
+
+        assert pi._uncontrollable_cvh > 0, "Should accumulate uncontrollable CVH"
+        assert pi._controllable_cvh == 0.0, "Should NOT accumulate controllable CVH"
+
+    @pytest.mark.asyncio
+    async def test_controllable_cvh_when_hp_has_headroom(self):
+        """CVH controllable when HP not at limit."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 22.0
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 23.0  # 2°C above
+        pi._pi_integral = -2.0
+
+        pi._controllable_cvh = 0.0
+        pi._uncontrollable_cvh = 0.0
+
+        for i in range(4):
+            pi._pi_last_tick_time = float(i * 900)
+            with patch("time.monotonic", return_value=float((i + 1) * 900)):
+                await pi._pi_tick()
+
+        assert pi._controllable_cvh > 0, "Should accumulate controllable CVH"
+        assert pi._uncontrollable_cvh == 0.0, "Should NOT accumulate uncontrollable CVH"
+
+    @pytest.mark.asyncio
+    async def test_total_itae_equals_sum_of_split(self):
+        """Total ITAE should equal controllable + uncontrollable."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 24.0  # above target
+        pi._pi_integral = -10.0
+
+        pi._itae_accumulator = 0.0
+        pi._controllable_itae = 0.0
+        pi._uncontrollable_itae = 0.0
+        pi._itae_tick_count = 0
+
+        # Phase 1: at min (uncontrollable)
+        pi._hp_setpoint = pi._min_temp_c
+        pi._pi_integral = -50.0  # deep enough to stay clamped at min
+        for i in range(3):
+            pi._pi_last_tick_time = float(i * 900)
+            with patch("time.monotonic", return_value=float((i + 1) * 900)):
+                await pi._pi_tick()
+
+        # Phase 2: above min (controllable)
+        pi._hp_setpoint = 22.0
+        pi._pi_integral = -2.0
+        for i in range(3, 6):
+            pi._pi_last_tick_time = float(i * 900)
+            with patch("time.monotonic", return_value=float((i + 1) * 900)):
+                await pi._pi_tick()
+
+        total = pi._itae_accumulator
+        split_sum = pi._controllable_itae + pi._uncontrollable_itae
+        assert abs(total - split_sum) < 0.1, (
+            f"Total ITAE {total:.2f} != controllable {pi._controllable_itae:.2f} "
+            f"+ uncontrollable {pi._uncontrollable_itae:.2f} = {split_sum:.2f}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_at_min_room_below_target_is_controllable(self):
+        """HP at min but room BELOW target → HP is helping → controllable."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = pi._min_temp_c
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 19.0  # BELOW target → error > 0
+        pi._pi_integral = -3.0
+
+        pi._controllable_itae = 0.0
+        pi._uncontrollable_itae = 0.0
+        pi._itae_tick_count = 0
+
+        for i in range(4):
+            pi._pi_last_tick_time = float(i * 900)
+            with patch("time.monotonic", return_value=float((i + 1) * 900)):
+                await pi._pi_tick()
+
+        assert pi._controllable_itae > 0, "HP helping cold room is controllable"
+        assert pi._uncontrollable_itae == 0.0, "Not uncontrollable when HP helps"
+
+
+class TestFFLoadFraction:
+    """Tests for FF load fraction metric."""
+
+    def test_ff_load_fraction_trends_up_with_large_ff(self):
+        """When FF offset dominates integral, load fraction trends toward 1."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._ff_load_fraction = 0.3  # start low
+
+        # Simulate the EMA update directly (same formula as in _pi_tick)
+        for _ in range(100):
+            ff_mag = 5.0   # large FF
+            i_correction = 0.5 * pi._pi_ki  # small integral contribution
+            total = ff_mag + i_correction
+            if total > 0.1:
+                instant = ff_mag / total
+                pi._ff_load_fraction += 0.01 * (instant - pi._ff_load_fraction)
+
+        # EMA with alpha=0.01 over 100 ticks reaches ~63% of target.
+        # Starting at 0.3 trending toward ~0.985: expect > 0.7
+        assert pi._ff_load_fraction > 0.7, (
+            f"FF load fraction should trend up from 0.3, got {pi._ff_load_fraction}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_ff_load_fraction_bounded_0_1(self):
+        """Load fraction stays in [0, 1]."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 20.0
+        pi._ff_load_fraction = 0.5
+
+        for i in range(10):
+            pi._pi_last_tick_time = float(i * 900)
+            with patch("time.monotonic", return_value=float((i + 1) * 900)):
+                await pi._pi_tick()
+
+        assert 0.0 <= pi._ff_load_fraction <= 1.0, (
+            f"FF load fraction out of bounds: {pi._ff_load_fraction}"
+        )
+
+
+class TestBatchModelRMS:
+    """Tests for batch model RMS sensor."""
+
+    @pytest.mark.asyncio
+    async def test_batch_rms_updated_after_analysis(self):
+        """_batch_model_rms should be set after _run_batch_analysis."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        entity._attr_hvac_mode = HVACMode.HEAT
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 21.0
+
+        assert pi._batch_model_rms is None
+
+        # Seed observation buffer
+        import time as time_mod
+        from custom_components.tasmota_irhvac.batch_learning import Observation
+        now = time_mod.monotonic()
+        for i in range(30):
+            obs = Observation(
+                timestamp=now + i * 900,
+                features=[1.0, float(i % 5 - 2)],
+                hp_setpoint=22.0,
+                current_c=21.0 + (i % 3) * 0.1,
+                desired_c=21.0,
+                room_rate=0.001,
+                clamped=False,
+            )
+            pi._observation_buffer.add(obs)
+
+        pi._run_batch_analysis()
+
+        if pi._last_batch_result is not None:
+            assert pi._batch_model_rms is not None
+            assert pi._batch_model_rms >= 0.0
+
+
+class TestConditionalIntegrationLogging:
+    """Tests for edge-triggered integration freeze logging."""
+
+    @pytest.mark.asyncio
+    async def test_freeze_logs_on_entry(self, caplog):
+        """Should log when integration transitions to frozen."""
+        import logging
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = pi._min_temp_c
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 24.0  # error < 0, at min
+        pi._pi_integral = -10.0
+        pi._integration_frozen = False
+
+        with caplog.at_level(logging.DEBUG):
+            await pi._pi_tick()
+
+        freeze_msgs = [r for r in caplog.records if "Integration frozen" in r.message]
+        assert len(freeze_msgs) >= 1, "Should log on freeze entry"
+
+    @pytest.mark.asyncio
+    async def test_unfreeze_logs_on_exit(self, caplog):
+        """Should log when integration transitions out of frozen."""
+        import logging
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 22.0  # NOT at min
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 24.0
+        pi._pi_integral = -2.0
+        pi._integration_frozen = True  # was frozen
+
+        with caplog.at_level(logging.DEBUG):
+            await pi._pi_tick()
+
+        unfreeze_msgs = [r for r in caplog.records if "Integration unfrozen" in r.message]
+        assert len(unfreeze_msgs) >= 1, "Should log on unfreeze"
+
+    @pytest.mark.asyncio
+    async def test_no_log_when_state_unchanged(self, caplog):
+        """No log when freeze state doesn't change."""
+        import logging
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 22.0  # NOT at min
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 24.0
+        pi._pi_integral = -2.0
+        pi._integration_frozen = False  # already not frozen
+
+        with caplog.at_level(logging.DEBUG):
+            await pi._pi_tick()
+
+        freeze_msgs = [r for r in caplog.records
+                       if "Integration frozen" in r.message or "Integration unfrozen" in r.message]
+        assert len(freeze_msgs) == 0, "No log when state unchanged"
+
+
+class TestStoredDataNewFields:
+    """Tests for persistence of new metric fields."""
+
+    def test_from_dict_new_fields_default_on_legacy(self):
+        """Legacy stored data without new fields gets sensible defaults."""
+        raw = {
+            "pi_integral": 1.0,
+            "desired_temp": 22.0,
+            "hp_setpoint": 22.0,
+        }
+        data = PIExtraStoredData.from_dict(raw)
+        assert data is not None
+        assert data.controllable_itae == 0.0
+        assert data.uncontrollable_itae == 0.0
+        assert data.controllable_cvh == 0.0
+        assert data.uncontrollable_cvh == 0.0
+        assert data.ff_load_fraction == 0.5
+
+    def test_round_trip_preserves_new_fields(self):
+        """as_dict → from_dict round-trip preserves all new fields."""
+        data = PIExtraStoredData(
+            pi_integral=1.0,
+            desired_temp=22.0,
+            hp_setpoint=22.0,
+            controllable_itae=100.5,
+            uncontrollable_itae=200.3,
+            controllable_cvh=1.5,
+            uncontrollable_cvh=3.2,
+            ff_load_fraction=0.72,
+        )
+        restored = PIExtraStoredData.from_dict(data.as_dict())
+        assert restored is not None
+        assert restored.controllable_itae == pytest.approx(100.5)
+        assert restored.uncontrollable_itae == pytest.approx(200.3)
+        assert restored.controllable_cvh == pytest.approx(1.5)
+        assert restored.uncontrollable_cvh == pytest.approx(3.2)
+        assert restored.ff_load_fraction == pytest.approx(0.72)
+
+    def test_restore_applies_new_fields_to_controller(self):
+        """restore_extra_stored_data loads new fields into PI controller."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        data = PIExtraStoredData(
+            pi_integral=1.0,
+            desired_temp=22.0,
+            hp_setpoint=22.0,
+            controllable_itae=50.0,
+            uncontrollable_itae=75.0,
+            controllable_cvh=2.0,
+            uncontrollable_cvh=4.0,
+            ff_load_fraction=0.65,
+        )
+        pi.restore_extra_stored_data(data)
+
+        assert pi._controllable_itae == pytest.approx(50.0)
+        assert pi._uncontrollable_itae == pytest.approx(75.0)
+        assert pi._controllable_cvh == pytest.approx(2.0)
+        assert pi._uncontrollable_cvh == pytest.approx(4.0)
+        assert pi._ff_load_fraction == pytest.approx(0.65)

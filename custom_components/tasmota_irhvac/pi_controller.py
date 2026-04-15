@@ -105,6 +105,11 @@ class PIExtraStoredData(ExtraStoredData):
     itae_accumulator: float = 0.0
     comfort_violation_hours: float = 0.0
     setpoint_changes: int = 0
+    controllable_itae: float = 0.0
+    uncontrollable_itae: float = 0.0
+    controllable_cvh: float = 0.0
+    uncontrollable_cvh: float = 0.0
+    ff_load_fraction: float = 0.5
     rls_heat_model: dict = dataclasses.field(default_factory=dict)
     rls_cool_model: dict = dataclasses.field(default_factory=dict)
     lag_filter_states: dict = dataclasses.field(default_factory=dict)
@@ -124,6 +129,11 @@ class PIExtraStoredData(ExtraStoredData):
             "itae_accumulator": self.itae_accumulator,
             "comfort_violation_hours": self.comfort_violation_hours,
             "setpoint_changes": self.setpoint_changes,
+            "controllable_itae": self.controllable_itae,
+            "uncontrollable_itae": self.uncontrollable_itae,
+            "controllable_cvh": self.controllable_cvh,
+            "uncontrollable_cvh": self.uncontrollable_cvh,
+            "ff_load_fraction": self.ff_load_fraction,
             "rls_heat_model": self.rls_heat_model,
             "rls_cool_model": self.rls_cool_model,
             "lag_filter_states": self.lag_filter_states,
@@ -150,6 +160,11 @@ class PIExtraStoredData(ExtraStoredData):
                 itae_accumulator=float(restored.get("itae_accumulator", 0.0)),
                 comfort_violation_hours=float(restored.get("comfort_violation_hours", 0.0)),
                 setpoint_changes=int(restored.get("setpoint_changes", 0)),
+                controllable_itae=float(restored.get("controllable_itae", 0.0)),
+                uncontrollable_itae=float(restored.get("uncontrollable_itae", 0.0)),
+                controllable_cvh=float(restored.get("controllable_cvh", 0.0)),
+                uncontrollable_cvh=float(restored.get("uncontrollable_cvh", 0.0)),
+                ff_load_fraction=float(restored.get("ff_load_fraction", 0.5)),
                 rls_heat_model=restored.get("rls_heat_model", {}),
                 rls_cool_model=restored.get("rls_cool_model", {}),
                 lag_filter_states=restored.get("lag_filter_states", {}),
@@ -518,6 +533,12 @@ class PIController:
         self._itae_tick_count: int = 0         # ticks since last reset
         self._comfort_violation_hours: float = 0.0  # hours spent >1°C from setpoint
         self._setpoint_changes: int = 0  # total setpoint change count
+        # Controllable/uncontrollable split: only accumulate "controllable"
+        # when HP has headroom (not clamped at min/max for the error direction).
+        self._controllable_itae: float = 0.0
+        self._uncontrollable_itae: float = 0.0
+        self._controllable_cvh: float = 0.0
+        self._uncontrollable_cvh: float = 0.0
 
         # RLS learning gate: track integral stability
         self._prev_integral_for_rls: float = 0.0
@@ -529,6 +550,16 @@ class PIController:
         # FF confidence (EMA-smoothed to prevent limit cycling from
         # tick-to-tick confidence changes near integer setpoint boundaries)
         self._ff_confidence: float = 1.0
+
+        # FF load fraction: EMA of |ff_offset| / (|ff_offset| + |ki*integral|).
+        # Trends toward 1.0 as the model takes load off the integral.
+        self._ff_load_fraction: float = 0.5
+
+        # Batch model RMS: last residual_rms from batch WLS analysis.
+        self._batch_model_rms: float | None = None
+
+        # Conditional integration freeze: track state for edge-triggered logging.
+        self._integration_frozen: bool = False
 
         # Batch learning: ring buffer of every tick's state for periodic
         # offline WLS analysis.  Records regardless of learning gate.
@@ -726,6 +757,7 @@ class PIController:
 
         self._last_batch_result = result
         self._last_batch_timestamp = time.monotonic()
+        self._batch_model_rms = result.residual_rms
 
     # ── Hook methods (called by climate entity) ──────────────────────
 
@@ -744,6 +776,11 @@ class PIController:
             itae_accumulator=self._itae_accumulator,
             comfort_violation_hours=self._comfort_violation_hours,
             setpoint_changes=self._setpoint_changes,
+            controllable_itae=self._controllable_itae,
+            uncontrollable_itae=self._uncontrollable_itae,
+            controllable_cvh=self._controllable_cvh,
+            uncontrollable_cvh=self._uncontrollable_cvh,
+            ff_load_fraction=self._ff_load_fraction,
             rls_heat_model=self._rls_heat.as_dict(),
             rls_cool_model=self._rls_cool.as_dict(),
             lag_filter_states=lag_states,
@@ -775,6 +812,11 @@ class PIController:
         self._itae_accumulator = data.itae_accumulator
         self._comfort_violation_hours = data.comfort_violation_hours
         self._setpoint_changes = data.setpoint_changes
+        self._controllable_itae = data.controllable_itae
+        self._uncontrollable_itae = data.uncontrollable_itae
+        self._controllable_cvh = data.controllable_cvh
+        self._uncontrollable_cvh = data.uncontrollable_cvh
+        self._ff_load_fraction = data.ff_load_fraction
         # Restore RLS models if available. Pass seed_coefficients so that
         # if model inputs changed (different vector length), new inputs get
         # seeded instead of zeroed.
@@ -1856,6 +1898,22 @@ class PIController:
             or (is_cooling and self._hp_setpoint >= self._max_temp_c and error > 0)
         )
 
+        # Log transitions into/out of conditional integration freeze.
+        if skip_integration and not self._integration_frozen:
+            _LOGGER.debug(
+                "%sIntegration frozen: %s at %s limit, error=%.2f°C",
+                self._log_prefix,
+                "heating" if is_heating else "cooling",
+                "min" if is_heating else "max",
+                error,
+            )
+        elif not skip_integration and self._integration_frozen:
+            _LOGGER.debug(
+                "%sIntegration unfrozen: error=%.2f°C, setpoint=%.1f°C",
+                self._log_prefix, error, self._hp_setpoint,
+            )
+        self._integration_frozen = skip_integration
+
         if in_deadband:
             self._ff_settled_ticks += 1
             # Variable-rate: smooth taper from full rate at deadband edge to 5%
@@ -2069,6 +2127,33 @@ class PIController:
             self._itae_accumulator += self._itae_tick_count * effective_error
             if abs_error > 1.0:
                 self._comfort_violation_hours += dt_seconds / 3600.0
+
+            # Controllable/uncontrollable split: "uncontrollable" when the HP
+            # is clamped at its limit in the direction that would help.
+            # Heating + room above target + at min → can't cool further.
+            # Cooling + room below target + at max → can't heat further.
+            saturated_wrong_end = (
+                (is_heating and error < 0 and self._hp_setpoint <= self._min_temp_c)
+                or (is_cooling and error > 0 and self._hp_setpoint >= self._max_temp_c)
+            )
+            itae_increment = self._itae_tick_count * effective_error
+            if saturated_wrong_end:
+                self._uncontrollable_itae += itae_increment
+                if abs_error > 1.0:
+                    self._uncontrollable_cvh += dt_seconds / 3600.0
+            else:
+                self._controllable_itae += itae_increment
+                if abs_error > 1.0:
+                    self._controllable_cvh += dt_seconds / 3600.0
+
+        # FF load fraction: how much of the control effort comes from the
+        # feedforward model vs the integral.  EMA ~24h (alpha ≈ 0.01).
+        i_correction = abs(self._pi_ki * self._pi_integral)
+        ff_mag = abs(self._ff_offset)
+        total_effort = ff_mag + i_correction
+        if total_effort > 0.1:  # avoid noise when both are near zero
+            instant_ff_load = ff_mag / total_effort
+            self._ff_load_fraction += 0.01 * (instant_ff_load - self._ff_load_fraction)
 
         i_term = self._pi_ki * self._pi_integral
         d_term = self._pi_d_filtered

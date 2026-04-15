@@ -22,6 +22,24 @@
       "setpoint_changes": {
         "name": "Setpoint Changes"
       },
+      "controllable_itae": {
+        "name": "ITAE (Controllable)"
+      },
+      "uncontrollable_itae": {
+        "name": "ITAE (Uncontrollable)"
+      },
+      "controllable_cvh": {
+        "name": "Comfort Violation Hours (Controllable)"
+      },
+      "uncontrollable_cvh": {
+        "name": "Comfort Violation Hours (Uncontrollable)"
+      },
+      "ff_load_fraction": {
+        "name": "FF Load Fraction"
+      },
+      "batch_model_rms": {
+        "name": "Batch Model RMS"
+      },
       "health": {
         "name": "Health",
         "state": {
