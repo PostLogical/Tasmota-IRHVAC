@@ -113,6 +113,19 @@ async def async_get_config_entry_diagnostics(
                     batch_names[i] for i in br.held_features
                     if i < len(batch_names)
                 ],
+                "n_outliers_excluded": br.n_outliers_excluded,
+            }
+            # Drift detection state
+            drifting = pi.get_drifting_coefficients()
+            data["pi_controller"]["batch_learning"]["drift_detection"] = {
+                "drifting_coefficients": [
+                    {"index": idx, "name": name, "consecutive_cycles": count}
+                    for idx, name, count in drifting
+                ],
+                "correction_history": {
+                    (coeff_names[i] if i < len(coeff_names) else f"β{i}"): signs
+                    for i, signs in enumerate(pi._drift_correction_signs)
+                },
             }
         else:
             data["pi_controller"]["batch_learning"] = None
@@ -123,10 +136,38 @@ async def async_get_config_entry_diagnostics(
             1 for o in obs
             if not o.clamped and abs(o.room_rate) < 0.02
         )
-        data["pi_controller"]["observation_buffer"] = {
+        buf_stats: dict = {
             "total": len(obs),
             "eligible": n_eligible,
         }
+        # Diversity buffer stats (if using DiversityAwareBuffer)
+        if hasattr(pi._observation_buffer, 'get_leverage_scores'):
+            scores = pi._observation_buffer.get_leverage_scores()
+            if scores:
+                buf_stats["leverage_min"] = round(min(scores), 6)
+                buf_stats["leverage_median"] = round(sorted(scores)[len(scores) // 2], 6)
+                buf_stats["leverage_max"] = round(max(scores), 6)
+            if obs:
+                import time as time_mod
+                now = time_mod.monotonic()
+                oldest = min(o.timestamp for o in obs)
+                buf_stats["oldest_age_hours"] = round((now - oldest) / 3600, 1)
+            buf_stats["max_size"] = pi._observation_buffer._max_size
+            # Feature composition: count observations with each feature active
+            n_features = pi._observation_buffer.n_features
+            coeff_names = ["intercept", "outdoor_delta"]
+            for m_input in pi._model_inputs:
+                coeff_names.append(m_input.get("name", "input"))
+            feature_active: dict[str, int] = {}
+            for j in range(2, n_features):  # skip intercept & outdoor_delta (always present)
+                name = coeff_names[j] if j < len(coeff_names) else f"feature_{j}"
+                feature_active[name] = sum(
+                    1 for o in obs
+                    if j < len(o.features) and abs(o.features[j]) > 1e-6
+                )
+            if feature_active:
+                buf_stats["feature_active_counts"] = feature_active
+        data["pi_controller"]["observation_buffer"] = buf_stats
 
         # PI performance metrics
         data["pi_controller"]["performance"] = {

@@ -118,6 +118,7 @@ class PIExtraStoredData(ExtraStoredData):
     ki_at_save: float = 0.0
     tau_estimate: float = 0.0
     observation_buffer: list = dataclasses.field(default_factory=list)
+    drift_correction_signs: list = dataclasses.field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize to JSON-compatible dict."""
@@ -142,6 +143,7 @@ class PIExtraStoredData(ExtraStoredData):
             "ki_at_save": self.ki_at_save,
             "tau_estimate": self.tau_estimate,
             "observation_buffer": self.observation_buffer,
+            "drift_correction_signs": self.drift_correction_signs,
         }
 
     @classmethod
@@ -173,6 +175,7 @@ class PIExtraStoredData(ExtraStoredData):
                 ki_at_save=float(restored.get("ki_at_save", 0.0)),
                 tau_estimate=float(restored.get("tau_estimate", 0.0)),
                 observation_buffer=restored.get("observation_buffer", []),
+                drift_correction_signs=restored.get("drift_correction_signs", []),
             )
         except (KeyError, ValueError, TypeError, AttributeError):
             return None
@@ -854,6 +857,7 @@ class PIController:
             ki_at_save=self._pi_ki,
             tau_estimate=self._tau_estimate,
             observation_buffer=self._observation_buffer.as_list(),
+            drift_correction_signs=self._drift_correction_signs,
         )
 
     def restore_extra_stored_data(self, data: PIExtraStoredData) -> None:
@@ -906,6 +910,9 @@ class PIController:
                 data.observation_buffer,
                 n_features=2 + len(self._model_inputs),
             )
+        # Restore drift detection history
+        if data.drift_correction_signs:
+            self._drift_correction_signs = data.drift_correction_signs
         # Seed change detection: if user edited a seed since last save,
         # reset that coefficient to the new seed and increase its uncertainty.
         # Coefficients with unchanged seeds keep their learned values.

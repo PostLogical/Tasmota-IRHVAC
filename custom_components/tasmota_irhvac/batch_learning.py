@@ -704,11 +704,14 @@ def compare_and_report(
 
     # Log the analysis
     n_held = len(held)
+    n_outliers = result.n_outliers_excluded
     _LOGGER.info(
-        "%sBatch WLS analysis: %d/%d observations eligible, RMS=%.3f%s",
+        "%sBatch WLS analysis: %d/%d observations eligible, RMS=%.3f%s%s",
         log_prefix, result.n_eligible, result.n_total, result.residual_rms,
         f", {n_held} feature{'s' if n_held != 1 else ''} held (no variance)"
         if n_held else "",
+        f", {n_outliers} outlier{'s' if n_outliers != 1 else ''} excluded"
+        if n_outliers else "",
     )
     for name, current, batch, pct, is_held in changes:
         if is_held:
