@@ -119,6 +119,7 @@ class PIExtraStoredData(ExtraStoredData):
     tau_estimate: float = 0.0
     observation_buffer: list = dataclasses.field(default_factory=list)
     drift_correction_signs: list = dataclasses.field(default_factory=list)
+    last_batch_result: dict | None = None
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize to JSON-compatible dict."""
@@ -144,6 +145,7 @@ class PIExtraStoredData(ExtraStoredData):
             "tau_estimate": self.tau_estimate,
             "observation_buffer": self.observation_buffer,
             "drift_correction_signs": self.drift_correction_signs,
+            "last_batch_result": self.last_batch_result,
         }
 
     @classmethod
@@ -176,6 +178,7 @@ class PIExtraStoredData(ExtraStoredData):
                 tau_estimate=float(restored.get("tau_estimate", 0.0)),
                 observation_buffer=restored.get("observation_buffer", []),
                 drift_correction_signs=restored.get("drift_correction_signs", []),
+                last_batch_result=restored.get("last_batch_result"),
             )
         except (KeyError, ValueError, TypeError, AttributeError):
             return None
@@ -902,6 +905,14 @@ class PIController:
             tau_estimate=self._tau_estimate,
             observation_buffer=self._observation_buffer.as_list(),
             drift_correction_signs=self._drift_correction_signs,
+            last_batch_result=(
+                {
+                    **dataclasses.asdict(self._last_batch_result),
+                    "held_features": list(self._last_batch_result.held_features),
+                }
+                if self._last_batch_result is not None
+                else None
+            ),
         )
 
     def restore_extra_stored_data(self, data: PIExtraStoredData) -> None:
@@ -957,6 +968,14 @@ class PIController:
         # Restore drift detection history
         if data.drift_correction_signs:
             self._drift_correction_signs = data.drift_correction_signs
+        # Restore last batch result for diagnostics continuity
+        if data.last_batch_result is not None:
+            br = data.last_batch_result
+            # Convert held_features back to set (serialized as list)
+            if "held_features" in br and isinstance(br["held_features"], list):
+                br["held_features"] = set(br["held_features"])
+            self._last_batch_result = BatchResult(**br)
+            self._batch_model_rms = self._last_batch_result.residual_rms
         # Seed change detection: if user edited a seed since last save,
         # reset that coefficient to the new seed and increase its uncertainty.
         # Coefficients with unchanged seeds keep their learned values.

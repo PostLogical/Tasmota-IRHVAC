@@ -3998,6 +3998,89 @@ class TestStoredDataNewFields:
         assert pi._uncontrollable_cvh == pytest.approx(4.0)
         assert pi._ff_load_fraction == pytest.approx(0.65)
 
+    def test_batch_result_round_trip(self):
+        """BatchResult survives serialize → deserialize via PIExtraStoredData."""
+        from custom_components.tasmota_irhvac.batch_learning import BatchResult
+
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        # Simulate a batch result
+        pi._last_batch_result = BatchResult(
+            n_total=300,
+            n_eligible=280,
+            beta_batch=[1.0, -0.5, 0.3],
+            beta_current=[1.1, -0.4, 0.25],
+            residual_rms=0.42,
+            max_coeff_change_pct=12.5,
+            recommend_update=True,
+            n_outliers_excluded=5,
+            held_features={2},
+            beta_std_err=[0.01, 0.02, 0.03],
+            beta_blended=[1.05, -0.45, 0.28],
+            blend_gains=[0.5, 0.6, 0.7],
+        )
+        pi._batch_model_rms = 0.42
+
+        # Serialize
+        stored = pi.get_extra_stored_data()
+        assert stored is not None
+        d = stored.as_dict()
+        assert d["last_batch_result"] is not None
+        # held_features serialized as list
+        assert isinstance(d["last_batch_result"]["held_features"], list)
+
+        # Deserialize
+        restored = PIExtraStoredData.from_dict(d)
+        assert restored is not None
+
+        # Restore into a fresh controller
+        config2 = make_pi_config()
+        entity2 = FakePIEntity(config2)
+        pi2 = entity2._pi
+        pi2.restore_extra_stored_data(restored)
+
+        br = pi2._last_batch_result
+        assert br is not None
+        assert br.n_total == 300
+        assert br.n_eligible == 280
+        assert br.n_outliers_excluded == 5
+        assert br.residual_rms == pytest.approx(0.42)
+        assert br.recommend_update is True
+        assert br.held_features == {2}
+        assert br.beta_blended == [1.05, -0.45, 0.28]
+        assert pi2._batch_model_rms == pytest.approx(0.42)
+
+    def test_batch_result_none_round_trip(self):
+        """No batch result serializes as None and restores cleanly."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        assert pi._last_batch_result is None
+        stored = pi.get_extra_stored_data()
+        d = stored.as_dict()
+        assert d["last_batch_result"] is None
+
+        restored = PIExtraStoredData.from_dict(d)
+        config2 = make_pi_config()
+        entity2 = FakePIEntity(config2)
+        pi2 = entity2._pi
+        pi2.restore_extra_stored_data(restored)
+        assert pi2._last_batch_result is None
+
+    def test_batch_result_missing_from_legacy_data(self):
+        """Old stored data without last_batch_result field restores without error."""
+        d = {
+            "pi_integral": 1.0,
+            "desired_temp": 22.0,
+            "hp_setpoint": 22.0,
+        }
+        restored = PIExtraStoredData.from_dict(d)
+        assert restored is not None
+        assert restored.last_batch_result is None
+
 
 class TestDriftDetection:
     """Tests for persistent same-direction batch correction detection."""
