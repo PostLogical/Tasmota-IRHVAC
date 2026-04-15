@@ -89,6 +89,7 @@ from .rls_model import RLSModel
 from .pi_stored_data import PIExtraStoredData
 from .performance_metrics import PerformanceMetrics
 from .smith_predictor import SmithPredictor
+from .tau_estimator import GainUpdate, TauEstimator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -159,38 +160,31 @@ class PIController:
         )
         self._pi_min_interval: float = config.get(CONF_PI_MIN_INTERVAL, DEFAULT_PI_MIN_INTERVAL)
 
-        # IMC gain scheduling from τ estimate
-        self._tau_seed: float = config.get(CONF_PI_TAU_ESTIMATE, DEFAULT_PI_TAU_ESTIMATE)
-        self._response_lag: float = config.get(CONF_PI_RESPONSE_LAG, DEFAULT_PI_RESPONSE_LAG)
-        self._imc_lambda_config: float = config.get(CONF_PI_IMC_LAMBDA, DEFAULT_PI_IMC_LAMBDA)
-        self._tau_estimate: float = self._tau_seed  # Online estimate, updated by step-response
-        self._imc_enabled: bool = self._tau_seed > 0
+        # IMC gain scheduling + τ estimation
+        self._tau_estimator = TauEstimator(
+            tau_seed=config.get(CONF_PI_TAU_ESTIMATE, DEFAULT_PI_TAU_ESTIMATE),
+            response_lag=config.get(CONF_PI_RESPONSE_LAG, DEFAULT_PI_RESPONSE_LAG),
+            imc_lambda=config.get(CONF_PI_IMC_LAMBDA, DEFAULT_PI_IMC_LAMBDA),
+        )
 
         # Smith predictor for dead-time compensation.
         # Requires IMC (tau > 0) AND pi_smith_enabled=true.
-        # Must be created before _recompute_imc_gains which calls update_params.
         self._smith: SmithPredictor | None = None
-        if self._imc_enabled and self._smith_enabled:
+        if self._tau_estimator.enabled and self._smith_enabled:
             self._smith = SmithPredictor(
-                tau=self._tau_estimate, lag=self._response_lag
+                tau=self._tau_estimator.tau, lag=self._tau_estimator.response_lag
             )
 
         # Derive effective Kp/Ki: IMC formula or manual config
         self._pi_kp: float = 0.0
         self._pi_ki: float = 0.0
-        if self._imc_enabled:
-            self._recompute_imc_gains()
+        if self._tau_estimator.enabled:
+            gains = self._tau_estimator.compute_gains()
+            self._pi_kp = gains.kp
+            self._pi_ki = gains.ki
         else:
             self._pi_kp = self._pi_kp_config
             self._pi_ki = self._pi_ki_config
-
-        # Step-response τ observation state
-        self._tau_step_time: float = 0.0        # monotonic time of last HP setpoint change
-        self._tau_step_temp: float | None = None  # room temp at step time
-        self._tau_step_target: float | None = None  # expected final room temp (desired_c)
-        self._tau_step_magnitude: float = 0.0   # signed HP setpoint change (°C)
-        self._tau_step_active: bool = False      # True while observing a step response
-        self._tau_observations: int = 0          # total τ observations made
 
         # Control parameters are stored in °C always — read directly, no conversion
         self._pi_deadband: float = config.get(CONF_PI_DEADBAND, DEFAULT_PI_DEADBAND)
@@ -689,7 +683,7 @@ class PIController:
             heat_seeds_at_learn=list(self._heat_seeds),
             cool_seeds_at_learn=list(self._cool_seeds),
             ki_at_save=self._pi_ki,
-            tau_estimate=self._tau_estimate,
+            tau_estimate=self._tau_estimator.tau,
             observation_buffer=self._observation_buffer.as_list(),
             drift_correction_signs=self._drift_correction_signs,
             last_batch_result=(
@@ -775,10 +769,10 @@ class PIController:
                 if key in data.lag_filter_states:
                     self._model_input_filtered[i] = float(data.lag_filter_states[key])
         # Restore τ estimate and recompute IMC gains
-        if self._imc_enabled and data.tau_estimate > 0:
+        if self._tau_estimator.enabled and data.tau_estimate > 0:
             old_ki = self._pi_ki
-            self._tau_estimate = data.tau_estimate
-            self._recompute_imc_gains()
+            gains = self._tau_estimator.restore(data.tau_estimate)
+            self._apply_gain_update(gains)
             # Re-scale integral for the restored ki (overrides the earlier scaling
             # which used the seed-derived ki, not the restored-τ-derived ki)
             if old_ki > 0 and old_ki != self._pi_ki:
@@ -824,7 +818,7 @@ class PIController:
             await e.set_mode(hvac_mode)
         old_desired = self._desired_temp
         self._desired_temp = temperature
-        self._cancel_tau_observation()
+        self._tau_estimator.cancel_observation()
         # Bumpless transfer (Åström & Hägglund): keep output continuous
         if old_desired is not None:
             old_c = TemperatureConverter.convert(
@@ -931,8 +925,8 @@ class PIController:
             "room_temp_rate": round(self._room_temp_rate, 4),  # °C/min
             "effective_kp": round(self._pi_kp, 3),
             "effective_ki": round(self._pi_ki, 4),
-            "tau_estimate": round(self._tau_estimate, 1) if self._imc_enabled else None,
-            "tau_observations": self._tau_observations if self._imc_enabled else None,
+            "tau_estimate": round(self._tau_estimator.tau, 1) if self._tau_estimator.enabled else None,
+            "tau_observations": self._tau_estimator.observations if self._tau_estimator.enabled else None,
             "smith_correction": (
                 round(self._smith.correction, 3) if self._smith is not None else None
             ),
@@ -977,7 +971,7 @@ class PIController:
                 "outdoor_temp": self._outdoor_temp,
                 "room_temp_rate": round(self._room_temp_rate, 6),
                 "integral_convergence": round(self._metrics.integral_convergence, 4),
-                "tau_estimate": round(self._tau_estimate, 1) if self._imc_enabled else None,
+                "tau_estimate": round(self._tau_estimator.tau, 1) if self._tau_estimator.enabled else None,
             },
         }
 
@@ -1152,7 +1146,7 @@ class PIController:
             "rls_obs_count": rls.observation_count,
             "ff_confidence": round(self._ff_confidence, 3),
             "integral_convergence": round(self._metrics.integral_convergence, 2),
-            "tau_estimate": round(self._tau_estimate, 1) if self._imc_enabled else None,
+            "tau_estimate": round(self._tau_estimator.tau, 1) if self._tau_estimator.enabled else None,
             "smith_correction": (
                 round(self._smith.correction, 3) if self._smith is not None else None
             ),
@@ -1337,137 +1331,25 @@ class PIController:
 
         return not self._tracking_mode
 
-    # ── IMC Gain Scheduling ─────────────────────────────────────────
+    # ── IMC Gain Scheduling (delegated to TauEstimator) ──────────────
+
+    def _apply_gain_update(self, gains: GainUpdate) -> None:
+        """Apply a GainUpdate from TauEstimator to PI state and Smith predictor."""
+        self._pi_kp = gains.kp
+        self._pi_ki = gains.ki
+        if self._smith is not None:
+            self._smith.update_params(tau=gains.tau, lag=gains.lag)
 
     def _recompute_imc_gains(self) -> None:
-        """Derive Kp and Ki from τ estimate via modified IMC tuning rule.
-
-        IMC for first-order + delay (FOPDT):
-            Kp = τ / (K_eff * (λ + L))
-
-        Integral time uses Ti = τ/3 instead of standard Ti = τ (Skogestad SIMC
-        modification for HVAC: faster integral action for disturbance rejection,
-        since HVAC systems face continuous disturbances from weather/occupancy):
-            Ki = Kp / (τ/3) = 3 * Kp / τ
-
-        K_eff = 1.0 (unit gain: 1°C HP setpoint offset → 1°C room temp at SS).
-        L = HP response lag (compressor → room sensor, config, default 15 min).
-
-        λ (closed-loop speed) defaults to L/3 when not explicitly configured.
-        Bench sweep across 3 house profiles (τ=25,50,120) × 6 scenarios showed:
-        - λ=τ/2 (old default) too conservative: gains barely differ from flat Kp=1.5
-        - λ=L/3≈5 gives 17% aggregate ITAE reduction vs flat gains, 0 regressions
-        - Biggest win on well-insulated (τ=120): 64% ITAE reduction (Kp 1.5→6.0)
-        - λ tied to L (not τ) because the transport delay is the physical constraint
-          on how aggressively we can close the loop, regardless of house thermal mass
-        Override via pi_imc_lambda config for manual tuning.
-        """
-        tau = max(self._tau_estimate, 1.0)  # Floor at 1 min to avoid division issues
-        lag = self._response_lag
-        lam = self._imc_lambda_config if self._imc_lambda_config > 0 else lag / 3.0
-        k_eff = 1.0
-
-        old_kp = self._pi_kp
-        old_ki = self._pi_ki
-        self._pi_kp = tau / (k_eff * (lam + lag))
-        ti = tau / 3.0  # Aggressive integral time for HVAC disturbance rejection
-        self._pi_ki = self._pi_kp / ti
-
-        if old_kp > 0 and (abs(self._pi_kp - old_kp) / old_kp > 0.05):
-            _LOGGER.info(
-                "IMC gains updated: τ=%.1f λ=%.1f L=%.1f → Kp=%.3f Ki=%.4f (was Kp=%.3f Ki=%.4f)",
-                tau, lam, lag, self._pi_kp, self._pi_ki, old_kp, old_ki,
-            )
-
-        # Keep Smith predictor model in sync with updated τ
-        if self._smith is not None:
-            self._smith.update_params(tau=tau, lag=lag)
-
-    def _start_tau_observation(
-        self, now_mono: float, current_c: float, desired_c: float, step_magnitude: float
-    ) -> None:
-        """Begin observing a step response for τ estimation.
-
-        Called when hp_setpoint changes by ≥1°C. Records the starting conditions
-        so _check_tau_observation can detect when the room reaches 63.2% of the
-        expected response.
-        """
-        if not self._imc_enabled:
-            return
-        # Only observe steps with clear direction and magnitude
-        if abs(step_magnitude) < 1.0:
-            return
-        self._tau_step_time = now_mono
-        self._tau_step_temp = current_c
-        self._tau_step_target = desired_c
-        self._tau_step_magnitude = step_magnitude
-        self._tau_step_active = True
-        _LOGGER.debug(
-            "τ observation started: step=%.1f°C, room=%.1f°C, target=%.1f°C",
-            step_magnitude, current_c, desired_c,
-        )
+        """Recompute IMC gains from current τ estimate and apply them."""
+        gains = self._tau_estimator.compute_gains()
+        self._apply_gain_update(gains)
 
     def _check_tau_observation(self, now_mono: float, current_c: float) -> None:
-        """Check if the room has reached 63.2% of the step response.
-
-        τ is the time from setpoint change to 63.2% of the total expected
-        temperature change (first-order system definition). On observation,
-        update the running τ estimate with an EMA.
-        """
-        if not self._tau_step_active or self._tau_step_temp is None:
-            return
-
-        elapsed_min = (now_mono - self._tau_step_time) / 60.0
-
-        # Timeout: if we haven't seen 63.2% response in 4× the current estimate
-        # (or 4 hours if no estimate), abandon this observation.
-        timeout = max(4.0 * self._tau_estimate, 240.0) if self._tau_estimate > 0 else 240.0
-        if elapsed_min > timeout:
-            _LOGGER.debug("τ observation timed out after %.0f min", elapsed_min)
-            self._tau_step_active = False
-            return
-
-        # Expected total change: step drives room from step_temp toward target.
-        # For FOPDT, the expected SS change = step_magnitude * K_eff (K_eff=1).
-        expected_change = self._tau_step_magnitude  # K_eff = 1.0
-        if abs(expected_change) < 0.5:
-            self._tau_step_active = False
-            return
-
-        actual_change = current_c - self._tau_step_temp
-        fraction = actual_change / expected_change
-
-        # 63.2% threshold (1 - 1/e)
-        if fraction >= 0.632:
-            # Subtract response lag — τ is the thermal time constant, not
-            # including the HP's own delay to start affecting room temp.
-            raw_tau = elapsed_min - self._response_lag
-            observed_tau = max(raw_tau, 5.0)  # Floor: no house has τ < 5 min
-
-            # EMA update: weight new observations more when we have few
-            n = self._tau_observations
-            alpha = max(0.3, 1.0 / (1.0 + n))  # Starts at 0.5, decays to 0.3
-            old_tau = self._tau_estimate
-            self._tau_estimate = (1.0 - alpha) * old_tau + alpha * observed_tau
-            self._tau_observations += 1
-            self._tau_step_active = False
-
-            _LOGGER.info(
-                "τ observed: %.1f min (raw=%.1f, lag=%.1f). "
-                "EMA τ: %.1f → %.1f min (n=%d, α=%.2f). Kp=%.3f Ki=%.4f",
-                observed_tau, elapsed_min, self._response_lag,
-                old_tau, self._tau_estimate, self._tau_observations, alpha,
-                self._pi_kp, self._pi_ki,
-            )
-
-            # Recompute gains with updated τ
-            self._recompute_imc_gains()
-
-    def _cancel_tau_observation(self) -> None:
-        """Cancel any in-progress τ observation (e.g., mode change, setpoint change)."""
-        if self._tau_step_active:
-            _LOGGER.debug("τ observation cancelled")
-            self._tau_step_active = False
+        """Check τ observation and apply any resulting gain update."""
+        gain_update = self._tau_estimator.check_observation(now_mono, current_c)
+        if gain_update is not None:
+            self._apply_gain_update(gain_update)
 
     # ── PI Internals ──────────────────────────────────────────────────
 
@@ -1647,7 +1529,7 @@ class PIController:
         e = self._entity
         if e._attr_hvac_mode == HVACMode.OFF:
             self._pi_integral = 0.0
-            self._cancel_tau_observation()
+            self._tau_estimator.cancel_observation()
             if self._smith is not None:
                 self._smith._initialized = False
             return False
@@ -1713,7 +1595,9 @@ class PIController:
                 self._room_temp_rate = (temp1 - temp0) / elapsed_min
 
         # Check ongoing τ step-response observation (raw — measures real plant)
-        self._check_tau_observation(now_mono, raw_c)
+        tau_gain_update = self._tau_estimator.check_observation(now_mono, raw_c)
+        if tau_gain_update is not None:
+            self._apply_gain_update(tau_gain_update)
 
         # Evaluate supplemental heat source override (selector control)
         now_mono = time.monotonic()
@@ -2167,7 +2051,7 @@ class PIController:
                     self._last_setpoint_change_time = now_mono
                     self._metrics.record_setpoint_change()
                     # Start τ observation on significant setpoint changes
-                    self._start_tau_observation(now_mono, current_c, desired_c, float(change))
+                    self._tau_estimator.start_observation(now_mono, current_c, desired_c, float(change))
                     return True
         else:
             _LOGGER.debug(

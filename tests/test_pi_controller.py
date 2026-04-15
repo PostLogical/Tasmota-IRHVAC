@@ -2667,7 +2667,7 @@ class TestIMCGainScheduling:
         config = make_pi_config()
         entity = FakePIEntity(config)
         pi = entity._pi
-        assert not pi._imc_enabled
+        assert not pi._tau_estimator.enabled
         # Should use conftest defaults (pi_kp=1.5, pi_ki=0.15)
         assert pi._pi_kp == 1.5
         assert pi._pi_ki == 0.15
@@ -2677,7 +2677,7 @@ class TestIMCGainScheduling:
         config = make_pi_config({"pi_tau_estimate": 120.0, "pi_response_lag": 15.0})
         entity = FakePIEntity(config)
         pi = entity._pi
-        assert pi._imc_enabled
+        assert pi._tau_estimator.enabled
         # IMC: Kp = τ / (K_eff * (λ + L))
         # λ = L/3 = 5, L = 15, K_eff = 1.0
         # Kp = 120 / (1.0 * (5 + 15)) = 120/20 = 6.0
@@ -2727,7 +2727,7 @@ class TestIMCGainScheduling:
         pi = entity._pi
         old_kp = pi._pi_kp
         # Simulate learning a different τ
-        pi._tau_estimate = 60.0
+        pi._tau_estimator.tau = 60.0
         pi._recompute_imc_gains()
         # λ config is 0, so auto = L/3 = 5
         # Kp = 60 / (1 * (5 + 15)) = 60/20 = 3.0
@@ -2749,75 +2749,75 @@ class TestTauObservation:
     def test_start_observation_on_large_step(self):
         """Step ≥ 1°C starts a τ observation."""
         _, pi = self._make_imc_entity()
-        pi._start_tau_observation(1000.0, 20.0, 22.0, 2.0)
-        assert pi._tau_step_active
-        assert pi._tau_step_temp == 20.0
-        assert pi._tau_step_magnitude == 2.0
+        pi._tau_estimator.start_observation(1000.0, 20.0, 22.0, 2.0)
+        assert pi._tau_estimator.active
+        assert pi._tau_estimator.step_temp == 20.0
+        assert pi._tau_estimator.step_magnitude == 2.0
 
     def test_start_observation_ignores_small_step(self):
         """Step < 1°C does not start observation."""
         _, pi = self._make_imc_entity()
-        pi._start_tau_observation(1000.0, 20.0, 20.5, 0.5)
-        assert not pi._tau_step_active
+        pi._tau_estimator.start_observation(1000.0, 20.0, 20.5, 0.5)
+        assert not pi._tau_estimator.active
 
     def test_start_observation_noop_when_disabled(self):
         """No observation when IMC is disabled."""
         config = make_pi_config()  # τ=0 (default)
         entity = FakePIEntity(config)
         pi = entity._pi
-        pi._start_tau_observation(1000.0, 20.0, 22.0, 2.0)
-        assert not pi._tau_step_active
+        pi._tau_estimator.start_observation(1000.0, 20.0, 22.0, 2.0)
+        assert not pi._tau_estimator.active
 
     def test_check_observation_detects_632_pct(self):
         """τ observation fires when room reaches 63.2% of expected change."""
         _, pi = self._make_imc_entity(tau=120.0, lag=15.0)
-        pi._start_tau_observation(0.0, 20.0, 22.0, 2.0)
-        assert pi._tau_step_active
-        old_tau = pi._tau_estimate
+        pi._tau_estimator.start_observation(0.0, 20.0, 22.0, 2.0)
+        assert pi._tau_estimator.active
+        old_tau = pi._tau_estimator.tau
 
         # Room reaches 63.2% of 2°C step = 1.264°C above start = 21.264
         # At t=50 min (3000s), so observed τ = 50 - 15 (lag) = 35 min
         pi._check_tau_observation(3000.0, 21.27)
-        assert not pi._tau_step_active
-        assert pi._tau_observations == 1
+        assert not pi._tau_estimator.active
+        assert pi._tau_estimator.observations == 1
         # EMA with α ~ 0.5 for first observation: new τ ≈ blend of 120 and 35
-        assert pi._tau_estimate != old_tau
-        assert pi._tau_estimate < old_tau  # Moved toward 35
+        assert pi._tau_estimator.tau != old_tau
+        assert pi._tau_estimator.tau < old_tau  # Moved toward 35
 
     def test_check_observation_timeout(self):
         """Observation abandoned after timeout."""
         _, pi = self._make_imc_entity(tau=60.0, lag=15.0)
-        pi._start_tau_observation(0.0, 20.0, 22.0, 2.0)
+        pi._tau_estimator.start_observation(0.0, 20.0, 22.0, 2.0)
         # timeout = max(4*60, 240) = 240 min = 14400s
         # Room still at 20.5 (< 63.2% of 2°C = 1.264)
         pi._check_tau_observation(14500.0, 20.5)
-        assert not pi._tau_step_active
-        assert pi._tau_observations == 0  # No observation recorded
+        assert not pi._tau_estimator.active
+        assert pi._tau_estimator.observations == 0  # No observation recorded
 
     def test_cancel_observation(self):
         """Cancellation clears active observation."""
         _, pi = self._make_imc_entity()
-        pi._start_tau_observation(0.0, 20.0, 22.0, 2.0)
-        assert pi._tau_step_active
-        pi._cancel_tau_observation()
-        assert not pi._tau_step_active
+        pi._tau_estimator.start_observation(0.0, 20.0, 22.0, 2.0)
+        assert pi._tau_estimator.active
+        pi._tau_estimator.cancel_observation()
+        assert not pi._tau_estimator.active
 
     def test_setpoint_change_cancels_observation(self):
         """User changing desired temp cancels the old τ observation."""
         _, pi = self._make_imc_entity()
         # Start an observation for a step from t=0
-        pi._start_tau_observation(0.0, 20.0, 22.0, 2.0)
-        assert pi._tau_step_active
-        assert pi._tau_step_target == 22.0
+        pi._tau_estimator.start_observation(0.0, 20.0, 22.0, 2.0)
+        assert pi._tau_estimator.active
+        assert pi._tau_estimator.step_target == 22.0
         # Cancel directly (set_temperature calls this)
-        pi._cancel_tau_observation()
-        assert not pi._tau_step_active
+        pi._tau_estimator.cancel_observation()
+        assert not pi._tau_estimator.active
 
     def test_tau_observation_updates_gains(self):
         """After τ observation, IMC gains are recomputed."""
         _, pi = self._make_imc_entity(tau=120.0, lag=15.0)
         old_kp = pi._pi_kp
-        pi._start_tau_observation(0.0, 20.0, 22.0, 2.0)
+        pi._tau_estimator.start_observation(0.0, 20.0, 22.0, 2.0)
         # Reach 63.2% at t=80 min → observed τ = 80-15 = 65 min
         pi._check_tau_observation(4800.0, 21.27)
         # Gains should have changed
@@ -2826,29 +2826,29 @@ class TestTauObservation:
     def test_tau_floor_at_5_min(self):
         """Observed τ is floored at 5 minutes."""
         _, pi = self._make_imc_entity(tau=120.0, lag=15.0)
-        pi._start_tau_observation(0.0, 20.0, 22.0, 2.0)
+        pi._tau_estimator.start_observation(0.0, 20.0, 22.0, 2.0)
         # Reach 63.2% at t=16 min → raw τ = 16-15 = 1 min → floored to 5
         pi._check_tau_observation(960.0, 21.27)
-        assert pi._tau_observations == 1
+        assert pi._tau_estimator.observations == 1
         # τ should be moved toward 5 (from 120)
-        assert pi._tau_estimate < 120.0
+        assert pi._tau_estimator.tau < 120.0
 
     def test_multiple_observations_ema(self):
         """Multiple τ observations produce EMA convergence."""
         _, pi = self._make_imc_entity(tau=120.0, lag=15.0)
         # First observation: observed τ = 60
-        pi._start_tau_observation(0.0, 20.0, 22.0, 2.0)
+        pi._tau_estimator.start_observation(0.0, 20.0, 22.0, 2.0)
         pi._check_tau_observation(4500.0, 21.27)  # 75min → τ=75-15=60
-        tau_after_1 = pi._tau_estimate
-        assert pi._tau_observations == 1
+        tau_after_1 = pi._tau_estimator.tau
+        assert pi._tau_estimator.observations == 1
         # α=1.0 for first obs → fully replaces seed
         assert abs(tau_after_1 - 60.0) < 0.1
 
         # Second observation: observed τ = 90 (different conditions)
-        pi._start_tau_observation(5000.0, 20.0, 22.0, 2.0)
+        pi._tau_estimator.start_observation(5000.0, 20.0, 22.0, 2.0)
         pi._check_tau_observation(11300.0, 21.27)  # 105min → τ=105-15=90
-        tau_after_2 = pi._tau_estimate
-        assert pi._tau_observations == 2
+        tau_after_2 = pi._tau_estimator.tau
+        assert pi._tau_estimator.observations == 2
         # α=0.5 for second obs → EMA blend: 0.5*60 + 0.5*90 = 75
         assert abs(tau_after_2 - 75.0) < 0.1
 
@@ -2861,7 +2861,7 @@ class TestIMCPersistence:
         config = make_pi_config({"pi_tau_estimate": 120.0})
         entity = FakePIEntity(config)
         pi = entity._pi
-        pi._tau_estimate = 85.0
+        pi._tau_estimator.tau = 85.0
         data = pi.get_extra_stored_data()
         assert data is not None
         d = data.as_dict()
@@ -2883,7 +2883,7 @@ class TestIMCPersistence:
             tau_estimate=60.0,
         )
         pi.restore_extra_stored_data(data)
-        assert pi._tau_estimate == 60.0
+        assert pi._tau_estimator.tau == 60.0
         assert pi._pi_kp != kp_seed  # Gains recomputed from restored τ
 
     def test_tau_zero_not_restored(self):
@@ -2900,7 +2900,7 @@ class TestIMCPersistence:
             tau_estimate=0.0,
         )
         pi.restore_extra_stored_data(data)
-        assert pi._tau_estimate == 120.0  # Kept seed
+        assert pi._tau_estimator.tau == 120.0  # Kept seed
         assert pi._pi_kp == kp_seed
 
     def test_integral_unchanged_when_ki_invariant(self):
@@ -2950,12 +2950,12 @@ class TestIMCPersistence:
         # Actually with fixed λ=30: Ki = 3*τ/(τ*(30+15)) = 3/45 = 0.0667 for all τ.
         # Need τ-dependent λ to get Ki variation. Use a τ seed where default λ differs.
         # This test validates the rescaling mechanism works when Ki does change.
-        pi._tau_estimate = 60.0
-        pi._imc_lambda_config = 0.0  # Switch to auto λ=L/3
+        pi._tau_estimator.tau = 60.0
+        pi._tau_estimator._imc_lambda_config = 0.0  # Switch to auto λ=L/3
         old_ki = pi._pi_ki
         pi._pi_integral = 5.0
         # Manually trigger a Ki change by using a different formula
-        pi._imc_lambda_config = 10.0  # λ=10: Ki = 3*(60/25)/60 = 0.12
+        pi._tau_estimator._imc_lambda_config = 10.0  # λ=10: Ki = 3*(60/25)/60 = 0.12
         pi._recompute_imc_gains()
         # Ki changed, so rescaling code in restore would fire
         assert pi._pi_ki != pytest.approx(old_ki, abs=0.01)

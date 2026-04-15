@@ -186,7 +186,7 @@ async def async_get_config_entry_diagnostics(
         data["pi_controller"]["ff_confidence"] = round(pi._ff_confidence, 4)
         data["pi_controller"]["room_temp_rate"] = round(pi._room_temp_rate, 4)
         data["pi_controller"]["tau_estimate"] = (
-            round(pi._tau_estimate, 1) if pi._imc_enabled else None
+            round(pi._tau_estimator.tau, 1) if pi._tau_estimator.enabled else None
         )
 
     return data

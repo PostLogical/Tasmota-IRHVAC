@@ -781,9 +781,9 @@ def _run_comparison(climate_ts, outdoor_ts, room_sensor_ts, zone):
 
         # IMC state: learned τ and final gains
         imc_info = ""
-        if pi._imc_enabled:
-            imc_info = (f"  → τ learned: {pi._tau_estimate:.0f} min "
-                        f"({pi._tau_observations} obs), "
+        if pi._tau_estimator.enabled:
+            imc_info = (f"  → τ learned: {pi._tau_estimator.tau:.0f} min "
+                        f"({pi._tau_estimator.observations} obs), "
                         f"Kp={pi._pi_kp:.2f} Ki={pi._pi_ki:.3f}")
 
         print(f"{name:<42} {m['itae']:>8.1f} {m['cold_ticks']:>6} {m['cold_max_run']:>7} "
@@ -793,9 +793,9 @@ def _run_comparison(climate_ts, outdoor_ts, room_sensor_ts, zone):
             print(imc_info)
 
         result = {"name": name, "metrics": m, "history_len": len(history)}
-        if pi._imc_enabled:
-            result["tau_learned"] = round(pi._tau_estimate, 1)
-            result["tau_observations"] = pi._tau_observations
+        if pi._tau_estimator.enabled:
+            result["tau_learned"] = round(pi._tau_estimator.tau, 1)
+            result["tau_observations"] = pi._tau_estimator.observations
             result["final_kp"] = round(pi._pi_kp, 3)
             result["final_ki"] = round(pi._pi_ki, 4)
         all_results.append(result)
