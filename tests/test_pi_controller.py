@@ -1388,7 +1388,7 @@ class TestExtraStoredDataFullRestore:
         assert pi._rls_heat.observation_count == 50
         assert pi._rls_cool.observation_count == 30
         # Integral convergence restored
-        assert pi._integral_convergence == 0.5
+        assert pi._metrics.integral_convergence == 0.5
 
     def test_restore_lag_filter_states(self):
         """restore_extra_stored_data with lag filter states should restore filtered values."""
@@ -3663,17 +3663,17 @@ class TestControllableUncontrollableMetrics:
         pi._pi_integral = -50.0  # deep enough to keep HP clamped at min
 
         # Reset counters
-        pi._controllable_itae = 0.0
-        pi._uncontrollable_itae = 0.0
-        pi._itae_tick_count = 0
+        pi._metrics.controllable_itae = 0.0
+        pi._metrics.uncontrollable_itae = 0.0
+        pi._metrics.itae_tick_count = 0
 
         for i in range(4):
             pi._pi_last_tick_time = float(i * 900)
             with patch("time.monotonic", return_value=float((i + 1) * 900)):
                 await pi._pi_tick()
 
-        assert pi._uncontrollable_itae > 0, "Should accumulate uncontrollable ITAE"
-        assert pi._controllable_itae == 0.0, "Should NOT accumulate controllable ITAE"
+        assert pi._metrics.uncontrollable_itae > 0, "Should accumulate uncontrollable ITAE"
+        assert pi._metrics.controllable_itae == 0.0, "Should NOT accumulate controllable ITAE"
 
     @pytest.mark.asyncio
     async def test_controllable_itae_accumulates_above_min_setpoint(self):
@@ -3687,17 +3687,17 @@ class TestControllableUncontrollableMetrics:
         entity._attr_current_temperature = 24.0  # above target
         pi._pi_integral = -2.0
 
-        pi._controllable_itae = 0.0
-        pi._uncontrollable_itae = 0.0
-        pi._itae_tick_count = 0
+        pi._metrics.controllable_itae = 0.0
+        pi._metrics.uncontrollable_itae = 0.0
+        pi._metrics.itae_tick_count = 0
 
         for i in range(4):
             pi._pi_last_tick_time = float(i * 900)
             with patch("time.monotonic", return_value=float((i + 1) * 900)):
                 await pi._pi_tick()
 
-        assert pi._controllable_itae > 0, "Should accumulate controllable ITAE"
-        assert pi._uncontrollable_itae == 0.0, "Should NOT accumulate uncontrollable ITAE"
+        assert pi._metrics.controllable_itae > 0, "Should accumulate controllable ITAE"
+        assert pi._metrics.uncontrollable_itae == 0.0, "Should NOT accumulate uncontrollable ITAE"
 
     @pytest.mark.asyncio
     async def test_uncontrollable_cvh_at_min_above_threshold(self):
@@ -3711,16 +3711,16 @@ class TestControllableUncontrollableMetrics:
         entity._attr_current_temperature = 23.0  # 2°C above → abs_error > 1.0
         pi._pi_integral = -50.0
 
-        pi._controllable_cvh = 0.0
-        pi._uncontrollable_cvh = 0.0
+        pi._metrics.controllable_cvh = 0.0
+        pi._metrics.uncontrollable_cvh = 0.0
 
         for i in range(4):
             pi._pi_last_tick_time = float(i * 900)
             with patch("time.monotonic", return_value=float((i + 1) * 900)):
                 await pi._pi_tick()
 
-        assert pi._uncontrollable_cvh > 0, "Should accumulate uncontrollable CVH"
-        assert pi._controllable_cvh == 0.0, "Should NOT accumulate controllable CVH"
+        assert pi._metrics.uncontrollable_cvh > 0, "Should accumulate uncontrollable CVH"
+        assert pi._metrics.controllable_cvh == 0.0, "Should NOT accumulate controllable CVH"
 
     @pytest.mark.asyncio
     async def test_controllable_cvh_when_hp_has_headroom(self):
@@ -3734,16 +3734,16 @@ class TestControllableUncontrollableMetrics:
         entity._attr_current_temperature = 23.0  # 2°C above
         pi._pi_integral = -2.0
 
-        pi._controllable_cvh = 0.0
-        pi._uncontrollable_cvh = 0.0
+        pi._metrics.controllable_cvh = 0.0
+        pi._metrics.uncontrollable_cvh = 0.0
 
         for i in range(4):
             pi._pi_last_tick_time = float(i * 900)
             with patch("time.monotonic", return_value=float((i + 1) * 900)):
                 await pi._pi_tick()
 
-        assert pi._controllable_cvh > 0, "Should accumulate controllable CVH"
-        assert pi._uncontrollable_cvh == 0.0, "Should NOT accumulate uncontrollable CVH"
+        assert pi._metrics.controllable_cvh > 0, "Should accumulate controllable CVH"
+        assert pi._metrics.uncontrollable_cvh == 0.0, "Should NOT accumulate uncontrollable CVH"
 
     @pytest.mark.asyncio
     async def test_total_itae_equals_sum_of_split(self):
@@ -3756,10 +3756,10 @@ class TestControllableUncontrollableMetrics:
         entity._attr_current_temperature = 24.0  # above target
         pi._pi_integral = -10.0
 
-        pi._itae_accumulator = 0.0
-        pi._controllable_itae = 0.0
-        pi._uncontrollable_itae = 0.0
-        pi._itae_tick_count = 0
+        pi._metrics.itae_accumulator = 0.0
+        pi._metrics.controllable_itae = 0.0
+        pi._metrics.uncontrollable_itae = 0.0
+        pi._metrics.itae_tick_count = 0
 
         # Phase 1: at min (uncontrollable)
         pi._hp_setpoint = pi._min_temp_c
@@ -3777,11 +3777,11 @@ class TestControllableUncontrollableMetrics:
             with patch("time.monotonic", return_value=float((i + 1) * 900)):
                 await pi._pi_tick()
 
-        total = pi._itae_accumulator
-        split_sum = pi._controllable_itae + pi._uncontrollable_itae
+        total = pi._metrics.itae_accumulator
+        split_sum = pi._metrics.controllable_itae + pi._metrics.uncontrollable_itae
         assert abs(total - split_sum) < 0.1, (
-            f"Total ITAE {total:.2f} != controllable {pi._controllable_itae:.2f} "
-            f"+ uncontrollable {pi._uncontrollable_itae:.2f} = {split_sum:.2f}"
+            f"Total ITAE {total:.2f} != controllable {pi._metrics.controllable_itae:.2f} "
+            f"+ uncontrollable {pi._metrics.uncontrollable_itae:.2f} = {split_sum:.2f}"
         )
 
     @pytest.mark.asyncio
@@ -3796,17 +3796,17 @@ class TestControllableUncontrollableMetrics:
         entity._attr_current_temperature = 19.0  # BELOW target → error > 0
         pi._pi_integral = -3.0
 
-        pi._controllable_itae = 0.0
-        pi._uncontrollable_itae = 0.0
-        pi._itae_tick_count = 0
+        pi._metrics.controllable_itae = 0.0
+        pi._metrics.uncontrollable_itae = 0.0
+        pi._metrics.itae_tick_count = 0
 
         for i in range(4):
             pi._pi_last_tick_time = float(i * 900)
             with patch("time.monotonic", return_value=float((i + 1) * 900)):
                 await pi._pi_tick()
 
-        assert pi._controllable_itae > 0, "HP helping cold room is controllable"
-        assert pi._uncontrollable_itae == 0.0, "Not uncontrollable when HP helps"
+        assert pi._metrics.controllable_itae > 0, "HP helping cold room is controllable"
+        assert pi._metrics.uncontrollable_itae == 0.0, "Not uncontrollable when HP helps"
 
 
 class TestFFLoadFraction:
@@ -3817,7 +3817,7 @@ class TestFFLoadFraction:
         config = make_pi_config()
         entity = FakePIEntity(config)
         pi = entity._pi
-        pi._ff_load_fraction = 0.3  # start low
+        pi._metrics.ff_load_fraction = 0.3  # start low
 
         # Simulate the EMA update directly (same formula as in _pi_tick)
         for _ in range(100):
@@ -3826,12 +3826,12 @@ class TestFFLoadFraction:
             total = ff_mag + i_correction
             if total > 0.1:
                 instant = ff_mag / total
-                pi._ff_load_fraction += 0.01 * (instant - pi._ff_load_fraction)
+                pi._metrics.ff_load_fraction += 0.01 * (instant - pi._metrics.ff_load_fraction)
 
         # EMA with alpha=0.01 over 100 ticks reaches ~63% of target.
         # Starting at 0.3 trending toward ~0.985: expect > 0.7
-        assert pi._ff_load_fraction > 0.7, (
-            f"FF load fraction should trend up from 0.3, got {pi._ff_load_fraction}"
+        assert pi._metrics.ff_load_fraction > 0.7, (
+            f"FF load fraction should trend up from 0.3, got {pi._metrics.ff_load_fraction}"
         )
 
     @pytest.mark.asyncio
@@ -3843,15 +3843,15 @@ class TestFFLoadFraction:
         pi._desired_temp = 21.0
         entity._attr_hvac_mode = HVACMode.HEAT
         entity._attr_current_temperature = 20.0
-        pi._ff_load_fraction = 0.5
+        pi._metrics.ff_load_fraction = 0.5
 
         for i in range(10):
             pi._pi_last_tick_time = float(i * 900)
             with patch("time.monotonic", return_value=float((i + 1) * 900)):
                 await pi._pi_tick()
 
-        assert 0.0 <= pi._ff_load_fraction <= 1.0, (
-            f"FF load fraction out of bounds: {pi._ff_load_fraction}"
+        assert 0.0 <= pi._metrics.ff_load_fraction <= 1.0, (
+            f"FF load fraction out of bounds: {pi._metrics.ff_load_fraction}"
         )
 
 
@@ -3868,7 +3868,7 @@ class TestBatchModelRMS:
         pi._desired_temp = 21.0
         pi._hp_setpoint = 21.0
 
-        assert pi._batch_model_rms is None
+        assert pi._metrics.batch_model_rms is None
 
         # Seed observation buffer
         import time as time_mod
@@ -3889,8 +3889,8 @@ class TestBatchModelRMS:
         pi._run_batch_analysis()
 
         if pi._last_batch_result is not None:
-            assert pi._batch_model_rms is not None
-            assert pi._batch_model_rms >= 0.0
+            assert pi._metrics.batch_model_rms is not None
+            assert pi._metrics.batch_model_rms >= 0.0
 
 
 class TestConditionalIntegrationLogging:
@@ -4014,11 +4014,11 @@ class TestStoredDataNewFields:
         )
         pi.restore_extra_stored_data(data)
 
-        assert pi._controllable_itae == pytest.approx(50.0)
-        assert pi._uncontrollable_itae == pytest.approx(75.0)
-        assert pi._controllable_cvh == pytest.approx(2.0)
-        assert pi._uncontrollable_cvh == pytest.approx(4.0)
-        assert pi._ff_load_fraction == pytest.approx(0.65)
+        assert pi._metrics.controllable_itae == pytest.approx(50.0)
+        assert pi._metrics.uncontrollable_itae == pytest.approx(75.0)
+        assert pi._metrics.controllable_cvh == pytest.approx(2.0)
+        assert pi._metrics.uncontrollable_cvh == pytest.approx(4.0)
+        assert pi._metrics.ff_load_fraction == pytest.approx(0.65)
 
     def test_batch_result_round_trip(self):
         """BatchResult survives serialize → deserialize via PIExtraStoredData."""
@@ -4043,7 +4043,7 @@ class TestStoredDataNewFields:
             beta_blended=[1.05, -0.45, 0.28],
             blend_gains=[0.5, 0.6, 0.7],
         )
-        pi._batch_model_rms = 0.42
+        pi._metrics.batch_model_rms = 0.42
 
         # Serialize
         stored = pi.get_extra_stored_data()
@@ -4072,7 +4072,7 @@ class TestStoredDataNewFields:
         assert br.recommend_update is True
         assert br.held_features == {2}
         assert br.beta_blended == [1.05, -0.45, 0.28]
-        assert pi2._batch_model_rms == pytest.approx(0.42)
+        assert pi2._metrics.batch_model_rms == pytest.approx(0.42)
 
     def test_batch_result_none_round_trip(self):
         """No batch result serializes as None and restores cleanly."""

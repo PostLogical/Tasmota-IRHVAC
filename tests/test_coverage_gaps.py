@@ -2713,7 +2713,7 @@ class TestExtraStoredDataViaAsyncAdded:
         assert pi._rls_heat.observation_count == 25
         assert pi._rls_cool.observation_count == 10
         # Integral convergence
-        assert pi._integral_convergence == pytest.approx(0.3, abs=0.1)
+        assert pi._metrics.integral_convergence == pytest.approx(0.3, abs=0.1)
         # Lag filter state
         assert pi._model_input_filtered[0] > 0  # Lag filter state restored from persisted data
 

@@ -69,14 +69,14 @@ class TestIntegralConvergence:
         entity = FakeLearningEntity(_make_config())
         pi = entity._pi
 
-        pi._integral_convergence = 0.0
+        pi._metrics.integral_convergence = 0.0
         pi._pi_integral = 10.0
 
         _settled_tick(entity, outdoor_temp=5.0, current=20.0, desired=22.0)
         await pi._pi_tick()
 
         # After one tick with integral ~10: convergence = 0.99*0 + 0.01*|integral|
-        assert pi._integral_convergence > 0
+        assert pi._metrics.integral_convergence > 0
 
     @pytest.mark.asyncio
     async def test_convergence_decays_with_low_integral(self):
@@ -84,14 +84,14 @@ class TestIntegralConvergence:
         entity = FakeLearningEntity(_make_config())
         pi = entity._pi
 
-        pi._integral_convergence = 20.0  # Was high
+        pi._metrics.integral_convergence = 20.0  # Was high
         pi._pi_integral = 0.0
 
         _settled_tick(entity, outdoor_temp=5.0, current=22.0, desired=22.0)
         await pi._pi_tick()
 
         # Should decay toward 0
-        assert pi._integral_convergence < 20.0
+        assert pi._metrics.integral_convergence < 20.0
 
 
 # ── ExtraStoredData Tests ────────────────────────────────────────────

@@ -87,6 +87,7 @@ from .const import (
 from .const import DEFAULT_RLS_P_INIT
 from .rls_model import RLSModel
 from .pi_stored_data import PIExtraStoredData
+from .performance_metrics import PerformanceMetrics
 from .smith_predictor import SmithPredictor
 
 _LOGGER = logging.getLogger(__name__)
@@ -338,20 +339,8 @@ class PIController:
         self._health_prev_desired: float | None = None
         self._health_comfort_skip: int = 0
 
-        # Integral convergence tracking (EMA of abs(integral) over ~24hr)
-        self._integral_convergence: float = 0.0
-
-        # Performance metrics (running totals, persisted via ExtraStoredData)
-        self._itae_accumulator: float = 0.0      # Σ(tick * |effective_error|)
-        self._itae_tick_count: int = 0         # ticks since last reset
-        self._comfort_violation_hours: float = 0.0  # hours spent >1°C from setpoint
-        self._setpoint_changes: int = 0  # total setpoint change count
-        # Controllable/uncontrollable split: only accumulate "controllable"
-        # when HP has headroom (not clamped at min/max for the error direction).
-        self._controllable_itae: float = 0.0
-        self._uncontrollable_itae: float = 0.0
-        self._controllable_cvh: float = 0.0
-        self._uncontrollable_cvh: float = 0.0
+        # Performance metrics (ITAE, CVH, FF load fraction, integral convergence)
+        self._metrics = PerformanceMetrics()
 
         # RLS learning gate: track integral stability
         self._prev_integral_for_rls: float = 0.0
@@ -363,13 +352,6 @@ class PIController:
         # FF confidence (EMA-smoothed to prevent limit cycling from
         # tick-to-tick confidence changes near integer setpoint boundaries)
         self._ff_confidence: float = 1.0
-
-        # FF load fraction: EMA of |ff_offset| / (|ff_offset| + |ki*integral|).
-        # Trends toward 1.0 as the model takes load off the integral.
-        self._ff_load_fraction: float = 0.5
-
-        # Batch model RMS: last residual_rms from batch WLS analysis.
-        self._batch_model_rms: float | None = None
 
         # Conditional integration freeze: track state for edge-triggered logging.
         self._integration_frozen: bool = False
@@ -586,7 +568,7 @@ class PIController:
 
         self._last_batch_result = result
         self._last_batch_timestamp = time.monotonic()
-        self._batch_model_rms = result.residual_rms
+        self._metrics.batch_model_rms = result.residual_rms
 
         # ── Drift detection: track per-coefficient correction direction ──
         if result.beta_blended and result.beta_current:
@@ -692,15 +674,15 @@ class PIController:
             pi_integral=self._pi_integral,
             desired_temp=self._desired_temp,
             hp_setpoint=self._hp_setpoint,
-            integral_convergence=self._integral_convergence,
-            itae_accumulator=self._itae_accumulator,
-            comfort_violation_hours=self._comfort_violation_hours,
-            setpoint_changes=self._setpoint_changes,
-            controllable_itae=self._controllable_itae,
-            uncontrollable_itae=self._uncontrollable_itae,
-            controllable_cvh=self._controllable_cvh,
-            uncontrollable_cvh=self._uncontrollable_cvh,
-            ff_load_fraction=self._ff_load_fraction,
+            integral_convergence=self._metrics.integral_convergence,
+            itae_accumulator=self._metrics.itae_accumulator,
+            comfort_violation_hours=self._metrics.comfort_violation_hours,
+            setpoint_changes=self._metrics.setpoint_changes,
+            controllable_itae=self._metrics.controllable_itae,
+            uncontrollable_itae=self._metrics.uncontrollable_itae,
+            controllable_cvh=self._metrics.controllable_cvh,
+            uncontrollable_cvh=self._metrics.uncontrollable_cvh,
+            ff_load_fraction=self._metrics.ff_load_fraction,
             rls_heat_model=self._rls_heat.as_dict(),
             rls_cool_model=self._rls_cool.as_dict(),
             lag_filter_states=lag_states,
@@ -737,15 +719,15 @@ class PIController:
             self._desired_temp = data.desired_temp
         if data.hp_setpoint is not None:
             self._hp_setpoint = data.hp_setpoint
-        self._integral_convergence = data.integral_convergence
-        self._itae_accumulator = data.itae_accumulator
-        self._comfort_violation_hours = data.comfort_violation_hours
-        self._setpoint_changes = data.setpoint_changes
-        self._controllable_itae = data.controllable_itae
-        self._uncontrollable_itae = data.uncontrollable_itae
-        self._controllable_cvh = data.controllable_cvh
-        self._uncontrollable_cvh = data.uncontrollable_cvh
-        self._ff_load_fraction = data.ff_load_fraction
+        self._metrics.integral_convergence = data.integral_convergence
+        self._metrics.itae_accumulator = data.itae_accumulator
+        self._metrics.comfort_violation_hours = data.comfort_violation_hours
+        self._metrics.setpoint_changes = data.setpoint_changes
+        self._metrics.controllable_itae = data.controllable_itae
+        self._metrics.uncontrollable_itae = data.uncontrollable_itae
+        self._metrics.controllable_cvh = data.controllable_cvh
+        self._metrics.uncontrollable_cvh = data.uncontrollable_cvh
+        self._metrics.ff_load_fraction = data.ff_load_fraction
         # Restore RLS models if available. Pass seed_coefficients so that
         # if model inputs changed (different vector length), new inputs get
         # seeded instead of zeroed.
@@ -780,7 +762,7 @@ class PIController:
             if "held_features" in br and isinstance(br["held_features"], list):
                 br["held_features"] = set(br["held_features"])
             self._last_batch_result = BatchResult(**br)
-            self._batch_model_rms = self._last_batch_result.residual_rms
+            self._metrics.batch_model_rms = self._last_batch_result.residual_rms
         # Seed change detection: if user edited a seed since last save,
         # reset that coefficient to the new seed and increase its uncertainty.
         # Coefficients with unchanged seeds keep their learned values.
@@ -945,7 +927,7 @@ class PIController:
             "rls_cool_coefficients": rls_cool_coeffs,
             "rls_observation_count": self._rls_heat.observation_count,
             "ff_learning_suppressed": self._disturbance_suppress_active,
-            "integral_convergence": round(self._integral_convergence, 2),
+            "integral_convergence": round(self._metrics.integral_convergence, 2),
             "room_temp_rate": round(self._room_temp_rate, 4),  # °C/min
             "effective_kp": round(self._pi_kp, 3),
             "effective_ki": round(self._pi_ki, 4),
@@ -954,7 +936,7 @@ class PIController:
             "smith_correction": (
                 round(self._smith.correction, 3) if self._smith is not None else None
             ),
-            "setpoint_changes_total": self._setpoint_changes,
+            "setpoint_changes_total": self._metrics.setpoint_changes,
             "sensor_filtered": (
                 round(self._sensor_filtered, 3)
                 if self._sensor_filtered is not None else None
@@ -994,7 +976,7 @@ class PIController:
                 "desired_temp": self._desired_temp,
                 "outdoor_temp": self._outdoor_temp,
                 "room_temp_rate": round(self._room_temp_rate, 6),
-                "integral_convergence": round(self._integral_convergence, 4),
+                "integral_convergence": round(self._metrics.integral_convergence, 4),
                 "tau_estimate": round(self._tau_estimate, 1) if self._imc_enabled else None,
             },
         }
@@ -1169,7 +1151,7 @@ class PIController:
             "expected_slope": round(expected_slope, 4),
             "rls_obs_count": rls.observation_count,
             "ff_confidence": round(self._ff_confidence, 3),
-            "integral_convergence": round(self._integral_convergence, 2),
+            "integral_convergence": round(self._metrics.integral_convergence, 2),
             "tau_estimate": round(self._tau_estimate, 1) if self._imc_enabled else None,
             "smith_correction": (
                 round(self._smith.correction, 3) if self._smith is not None else None
@@ -2070,48 +2052,24 @@ class PIController:
 
         self._pi_last_error = error
 
-        # Update integral convergence metric (EMA of abs(integral), ~24hr time constant)
-        # With 15-min ticks, 96 ticks/day → alpha ≈ 1/96 ≈ 0.01
-        convergence_alpha = 0.01
-        self._integral_convergence = (
-            (1.0 - convergence_alpha) * self._integral_convergence
-            + convergence_alpha * abs(self._pi_integral)
-        )
-
-        # Performance metrics accumulation (paused during tracking — HP not responsible)
+        # Performance metrics accumulation
+        self._metrics.accumulate_convergence(self._pi_integral)
         if not self._tracking_mode:
-            self._itae_tick_count += 1
-            effective_error = max(0.0, abs_error - self._pi_deadband)
-            self._itae_accumulator += self._itae_tick_count * effective_error
-            if abs_error > 1.0:
-                self._comfort_violation_hours += dt_seconds / 3600.0
-
-            # Controllable/uncontrollable split: "uncontrollable" when the HP
-            # is clamped at its limit in the direction that would help.
-            # Heating + room above target + at min → can't cool further.
-            # Cooling + room below target + at max → can't heat further.
-            saturated_wrong_end = (
-                (is_heating and error < 0 and self._hp_setpoint <= self._min_temp_c)
-                or (is_cooling and error > 0 and self._hp_setpoint >= self._max_temp_c)
+            self._metrics.accumulate_tick(
+                abs_error=abs_error,
+                dt_seconds=dt_seconds,
+                pi_deadband=self._pi_deadband,
+                is_heating=is_heating,
+                is_cooling=is_cooling,
+                error=error,
+                hp_setpoint=self._hp_setpoint,
+                min_temp_c=self._min_temp_c,
+                max_temp_c=self._max_temp_c,
             )
-            itae_increment = self._itae_tick_count * effective_error
-            if saturated_wrong_end:
-                self._uncontrollable_itae += itae_increment
-                if abs_error > 1.0:
-                    self._uncontrollable_cvh += dt_seconds / 3600.0
-            else:
-                self._controllable_itae += itae_increment
-                if abs_error > 1.0:
-                    self._controllable_cvh += dt_seconds / 3600.0
-
-        # FF load fraction: how much of the control effort comes from the
-        # feedforward model vs the integral.  EMA ~24h (alpha ≈ 0.01).
-        i_correction = abs(self._pi_ki * self._pi_integral)
-        ff_mag = abs(self._ff_offset)
-        total_effort = ff_mag + i_correction
-        if total_effort > 0.1:  # avoid noise when both are near zero
-            instant_ff_load = ff_mag / total_effort
-            self._ff_load_fraction += 0.01 * (instant_ff_load - self._ff_load_fraction)
+        self._metrics.accumulate_ff_load(
+            ki_integral=self._pi_ki * self._pi_integral,
+            ff_offset=self._ff_offset,
+        )
 
         i_term = self._pi_ki * self._pi_integral
         d_term = self._pi_d_filtered
@@ -2207,7 +2165,7 @@ class PIController:
                         clamped_setpoint, old_setpoint, new_setpoint,
                     )
                     self._last_setpoint_change_time = now_mono
-                    self._setpoint_changes += 1
+                    self._metrics.record_setpoint_change()
                     # Start τ observation on significant setpoint changes
                     self._start_tau_observation(now_mono, current_c, desired_c, float(change))
                     return True

@@ -67,7 +67,7 @@ async def async_get_config_entry_diagnostics(
             "desired_temp": pi._desired_temp,
             "hp_setpoint": pi._hp_setpoint,
             "integral": round(pi._pi_integral, 3),
-            "integral_convergence": round(pi._integral_convergence, 2),
+            "integral_convergence": round(pi._metrics.integral_convergence, 2),
             "ff_offset": round(pi._ff_offset, 2),
             "outdoor_temp": pi._outdoor_temp,
             "sensor_unavailable": pi._sensor_unavailable,
@@ -173,15 +173,15 @@ async def async_get_config_entry_diagnostics(
 
         # PI performance metrics
         data["pi_controller"]["performance"] = {
-            "itae_accumulator": round(pi._itae_accumulator, 2),
-            "comfort_violation_hours": round(pi._comfort_violation_hours, 2),
-            "setpoint_changes": pi._setpoint_changes,
-            "controllable_itae": round(pi._controllable_itae, 2),
-            "uncontrollable_itae": round(pi._uncontrollable_itae, 2),
-            "controllable_cvh": round(pi._controllable_cvh, 2),
-            "uncontrollable_cvh": round(pi._uncontrollable_cvh, 2),
-            "ff_load_fraction": round(pi._ff_load_fraction, 4),
-            "batch_model_rms": round(pi._batch_model_rms, 3) if pi._batch_model_rms is not None else None,
+            "itae_accumulator": round(pi._metrics.itae_accumulator, 2),
+            "comfort_violation_hours": round(pi._metrics.comfort_violation_hours, 2),
+            "setpoint_changes": pi._metrics.setpoint_changes,
+            "controllable_itae": round(pi._metrics.controllable_itae, 2),
+            "uncontrollable_itae": round(pi._metrics.uncontrollable_itae, 2),
+            "controllable_cvh": round(pi._metrics.controllable_cvh, 2),
+            "uncontrollable_cvh": round(pi._metrics.uncontrollable_cvh, 2),
+            "ff_load_fraction": round(pi._metrics.ff_load_fraction, 4),
+            "batch_model_rms": round(pi._metrics.batch_model_rms, 3) if pi._metrics.batch_model_rms is not None else None,
         }
         data["pi_controller"]["ff_confidence"] = round(pi._ff_confidence, 4)
         data["pi_controller"]["room_temp_rate"] = round(pi._room_temp_rate, 4)
