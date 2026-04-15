@@ -52,10 +52,12 @@ async def async_get_config_entry_diagnostics(
         for m_input in pi._model_inputs:
             coeff_names.append(m_input.get("name", "unknown"))
 
-        rls_heat_coeffs = {coeff_names[i]: round(pi._rls_heat.beta[i], 4)
-                          for i in range(min(len(coeff_names), len(pi._rls_heat.beta)))}
-        rls_cool_coeffs = {coeff_names[i]: round(pi._rls_cool.beta[i], 4)
-                          for i in range(min(len(coeff_names), len(pi._rls_cool.beta)))}
+        heat_phys = pi._rls_heat.get_coefficients()
+        cool_phys = pi._rls_cool.get_coefficients()
+        rls_heat_coeffs = {coeff_names[i]: round(heat_phys[i], 4)
+                          for i in range(min(len(coeff_names), len(heat_phys)))}
+        rls_cool_coeffs = {coeff_names[i]: round(cool_phys[i], 4)
+                          for i in range(min(len(coeff_names), len(cool_phys)))}
         rls_heat_uncertainty = {coeff_names[i]: round(pi._rls_heat.get_covariance_diagonal()[i], 4)
                                for i in range(min(len(coeff_names), len(pi._rls_heat.beta)))}
 

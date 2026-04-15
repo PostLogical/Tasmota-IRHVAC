@@ -2044,18 +2044,6 @@ class PIController:
         in_deadband = abs_error < self._pi_deadband
         avg_error = (error + self._pi_last_error) / 2.0
 
-        # One-sided actuator anti-windup (Astrom & Hagglund, "Advanced PID
-        # Control" §3.5 — conditional integration): heat-only HP cannot cool,
-        # cool-only cannot heat.  When the integral has wound up significantly
-        # in the direction the actuator cannot act, accelerated decay limits
-        # the windup while still allowing brief overshoot correction.
-        # Threshold: |ki*integral| > deadband in the constrained direction.
-        _ki_integral = self._pi_ki * self._pi_integral
-        integral_wound_against_actuator = (
-            (is_heating and error < 0 and _ki_integral < -self._pi_deadband)
-            or (is_cooling and error > 0 and _ki_integral > self._pi_deadband)
-        )
-
         # Conditional integration (Åström & Hägglund, "Advanced PID
         # Control" §3.5): freeze the integrator when the HP is at the
         # limit opposite to what its mode can deliver AND the error is
@@ -2267,18 +2255,6 @@ class PIController:
             p_term = self._pi_kp * self._pi_setpoint_weight * (error - effective_smith)
             if not skip_integration:
                 self._pi_integral += avg_error * dt_factor
-            if integral_wound_against_actuator and not skip_integration:
-                # Accelerated decay: exponential toward zero limits windup
-                # while still allowing the integral to correct brief
-                # overshoot.  Time constant matches the building's thermal
-                # response (Astrom back-calculation Tt ≈ Ti; tau_estimate
-                # ~60min is same order as Ti = 1/ki ~100min).  Floor at
-                # 10min prevents bumps on recovery if tau is very small.
-                tau_min = max(
-                    self._tau_estimate if self._tau_estimate > 0 else 60.0,
-                    10.0,
-                )
-                self._pi_integral *= math.exp(-(dt_seconds / 60.0) / tau_min)
 
         # Leaky integrator: weak decay bounds integral growth universally.
         # α=0.9999 per nominal tick ≈ 10000-tick time constant (~104 days at

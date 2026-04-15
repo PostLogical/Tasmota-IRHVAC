@@ -3144,50 +3144,59 @@ class TestSensorFilter:
 
 
 class TestOneSidedAntiWindup:
-    """Tests for bidirectional one-sided actuator anti-windup (conditional integration)."""
+    """Tests for integral behavior when error opposes mode direction.
+
+    With accelerated decay removed, the integral accumulates freely
+    (bounded by back-calculation anti-windup and leaky integrator).
+    This lets the integral fully correct FF model errors — the HP has
+    room to adjust its setpoint even when the error opposes the mode.
+    Conditional integration (HP at limit) is the true anti-windup.
+    """
 
     @pytest.mark.asyncio
-    async def test_heat_mode_negative_error_limited_windup(self, pi_entity):
-        """In heat mode with room above target, integral windup should be limited by decay."""
+    async def test_heat_mode_negative_error_integral_accumulates(self, pi_entity):
+        """In heat mode with room above target, integral should accumulate to correct FF."""
         pi_entity._attr_hvac_mode = HVACMode.HEAT
         pi_entity._attr_current_temperature = 24.0  # °C, well above target
         pi_entity._pi._desired_temp = 22.0  # error = -2.0°C, outside deadband
         pi_entity._pi._hp_setpoint = 22.0
         pi_entity._pi._pi_integral = 0.0
 
-        # Run multiple ticks — integral should NOT wind deeply negative
-        for _ in range(10):
-            await pi_entity._pi._pi_tick()
+        # Run multiple ticks with advancing time so dt_factor > 0
+        for i in range(10):
+            pi_entity._pi._pi_last_tick_time = float(i * 900)
+            with patch("time.monotonic", return_value=float((i + 1) * 900)):
+                await pi_entity._pi._pi_tick()
 
         integral_after = pi_entity._pi._pi_integral
 
-        # With accumulate-then-decay, integral settles at a bounded value
-        # instead of winding unboundedly.  With tau=60min and error=-2,
-        # equilibrium ≈ -error * dt / (1 - decay) ≈ -9.
-        # Must be much less extreme than the -28.6 seen without anti-windup.
-        assert integral_after > -15.0, (
-            f"Integral should be bounded by accelerated decay, got {integral_after}"
+        # Integral accumulates with error (~-2 per tick, 10 ticks).
+        # Back-calculation may cap it if raw setpoint < min_temp.
+        # But it should be significantly negative — the integral is
+        # correctly trying to pull the HP setpoint down.
+        assert integral_after < -5.0, (
+            f"Integral should accumulate with negative error, got {integral_after}"
         )
 
     @pytest.mark.asyncio
-    async def test_heat_mode_negative_error_decays_existing_integral(self, pi_entity):
-        """Pre-wound negative integral should decay toward zero in heat mode."""
+    async def test_heat_mode_negative_error_grows_existing_integral(self, pi_entity):
+        """Pre-wound negative integral should grow more negative with ongoing error."""
         pi_entity._attr_hvac_mode = HVACMode.HEAT
         pi_entity._attr_current_temperature = 24.0  # °C, above target
         pi_entity._pi._desired_temp = 22.0  # error = -2.0°C
         pi_entity._pi._hp_setpoint = 22.0
         pi_entity._pi._pi_integral = -10.0  # Pre-wound negative
-        pi_entity._pi._tau_estimate = 60.0  # 60 min time constant
+        pi_entity._pi._pi_last_tick_time = 0.0
 
-        await pi_entity._pi._pi_tick()
+        with patch("time.monotonic", return_value=900.0):
+            await pi_entity._pi._pi_tick()
         integral_after = pi_entity._pi._pi_integral
 
-        # Integral should have decayed toward zero
-        assert integral_after > -10.0, (
-            f"Integral should decay toward zero, got {integral_after}"
+        # With error = -2, integral should go more negative (not decay toward zero).
+        # Only leaky decay (α=0.9999) applies — negligible per tick.
+        assert integral_after < -10.0, (
+            f"Integral should grow more negative with ongoing error, got {integral_after}"
         )
-        # Should still be negative (one tick won't fully unwind)
-        assert integral_after < 0.0
 
     @pytest.mark.asyncio
     async def test_heat_mode_positive_error_normal_accumulation(self, pi_entity):
@@ -3207,22 +3216,25 @@ class TestOneSidedAntiWindup:
         )
 
     @pytest.mark.asyncio
-    async def test_cool_mode_positive_error_limited_windup(self, pi_entity):
-        """In cool mode with room below target, integral windup should be limited."""
+    async def test_cool_mode_positive_error_integral_accumulates(self, pi_entity):
+        """In cool mode with room below target, integral should accumulate to correct FF."""
         pi_entity._attr_hvac_mode = HVACMode.COOL
         pi_entity._attr_current_temperature = 20.0  # °C, below target
         pi_entity._pi._desired_temp = 22.0  # error = +2.0°C
         pi_entity._pi._hp_setpoint = 22.0
         pi_entity._pi._pi_integral = 0.0
 
-        for _ in range(10):
-            await pi_entity._pi._pi_tick()
+        for i in range(10):
+            pi_entity._pi._pi_last_tick_time = float(i * 900)
+            with patch("time.monotonic", return_value=float((i + 1) * 900)):
+                await pi_entity._pi._pi_tick()
 
         integral_after = pi_entity._pi._pi_integral
 
-        # Integral should be bounded by decay, not wind to +28
-        assert integral_after < 15.0, (
-            f"Integral should be bounded by accelerated decay, got {integral_after}"
+        # Integral accumulates with positive error (~+2 per tick).
+        # Back-calculation may cap it if raw setpoint > max_temp.
+        assert integral_after > 5.0, (
+            f"Integral should accumulate with positive error in cool mode, got {integral_after}"
         )
 
     @pytest.mark.asyncio
@@ -3245,10 +3257,10 @@ class TestOneSidedAntiWindup:
 
     @pytest.mark.asyncio
     async def test_heat_mode_deadband_normal_accumulation(self, pi_entity):
-        """In deadband, integral accumulates normally even with no-authority error.
+        """In deadband, integral accumulates normally even with small overshoot.
 
-        Small overshoots within deadband are normal control behavior, not
-        actuator saturation. Accelerated decay only applies outside deadband.
+        Small overshoots within deadband are normal control behavior.
+        Variable-rate integration applies (reduced rate near setpoint).
         """
         pi_entity._attr_hvac_mode = HVACMode.HEAT
         pi_entity._attr_current_temperature = 22.3  # °C, slightly above target
@@ -3265,11 +3277,13 @@ class TestOneSidedAntiWindup:
         )
 
     @pytest.mark.asyncio
-    async def test_decay_rate_matches_tau(self):
-        """Accelerated decay rate should use tau_estimate as time constant."""
-        import math
-        # Use small error and moderate integral to avoid triggering the
-        # separate back-calculation anti-windup (setpoint clamp).
+    async def test_integral_accumulates_to_correct_ff_bias(self):
+        """Integral should accumulate enough to correct persistent FF model error.
+
+        Without accelerated decay, the integral builds until the HP setpoint
+        corrects the error. This is essential for FF learning: the observation
+        at equilibrium (ff + ki*integral) reflects the true offset needed.
+        """
         config = make_pi_config({"pi_tau_estimate": 60.0, "min_temp": 0})
         entity = FakePIEntity(config)
         pi = entity._pi
@@ -3279,15 +3293,14 @@ class TestOneSidedAntiWindup:
         entity._attr_current_temperature = 21.0  # error = -1.0°C, outside deadband
         pi._pi_integral = -5.0
 
-        # Run one tick (default interval ~900s = 15min)
+        # Run one tick — integral should accumulate with error, not decay
         await pi._pi_tick()
         integral_after = pi._pi_integral
 
-        # Process: accumulate error (-1.0 * dt_factor=1), then decay, then leaky
-        # (-5 + -1.0) * exp(-15/60) * 0.9999 ≈ -6 * 0.778 * 0.9999 ≈ -4.67
-        expected = (-5.0 + -1.0) * math.exp(-15.0 / 60.0) * (0.9999 ** 1.0)
-        assert abs(integral_after - expected) < 0.5, (
-            f"Integral should decay with tau=60min, expected ~{expected:.2f}, got {integral_after:.2f}"
+        # Integral = (-5 + -1.0) * 0.9999 ≈ -5.999 (leaky only, no accel decay)
+        # Back-calculation may limit if raw setpoint < min_temp.
+        assert integral_after < -5.4, (
+            f"Integral should accumulate with error, got {integral_after:.2f}"
         )
 
     @pytest.mark.asyncio
@@ -3307,30 +3320,39 @@ class TestOneSidedAntiWindup:
         assert pi_entity._pi._pi_integral < 40.0
 
     @pytest.mark.asyncio
-    async def test_recovery_after_sustained_overshoot(self):
-        """After sustained no-authority period, integral should be near zero for fast recovery."""
-        import math
+    async def test_sustained_overshoot_reaches_hp_limit(self):
+        """During sustained overshoot, integral drives HP to min, then conditional freeze holds.
+
+        The integral accumulates freely until the HP reaches min_temp.
+        Then conditional integration freezes the integral (HP at limit +
+        error opposing mode). Back-calculation also caps the integral.
+        This is the correct anti-windup: only at the actuator limit.
+        """
         config = make_pi_config({"pi_tau_estimate": 60.0})
         entity = FakePIEntity(config)
         pi = entity._pi
         pi._desired_temp = 20.0
         pi._hp_setpoint = 20.0
         entity._attr_hvac_mode = HVACMode.HEAT
-        entity._attr_current_temperature = 24.0  # room well above target
+        entity._attr_current_temperature = 24.0  # room well above target, error = -4°C
         pi._pi_integral = -25.0
 
-        # Simulate ~3 hours of no-authority (12 ticks at 15min)
+        # Simulate ~3 hours of overshoot (12 ticks at 15min)
         for i in range(12):
             pi._pi_last_tick_time = float(i * 900)
             with patch("time.monotonic", return_value=float((i + 1) * 900)):
                 await pi._pi_tick()
 
-        # With accumulate-then-decay, integral settles at a bounded
-        # equilibrium rather than winding to -48 (12 × -4).  The exact
-        # value depends on tau, error, and back-calculation anti-windup.
-        assert abs(pi._pi_integral) < 10.0, (
-            f"Integral should be bounded after 3h of no-authority, got {pi._pi_integral}"
+        # HP should be at or near minimum (error drives it there quickly).
+        assert pi._hp_setpoint <= 17, (
+            f"HP should be driven to min by large error, got {pi._hp_setpoint}"
         )
+        # Integral is bounded by back-calculation (raw < min_temp) and
+        # conditional freeze (hp at min + error < 0). It won't wind to -73.
+        assert pi._pi_integral > -30.0, (
+            f"Back-calculation should cap integral, got {pi._pi_integral}"
+        )
+        assert pi._pi_integral < 0, "Integral should still be negative"
 
 
 class TestConditionalIntegration:
