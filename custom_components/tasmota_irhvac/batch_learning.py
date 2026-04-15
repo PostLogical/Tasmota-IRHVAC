@@ -112,6 +112,252 @@ class ObservationBuffer:
         return buf
 
 
+# Default capacity for diversity-aware buffer.  ~2000 observations at
+# 4/hr fills in ~3 weeks, after which leverage scoring governs eviction.
+DEFAULT_DIVERSITY_BUFFER_SIZE = 2000
+
+# Regularization for (X^T X)^{-1} to keep it invertible before the
+# buffer fills and during early operation when rank may be deficient.
+INFO_MATRIX_REGULARIZATION = 1e-4
+
+
+class DiversityAwareBuffer:
+    """Leverage-scored observation buffer for long-term diverse data retention.
+
+    Instead of FIFO eviction, retains observations that maximize the
+    information content of the buffer (D-optimal design).  Each observation's
+    leverage score measures how much unique information it contributes:
+
+        leverage(x) = x^T (X^T X + λI)^{-1} x
+
+    When the buffer is full, a new observation replaces the stored observation
+    with the lowest leverage score, but only if the new observation has higher
+    leverage.  This naturally retains rare operating conditions (cold snaps,
+    pellet stove events, door transitions) while shedding redundant
+    steady-state observations.
+
+    References:
+    - Chowdhary & Johnson, ACC 2011 — concurrent learning history stack
+    - Atkinson & Donev, "Optimum Experimental Designs" — D-optimal sequential design
+    """
+
+    def __init__(self, n_features: int, max_size: int = DEFAULT_DIVERSITY_BUFFER_SIZE) -> None:
+        self._buffer: list[Observation] = []
+        self._max_size = max_size
+        self._n_features = n_features
+        # (X^T X + λI)^{-1} — the inverse information matrix, n×n.
+        # Initialized to (1/λ) * I (no data yet).
+        n = n_features
+        reg_inv = 1.0 / INFO_MATRIX_REGULARIZATION
+        self._info_inv: list[list[float]] = [
+            [reg_inv if i == j else 0.0 for j in range(n)]
+            for i in range(n)
+        ]
+        # Counter for incremental updates since last full recomputation.
+        self._updates_since_recompute: int = 0
+
+    @property
+    def n_features(self) -> int:
+        return self._n_features
+
+    def add(self, obs: Observation) -> None:
+        """Add an observation, using leverage-scored eviction when full."""
+        x = self._get_feature_vector(obs)
+        new_leverage = self._compute_leverage(x)
+
+        if len(self._buffer) < self._max_size:
+            # Buffer not full — always accept.
+            self._buffer.append(obs)
+            self._sherman_morrison_update(x)
+        else:
+            # Find the lowest-leverage observation using current info matrix.
+            min_idx = 0
+            min_lev = self._compute_leverage(self._get_feature_vector(self._buffer[0]))
+            for i in range(1, len(self._buffer)):
+                lev = self._compute_leverage(self._get_feature_vector(self._buffer[i]))
+                if lev < min_lev:
+                    min_lev = lev
+                    min_idx = i
+            if new_leverage > min_lev:
+                # Downdate the evicted observation, then update with new.
+                old_x = self._get_feature_vector(self._buffer[min_idx])
+                self._sherman_morrison_downdate(old_x)
+                self._buffer[min_idx] = obs
+                self._sherman_morrison_update(x)
+            # else: new observation is less informative than everything
+            # in the buffer — discard it silently.
+
+    def get_all(self) -> list[Observation]:
+        return list(self._buffer)
+
+    def __len__(self) -> int:
+        return len(self._buffer)
+
+    def as_list(self) -> list[dict[str, Any]]:
+        return [o.as_dict() for o in self._buffer]
+
+    @classmethod
+    def from_list(
+        cls,
+        data: list[dict[str, Any]],
+        n_features: int,
+        max_size: int = DEFAULT_DIVERSITY_BUFFER_SIZE,
+    ) -> DiversityAwareBuffer:
+        """Deserialize from stored dicts, recomputing the info matrix."""
+        buf = cls(n_features, max_size)
+        observations: list[Observation] = []
+        for d in data:
+            try:
+                observations.append(Observation.from_dict(d))
+            except (KeyError, TypeError, ValueError):
+                continue
+        # If more observations than max_size, keep only the most recent
+        # (from a prior FIFO buffer) and let them seed the diversity buffer.
+        if len(observations) > max_size:
+            observations = observations[-max_size:]
+        # Bulk-load without eviction scoring (all are accepted initially).
+        buf._buffer = observations
+        buf.recompute_info_matrix()
+        return buf
+
+    def _get_feature_vector(self, obs: Observation) -> list[float]:
+        """Extract and pad feature vector to match expected dimensions."""
+        x = obs.features[:self._n_features]
+        while len(x) < self._n_features:
+            x.append(0.0)
+        return x
+
+    def recompute_info_matrix(self) -> None:
+        """Recompute (X^T X + λI)^{-1} from scratch.
+
+        Call periodically (e.g., at each 12h batch cycle) to prevent
+        numerical drift from incremental Sherman-Morrison updates.
+        """
+        n = self._n_features
+        # Build X^T X + λI
+        xtx = [
+            [INFO_MATRIX_REGULARIZATION if i == j else 0.0 for j in range(n)]
+            for i in range(n)
+        ]
+        for obs in self._buffer:
+            x = self._get_feature_vector(obs)
+            for i in range(n):
+                for j in range(n):
+                    xtx[i][j] += x[i] * x[j]
+
+        # Invert via Gaussian elimination
+        inv = self._invert_matrix(xtx, n)
+        if inv is not None:
+            self._info_inv = inv
+        else:
+            # Fallback: increase regularization
+            for i in range(n):
+                xtx[i][i] += 1e-2
+            inv = self._invert_matrix(xtx, n)
+            if inv is not None:
+                self._info_inv = inv
+
+        self._updates_since_recompute = 0
+
+    def get_leverage_scores(self) -> list[float]:
+        """Compute and return current leverage scores (for diagnostics)."""
+        return [self._compute_leverage(self._get_feature_vector(o)) for o in self._buffer]
+
+    def get_min_leverage(self) -> float:
+        """Return the minimum leverage score in the buffer."""
+        if not self._buffer:
+            return 0.0
+        return min(self._compute_leverage(self._get_feature_vector(o)) for o in self._buffer)
+
+    def _compute_leverage(self, x: list[float]) -> float:
+        """Compute leverage score: x^T (X^T X + λI)^{-1} x."""
+        n = self._n_features
+        # (X^T X + λI)^{-1} x
+        inv_x = [0.0] * n
+        for i in range(n):
+            for j in range(n):
+                inv_x[i] += self._info_inv[i][j] * x[j]
+        # x^T (result)
+        return sum(x[i] * inv_x[i] for i in range(n))
+
+    def _sherman_morrison_update(self, x: list[float]) -> None:
+        """Rank-1 downdate of the inverse: (A + xx^T)^{-1} via Sherman-Morrison.
+
+        (A + xx^T)^{-1} = A^{-1} - (A^{-1} x x^T A^{-1}) / (1 + x^T A^{-1} x)
+        """
+        n = self._n_features
+        # A^{-1} x
+        inv_x = [sum(self._info_inv[i][j] * x[j] for j in range(n)) for i in range(n)]
+        # 1 + x^T A^{-1} x
+        denom = 1.0 + sum(x[i] * inv_x[i] for i in range(n))
+        if abs(denom) < 1e-15:
+            return  # near-singular, skip incremental update
+        # A^{-1} -= (A^{-1} x)(x^T A^{-1}) / denom
+        for i in range(n):
+            for j in range(n):
+                self._info_inv[i][j] -= inv_x[i] * inv_x[j] / denom
+        self._updates_since_recompute += 1
+
+    def _sherman_morrison_downdate(self, x: list[float]) -> None:
+        """Rank-1 update for removing an observation: (A - xx^T)^{-1}.
+
+        (A - xx^T)^{-1} = A^{-1} + (A^{-1} x x^T A^{-1}) / (1 - x^T A^{-1} x)
+        """
+        n = self._n_features
+        inv_x = [sum(self._info_inv[i][j] * x[j] for j in range(n)) for i in range(n)]
+        denom = 1.0 - sum(x[i] * inv_x[i] for i in range(n))
+        if abs(denom) < 1e-15:
+            # Near-singular downdate — schedule full recomputation instead.
+            self._updates_since_recompute = 999
+            return
+        for i in range(n):
+            for j in range(n):
+                self._info_inv[i][j] += inv_x[i] * inv_x[j] / denom
+        self._updates_since_recompute += 1
+
+    @property
+    def needs_recompute(self) -> bool:
+        """Whether the info matrix should be recomputed from scratch."""
+        return self._updates_since_recompute > 500
+
+    @staticmethod
+    def _invert_matrix(A: list[list[float]], n: int) -> list[list[float]] | None:
+        """Invert an n×n matrix via Gauss-Jordan elimination.
+
+        Returns None if singular.  For n=3-8 this is instantaneous.
+        """
+        # Build [A | I]
+        M = [A[i][:] + [1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
+
+        for col in range(n):
+            # Partial pivoting
+            max_row = col
+            max_val = abs(M[col][col])
+            for row in range(col + 1, n):
+                if abs(M[row][col]) > max_val:
+                    max_val = abs(M[row][col])
+                    max_row = row
+            if max_val < 1e-14:
+                return None
+            M[col], M[max_row] = M[max_row], M[col]
+
+            # Scale pivot row
+            pivot = M[col][col]
+            for j in range(2 * n):
+                M[col][j] /= pivot
+
+            # Eliminate column
+            for row in range(n):
+                if row == col:
+                    continue
+                factor = M[row][col]
+                for j in range(2 * n):
+                    M[row][j] -= factor * M[col][j]
+
+        # Extract inverse from right half
+        return [M[i][n:] for i in range(n)]
+
+
 @dataclass
 class BatchResult:
     """Result of a batch WLS analysis."""
@@ -123,6 +369,7 @@ class BatchResult:
     residual_rms: float  # RMS residual of batch fit
     max_coeff_change_pct: float  # largest coefficient change (%)
     recommend_update: bool  # True if batch differs significantly
+    n_outliers_excluded: int = 0  # observations excluded by residual filter
     held_features: set[int] = field(default_factory=set)  # indices held at current (insufficient variance)
     beta_std_err: list[float] = field(default_factory=list)  # per-coefficient standard error from WLS
     beta_blended: list[float] = field(default_factory=list)  # safe update after covariance-weighted blend
@@ -151,6 +398,8 @@ def weighted_least_squares(
     room_rate_threshold: float = 0.02,
     min_observations: int = 20,
     min_feature_variance: float = MIN_FEATURE_VARIANCE,
+    outlier_sigma: float = 3.0,
+    min_feature_representation: int = 10,
 ) -> BatchResult | None:
     """Run weighted least squares on filtered observations.
 
@@ -159,6 +408,11 @@ def weighted_least_squares(
     - Excludes observations with room_rate > threshold (not at equilibrium)
     - Per-feature persistent excitation check: features with insufficient
       weighted variance are held at their current_beta values (Ljung §13.3).
+    - Residual outlier exclusion (Huber robust regression): after initial fit,
+      observations with |residual| > outlier_sigma * σ are excluded and the
+      model is refit.  Observations where a rare feature (< min_feature_representation
+      active samples) is non-zero are exempt from outlier exclusion to avoid
+      rejecting the first pellet-stove-on events as outliers.
 
     Weights: 1.0 / (1.0 + |error_c|) — at-target observations get full
     weight, observations further from target are downweighted.
@@ -236,12 +490,90 @@ def weighted_least_squares(
     for ii, j in enumerate(active):
         beta[j] = beta_active[ii]
 
-    # Compute RMS residual (using full beta, original y)
-    ss = 0.0
+    # Compute residuals for outlier detection
+    residuals = []
     for k in range(m):
         pred = sum(beta[i] * (X[k][i] if i < len(X[k]) else 0.0) for i in range(n))
-        ss += (y[k] - pred) ** 2
-    rms = math.sqrt(ss / m) if m > 0 else 0.0
+        residuals.append(y[k] - pred)
+
+    rms = math.sqrt(sum(r * r for r in residuals) / m) if m > 0 else 0.0
+
+    # ── Residual outlier exclusion (Huber robust regression) ─────────
+    # Exclude observations with |residual| > outlier_sigma * RMS, then
+    # refit.  Observations where a rare feature is active are exempt —
+    # they may look like outliers because the model hasn't learned that
+    # feature yet, not because they're bad data.
+    n_excluded = 0
+    if outlier_sigma > 0 and rms > 0 and m > min_observations + 5:
+        threshold = outlier_sigma * rms
+
+        # Count active observations per feature for the representation guard.
+        feature_active_count: list[int] = [0] * n
+        for k in range(m):
+            for j in range(1, n):  # skip intercept
+                xj = X[k][j] if j < len(X[k]) else 0.0
+                if abs(xj) > 1e-6:
+                    feature_active_count[j] += 1
+
+        keep = []
+        for k in range(m):
+            if abs(residuals[k]) <= threshold:
+                keep.append(k)
+            else:
+                # Check if this observation has an under-represented feature.
+                # If so, keep it — it's more likely new information than bad data.
+                has_rare_feature = False
+                for j in range(1, n):
+                    xj = X[k][j] if j < len(X[k]) else 0.0
+                    if abs(xj) > 1e-6 and feature_active_count[j] < min_feature_representation:
+                        has_rare_feature = True
+                        break
+                if has_rare_feature:
+                    keep.append(k)
+                else:
+                    n_excluded += 1
+
+        # Refit if any observations were excluded and we still have enough
+        if n_excluded > 0 and len(keep) >= min_observations:
+            m2 = len(keep)
+            y_adj2 = [y_adj[k] for k in keep]
+            X2 = [X[k] for k in keep]
+            w2 = [w[k] for k in keep]
+            y2 = [y[k] for k in keep]
+
+            XtWX2 = [[0.0] * na for _ in range(na)]
+            XtWy2 = [0.0] * na
+            for k in range(m2):
+                for ii, i in enumerate(active):
+                    xi = X2[k][i] if i < len(X2[k]) else 0.0
+                    XtWy2[ii] += xi * w2[k] * y_adj2[k]
+                    for jj, j in enumerate(active):
+                        xj = X2[k][j] if j < len(X2[k]) else 0.0
+                        XtWX2[ii][jj] += xi * w2[k] * xj
+
+            for ii in range(na):
+                XtWX2[ii][ii] += ridge
+
+            beta_active2 = _solve_symmetric(XtWX2, XtWy2, na)
+            if beta_active2 is not None:
+                for j in held:
+                    beta[j] = fallback[j] if j < len(fallback) else 0.0
+                for ii, j in enumerate(active):
+                    beta[j] = beta_active2[ii]
+
+                # Recompute residuals and RMS with the cleaned fit
+                residuals = []
+                for k in range(m2):
+                    pred = sum(beta[i] * (X2[k][i] if i < len(X2[k]) else 0.0) for i in range(n))
+                    residuals.append(y2[k] - pred)
+                rms = math.sqrt(sum(r * r for r in residuals) / m2) if m2 > 0 else 0.0
+                m = m2
+                XtWX = XtWX2
+
+                _LOGGER.debug(
+                    "Residual filter: excluded %d observations (threshold=%.3f)",
+                    n_excluded, threshold,
+                )
 
     # ── Per-coefficient standard error from (X'WX)⁻¹ ────────────────
     # σ²(βᵢ) = RMS² × diag((X'WX)⁻¹)ᵢ  (Ljung §9.4)
@@ -257,6 +589,7 @@ def weighted_least_squares(
     return BatchResult(
         n_total=len(observations),
         n_eligible=m,
+        n_outliers_excluded=n_excluded,
         beta_batch=beta,
         beta_current=[],  # filled in by caller
         residual_rms=rms,

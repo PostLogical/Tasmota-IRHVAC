@@ -35,7 +35,7 @@ from homeassistant.util.unit_conversion import TemperatureConverter
 
 import math
 
-from .batch_learning import BatchResult, Observation, ObservationBuffer, weighted_least_squares, compare_and_report, compute_blended_update
+from .batch_learning import BatchResult, DiversityAwareBuffer, Observation, ObservationBuffer, weighted_least_squares, compare_and_report, compute_blended_update
 
 from .const import (
     ATTR_DESIRED_TEMP,
@@ -561,9 +561,12 @@ class PIController:
         # Conditional integration freeze: track state for edge-triggered logging.
         self._integration_frozen: bool = False
 
-        # Batch learning: ring buffer of every tick's state for periodic
-        # offline WLS analysis.  Records regardless of learning gate.
-        self._observation_buffer = ObservationBuffer()
+        # Batch learning: diversity-aware buffer of every tick's state for
+        # periodic offline WLS analysis.  Records regardless of learning gate.
+        # n_features = intercept + outdoor_delta + model_inputs
+        self._observation_buffer = DiversityAwareBuffer(
+            n_features=2 + len(self._model_inputs),
+        )
         self._batch_analysis_timer: Any | None = None
         self._last_batch_result: BatchResult | None = None
         self._last_batch_timestamp: float | None = None
@@ -712,6 +715,11 @@ class PIController:
         is_heating = e._attr_hvac_mode == HVACMode.HEAT
         rls = self._rls_heat if is_heating else self._rls_cool
 
+        # Periodic recomputation of info matrix to prevent numerical drift.
+        if hasattr(self._observation_buffer, 'recompute_info_matrix'):
+            if self._observation_buffer.needs_recompute:
+                self._observation_buffer.recompute_info_matrix()
+
         observations = self._observation_buffer.get_all()
         if len(observations) < 20:
             _LOGGER.debug(
@@ -834,9 +842,13 @@ class PIController:
                 coeff_clamps=self._rls_cool_clamps,
                 feature_scales=self._feature_scales,
             )
-        # Restore observation buffer for batch learning
+        # Restore observation buffer for batch learning.
+        # Accepts data from both legacy FIFO and diversity-aware buffers.
         if data.observation_buffer:
-            self._observation_buffer = ObservationBuffer.from_list(data.observation_buffer)
+            self._observation_buffer = DiversityAwareBuffer.from_list(
+                data.observation_buffer,
+                n_features=2 + len(self._model_inputs),
+            )
         # Seed change detection: if user edited a seed since last save,
         # reset that coefficient to the new seed and increase its uncertainty.
         # Coefficients with unchanged seeds keep their learned values.
