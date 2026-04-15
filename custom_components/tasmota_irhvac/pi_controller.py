@@ -89,6 +89,7 @@ from .rls_model import RLSModel
 from .pi_stored_data import PIExtraStoredData
 from .performance_metrics import PerformanceMetrics
 from .smith_predictor import SmithPredictor
+from .supplemental_controller import SupplementalController
 from .tau_estimator import GainUpdate, TauEstimator
 
 _LOGGER = logging.getLogger(__name__)
@@ -239,12 +240,11 @@ class PIController:
         self._last_raw_setpoint: float = 0.0  # Pre-quantization setpoint from last tick
 
         # Supplemental heat source selector/override control
-        self._supplemental_sources: list[dict[str, Any]] = config.get("pi_supplemental_sources", [])
-        self._tracking_mode: bool = False          # True = HP defers to supplemental
-        self._tracking_sources: list[str] = []  # Names of active overriding sources
-        self._supplemental_failure_start: float | None = None
-        self._supplemental_assist_active: bool = False
-        self._supplemental_last_override: bool = False  # Edge detection
+        supplemental_sources: list[dict[str, Any]] = config.get("pi_supplemental_sources", [])
+        self._supplemental = SupplementalController(
+            sources=supplemental_sources,
+            deadband=self._pi_deadband,
+        )
 
         # Model inputs (replaces disturbance inputs for RLS)
         # Each: {"name": str, "entity_id": str, "seed_heat": float, "seed_cool": float,
@@ -255,7 +255,7 @@ class PIController:
         # These use the supplemental's climate entity as a binary signal (heat/cool=1, else=0).
         # The PI controller reads the entity state each tick to update the value.
         self._supplemental_auto_inputs: list[dict[str, Any]] = []
-        for source in self._supplemental_sources:
+        for source in supplemental_sources:
             if not source.get("auto_model_input", True):
                 continue
             entity_id = source.get("entity_id", "")
@@ -912,9 +912,9 @@ class PIController:
             ATTR_HP_SETPOINT: self._hp_setpoint,
             ATTR_PI_INTEGRAL: round(self._pi_integral, 3),
             "d_term": round(self._pi_d_filtered, 3),
-            "tracking_mode": self._tracking_mode,
-            "tracking_sources": self._tracking_sources,
-            "supplemental_assist": self._supplemental_assist_active,
+            "tracking_mode": self._supplemental.tracking_mode,
+            "tracking_sources": self._supplemental.tracking_sources,
+            "supplemental_assist": self._supplemental.assist_active,
             ATTR_DESIRED_TEMP: self._desired_temp,
             ATTR_FF_OFFSET: round(self._ff_offset, 2),
             "rls_heat_coefficients": rls_heat_coeffs,
@@ -1237,99 +1237,19 @@ class PIController:
         self._pi_integral = 0.0
         _LOGGER.info("FF models reset to seed values, integral zeroed")
 
-    # ── Supplemental Source Override/Selector ────────────────────────
-
     def _evaluate_supplemental_override(self, error_c: float, now_mono: float) -> bool:
-        """Evaluate whether supplemental sources are active and update tracking mode.
-
-        Implements override/selector control pattern:
-        - When supplemental is active: HP enters tracking mode (computes but doesn't send IR)
-        - When supplemental can't keep up: HP assists (sends IR alongside supplemental)
-        - When supplemental stops: bumpless transfer (HP resumes with current integral)
-
-        Returns True if the HP should send IR commands, False if tracking.
-        """
-        if not self._supplemental_sources:
-            return True  # No supplemental sources configured, HP always active
-
-        active_sources = []
-        for source in self._supplemental_sources:
-            entity_id = source.get("entity_id", "")
-            if not entity_id:
-                continue
+        """Evaluate supplemental override and apply side-effects. Returns hp_should_send_ir."""
+        def _get_state(entity_id: str) -> str | None:
             state = self._hass.states.get(entity_id)
-            if state is None or state.state in ("unavailable", "unknown"):
-                continue
-            # Climate entity in heat or cool mode = supplemental is managing the room
-            if state.state in ("heat", "cool"):
-                active_sources.append(source.get("name", entity_id))
+            return state.state if state is not None else None
 
-        was_tracking = self._tracking_mode
-
-        if not active_sources:
-            # No supplemental active → HP is in charge
-            self._tracking_mode = False
-            self._tracking_sources = []
-            self._supplemental_failure_start = None
-            self._supplemental_assist_active = False
-
-            if was_tracking:
-                _LOGGER.info(
-                    "Supplemental override ended (sources: %s). HP resuming with integral=%.2f, setpoint=%s",
-                    self._tracking_sources if self._tracking_sources else "none",
-                    self._pi_integral, self._hp_setpoint,
-                )
-                # Bumpless transfer: clear hold timer so first IR send isn't blocked
-                self._last_setpoint_change_time = 0.0
-            return True  # HP active
-
-        # At least one supplemental is active
-        self._tracking_sources = active_sources
-
-        # Failure detection: is the supplemental keeping up?
-        min_threshold = min(
-            s.get("failure_threshold", 900) for s in self._supplemental_sources
-            if s.get("name", "") in active_sources
-        ) if active_sources else 900
-
-        # recovery_margin is stored in °C — read directly
-        recovery_margin = min(
-            s.get("recovery_margin", 0.3) for s in self._supplemental_sources
-            if s.get("name", "") in active_sources
-        ) if active_sources else 0.3
-
-        if error_c > self._pi_deadband:
-            # Room is below desired
-            if self._supplemental_failure_start is None:
-                self._supplemental_failure_start = now_mono
-            time_below = now_mono - self._supplemental_failure_start
-            if time_below >= min_threshold:
-                if not self._supplemental_assist_active:
-                    _LOGGER.info(
-                        "Supplemental can't keep up (%.0fs below desired). HP assisting.",
-                        time_below,
-                    )
-                self._supplemental_assist_active = True
-        else:
-            if error_c < -recovery_margin:
-                # Room above desired + margin → supplemental caught up
-                if self._supplemental_assist_active:
-                    _LOGGER.info("Supplemental recovered. HP deferring again.")
-                self._supplemental_assist_active = False
-            self._supplemental_failure_start = None
-
-        if self._supplemental_assist_active:
-            self._tracking_mode = False  # HP active (assisting)
-        else:
-            self._tracking_mode = True   # HP tracking (deferred)
-
-        if self._tracking_mode and not was_tracking:
-            _LOGGER.info(
-                "Supplemental override started: %s. HP entering tracking mode.",
-                ", ".join(active_sources),
-            )
-
-        return not self._tracking_mode
+        result = self._supplemental.evaluate(
+            error_c, now_mono, _get_state,
+            pi_integral=self._pi_integral, hp_setpoint=self._hp_setpoint,
+        )
+        if result.should_reset_hold_timer:
+            self._last_setpoint_change_time = 0.0
+        return result.hp_should_send_ir
 
     # ── IMC Gain Scheduling (delegated to TauEstimator) ──────────────
 
@@ -1779,8 +1699,8 @@ class PIController:
                 and integral_settling
                 and room_settling
                 and not self._any_model_input_unavailable()
-                and not self._tracking_mode
-                and not self._supplemental_assist_active
+                and not self._supplemental.tracking_mode
+                and not self._supplemental.assist_active
             )
             if not can_learn_rls and self._ff_settled_ticks >= 4 and self._ff_settled_ticks % 4 == 0:
                 # Log why learning was blocked (every 4th tick ≈ 60min)
@@ -1893,8 +1813,8 @@ class PIController:
                 and self._outdoor_temp is not None
                 and not learning_suppressed
                 and not self._any_model_input_unavailable()
-                and not self._tracking_mode
-                and not self._supplemental_assist_active
+                and not self._supplemental.tracking_mode
+                and not self._supplemental.assist_active
             ):
                 corrected_offset = float(self._hp_setpoint) - current_c
                 beta_before = list(rls.beta)
@@ -1938,7 +1858,7 @@ class PIController:
 
         # Performance metrics accumulation
         self._metrics.accumulate_convergence(self._pi_integral)
-        if not self._tracking_mode:
+        if not self._supplemental.tracking_mode:
             self._metrics.accumulate_tick(
                 abs_error=abs_error,
                 dt_seconds=dt_seconds,
@@ -2040,7 +1960,7 @@ class PIController:
                     # Tracking mode: update internal setpoint but don't send IR
                     _LOGGER.debug(
                         "%sPI tracking: setpoint %s -> %s (IR suppressed, override by %s)",
-                        self._log_prefix, old_setpoint, new_setpoint, ", ".join(self._tracking_sources),
+                        self._log_prefix, old_setpoint, new_setpoint, ", ".join(self._supplemental.tracking_sources),
                     )
                 else:
                     _LOGGER.info(

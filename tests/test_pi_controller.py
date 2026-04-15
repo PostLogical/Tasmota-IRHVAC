@@ -2017,8 +2017,8 @@ class TestEvaluateSupplementalSources:
         result = pi._evaluate_supplemental_override(error_c=0.0, now_mono=100.0)
 
         assert result is False  # HP defers
-        assert pi._tracking_mode is True
-        assert pi._tracking_sources == ["Pellet Stove"]
+        assert pi._supplemental.tracking_mode is True
+        assert pi._supplemental.tracking_sources == ["Pellet Stove"]
 
     def test_supplemental_inactive_hp_active(self):
         """When supplemental is off, HP is active."""
@@ -2032,7 +2032,7 @@ class TestEvaluateSupplementalSources:
         result = pi._evaluate_supplemental_override(error_c=1.0, now_mono=100.0)
 
         assert result is True
-        assert pi._tracking_mode is False
+        assert pi._supplemental.tracking_mode is False
 
     def test_supplemental_unavailable_hp_active(self):
         """When supplemental entity is unavailable, HP stays active."""
@@ -2046,7 +2046,7 @@ class TestEvaluateSupplementalSources:
         result = pi._evaluate_supplemental_override(error_c=1.0, now_mono=100.0)
 
         assert result is True
-        assert pi._tracking_mode is False
+        assert pi._supplemental.tracking_mode is False
 
     def test_supplemental_none_state_hp_active(self):
         """When hass.states.get returns None, HP stays active."""
@@ -2070,8 +2070,8 @@ class TestEvaluateSupplementalSources:
 
         pi._evaluate_supplemental_override(error_c=1.0, now_mono=100.0)
 
-        assert pi._supplemental_failure_start == 100.0
-        assert pi._tracking_mode is True  # Still tracking (threshold not met)
+        assert pi._supplemental.failure_start == 100.0
+        assert pi._supplemental.tracking_mode is True  # Still tracking (threshold not met)
 
     def test_failure_threshold_triggers_assist(self):
         """After failure_threshold seconds below desired, HP assists."""
@@ -2084,14 +2084,14 @@ class TestEvaluateSupplementalSources:
 
         # First call: start failure timer
         pi._evaluate_supplemental_override(error_c=1.0, now_mono=100.0)
-        assert pi._supplemental_assist_active is False
+        assert pi._supplemental.assist_active is False
 
         # Second call: 901s later, exceeds 900s threshold
         result = pi._evaluate_supplemental_override(error_c=1.0, now_mono=1001.0)
 
-        assert pi._supplemental_assist_active is True
+        assert pi._supplemental.assist_active is True
         assert result is True  # HP active (assisting)
-        assert pi._tracking_mode is False
+        assert pi._supplemental.tracking_mode is False
 
     def test_recovery_clears_assist(self):
         """Room recovering past margin clears assist mode."""
@@ -2103,15 +2103,15 @@ class TestEvaluateSupplementalSources:
         entity.hass.states.get.return_value = state
 
         # Enter assist mode
-        pi._supplemental_assist_active = True
-        pi._supplemental_failure_start = 0.0
+        pi._supplemental.assist_active = True
+        pi._supplemental.failure_start = 0.0
 
         # Error negative beyond recovery_margin (0.3) → recovered
         pi._evaluate_supplemental_override(error_c=-0.5, now_mono=2000.0)
 
-        assert pi._supplemental_assist_active is False
-        assert pi._supplemental_failure_start is None
-        assert pi._tracking_mode is True  # Back to tracking
+        assert pi._supplemental.assist_active is False
+        assert pi._supplemental.failure_start is None
+        assert pi._supplemental.tracking_mode is True  # Back to tracking
 
     def test_bumpless_transfer_on_supplemental_end(self):
         """When supplemental stops, bumpless transfer clears hold timer."""
@@ -2119,8 +2119,8 @@ class TestEvaluateSupplementalSources:
         pi = entity._pi
 
         # Simulate was in tracking mode
-        pi._tracking_mode = True
-        pi._tracking_sources = ["Pellet Stove"]
+        pi._supplemental.tracking_mode = True
+        pi._supplemental.tracking_sources = ["Pellet Stove"]
         pi._last_setpoint_change_time = 999.0
 
         # Supplemental turns off
@@ -2131,7 +2131,7 @@ class TestEvaluateSupplementalSources:
         result = pi._evaluate_supplemental_override(error_c=1.0, now_mono=2000.0)
 
         assert result is True
-        assert pi._tracking_mode is False
+        assert pi._supplemental.tracking_mode is False
         assert pi._last_setpoint_change_time == 0.0  # Cleared for bumpless transfer
 
     def test_error_within_deadband_clears_failure_timer(self):
@@ -2145,11 +2145,11 @@ class TestEvaluateSupplementalSources:
 
         # Start failure timer
         pi._evaluate_supplemental_override(error_c=1.0, now_mono=100.0)
-        assert pi._supplemental_failure_start == 100.0
+        assert pi._supplemental.failure_start == 100.0
 
         # Error drops to 0 (within deadband, not negative enough for recovery)
         pi._evaluate_supplemental_override(error_c=0.0, now_mono=200.0)
-        assert pi._supplemental_failure_start is None
+        assert pi._supplemental.failure_start is None
 
     def test_empty_entity_id_skipped(self):
         """Supplemental source with empty entity_id is skipped."""
@@ -2273,8 +2273,8 @@ class TestTrackingModeIRSuppressed:
         state = MagicMock()
         state.state = "heat"
         entity.hass.states.get.return_value = state
-        pi._tracking_mode = True
-        pi._tracking_sources = ["Pellet Stove"]
+        pi._supplemental.tracking_mode = True
+        pi._supplemental.tracking_sources = ["Pellet Stove"]
 
         send_needed = await pi._pi_tick()
 
