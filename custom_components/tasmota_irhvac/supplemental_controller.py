@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-from typing import Any, Callable
+from typing import Any
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -44,11 +44,16 @@ class SupplementalController:
         """Whether any supplemental sources are configured."""
         return bool(self._sources)
 
+    @property
+    def source_configs(self) -> list[dict[str, Any]]:
+        """Source config dicts (for caller to resolve entity states)."""
+        return self._sources
+
     def evaluate(
         self,
         error_c: float,
         now_mono: float,
-        get_entity_state: Callable[[str], str | None],
+        active_sources: list[str],
         *,
         pi_integral: float = 0.0,
         hp_setpoint: float | None = None,
@@ -58,29 +63,11 @@ class SupplementalController:
         Args:
             error_c: Current error in °C (desired - current).
             now_mono: Monotonic time in seconds.
-            get_entity_state: Callback that returns entity state string for a
-                given entity_id, or None if unavailable/unknown.
+            active_sources: Names of supplemental sources currently active
+                (resolved by caller from HA entity states).
             pi_integral: Current PI integral (for logging only).
             hp_setpoint: Current HP setpoint (for logging only).
-
-        Returns:
-            SupplementalResult with hp_should_send_ir and should_reset_hold_timer.
         """
-        if not self._sources:
-            return SupplementalResult(hp_should_send_ir=True, should_reset_hold_timer=False)
-
-        active_sources = []
-        for source in self._sources:
-            entity_id = source.get("entity_id", "")
-            if not entity_id:
-                continue
-            state = get_entity_state(entity_id)
-            if state is None or state in ("unavailable", "unknown"):
-                continue
-            # Climate entity in heat or cool mode = supplemental is managing the room
-            if state in ("heat", "cool"):
-                active_sources.append(source.get("name", entity_id))
-
         was_tracking = self.tracking_mode
         should_reset_hold_timer = False
 
@@ -97,7 +84,6 @@ class SupplementalController:
                     self.tracking_sources if self.tracking_sources else "none",
                     pi_integral, hp_setpoint,
                 )
-                # Bumpless transfer: clear hold timer so first IR send isn't blocked
                 should_reset_hold_timer = True
             return SupplementalResult(hp_should_send_ir=True, should_reset_hold_timer=should_reset_hold_timer)
 
@@ -110,14 +96,12 @@ class SupplementalController:
             if s.get("name", "") in active_sources
         ) if active_sources else 900
 
-        # recovery_margin is stored in °C — read directly
         recovery_margin = min(
             s.get("recovery_margin", 0.3) for s in self._sources
             if s.get("name", "") in active_sources
         ) if active_sources else 0.3
 
         if error_c > self._deadband:
-            # Room is below desired
             if self.failure_start is None:
                 self.failure_start = now_mono
             time_below = now_mono - self.failure_start
@@ -130,7 +114,6 @@ class SupplementalController:
                 self.assist_active = True
         else:
             if error_c < -recovery_margin:
-                # Room above desired + margin → supplemental caught up
                 if self.assist_active:
                     _LOGGER.info("Supplemental recovered. HP deferring again.")
                 self.assist_active = False

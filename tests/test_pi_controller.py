@@ -2777,7 +2777,7 @@ class TestTauObservation:
 
         # Room reaches 63.2% of 2°C step = 1.264°C above start = 21.264
         # At t=50 min (3000s), so observed τ = 50 - 15 (lag) = 35 min
-        pi._check_tau_observation(3000.0, 21.27)
+        pi._tau_estimator.check_observation(3000.0, 21.27)
         assert not pi._tau_estimator.active
         assert pi._tau_estimator.observations == 1
         # EMA with α ~ 0.5 for first observation: new τ ≈ blend of 120 and 35
@@ -2790,7 +2790,7 @@ class TestTauObservation:
         pi._tau_estimator.start_observation(0.0, 20.0, 22.0, 2.0)
         # timeout = max(4*60, 240) = 240 min = 14400s
         # Room still at 20.5 (< 63.2% of 2°C = 1.264)
-        pi._check_tau_observation(14500.0, 20.5)
+        pi._tau_estimator.check_observation(14500.0, 20.5)
         assert not pi._tau_estimator.active
         assert pi._tau_estimator.observations == 0  # No observation recorded
 
@@ -2819,7 +2819,9 @@ class TestTauObservation:
         old_kp = pi._pi_kp
         pi._tau_estimator.start_observation(0.0, 20.0, 22.0, 2.0)
         # Reach 63.2% at t=80 min → observed τ = 80-15 = 65 min
-        pi._check_tau_observation(4800.0, 21.27)
+        gain_update = pi._tau_estimator.check_observation(4800.0, 21.27)
+        assert gain_update is not None
+        pi._apply_gain_update(gain_update)
         # Gains should have changed
         assert pi._pi_kp != old_kp
 
@@ -2828,7 +2830,7 @@ class TestTauObservation:
         _, pi = self._make_imc_entity(tau=120.0, lag=15.0)
         pi._tau_estimator.start_observation(0.0, 20.0, 22.0, 2.0)
         # Reach 63.2% at t=16 min → raw τ = 16-15 = 1 min → floored to 5
-        pi._check_tau_observation(960.0, 21.27)
+        pi._tau_estimator.check_observation(960.0, 21.27)
         assert pi._tau_estimator.observations == 1
         # τ should be moved toward 5 (from 120)
         assert pi._tau_estimator.tau < 120.0
@@ -2838,7 +2840,7 @@ class TestTauObservation:
         _, pi = self._make_imc_entity(tau=120.0, lag=15.0)
         # First observation: observed τ = 60
         pi._tau_estimator.start_observation(0.0, 20.0, 22.0, 2.0)
-        pi._check_tau_observation(4500.0, 21.27)  # 75min → τ=75-15=60
+        pi._tau_estimator.check_observation(4500.0, 21.27)  # 75min → τ=75-15=60
         tau_after_1 = pi._tau_estimator.tau
         assert pi._tau_estimator.observations == 1
         # α=1.0 for first obs → fully replaces seed
@@ -2846,7 +2848,7 @@ class TestTauObservation:
 
         # Second observation: observed τ = 90 (different conditions)
         pi._tau_estimator.start_observation(5000.0, 20.0, 22.0, 2.0)
-        pi._check_tau_observation(11300.0, 21.27)  # 105min → τ=105-15=90
+        pi._tau_estimator.check_observation(11300.0, 21.27)  # 105min → τ=105-15=90
         tau_after_2 = pi._tau_estimator.tau
         assert pi._tau_estimator.observations == 2
         # α=0.5 for second obs → EMA blend: 0.5*60 + 0.5*90 = 75

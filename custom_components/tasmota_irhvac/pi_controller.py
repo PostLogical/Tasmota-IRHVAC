@@ -1237,14 +1237,25 @@ class PIController:
         self._pi_integral = 0.0
         _LOGGER.info("FF models reset to seed values, integral zeroed")
 
+    def _resolve_active_supplemental_sources(self) -> list[str]:
+        """Resolve which supplemental sources are currently active from HA state."""
+        active: list[str] = []
+        for source in self._supplemental.source_configs:
+            entity_id = source.get("entity_id", "")
+            if not entity_id:
+                continue
+            state = self._hass.states.get(entity_id)
+            if state is None or state.state in ("unavailable", "unknown"):
+                continue
+            if state.state in ("heat", "cool"):
+                active.append(source.get("name", entity_id))
+        return active
+
     def _evaluate_supplemental_override(self, error_c: float, now_mono: float) -> bool:
         """Evaluate supplemental override and apply side-effects. Returns hp_should_send_ir."""
-        def _get_state(entity_id: str) -> str | None:
-            state = self._hass.states.get(entity_id)
-            return state.state if state is not None else None
-
+        active = self._resolve_active_supplemental_sources()
         result = self._supplemental.evaluate(
-            error_c, now_mono, _get_state,
+            error_c, now_mono, active,
             pi_integral=self._pi_integral, hp_setpoint=self._hp_setpoint,
         )
         if result.should_reset_hold_timer:
@@ -1264,12 +1275,6 @@ class PIController:
         """Recompute IMC gains from current τ estimate and apply them."""
         gains = self._tau_estimator.compute_gains()
         self._apply_gain_update(gains)
-
-    def _check_tau_observation(self, now_mono: float, current_c: float) -> None:
-        """Check τ observation and apply any resulting gain update."""
-        gain_update = self._tau_estimator.check_observation(now_mono, current_c)
-        if gain_update is not None:
-            self._apply_gain_update(gain_update)
 
     # ── PI Internals ──────────────────────────────────────────────────
 
