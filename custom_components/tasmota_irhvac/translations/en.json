@@ -40,6 +40,21 @@
       "batch_model_rms": {
         "name": "Batch Model RMS"
       },
+      "buffer_eligible": {
+        "name": "Buffer Eligible"
+      },
+      "buffer_total": {
+        "name": "Buffer Total"
+      },
+      "buffer_oldest_age_hours": {
+        "name": "Buffer Oldest Observation Age"
+      },
+      "buffer_leverage_max": {
+        "name": "Buffer Max Leverage"
+      },
+      "batch_outliers_excluded": {
+        "name": "Batch Outliers Excluded"
+      },
       "health": {
         "name": "Health",
         "state": {
@@ -64,6 +79,9 @@
     "binary_sensor": {
       "ff_learning": {
         "name": "FF Learning"
+      },
+      "model_drifting": {
+        "name": "Model Drifting"
       }
     }
   },

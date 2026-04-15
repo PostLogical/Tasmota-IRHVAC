@@ -16,7 +16,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EntityCategory, UnitOfTemperature
+from homeassistant.const import EntityCategory, UnitOfTemperature, UnitOfTime
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -163,6 +163,56 @@ PI_SENSOR_DESCRIPTIONS: tuple[TasmotaIrhvacPISensorDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
         suggested_display_precision=3,
+    ),
+    TasmotaIrhvacPISensorDescription(
+        key="buffer_eligible",
+        translation_key="buffer_eligible",
+        climate_attr="buffer_eligible",
+        device_class=None,
+        native_unit_of_measurement=None,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        suggested_display_precision=0,
+    ),
+    TasmotaIrhvacPISensorDescription(
+        key="buffer_total",
+        translation_key="buffer_total",
+        climate_attr="buffer_total",
+        device_class=None,
+        native_unit_of_measurement=None,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        suggested_display_precision=0,
+    ),
+    TasmotaIrhvacPISensorDescription(
+        key="buffer_oldest_age_hours",
+        translation_key="buffer_oldest_age_hours",
+        climate_attr="buffer_oldest_age_hours",
+        device_class=SensorDeviceClass.DURATION,
+        native_unit_of_measurement=UnitOfTime.HOURS,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        suggested_display_precision=1,
+    ),
+    TasmotaIrhvacPISensorDescription(
+        key="buffer_leverage_max",
+        translation_key="buffer_leverage_max",
+        climate_attr="buffer_leverage_max",
+        device_class=None,
+        native_unit_of_measurement=None,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        suggested_display_precision=4,
+    ),
+    TasmotaIrhvacPISensorDescription(
+        key="batch_outliers_excluded",
+        translation_key="batch_outliers_excluded",
+        climate_attr="batch_outliers_excluded",
+        device_class=None,
+        native_unit_of_measurement=None,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        suggested_display_precision=0,
     ),
 )
 

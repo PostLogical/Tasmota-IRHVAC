@@ -314,6 +314,8 @@ class PIController:
     HEALTH_INTERCEPT_WARN: float = 1.0      # RLS intercept drift
     HEALTH_SLOPE_DRIFT_PCT: float = 30.0    # % drift from configured ff slope
     HEALTH_SLOPE_DRIFT_FLOOR: float = 0.05  # minimum absolute drift to trigger
+    HEALTH_FEATURE_DIVERSITY_MIN: float = 0.05   # 5% activity floor per feature
+    HEALTH_FEATURE_DIVERSITY_MIN_OBS: int = 100   # don't fire until enough data
 
     def __init__(self, entity: TasmotaIrhvac, config: dict[str, Any]) -> None:
         """Initialize PI controller.
@@ -827,6 +829,48 @@ class PIController:
                 drifting.append((i, name, len([s for s in history if s == recent[0]])))
         return drifting
 
+    # ── Buffer / batch sensor properties ──────────────────────────────
+
+    @property
+    def buffer_eligible(self) -> int:
+        """Count of eligible (unclamped, low-rate) observations in the buffer."""
+        obs = self._observation_buffer.get_all()
+        return sum(1 for o in obs if not o.clamped and abs(o.room_rate) < 0.02)
+
+    @property
+    def buffer_total(self) -> int:
+        """Total observations currently in the buffer."""
+        return len(self._observation_buffer)
+
+    @property
+    def buffer_oldest_age_hours(self) -> float | None:
+        """Age of the oldest observation in hours, or None if buffer is empty."""
+        obs = self._observation_buffer.get_all()
+        if not obs:
+            return None
+        import time as time_mod
+
+        now = time_mod.monotonic()
+        oldest = min(o.timestamp for o in obs)
+        return round((now - oldest) / 3600, 1)
+
+    @property
+    def buffer_leverage_max(self) -> float | None:
+        """Maximum leverage score in the buffer, or None if unavailable."""
+        if not hasattr(self._observation_buffer, "get_leverage_scores"):
+            return None
+        scores = self._observation_buffer.get_leverage_scores()
+        if not scores:
+            return None
+        return round(max(scores), 6)
+
+    @property
+    def batch_outliers_excluded(self) -> int | None:
+        """Number of outliers excluded in the most recent batch run."""
+        if self._last_batch_result is None:
+            return None
+        return self._last_batch_result.n_outliers_excluded
+
     # ── Hook methods (called by climate entity) ──────────────────────
 
     def get_extra_stored_data(self) -> PIExtraStoredData | None:
@@ -1261,6 +1305,32 @@ class PIController:
                     f"({count} cycles) — possible physical change"
                 )
             reasons.append("model_drift")
+
+        # Check 6: Buffer feature diversity
+        obs = self._observation_buffer.get_all()
+        total_obs = len(obs)
+        if total_obs >= self.HEALTH_FEATURE_DIVERSITY_MIN_OBS:
+            n_features = getattr(self._observation_buffer, "n_features", 0)
+            starved: list[str] = []
+            feature_names = ["intercept", "outdoor_delta"]
+            for m in self._model_inputs:
+                feature_names.append(m.get("name", "input"))
+            for j in range(2, n_features):  # skip intercept & outdoor_delta
+                active = sum(
+                    1 for o in obs
+                    if j < len(o.features) and abs(o.features[j]) > 1e-6
+                )
+                if active / total_obs < self.HEALTH_FEATURE_DIVERSITY_MIN:
+                    name = feature_names[j] if j < len(feature_names) else f"feature_{j}"
+                    starved.append(name)
+            if starved:
+                if severity != "Critical":
+                    severity = "Warning"
+                alerts.append(
+                    f"Low feature diversity: {', '.join(starved)} "
+                    f"active in <{self.HEALTH_FEATURE_DIVERSITY_MIN:.0%} of {total_obs} observations"
+                )
+                reasons.append("low_feature_diversity")
 
         return {
             "state": severity,
