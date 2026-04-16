@@ -529,8 +529,7 @@ Near setpoint:      p_error = b   × desired - current    (gentler P, b=0.5 defa
 
 Within ±0.5°C of target, the controller relaxes:
 - P term goes to zero (no proportional action)
-- Integration rate scales with error distance (5% at edge → 100% outside),
-  preserving correction for slow-τ houses (Åström §3.5)
+- Integration runs at full rate (the error is the signal, not throttled)
 - Feedforward learning activates (system is "settled")
 
 This prevents the AC from constantly cycling on/off around the setpoint.
@@ -625,9 +624,8 @@ def _pi_tick_inner(self):
     # 8. Deadband behavior
     if abs(error) < deadband:
         p_term = 0
-        # Variable-rate integration: scales with error distance
-        integration_rate = max(0.05, min(1.0, abs_error / deadband))
-        integral += integration_rate * (error + prev_error)/2 * dt_factor
+        # Full-rate integration: the error IS the signal
+        integral += (error + prev_error)/2 * dt_factor
         settled_ticks += 1
         maybe_learn_ff()         # IDB gate: learn if settled ≥4 ticks
     else:
