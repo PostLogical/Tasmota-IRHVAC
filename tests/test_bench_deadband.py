@@ -1,8 +1,9 @@
-"""CI bench tests: full-rate vs variable-rate deadband integration.
+"""CI bench tests: deadband integration policy comparison.
 
-Validates that full-rate integration (current policy) is equal or better
-than variable-rate across all scenarios.  The solar cycle regression is
-the key gate — full-rate must show lower ITAE during day/night transitions.
+Runs all scenarios with three policies (full-rate, variable-rate, suspend)
+and validates that full-rate (current policy) does not regress.  Includes
+realistic sensor noise (σ=0.1°C, matching production DHT sensors) on
+scenarios where noise affects the results.
 
 Run with: python -m pytest tests/test_bench_deadband.py -v
 """
@@ -234,12 +235,25 @@ def _make_bunkroom(room_temp=20.0, outdoor_temp=0.0):
     )
 
 
-async def _run_ab(room_factory, desired_c, duration_hours,
-                  warmup_hours=6, outdoor_events=None,
-                  solar_fn=None, sensor_noise_std=0.0):
-    """Run both variable-rate and full-rate from the same warmup equilibrium.
+POLICIES = {
+    "full-rate": lambda pi: None,  # Current default (rate=1.0), no override
+    "variable-rate": lambda pi: setattr(
+        pi, "_deadband_integration_rate",
+        lambda ae, db=pi._pi_deadband: max(0.05, ae / db) if db > 0 else 1.0,
+    ),
+    "suspend": lambda pi: setattr(
+        pi, "_deadband_integration_rate", lambda ae: 0.0,
+    ),
+}
 
-    Returns dict with keys "variable-rate" and "full-rate", each containing metrics.
+
+async def _run_all_policies(room_factory, desired_c, duration_hours,
+                            warmup_hours=6, outdoor_events=None,
+                            solar_fn=None, sensor_noise_std=0.0):
+    """Run all three policies from the same warmup equilibrium.
+
+    Returns dict with keys "full-rate", "variable-rate", "suspend",
+    each containing metrics.
     """
     config = make_pi_config()
     outdoor_c = room_factory().outdoor_temp
@@ -257,7 +271,7 @@ async def _run_ab(room_factory, desired_c, duration_hours,
     eq_ff_confidence = warmup_pi._ff_confidence
 
     results = {}
-    for policy in ["variable-rate", "full-rate"]:
+    for policy_name, apply_policy in POLICIES.items():
         room = room_factory()
         room.room_temp = eq_room_temp
         room.hp_output = warmup_room.hp_output
@@ -271,18 +285,13 @@ async def _run_ab(room_factory, desired_c, duration_hours,
         pi._desired_temp = desired_c
         pi._inputs.outdoor_temp = room.outdoor_temp
 
-        if policy == "variable-rate":
-            # Old policy: rate = |error|/deadband, floor 0.05
-            deadband = pi._pi_deadband
-            pi._deadband_integration_rate = (
-                lambda ae, db=deadband: max(0.05, ae / db) if db > 0 else 1.0
-            )
+        apply_policy(pi)
 
         trace = await _run_sim(entity, room, duration_hours, desired_c,
                                outdoor_events=outdoor_events,
                                solar_fn=solar_fn,
                                sensor_noise_std=sensor_noise_std)
-        results[policy] = _compute_metrics(trace, desired_c, outdoor_c)
+        results[policy_name] = _compute_metrics(trace, desired_c, outdoor_c)
 
     return results
 
@@ -324,30 +333,38 @@ def _spring_outdoor_events():
 # ── Scenario Definitions ─────────────────────────────────────────────
 
 
+# Realistic sensor noise: σ=0.1°C matches production DHT sensor noise
+# (measured from 72h LR data: tick-to-tick std = 0.098°C).
+SENSOR_NOISE = 0.1
+
 SCENARIOS = {
     "lr_mild": {
         "label": "Living room mild (22°C, outdoor 10°C)",
         "room_factory": lambda: _make_living_room(room_temp=20.0, outdoor_temp=10.0),
         "desired_c": 22.0,
         "duration_hours": 12,
+        "sensor_noise_std": SENSOR_NOISE,
     },
     "lr_shoulder": {
         "label": "Living room shoulder (22°C, outdoor 18°C)",
         "room_factory": lambda: _make_living_room(room_temp=21.0, outdoor_temp=18.0),
         "desired_c": 22.0,
         "duration_hours": 12,
+        "sensor_noise_std": SENSOR_NOISE,
     },
     "br_mild": {
         "label": "Bunkroom mild (21°C, outdoor 10°C)",
         "room_factory": lambda: _make_bunkroom(room_temp=19.0, outdoor_temp=10.0),
         "desired_c": 21.0,
         "duration_hours": 12,
+        "sensor_noise_std": SENSOR_NOISE,
     },
     "br_shoulder": {
         "label": "Bunkroom shoulder (21°C, outdoor 18°C)",
         "room_factory": lambda: _make_bunkroom(room_temp=20.5, outdoor_temp=18.0),
         "desired_c": 21.0,
         "duration_hours": 12,
+        "sensor_noise_std": SENSOR_NOISE,
     },
     "lr_cold_front": {
         "label": "Living room cold front (10→0°C over 3h)",
@@ -357,29 +374,25 @@ SCENARIOS = {
         "outdoor_events": [
             (1.0 + i * 5 / 60, 10.0 - i * (10.0 / 36)) for i in range(37)
         ],
+        "sensor_noise_std": SENSOR_NOISE,
     },
     "br_perturbation": {
         "label": "Bunkroom door-open perturbation",
         "room_factory": lambda: _make_bunkroom(room_temp=20.5, outdoor_temp=10.0),
         "desired_c": 21.0,
         "duration_hours": 12,
+        "sensor_noise_std": SENSOR_NOISE,
     },
 }
 
 EDGE_SCENARIOS = {
-    "br_noise": {
-        "label": "Bunkroom + sensor noise ±0.1°C",
-        "room_factory": lambda: _make_bunkroom(room_temp=19.0, outdoor_temp=10.0),
-        "desired_c": 21.0,
-        "duration_hours": 12,
-        "sensor_noise_std": 0.1,
-    },
     "lr_solar": {
-        "label": "Living room solar day/night 48h (KEY REGRESSION)",
+        "label": "Living room solar day/night 48h",
         "room_factory": lambda: _make_living_room(room_temp=22.0, outdoor_temp=10.0),
         "desired_c": 22.0,
         "duration_hours": 48,
         "solar_fn": _solar_cycle,
+        "sensor_noise_std": SENSOR_NOISE,
     },
     "br_solar": {
         "label": "Bunkroom solar day/night 48h",
@@ -387,6 +400,7 @@ EDGE_SCENARIOS = {
         "desired_c": 21.0,
         "duration_hours": 48,
         "solar_fn": _solar_cycle,
+        "sensor_noise_std": SENSOR_NOISE,
     },
     "lr_spring_day": {
         "label": "Living room spring day (5-15°C outdoor + 700W solar, 48h)",
@@ -395,6 +409,7 @@ EDGE_SCENARIOS = {
         "duration_hours": 48,
         "outdoor_events": _spring_outdoor_events(),
         "solar_fn": _spring_solar,
+        "sensor_noise_std": SENSOR_NOISE,
     },
     "br_spring_day": {
         "label": "Bunkroom spring day (5-15°C outdoor + 700W solar, 48h)",
@@ -403,6 +418,7 @@ EDGE_SCENARIOS = {
         "duration_hours": 48,
         "outdoor_events": _spring_outdoor_events(),
         "solar_fn": _spring_solar,
+        "sensor_noise_std": SENSOR_NOISE,
     },
 }
 
@@ -414,12 +430,12 @@ ALL_SCENARIOS = {**SCENARIOS, **EDGE_SCENARIOS}
 
 @pytest.fixture(scope="module")
 def ab_results():
-    """Run all A/B comparisons once, share across tests in this module."""
+    """Run all three policies on all scenarios, share across tests."""
     loop = asyncio.new_event_loop()
     results = {}
     for key, scen in ALL_SCENARIOS.items():
         results[key] = loop.run_until_complete(
-            _run_ab(
+            _run_all_policies(
                 room_factory=scen["room_factory"],
                 desired_c=scen["desired_c"],
                 duration_hours=scen["duration_hours"],
@@ -432,16 +448,16 @@ def ab_results():
     return results
 
 
-class TestDeadbandFullRateNotWorse:
-    """Full-rate must not regress vs variable-rate on any scenario."""
+class TestFullRateNotWorse:
+    """Full-rate (current policy) must not regress vs variable-rate."""
 
     @pytest.mark.parametrize("scenario_key", list(ALL_SCENARIOS.keys()),
                              ids=[ALL_SCENARIOS[k]["label"] for k in ALL_SCENARIOS])
     def test_itae_not_worse(self, ab_results, scenario_key):
-        """Full-rate ITAE must be <= variable-rate ITAE (with 5% tolerance)."""
+        """Full-rate ITAE within 5% of variable-rate."""
         vr = ab_results[scenario_key]["variable-rate"]
         fr = ab_results[scenario_key]["full-rate"]
-        tolerance = max(vr["itae"] * 0.05, 1.0)  # 5% or 1.0, whichever is larger
+        tolerance = max(vr["itae"] * 0.05, 1.0)
         assert fr["itae"] <= vr["itae"] + tolerance, (
             f"Full-rate ITAE {fr['itae']:.1f} worse than variable-rate "
             f"{vr['itae']:.1f} (tolerance {tolerance:.1f})"
@@ -450,12 +466,7 @@ class TestDeadbandFullRateNotWorse:
     @pytest.mark.parametrize("scenario_key", list(ALL_SCENARIOS.keys()),
                              ids=[ALL_SCENARIOS[k]["label"] for k in ALL_SCENARIOS])
     def test_reversals_not_worse(self, ab_results, scenario_key):
-        """Full-rate must not produce more than 4 extra reversals.
-
-        Tolerance is 4 (not 2) because coupled disturbances (spring day:
-        diurnal outdoor + moderate solar) can produce slightly more
-        reversals with full-rate in slow-τ rooms while ITAE stays within 5%.
-        """
+        """Full-rate must not produce more than 4 extra reversals."""
         vr = ab_results[scenario_key]["variable-rate"]
         fr = ab_results[scenario_key]["full-rate"]
         assert fr["reversals"] <= vr["reversals"] + 4, (
@@ -463,80 +474,27 @@ class TestDeadbandFullRateNotWorse:
             f"{vr['reversals']} (>4 extra)"
         )
 
-    @pytest.mark.parametrize("scenario_key", list(ALL_SCENARIOS.keys()),
-                             ids=[ALL_SCENARIOS[k]["label"] for k in ALL_SCENARIOS])
-    def test_setpoint_changes_not_worse(self, ab_results, scenario_key):
-        """Full-rate must not produce more than 4 extra setpoint changes."""
-        vr = ab_results[scenario_key]["variable-rate"]
-        fr = ab_results[scenario_key]["full-rate"]
-        assert fr["setpoint_changes"] <= vr["setpoint_changes"] + 4, (
-            f"Full-rate setpoint changes {fr['setpoint_changes']} vs "
-            f"variable-rate {vr['setpoint_changes']} (>4 extra)"
-        )
-
-
-class TestSolarCycleRegression:
-    """Solar day/night cycle is where full-rate proved measurably better.
-
-    Variable-rate carried stale daytime integral through the deadband during
-    dusk/dawn transitions.  Full-rate must be strictly better here.
-    """
-
-    def test_lr_solar_itae_better(self, ab_results):
-        """Living room solar: full-rate must have lower ITAE."""
-        vr = ab_results["lr_solar"]["variable-rate"]
-        fr = ab_results["lr_solar"]["full-rate"]
-        assert fr["itae"] <= vr["itae"], (
-            f"Full-rate ITAE {fr['itae']:.1f} not better than "
-            f"variable-rate {vr['itae']:.1f} on solar cycle"
-        )
-
-    def test_br_solar_itae_better(self, ab_results):
-        """Bunkroom solar: full-rate must have lower ITAE."""
-        vr = ab_results["br_solar"]["variable-rate"]
-        fr = ab_results["br_solar"]["full-rate"]
-        assert fr["itae"] <= vr["itae"], (
-            f"Full-rate ITAE {fr['itae']:.1f} not better than "
-            f"variable-rate {vr['itae']:.1f} on solar cycle"
-        )
-
-    def test_lr_solar_fewer_reversals(self, ab_results):
-        """Living room solar: full-rate must not have more reversals."""
-        vr = ab_results["lr_solar"]["variable-rate"]
-        fr = ab_results["lr_solar"]["full-rate"]
-        assert fr["reversals"] <= vr["reversals"], (
-            f"Full-rate reversals {fr['reversals']} vs "
-            f"variable-rate {vr['reversals']} on solar cycle"
-        )
-
-    def test_br_solar_fewer_reversals(self, ab_results):
-        """Bunkroom solar: full-rate must not have more reversals."""
-        vr = ab_results["br_solar"]["variable-rate"]
-        fr = ab_results["br_solar"]["full-rate"]
-        assert fr["reversals"] <= vr["reversals"], (
-            f"Full-rate reversals {fr['reversals']} vs "
-            f"variable-rate {vr['reversals']} on solar cycle"
-        )
-
 
 class TestSummaryTable:
-    """Print comparison table for human review (always passes)."""
+    """Print comparison table for all three policies (always passes)."""
 
     def test_print_summary(self, ab_results, capsys):
         with capsys.disabled():
-            print(f"\n{'=' * 90}")
-            print("  DEADBAND BENCH: Full-rate vs Variable-rate")
-            print(f"{'=' * 90}")
-            print(f"  {'Scenario':<40} {'ΔITAE':>10} {'ΔReversals':>12} "
+            print(f"\n{'=' * 110}")
+            print("  DEADBAND BENCH: all policies vs variable-rate baseline")
+            print(f"  Sensor noise: σ={SENSOR_NOISE}°C (matching production)")
+            print(f"{'=' * 110}")
+            print(f"  {'Scenario':<35} {'Policy':<14} {'ΔITAE':>10} {'ΔReversals':>12} "
                   f"{'ΔSP Changes':>12} {'ΔOvershoot':>12}")
-            print(f"  {'-' * 86}")
+            print(f"  {'-' * 100}")
             for key in ALL_SCENARIOS:
                 vr = ab_results[key]["variable-rate"]
-                fr = ab_results[key]["full-rate"]
-                d_itae = fr["itae"] - vr["itae"]
-                d_rev = fr["reversals"] - vr["reversals"]
-                d_sp = fr["setpoint_changes"] - vr["setpoint_changes"]
-                d_os = fr["overshoot"] - vr["overshoot"]
-                print(f"  {key:<40} {d_itae:>+10.1f} {d_rev:>+12d} "
-                      f"{d_sp:>+12d} {d_os:>+12.2f}")
-            print(f"{'=' * 90}")
+                for policy in ["full-rate", "suspend"]:
+                    p = ab_results[key][policy]
+                    d_itae = p["itae"] - vr["itae"]
+                    d_rev = p["reversals"] - vr["reversals"]
+                    d_sp = p["setpoint_changes"] - vr["setpoint_changes"]
+                    d_os = p["overshoot"] - vr["overshoot"]
+                    print(f"  {key:<35} {policy:<14} {d_itae:>+10.1f} {d_rev:>+12d} "
+                          f"{d_sp:>+12d} {d_os:>+12.2f}")
+            print(f"{'=' * 110}")

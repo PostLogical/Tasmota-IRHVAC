@@ -3144,7 +3144,7 @@ class TestOneSidedAntiWindup:
         """In deadband, integral accumulates normally even with small overshoot.
 
         Small overshoots within deadband are normal control behavior.
-        Variable-rate integration applies (reduced rate near setpoint).
+        Full-rate integration: accumulates the actual error.
         """
         pi_entity._attr_hvac_mode = HVACMode.HEAT
         pi_entity._attr_current_temperature = 22.3  # °C, slightly above target
