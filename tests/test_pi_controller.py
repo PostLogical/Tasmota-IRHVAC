@@ -1501,180 +1501,7 @@ class TestResetFFSeedsRLS:
 
 
 # ── Lag filter with tau > 0 (lines 898-899) ───────────────────────���─
-
-
-class TestLagFilterUpdate:
-    """Tests for _update_lag_filters with non-zero tau."""
-
-    def test_lag_filter_with_tau(self):
-        """Lag filter with tau > 0 should apply exponential smoothing."""
-        config = make_pi_config({
-            "pi_model_inputs": [{
-                "name": "Stove",
-                "entity_id": "input_boolean.stove",
-                "seed_heat": -3.0,
-                "seed_cool": 0.0,
-                "lag_tau": 1800,  # 30 minutes in seconds
-            }],
-        })
-        entity = FakePIEntity(config)
-        pi = entity._pi
-
-        # Set raw value to 1.0, filtered starts at 0.0
-        pi._inputs.values[0] = 1.0
-        pi._inputs.filtered[0] = 0.0
-
-        # Update with dt=900s (15 minutes, half of tau)
-        pi._inputs.update_lag_filters(900)
-
-        # Should be partially ramped up (not 0 and not 1)
-        assert 0.0 < pi._inputs.filtered[0] < 1.0
-
-    def test_lag_filter_with_zero_tau(self):
-        """Lag filter with tau=0 should pass through raw value."""
-        config = make_pi_config({
-            "pi_model_inputs": [{
-                "name": "Stove",
-                "entity_id": "input_boolean.stove",
-                "seed_heat": -3.0,
-                "seed_cool": 0.0,
-                "lag_tau": 0,
-            }],
-        })
-        entity = FakePIEntity(config)
-        pi = entity._pi
-
-        pi._inputs.values[0] = 1.0
-        pi._inputs.filtered[0] = 0.5
-
-        pi._inputs.update_lag_filters(900)
-        assert pi._inputs.filtered[0] == 1.0
-
-
-# ── _read_model_input_values edge cases (lines 910, 913-915) ────────
-
-
-class TestReadModelInputValues:
-    """Tests for _read_model_input_values with empty entity_id and unavailable entity."""
-
-    def test_empty_entity_id_skipped(self):
-        """Model input with empty entity_id should be skipped (line 910)."""
-        config = make_pi_config({
-            "pi_model_inputs": [{
-                "name": "Empty",
-                "entity_id": "",
-                "seed_heat": 0.0,
-                "seed_cool": 0.0,
-                "lag_tau": 0,
-            }],
-        })
-        entity = FakePIEntity(config)
-        pi = entity._pi
-        pi._inputs.values[0] = 99.0  # Should not change
-
-        pi._read_model_input_values()
-        assert pi._inputs.values[0] == 99.0  # Unchanged — skipped
-
-    def test_unavailable_entity_keeps_last_value(self):
-        """Unavailable entity should keep last value (lines 913-915)."""
-        config = make_pi_config({
-            "pi_model_inputs": [{
-                "name": "Stove",
-                "entity_id": "input_boolean.stove",
-                "seed_heat": -3.0,
-                "seed_cool": 0.0,
-                "lag_tau": 0,
-            }],
-        })
-        entity = FakePIEntity(config)
-        pi = entity._pi
-        pi._inputs.values[0] = 1.0  # Previous value
-
-        # Mock entity as unavailable
-        unavail_state = MagicMock()
-        unavail_state.state = STATE_UNAVAILABLE
-        entity.hass.states.get.return_value = unavail_state
-
-        pi._read_model_input_values()
-        assert pi._inputs.values[0] == 1.0  # Kept previous value
-
-    def test_missing_entity_keeps_last_value(self):
-        """Missing entity (None state) should keep last value."""
-        config = make_pi_config({
-            "pi_model_inputs": [{
-                "name": "Stove",
-                "entity_id": "input_boolean.stove",
-                "seed_heat": -3.0,
-                "seed_cool": 0.0,
-                "lag_tau": 0,
-            }],
-        })
-        entity = FakePIEntity(config)
-        pi = entity._pi
-        pi._inputs.values[0] = 0.5
-
-        entity.hass.states.get.return_value = None
-
-        pi._read_model_input_values()
-        assert pi._inputs.values[0] == 0.5
-
-
-# ── _any_model_input_unavailable (lines 930, 933) ───────────────────
-
-
-class TestAnyModelInputUnavailable:
-    """Tests for _any_model_input_unavailable."""
-
-    def test_empty_entity_id_skipped(self):
-        """Empty entity_id should be skipped, not flagged as unavailable (line 930)."""
-        config = make_pi_config({
-            "pi_model_inputs": [{
-                "name": "Empty",
-                "entity_id": "",
-                "seed_heat": 0.0,
-                "seed_cool": 0.0,
-                "lag_tau": 0,
-            }],
-        })
-        entity = FakePIEntity(config)
-        assert entity._pi._any_model_input_unavailable() is False
-
-    def test_unavailable_entity_returns_true(self):
-        """Unavailable entity should return True (line 933)."""
-        config = make_pi_config({
-            "pi_model_inputs": [{
-                "name": "Stove",
-                "entity_id": "input_boolean.stove",
-                "seed_heat": -3.0,
-                "seed_cool": 0.0,
-                "lag_tau": 0,
-            }],
-        })
-        entity = FakePIEntity(config)
-        unavail_state = MagicMock()
-        unavail_state.state = STATE_UNAVAILABLE
-        entity.hass.states.get.return_value = unavail_state
-
-        assert entity._pi._any_model_input_unavailable() is True
-
-    def test_available_entity_returns_false(self):
-        """Available entity should return False."""
-        config = make_pi_config({
-            "pi_model_inputs": [{
-                "name": "Stove",
-                "entity_id": "input_boolean.stove",
-                "seed_heat": -3.0,
-                "seed_cool": 0.0,
-                "lag_tau": 0,
-            }],
-        })
-        entity = FakePIEntity(config)
-        avail_state = MagicMock()
-        avail_state.state = "off"
-        entity.hass.states.get.return_value = avail_state
-
-        assert entity._pi._any_model_input_unavailable() is False
-
+# Lag filter, read_values, any_unavailable tests moved to test_model_input_manager.py
 
 # ── _async_model_input_changed dispatcher (lines 939-940) ───────────
 
@@ -1975,153 +1802,28 @@ class TestKiChangedIntegralScaling:
         assert pi._pi_integral == pytest.approx(10.0)
 
 
-# ── Supplemental Source Evaluation (L783-860) ────────────────────────
+# ── Supplemental Integration (bumpless transfer applies hold timer reset) ────
 
 
-class TestEvaluateSupplementalSources:
-    """Tests for _evaluate_supplemental_override tracking/assist logic."""
+class TestSupplementalIntegration:
+    """Integration: PIController applies SupplementalResult side effects."""
 
-    def _make_supplemental_entity(self, sources=None):
-        """Create entity with supplemental sources configured."""
-        if sources is None:
-            sources = [{
-                "name": "Pellet Stove",
-                "entity_id": "climate.pellet_stove",
-                "failure_threshold": 900,
-                "recovery_margin": 0.3,
-                "auto_model_input": False,
-            }]
-        config = make_pi_config({"pi_supplemental_sources": sources})
+    def test_bumpless_transfer_clears_hold_timer(self):
+        """When supplemental stops, PIController clears hold timer."""
+        config = make_pi_config({"pi_supplemental_sources": [{
+            "name": "Pellet Stove",
+            "entity_id": "climate.pellet_stove",
+            "failure_threshold": 900,
+            "recovery_margin": 0.3,
+            "auto_model_input": False,
+        }]})
         entity = FakePIEntity(config)
-        return entity
-
-    def test_no_supplemental_sources_returns_true(self):
-        """No supplemental sources → HP always active."""
-        entity = FakePIEntity(make_pi_config())
-        result = entity._pi._evaluate_supplemental_override(
-            error_c=1.0, now_mono=100.0
-        )
-        assert result is True
-
-    def test_supplemental_active_enters_tracking(self):
-        """When supplemental is heating and room is fine, HP enters tracking."""
-        entity = self._make_supplemental_entity()
         pi = entity._pi
 
-        state = MagicMock()
-        state.state = "heat"
-        entity.hass.states.get.return_value = state
-
-        result = pi._evaluate_supplemental_override(error_c=0.0, now_mono=100.0)
-
-        assert result is False  # HP defers
-        assert pi._supplemental.tracking_mode is True
-        assert pi._supplemental.tracking_sources == ["Pellet Stove"]
-
-    def test_supplemental_inactive_hp_active(self):
-        """When supplemental is off, HP is active."""
-        entity = self._make_supplemental_entity()
-        pi = entity._pi
-
-        state = MagicMock()
-        state.state = "off"
-        entity.hass.states.get.return_value = state
-
-        result = pi._evaluate_supplemental_override(error_c=1.0, now_mono=100.0)
-
-        assert result is True
-        assert pi._supplemental.tracking_mode is False
-
-    def test_supplemental_unavailable_hp_active(self):
-        """When supplemental entity is unavailable, HP stays active."""
-        entity = self._make_supplemental_entity()
-        pi = entity._pi
-
-        state = MagicMock()
-        state.state = "unavailable"
-        entity.hass.states.get.return_value = state
-
-        result = pi._evaluate_supplemental_override(error_c=1.0, now_mono=100.0)
-
-        assert result is True
-        assert pi._supplemental.tracking_mode is False
-
-    def test_supplemental_none_state_hp_active(self):
-        """When hass.states.get returns None, HP stays active."""
-        entity = self._make_supplemental_entity()
-        pi = entity._pi
-
-        entity.hass.states.get.return_value = None
-
-        result = pi._evaluate_supplemental_override(error_c=1.0, now_mono=100.0)
-
-        assert result is True
-
-    def test_failure_detection_starts_timer(self):
-        """Error above deadband starts failure timer."""
-        entity = self._make_supplemental_entity()
-        pi = entity._pi
-
-        state = MagicMock()
-        state.state = "heat"
-        entity.hass.states.get.return_value = state
-
-        pi._evaluate_supplemental_override(error_c=1.0, now_mono=100.0)
-
-        assert pi._supplemental.failure_start == 100.0
-        assert pi._supplemental.tracking_mode is True  # Still tracking (threshold not met)
-
-    def test_failure_threshold_triggers_assist(self):
-        """After failure_threshold seconds below desired, HP assists."""
-        entity = self._make_supplemental_entity()
-        pi = entity._pi
-
-        state = MagicMock()
-        state.state = "heat"
-        entity.hass.states.get.return_value = state
-
-        # First call: start failure timer
-        pi._evaluate_supplemental_override(error_c=1.0, now_mono=100.0)
-        assert pi._supplemental.assist_active is False
-
-        # Second call: 901s later, exceeds 900s threshold
-        result = pi._evaluate_supplemental_override(error_c=1.0, now_mono=1001.0)
-
-        assert pi._supplemental.assist_active is True
-        assert result is True  # HP active (assisting)
-        assert pi._supplemental.tracking_mode is False
-
-    def test_recovery_clears_assist(self):
-        """Room recovering past margin clears assist mode."""
-        entity = self._make_supplemental_entity()
-        pi = entity._pi
-
-        state = MagicMock()
-        state.state = "heat"
-        entity.hass.states.get.return_value = state
-
-        # Enter assist mode
-        pi._supplemental.assist_active = True
-        pi._supplemental.failure_start = 0.0
-
-        # Error negative beyond recovery_margin (0.3) → recovered
-        pi._evaluate_supplemental_override(error_c=-0.5, now_mono=2000.0)
-
-        assert pi._supplemental.assist_active is False
-        assert pi._supplemental.failure_start is None
-        assert pi._supplemental.tracking_mode is True  # Back to tracking
-
-    def test_bumpless_transfer_on_supplemental_end(self):
-        """When supplemental stops, bumpless transfer clears hold timer."""
-        entity = self._make_supplemental_entity()
-        pi = entity._pi
-
-        # Simulate was in tracking mode
         pi._supplemental.tracking_mode = True
         pi._supplemental.tracking_sources = ["Pellet Stove"]
         pi._last_setpoint_change_time = 999.0
 
-        # Supplemental turns off
         state = MagicMock()
         state.state = "off"
         entity.hass.states.get.return_value = state
@@ -2129,37 +1831,7 @@ class TestEvaluateSupplementalSources:
         result = pi._evaluate_supplemental_override(error_c=1.0, now_mono=2000.0)
 
         assert result is True
-        assert pi._supplemental.tracking_mode is False
-        assert pi._last_setpoint_change_time == 0.0  # Cleared for bumpless transfer
-
-    def test_error_within_deadband_clears_failure_timer(self):
-        """Error dropping within deadband clears failure start."""
-        entity = self._make_supplemental_entity()
-        pi = entity._pi
-
-        state = MagicMock()
-        state.state = "heat"
-        entity.hass.states.get.return_value = state
-
-        # Start failure timer
-        pi._evaluate_supplemental_override(error_c=1.0, now_mono=100.0)
-        assert pi._supplemental.failure_start == 100.0
-
-        # Error drops to 0 (within deadband, not negative enough for recovery)
-        pi._evaluate_supplemental_override(error_c=0.0, now_mono=200.0)
-        assert pi._supplemental.failure_start is None
-
-    def test_empty_entity_id_skipped(self):
-        """Supplemental source with empty entity_id is skipped."""
-        entity = self._make_supplemental_entity(sources=[{
-            "name": "Bad",
-            "entity_id": "",
-            "auto_model_input": False,
-        }])
-        pi = entity._pi
-
-        result = pi._evaluate_supplemental_override(error_c=1.0, now_mono=100.0)
-        assert result is True  # No active sources, HP active
+        assert pi._last_setpoint_change_time == 0.0
 
 
 # ── Recovery Tick Dedup Guard (L969-970) ─────────────────────────────
@@ -2733,124 +2405,20 @@ class TestIMCGainScheduling:
         assert pi._pi_kp != old_kp
 
 
-class TestTauObservation:
-    """Tests for online τ estimation from step-response observation."""
-
-    def _make_imc_entity(self, tau=120.0, lag=15.0):
-        config = make_pi_config({
-            "pi_tau_estimate": tau,
-            "pi_response_lag": lag,
-        })
-        entity = FakePIEntity(config)
-        return entity, entity._pi
-
-    def test_start_observation_on_large_step(self):
-        """Step ≥ 1°C starts a τ observation."""
-        _, pi = self._make_imc_entity()
-        pi._tau_estimator.start_observation(1000.0, 20.0, 22.0, 2.0)
-        assert pi._tau_estimator.active
-        assert pi._tau_estimator.step_temp == 20.0
-        assert pi._tau_estimator.step_magnitude == 2.0
-
-    def test_start_observation_ignores_small_step(self):
-        """Step < 1°C does not start observation."""
-        _, pi = self._make_imc_entity()
-        pi._tau_estimator.start_observation(1000.0, 20.0, 20.5, 0.5)
-        assert not pi._tau_estimator.active
-
-    def test_start_observation_noop_when_disabled(self):
-        """No observation when IMC is disabled."""
-        config = make_pi_config()  # τ=0 (default)
-        entity = FakePIEntity(config)
-        pi = entity._pi
-        pi._tau_estimator.start_observation(1000.0, 20.0, 22.0, 2.0)
-        assert not pi._tau_estimator.active
-
-    def test_check_observation_detects_632_pct(self):
-        """τ observation fires when room reaches 63.2% of expected change."""
-        _, pi = self._make_imc_entity(tau=120.0, lag=15.0)
-        pi._tau_estimator.start_observation(0.0, 20.0, 22.0, 2.0)
-        assert pi._tau_estimator.active
-        old_tau = pi._tau_estimator.tau
-
-        # Room reaches 63.2% of 2°C step = 1.264°C above start = 21.264
-        # At t=50 min (3000s), so observed τ = 50 - 15 (lag) = 35 min
-        pi._tau_estimator.check_observation(3000.0, 21.27)
-        assert not pi._tau_estimator.active
-        assert pi._tau_estimator.observations == 1
-        # EMA with α ~ 0.5 for first observation: new τ ≈ blend of 120 and 35
-        assert pi._tau_estimator.tau != old_tau
-        assert pi._tau_estimator.tau < old_tau  # Moved toward 35
-
-    def test_check_observation_timeout(self):
-        """Observation abandoned after timeout."""
-        _, pi = self._make_imc_entity(tau=60.0, lag=15.0)
-        pi._tau_estimator.start_observation(0.0, 20.0, 22.0, 2.0)
-        # timeout = max(4*60, 240) = 240 min = 14400s
-        # Room still at 20.5 (< 63.2% of 2°C = 1.264)
-        pi._tau_estimator.check_observation(14500.0, 20.5)
-        assert not pi._tau_estimator.active
-        assert pi._tau_estimator.observations == 0  # No observation recorded
-
-    def test_cancel_observation(self):
-        """Cancellation clears active observation."""
-        _, pi = self._make_imc_entity()
-        pi._tau_estimator.start_observation(0.0, 20.0, 22.0, 2.0)
-        assert pi._tau_estimator.active
-        pi._tau_estimator.cancel_observation()
-        assert not pi._tau_estimator.active
-
-    def test_setpoint_change_cancels_observation(self):
-        """User changing desired temp cancels the old τ observation."""
-        _, pi = self._make_imc_entity()
-        # Start an observation for a step from t=0
-        pi._tau_estimator.start_observation(0.0, 20.0, 22.0, 2.0)
-        assert pi._tau_estimator.active
-        assert pi._tau_estimator.step_target == 22.0
-        # Cancel directly (set_temperature calls this)
-        pi._tau_estimator.cancel_observation()
-        assert not pi._tau_estimator.active
+class TestTauGainIntegration:
+    """Integration test: τ observation applies gains to PIController."""
 
     def test_tau_observation_updates_gains(self):
-        """After τ observation, IMC gains are recomputed."""
-        _, pi = self._make_imc_entity(tau=120.0, lag=15.0)
+        """After τ observation, IMC gains are applied to PIController."""
+        config = make_pi_config({"pi_tau_estimate": 120.0, "pi_response_lag": 15.0})
+        entity = FakePIEntity(config)
+        pi = entity._pi
         old_kp = pi._pi_kp
         pi._tau_estimator.start_observation(0.0, 20.0, 22.0, 2.0)
-        # Reach 63.2% at t=80 min → observed τ = 80-15 = 65 min
         gain_update = pi._tau_estimator.check_observation(4800.0, 21.27)
         assert gain_update is not None
         pi._apply_gain_update(gain_update)
-        # Gains should have changed
         assert pi._pi_kp != old_kp
-
-    def test_tau_floor_at_5_min(self):
-        """Observed τ is floored at 5 minutes."""
-        _, pi = self._make_imc_entity(tau=120.0, lag=15.0)
-        pi._tau_estimator.start_observation(0.0, 20.0, 22.0, 2.0)
-        # Reach 63.2% at t=16 min → raw τ = 16-15 = 1 min → floored to 5
-        pi._tau_estimator.check_observation(960.0, 21.27)
-        assert pi._tau_estimator.observations == 1
-        # τ should be moved toward 5 (from 120)
-        assert pi._tau_estimator.tau < 120.0
-
-    def test_multiple_observations_ema(self):
-        """Multiple τ observations produce EMA convergence."""
-        _, pi = self._make_imc_entity(tau=120.0, lag=15.0)
-        # First observation: observed τ = 60
-        pi._tau_estimator.start_observation(0.0, 20.0, 22.0, 2.0)
-        pi._tau_estimator.check_observation(4500.0, 21.27)  # 75min → τ=75-15=60
-        tau_after_1 = pi._tau_estimator.tau
-        assert pi._tau_estimator.observations == 1
-        # α=1.0 for first obs → fully replaces seed
-        assert abs(tau_after_1 - 60.0) < 0.1
-
-        # Second observation: observed τ = 90 (different conditions)
-        pi._tau_estimator.start_observation(5000.0, 20.0, 22.0, 2.0)
-        pi._tau_estimator.check_observation(11300.0, 21.27)  # 105min → τ=105-15=90
-        tau_after_2 = pi._tau_estimator.tau
-        assert pi._tau_estimator.observations == 2
-        # α=0.5 for second obs → EMA blend: 0.5*60 + 0.5*90 = 75
-        assert abs(tau_after_2 - 75.0) < 0.1
 
 
 class TestIMCPersistence:
@@ -3812,27 +3380,7 @@ class TestControllableUncontrollableMetrics:
 class TestFFLoadFraction:
     """Tests for FF load fraction metric."""
 
-    def test_ff_load_fraction_trends_up_with_large_ff(self):
-        """When FF offset dominates integral, load fraction trends toward 1."""
-        config = make_pi_config()
-        entity = FakePIEntity(config)
-        pi = entity._pi
-        pi._metrics.ff_load_fraction = 0.3  # start low
-
-        # Simulate the EMA update directly (same formula as in _pi_tick)
-        for _ in range(100):
-            ff_mag = 5.0   # large FF
-            i_correction = 0.5 * pi._pi_ki  # small integral contribution
-            total = ff_mag + i_correction
-            if total > 0.1:
-                instant = ff_mag / total
-                pi._metrics.ff_load_fraction += 0.01 * (instant - pi._metrics.ff_load_fraction)
-
-        # EMA with alpha=0.01 over 100 ticks reaches ~63% of target.
-        # Starting at 0.3 trending toward ~0.985: expect > 0.7
-        assert pi._metrics.ff_load_fraction > 0.7, (
-            f"FF load fraction should trend up from 0.3, got {pi._metrics.ff_load_fraction}"
-        )
+    # test_ff_load_fraction_trends_up moved to test_performance_metrics.py
 
     @pytest.mark.asyncio
     async def test_ff_load_fraction_bounded_0_1(self):
