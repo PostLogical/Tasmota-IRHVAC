@@ -200,14 +200,14 @@ def replay_with_params(climate_ts, outdoor_ts, model_input_ts_list,
         # Get outdoor temp
         outdoor_c = interpolate_at(outdoor_ts, current_epoch)
         if outdoor_c is not None:
-            pi._outdoor_temp = outdoor_c
+            pi._inputs.outdoor_temp = outdoor_c
 
         # Get model input values
         for i, mi_ts in enumerate(model_input_ts_list):
-            if i < len(pi._model_input_values):
+            if i < len(pi._inputs.values):
                 val = interpolate_at(mi_ts, current_epoch)
                 if val is not None:
-                    pi._model_input_values[i] = val
+                    pi._inputs.values[i] = val
 
         # Set timing for PI tick
         pi._pi_last_tick_time = current_epoch - tick_interval_s

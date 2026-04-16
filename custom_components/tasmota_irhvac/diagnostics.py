@@ -69,7 +69,7 @@ async def async_get_config_entry_diagnostics(
             "integral": round(pi._pi_integral, 3),
             "integral_convergence": round(pi._metrics.integral_convergence, 2),
             "ff_offset": round(pi._ff_offset, 2),
-            "outdoor_temp": pi._outdoor_temp,
+            "outdoor_temp": pi._inputs.outdoor_temp,
             "sensor_unavailable": pi._sensor_unavailable,
             "sensor_recovery_pending": pi._sensor_recovery_pending,
             "config": {
@@ -78,7 +78,7 @@ async def async_get_config_entry_diagnostics(
                 "deadband": pi._pi_deadband,
                 "setpoint_weight": pi._pi_setpoint_weight,
                 "min_interval": pi._pi_min_interval,
-                "outdoor_temp_sensor": pi._outdoor_temp_sensor,
+                "outdoor_temp_sensor": pi._inputs.outdoor_temp_sensor,
                 "model_inputs": pi._model_inputs,
             },
             "rls_model": {

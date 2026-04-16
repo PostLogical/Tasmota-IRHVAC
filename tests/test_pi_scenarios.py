@@ -184,7 +184,7 @@ def _run_simulation(entity, thermal, n_ticks, outdoor_schedule=None,
 
             # Update entity state from thermal model
             entity._attr_current_temperature = thermal.room_temp
-            pi._outdoor_temp = thermal.outdoor_temp
+            pi._inputs.outdoor_temp = thermal.outdoor_temp
 
             # Run PI tick
             loop.run_until_complete(pi._pi_tick())

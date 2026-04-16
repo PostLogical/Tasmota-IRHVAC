@@ -52,7 +52,7 @@ def _settled_tick(entity, outdoor_temp=0.0, current=22.0, desired=22.0):
     entity._pi._desired_temp = desired
     entity._pi._hp_setpoint = round(desired)
     entity._pi._pi_integral = 0.0
-    entity._pi._outdoor_temp = outdoor_temp
+    entity._pi._inputs.outdoor_temp = outdoor_temp
     entity._pi._ff_settled_ticks = 5  # Already settled
     entity._pi._pi_last_tick_time = 0
 

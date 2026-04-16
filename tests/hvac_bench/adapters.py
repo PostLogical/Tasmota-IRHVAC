@@ -40,14 +40,14 @@ class TasmotaPIAdapter:
         """Run one PI tick and return HP setpoint."""
         self._sim_clock += dt_seconds
         self._entity._attr_current_temperature = room_temp_c
-        self._pi._outdoor_temp = outdoor_temp_c
+        self._pi._inputs.outdoor_temp = outdoor_temp_c
 
         # Update model inputs if provided
         if model_inputs:
             for i, m_input in enumerate(self._pi._model_inputs):
                 name = m_input.get("name", "")
                 if name in model_inputs:
-                    self._pi._model_input_values[i] = model_inputs[name]
+                    self._pi._inputs.values[i] = model_inputs[name]
 
         # Set timing
         self._pi._pi_last_tick_time = self._sim_clock - dt_seconds

@@ -136,7 +136,7 @@ class TestDeadbandBehavior:
         entity_c = FakePIEntity(config_c)
         pi_c = entity_c._pi
         pi_c._desired_temp = 20.0
-        pi_c._outdoor_temp = 5.0
+        pi_c._inputs.outdoor_temp = 5.0
         entity_c._attr_current_temperature = 20.3  # within 0.5°C deadband
 
         # Fahrenheit system: same deadband 0.5°C (entered in °C in config)
@@ -144,7 +144,7 @@ class TestDeadbandBehavior:
         entity_f = _make_f_entity(config_f)
         pi_f = entity_f._pi
         pi_f._desired_temp = 68.0  # 20°C in °F
-        pi_f._outdoor_temp = 5.0
+        pi_f._inputs.outdoor_temp = 5.0
         entity_f._attr_current_temperature = 68.54  # 20.3°C in °F
 
         # Both store deadband in °C — same value

@@ -87,6 +87,7 @@ from .const import (
 from .const import DEFAULT_RLS_P_INIT
 from .rls_model import RLSModel
 from .pi_stored_data import PIExtraStoredData
+from .model_input_manager import ModelInputManager
 from .health_checks import (
     check_comfort,
     check_feature_diversity,
@@ -203,7 +204,6 @@ class PIController:
         self._pi_setpoint_weight: float = config.get(CONF_PI_SETPOINT_WEIGHT, DEFAULT_PI_SETPOINT_WEIGHT)
 
         # Feedforward config
-        self._outdoor_temp_sensor: str | None = config.get(CONF_OUTDOOR_TEMP_SENSOR)
         self._ff_heat_slope: float = config.get(CONF_PI_FF_HEAT_SLOPE, DEFAULT_PI_FF_HEAT_SLOPE)
         self._ff_cool_slope: float = config.get(CONF_PI_FF_COOL_SLOPE, DEFAULT_PI_FF_COOL_SLOPE)
 
@@ -326,13 +326,11 @@ class PIController:
             feature_scales=self._feature_scales,
         )
 
-        # Model input current values and lag filter states
-        self._model_input_values = [0.0] * len(self._model_inputs)
-        self._model_input_filtered = [0.0] * len(self._model_inputs)
-
-        # Outdoor temp state
-        self._outdoor_temp: float | None = None
-
+        # Model input runtime state (values, lag filters, outdoor temp)
+        self._inputs = ModelInputManager(
+            model_inputs=self._model_inputs,
+            outdoor_temp_sensor=config.get(CONF_OUTDOOR_TEMP_SENSOR),
+        )
 
         # Health check state
         self._health_prev_desired: float | None = None
@@ -447,15 +445,16 @@ class PIController:
             )
 
         # Register outdoor temp sensor
-        if self._outdoor_temp_sensor:
+        if self._inputs.outdoor_temp_sensor:
             async_track_state_change_event(
                 self._hass,
-                self._outdoor_temp_sensor,
+                self._inputs.outdoor_temp_sensor,
                 self._async_outdoor_temp_changed,
             )
-            outdoor_state = self._hass.states.get(self._outdoor_temp_sensor)
+            outdoor_state = self._hass.states.get(self._inputs.outdoor_temp_sensor)
             if outdoor_state is not None:
-                self._update_outdoor_temp(outdoor_state)
+                unit = outdoor_state.attributes.get("unit_of_measurement", UnitOfTemperature.CELSIUS)
+                self._inputs.update_outdoor_temp(outdoor_state.state, unit)
 
         # Register model input entities
         model_entity_ids = [
@@ -471,11 +470,11 @@ class PIController:
         self._read_model_input_values()
 
         # Compute initial feedforward offset
-        if self._outdoor_temp is not None:
+        if self._inputs.outdoor_temp is not None:
             is_heating = e._attr_hvac_mode in (HVACMode.HEAT, HVACMode.HEAT_COOL, None)
-            outdoor_delta = self._ff_heat_reference - self._outdoor_temp if is_heating else self._outdoor_temp - self._ff_cool_reference
+            outdoor_delta = self._ff_heat_reference - self._inputs.outdoor_temp if is_heating else self._inputs.outdoor_temp - self._ff_cool_reference
             outdoor_delta = max(0, outdoor_delta)
-            x = self._build_feature_vector(outdoor_delta)
+            x = self._inputs.build_feature_vector(outdoor_delta)
             rls = self._rls_heat if is_heating else self._rls_cool
             self._ff_offset = rls.predict(x)
 
@@ -666,9 +665,6 @@ class PIController:
         """Return PI data for RestoreEntity's ExtraStoredData persistence."""
         if not self._pi_enabled:
             return None
-        lag_states = {}
-        for i, m_input in enumerate(self._model_inputs):
-            lag_states[m_input.get("name", str(i))] = self._model_input_filtered[i]
         return PIExtraStoredData(
             pi_integral=self._pi_integral,
             desired_temp=self._desired_temp,
@@ -684,7 +680,7 @@ class PIController:
             ff_load_fraction=self._metrics.ff_load_fraction,
             rls_heat_model=self._rls_heat.as_dict(),
             rls_cool_model=self._rls_cool.as_dict(),
-            lag_filter_states=lag_states,
+            lag_filter_states=self._inputs.get_lag_states(),
             heat_seeds_at_learn=list(self._heat_seeds),
             cool_seeds_at_learn=list(self._cool_seeds),
             ki_at_save=self._pi_ki,
@@ -769,10 +765,7 @@ class PIController:
         self._apply_seed_changes(data.cool_seeds_at_learn, self._cool_seeds, self._rls_cool)
         # Restore lag filter states
         if data.lag_filter_states:
-            for i, m_input in enumerate(self._model_inputs):
-                key = m_input.get("name", str(i))
-                if key in data.lag_filter_states:
-                    self._model_input_filtered[i] = float(data.lag_filter_states[key])
+            self._inputs.restore_lag_states(data.lag_filter_states)
         # Restore τ estimate and recompute IMC gains
         if self._tau_estimator.enabled and data.tau_estimate > 0:
             old_ki = self._pi_ki
@@ -973,7 +966,7 @@ class PIController:
                 "ff_confidence": round(self._ff_confidence, 4),
                 "hp_setpoint": self._hp_setpoint,
                 "desired_temp": self._desired_temp,
-                "outdoor_temp": self._outdoor_temp,
+                "outdoor_temp": self._inputs.outdoor_temp,
                 "room_temp_rate": round(self._room_temp_rate, 6),
                 "integral_convergence": round(self._metrics.integral_convergence, 4),
                 "tau_estimate": round(self._tau_estimator.tau, 1) if self._tau_estimator.enabled else None,
@@ -1213,7 +1206,7 @@ class PIController:
     def _rls_shared_gate_open(self, learning_suppressed: bool) -> bool:
         """Check shared RLS learning preconditions (outdoor temp, suppression, tracking)."""
         return (
-            self._outdoor_temp is not None
+            self._inputs.outdoor_temp is not None
             and not learning_suppressed
             and not self._any_model_input_unavailable()
             and not self._supplemental.tracking_mode
@@ -1255,7 +1248,7 @@ class PIController:
     ) -> None:
         """Log reasons why RLS learning gate is blocked (deadband path)."""
         reasons: list[str] = []
-        if self._outdoor_temp is None:
+        if self._inputs.outdoor_temp is None:
             reasons.append("no outdoor temp")
         if learning_suppressed:
             reasons.append("manually suppressed")
@@ -1288,78 +1281,35 @@ class PIController:
 
     # ── PI Internals ──────────────────────────────────────────────────
 
-    @callback
-    def _update_outdoor_temp(self, state: State) -> None:
-        """Update outdoor temperature from sensor state, converting to °C."""
-        try:
-            temp = float(state.state)
-            unit = state.attributes.get("unit_of_measurement", UnitOfTemperature.CELSIUS)
-            self._outdoor_temp = TemperatureConverter.convert(
-                temp, unit, UnitOfTemperature.CELSIUS
-            )
-        except (ValueError, TypeError):
-            pass
+    def _resolve_model_input_states(self) -> dict[str, tuple[str, bool]]:
+        """Resolve all model input entity states from HA for ModelInputManager."""
+        states: dict[str, tuple[str, bool]] = {}
+        for m_input in self._model_inputs:
+            entity_id = m_input.get("entity_id", "")
+            if not entity_id:
+                continue
+            state = self._hass.states.get(entity_id)
+            if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+                states[entity_id] = ("", False)
+            else:
+                states[entity_id] = (state.state, True)
+        return states
+
+    def _read_model_input_values(self) -> None:
+        """Resolve HA entity states and update model input manager."""
+        self._inputs.read_values(self._resolve_model_input_states())
+
+    def _any_model_input_unavailable(self) -> bool:
+        """Check if any model input entity is currently unavailable in HA."""
+        return self._inputs.any_unavailable(self._resolve_model_input_states())
 
     @callback
     def _async_outdoor_temp_changed(self, event: Event[EventStateChangedData]) -> None:
         """Handle outdoor temperature sensor state changes."""
         new_state = event.data.get("new_state")
         if new_state is not None:
-            self._update_outdoor_temp(new_state)
-
-    def _build_feature_vector(self, outdoor_delta: float) -> list[float]:
-        """Build the feature vector for RLS prediction/update.
-
-        Returns [1, outdoor_delta, input1_filtered, input2_filtered, ...].
-        """
-        x: list[float] = [1.0, outdoor_delta]
-        for i in range(len(self._model_inputs)):
-            x.append(self._model_input_filtered[i])
-        return x
-
-    def _update_lag_filters(self, dt_seconds: float) -> None:
-        """Update exponential lag filters for model inputs."""
-        for i, m_input in enumerate(self._model_inputs):
-            tau = float(m_input.get("lag_tau", 0))
-            raw = self._model_input_values[i]
-            if tau > 0 and dt_seconds > 0:
-                alpha = 1.0 - math.exp(-dt_seconds / tau)
-                self._model_input_filtered[i] = (
-                    alpha * raw + (1.0 - alpha) * self._model_input_filtered[i]
-                )
-            else:
-                self._model_input_filtered[i] = raw
-
-    def _read_model_input_values(self) -> None:
-        """Read current values from all model input entities."""
-        for i, m_input in enumerate(self._model_inputs):
-            entity_id = m_input.get("entity_id", "")
-            if not entity_id:
-                continue
-            state = self._hass.states.get(entity_id)
-            if not state or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
-                _LOGGER.debug("Model input '%s' (%s) unavailable, using last value %.2f",
-                             m_input.get("name", "?"), entity_id, self._model_input_values[i])
-                continue
-            try:
-                self._model_input_values[i] = float(state.state)
-            except (ValueError, TypeError):
-                # Non-numeric: treat as active/inactive
-                # Covers binary_sensor (on/off), climate (heat/cool/off), etc.
-                active_states = {"on", "heat", "cool", "dry", "fan_only",
-                                 "heating", "cooling", "burning", "igniting"}
-                self._model_input_values[i] = 1.0 if state.state in active_states else 0.0
-
-    def _any_model_input_unavailable(self) -> bool:
-        """Check if any model input entity is currently unavailable."""
-        for m_input in self._model_inputs:
-            entity_id = m_input.get("entity_id", "")
-            if not entity_id:
-                continue
-            state = self._hass.states.get(entity_id)
-            if not state or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
-                return True
-        return False
+            unit = new_state.attributes.get("unit_of_measurement", UnitOfTemperature.CELSIUS)
+            self._inputs.update_outdoor_temp(new_state.state, unit)
 
     @callback
     def _async_model_input_changed(self, event: Event[EventStateChangedData]) -> None:
@@ -1420,13 +1370,13 @@ class PIController:
         if not is_heating and e._attr_hvac_mode not in (HVACMode.COOL, HVACMode.DRY):
             return False
         # Use RLS model for FF-only fallback
-        if self._outdoor_temp is not None:
+        if self._inputs.outdoor_temp is not None:
             if is_heating:
-                outdoor_delta = max(0, self._ff_heat_reference - self._outdoor_temp)
+                outdoor_delta = max(0, self._ff_heat_reference - self._inputs.outdoor_temp)
             else:
-                outdoor_delta = max(0, self._outdoor_temp - self._ff_cool_reference)
+                outdoor_delta = max(0, self._inputs.outdoor_temp - self._ff_cool_reference)
             self._read_model_input_values()
-            x = self._build_feature_vector(outdoor_delta)
+            x = self._inputs.build_feature_vector(outdoor_delta)
             rls = self._rls_heat if is_heating else self._rls_cool
             self._ff_offset = rls.predict(x)
         else:
@@ -1576,19 +1526,19 @@ class PIController:
 
         # Read model input values and update lag filters
         self._read_model_input_values()
-        self._update_lag_filters(dt_seconds)
+        self._inputs.update_lag_filters(dt_seconds)
 
         # Compute outdoor delta (always first model input)
-        if self._outdoor_temp is not None:
+        if self._inputs.outdoor_temp is not None:
             if is_heating:
-                outdoor_delta = max(0, self._ff_heat_reference - self._outdoor_temp)
+                outdoor_delta = max(0, self._ff_heat_reference - self._inputs.outdoor_temp)
             else:
-                outdoor_delta = max(0, self._outdoor_temp - self._ff_cool_reference)
+                outdoor_delta = max(0, self._inputs.outdoor_temp - self._ff_cool_reference)
         else:
             outdoor_delta = 0.0
 
         # Build feature vector and predict FF offset via RLS model
-        x = self._build_feature_vector(outdoor_delta)
+        x = self._inputs.build_feature_vector(outdoor_delta)
         rls = self._rls_heat if is_heating else self._rls_cool
         seeds = self._heat_seeds if is_heating else self._cool_seeds
 
@@ -1634,7 +1584,7 @@ class PIController:
         if self._manual_ff_suppress:
             active_suppressors.append("manual")
         for i, m_input in enumerate(self._model_inputs):
-            if m_input.get("suppress_learning") and self._model_input_values[i] > 0.5:
+            if m_input.get("suppress_learning") and self._inputs.values[i] > 0.5:
                 learning_suppressed = True
                 active_suppressors.append(m_input.get("name", f"input_{i}"))
         self._disturbance_suppress_active = learning_suppressed

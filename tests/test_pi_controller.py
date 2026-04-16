@@ -424,7 +424,7 @@ class TestFeedforward:
     @pytest.mark.asyncio
     async def test_ff_offset_applied_in_heating(self, pi_entity):
         """FF offset from outdoor temp should be applied in heating mode."""
-        pi_entity._pi._outdoor_temp = 0.0  # Cold outdoor
+        pi_entity._pi._inputs.outdoor_temp = 0.0  # Cold outdoor
         pi_entity._attr_current_temperature = 68.0
         pi_entity._pi._desired_temp = 72.0
         pi_entity._pi._hp_setpoint = 22.0
@@ -436,7 +436,7 @@ class TestFeedforward:
     @pytest.mark.asyncio
     async def test_ff_offset_zero_when_no_outdoor(self, pi_entity):
         """Without outdoor sensor, FF offset should be zero."""
-        pi_entity._pi._outdoor_temp = None
+        pi_entity._pi._inputs.outdoor_temp = None
         pi_entity._attr_current_temperature = 68.0
         pi_entity._pi._desired_temp = 72.0
         pi_entity._pi._hp_setpoint = 22.0
@@ -448,7 +448,7 @@ class TestFeedforward:
     @pytest.mark.asyncio
     async def test_rls_model_produces_ff_offset(self, pi_entity):
         """RLS model should produce FF offset based on outdoor delta."""
-        pi_entity._pi._outdoor_temp = 5.0  # 10°C below reference (15)
+        pi_entity._pi._inputs.outdoor_temp = 5.0  # 10°C below reference (15)
         pi_entity._attr_current_temperature = 20.0
         pi_entity._pi._desired_temp = 22.0
         pi_entity._pi._hp_setpoint = 22.0
@@ -469,7 +469,7 @@ class TestFeedforward:
             "default_bias": 0.0,
             "gain": 1.0,
         }]
-        pi_entity._pi._outdoor_temp = None
+        pi_entity._pi._inputs.outdoor_temp = None
         pi_entity._attr_current_temperature = 68.0
         pi_entity._pi._desired_temp = 72.0
         pi_entity._pi._hp_setpoint = 22.0
@@ -492,7 +492,7 @@ class TestFeedforward:
             "default_bias": 0.0,
             "gain": 1.0,
         }]
-        pi_entity._pi._outdoor_temp = 0.0
+        pi_entity._pi._inputs.outdoor_temp = 0.0
         pi_entity._attr_current_temperature = 21.9  # °C, in deadband of 22°C desired
         pi_entity._pi._desired_temp = 22.0
         pi_entity._pi._hp_setpoint = 22.0
@@ -515,9 +515,9 @@ class TestFeedforward:
             "seed_cool": 0.0,
             "suppress_learning": True,
         }]
-        pi._model_input_values = [1.0]  # Stove is active
-        pi._model_input_filtered = [1.0]
-        pi._outdoor_temp = 5.0
+        pi._inputs.values = [1.0]  # Stove is active
+        pi._inputs.filtered = [1.0]
+        pi._inputs.outdoor_temp = 5.0
         pi._desired_temp = 22.0
         pi._hp_setpoint = 22.0
         pi._ff_settled_ticks = 10  # Well settled
@@ -543,9 +543,9 @@ class TestFeedforward:
             "seed_cool": 0.0,
             "suppress_learning": True,
         }]
-        pi._model_input_values = [0.0]  # Stove is OFF
-        pi._model_input_filtered = [0.0]
-        pi._outdoor_temp = 5.0
+        pi._inputs.values = [0.0]  # Stove is OFF
+        pi._inputs.filtered = [0.0]
+        pi._inputs.outdoor_temp = 5.0
         pi._desired_temp = 22.0
         pi._hp_setpoint = 22.0
         pi._pi_integral = 0.5  # Small, stable
@@ -665,7 +665,7 @@ class TestSensorRecovery:
         pi_entity._pi._sensor_recovery_pending = True
         pi_entity._pi._desired_temp = 72.0
         pi_entity._pi._hp_setpoint = 22.0
-        pi_entity._pi._outdoor_temp = 0.0
+        pi_entity._pi._inputs.outdoor_temp = 0.0
 
         await pi_entity._pi._check_sensor_recovery()
 
@@ -1005,7 +1005,7 @@ class TestPIEdgeCases:
         pi_entity._pi._hp_setpoint = 23.0
         pi_entity._pi._pi_integral = 0.0
         pi_entity._pi._pi_last_tick_time = 0
-        pi_entity._pi._outdoor_temp = 0.0
+        pi_entity._pi._inputs.outdoor_temp = 0.0
         pi_entity._pi._ff_settled_ticks = 0
         pi_entity._attr_hvac_mode = HVACMode.HEAT
 
@@ -1189,7 +1189,7 @@ class TestPIEdgeCases:
         # clamped = desired + ff + ki*I = 20.5 + ff + 0.15*I
         # With outdoor=5, default seed=0.3: ff = 0.3*10 = 3.0
         # Need 20.5 + 3.0 + 0.15*I = 23.6 → I = 0.67
-        pi._outdoor_temp = 5.0
+        pi._inputs.outdoor_temp = 5.0
         pi._pi_integral = 0.67
         pi._pi_deadband = 0.5
         pi_entity._attr_hvac_mode = HVACMode.HEAT
@@ -1212,7 +1212,7 @@ class TestPIEdgeCases:
         pi = pi_entity._pi
         pi._desired_temp = 20.5
         pi._hp_setpoint = 26
-        pi._outdoor_temp = 5.0  # FF ≈ 3.5
+        pi._inputs.outdoor_temp = 5.0  # FF ≈ 3.5
         pi._pi_integral = -2.0  # clamped ≈ 20.5 + 3.5 + 0.15*(-2) = 23.7
         # q_error = 26 - 23.7 = 2.3 — way too large for quantization feedback
         pi._pi_deadband = 0.5
@@ -1413,7 +1413,7 @@ class TestExtraStoredDataFullRestore:
         )
         pi.restore_extra_stored_data(data)
         # Lag filter state restored (line 660-664)
-        assert pi._model_input_filtered[0] == 0.75
+        assert pi._inputs.filtered[0] == 0.75
 
 
 
@@ -1521,14 +1521,14 @@ class TestLagFilterUpdate:
         pi = entity._pi
 
         # Set raw value to 1.0, filtered starts at 0.0
-        pi._model_input_values[0] = 1.0
-        pi._model_input_filtered[0] = 0.0
+        pi._inputs.values[0] = 1.0
+        pi._inputs.filtered[0] = 0.0
 
         # Update with dt=900s (15 minutes, half of tau)
-        pi._update_lag_filters(900)
+        pi._inputs.update_lag_filters(900)
 
         # Should be partially ramped up (not 0 and not 1)
-        assert 0.0 < pi._model_input_filtered[0] < 1.0
+        assert 0.0 < pi._inputs.filtered[0] < 1.0
 
     def test_lag_filter_with_zero_tau(self):
         """Lag filter with tau=0 should pass through raw value."""
@@ -1544,11 +1544,11 @@ class TestLagFilterUpdate:
         entity = FakePIEntity(config)
         pi = entity._pi
 
-        pi._model_input_values[0] = 1.0
-        pi._model_input_filtered[0] = 0.5
+        pi._inputs.values[0] = 1.0
+        pi._inputs.filtered[0] = 0.5
 
-        pi._update_lag_filters(900)
-        assert pi._model_input_filtered[0] == 1.0
+        pi._inputs.update_lag_filters(900)
+        assert pi._inputs.filtered[0] == 1.0
 
 
 # ── _read_model_input_values edge cases (lines 910, 913-915) ────────
@@ -1570,10 +1570,10 @@ class TestReadModelInputValues:
         })
         entity = FakePIEntity(config)
         pi = entity._pi
-        pi._model_input_values[0] = 99.0  # Should not change
+        pi._inputs.values[0] = 99.0  # Should not change
 
         pi._read_model_input_values()
-        assert pi._model_input_values[0] == 99.0  # Unchanged — skipped
+        assert pi._inputs.values[0] == 99.0  # Unchanged — skipped
 
     def test_unavailable_entity_keeps_last_value(self):
         """Unavailable entity should keep last value (lines 913-915)."""
@@ -1588,7 +1588,7 @@ class TestReadModelInputValues:
         })
         entity = FakePIEntity(config)
         pi = entity._pi
-        pi._model_input_values[0] = 1.0  # Previous value
+        pi._inputs.values[0] = 1.0  # Previous value
 
         # Mock entity as unavailable
         unavail_state = MagicMock()
@@ -1596,7 +1596,7 @@ class TestReadModelInputValues:
         entity.hass.states.get.return_value = unavail_state
 
         pi._read_model_input_values()
-        assert pi._model_input_values[0] == 1.0  # Kept previous value
+        assert pi._inputs.values[0] == 1.0  # Kept previous value
 
     def test_missing_entity_keeps_last_value(self):
         """Missing entity (None state) should keep last value."""
@@ -1611,12 +1611,12 @@ class TestReadModelInputValues:
         })
         entity = FakePIEntity(config)
         pi = entity._pi
-        pi._model_input_values[0] = 0.5
+        pi._inputs.values[0] = 0.5
 
         entity.hass.states.get.return_value = None
 
         pi._read_model_input_values()
-        assert pi._model_input_values[0] == 0.5
+        assert pi._inputs.values[0] == 0.5
 
 
 # ── _any_model_input_unavailable (lines 930, 933) ───────────────────
@@ -1719,7 +1719,7 @@ class TestFFOnlyFallback:
         entity._attr_hvac_mode = HVACMode.COOL
         pi._desired_temp = 24.0
         pi._hp_setpoint = 24.0
-        pi._outdoor_temp = 35.0  # Hot outdoor
+        pi._inputs.outdoor_temp = 35.0  # Hot outdoor
         entity._attr_current_temperature = None  # Sensor unavailable
 
         await pi._check_sensor_recovery()
@@ -1737,7 +1737,7 @@ class TestFFOnlyFallback:
         entity._attr_hvac_mode = HVACMode.HEAT
         pi._desired_temp = 22.0
         pi._hp_setpoint = 22.0
-        pi._outdoor_temp = None  # No outdoor temp
+        pi._inputs.outdoor_temp = None  # No outdoor temp
         entity._attr_current_temperature = None
 
         await pi._check_sensor_recovery()
@@ -1759,7 +1759,7 @@ class TestLearningGateDebugLogging:
         entity = FakePIEntity(config)
         pi = entity._pi
 
-        pi._outdoor_temp = None
+        pi._inputs.outdoor_temp = None
         pi._rls_warmup_done = True
         entity._attr_current_temperature = 22.0  # Within deadband of 22.0
         pi._desired_temp = 22.0
@@ -1776,7 +1776,7 @@ class TestLearningGateDebugLogging:
         entity = FakePIEntity(config)
         pi = entity._pi
 
-        pi._outdoor_temp = 5.0
+        pi._inputs.outdoor_temp = 5.0
         pi._rls_warmup_done = True
         pi._manual_ff_suppress = True
         entity._attr_current_temperature = 22.0
@@ -1802,7 +1802,7 @@ class TestLearningGateDebugLogging:
         entity = FakePIEntity(config)
         pi = entity._pi
 
-        pi._outdoor_temp = 5.0
+        pi._inputs.outdoor_temp = 5.0
         pi._rls_warmup_done = True
         entity._attr_current_temperature = 22.0
         pi._desired_temp = 22.0
@@ -3588,7 +3588,7 @@ class TestGateLogging:
         pi_entity._pi._desired_temp = 22.0
         pi_entity._pi._hp_setpoint = 22.0
         # Force a condition that blocks learning
-        pi_entity._pi._outdoor_temp = None  # blocks "no outdoor temp"
+        pi_entity._pi._inputs.outdoor_temp = None  # blocks "no outdoor temp"
 
         with caplog.at_level(logging.DEBUG):
             for i in range(16):
@@ -3610,7 +3610,7 @@ class TestGateLogging:
         pi_entity._attr_current_temperature = 19.0  # outside deadband
         pi_entity._pi._desired_temp = 22.0
         pi_entity._pi._hp_setpoint = 22.0
-        pi_entity._pi._outdoor_temp = 5.0
+        pi_entity._pi._inputs.outdoor_temp = 5.0
         # Simulate some stable ticks to build up counter
         pi_entity._pi._stable_oodb_ticks = 3
 
@@ -3634,7 +3634,7 @@ class TestGateLogging:
         pi_entity._attr_current_temperature = 19.0
         pi_entity._pi._desired_temp = 22.0
         pi_entity._pi._hp_setpoint = 22.0
-        pi_entity._pi._outdoor_temp = 5.0
+        pi_entity._pi._inputs.outdoor_temp = 5.0
         pi_entity._pi._stable_oodb_ticks = 0  # already zero
         pi_entity._pi._room_temp_rate = 0.05  # unstable
 

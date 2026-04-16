@@ -84,7 +84,7 @@ class TestManualSuppress:
         pi = entity._pi
         await pi.async_suppress_ff_learning(reason="test")
 
-        pi._outdoor_temp = 5.0
+        pi._inputs.outdoor_temp = 5.0
         pi._desired_temp = 22.0
         pi._hp_setpoint = 22.0
         pi._ff_settled_ticks = 10
@@ -121,7 +121,7 @@ class TestIntegralReset:
         entity._attr_current_temperature = 20.0
         entity._pi._desired_temp = 22.0
         entity._pi._hp_setpoint = 22.0
-        entity._pi._outdoor_temp = 5.0
+        entity._pi._inputs.outdoor_temp = 5.0
         entity._pi._pi_last_tick_time = 0
 
         await entity._pi._pi_tick()
@@ -138,7 +138,7 @@ class TestIntegralReset:
         entity._attr_current_temperature = 22.0
         entity._pi._desired_temp = 22.0
         entity._pi._hp_setpoint = 22.0
-        entity._pi._outdoor_temp = 14.0  # Near reference, low FF offset
+        entity._pi._inputs.outdoor_temp = 14.0  # Near reference, low FF offset
         entity._pi._pi_last_tick_time = 0
 
         await entity._pi._pi_tick()

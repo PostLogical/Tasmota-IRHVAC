@@ -167,7 +167,7 @@ class TestPIControllerGaps:
         )
         await hass.async_block_till_done()
 
-        assert pi._outdoor_temp == 10.0
+        assert pi._inputs.outdoor_temp == 10.0
 
     @pytest.mark.asyncio
     async def test_outdoor_temp_unavailable(self, hass, setup_pi_integration):
@@ -226,7 +226,7 @@ class TestPIControllerGaps:
         pi._hp_setpoint = 22.0
         pi._pi_integral = 0.0
         pi._pi_last_tick_time = 0
-        pi._outdoor_temp = 0.0
+        pi._inputs.outdoor_temp = 0.0
 
         # Room is ABOVE desired — overshooting in heat mode
         entity._attr_current_temperature = 23.0
@@ -251,7 +251,7 @@ class TestPIControllerGaps:
         pi._hp_setpoint = 24.0
         pi._pi_integral = 0.0
         pi._pi_last_tick_time = 0
-        pi._outdoor_temp = 30.0
+        pi._inputs.outdoor_temp = 30.0
         # Room is BELOW desired — overshooting in cool mode
         entity._attr_current_temperature = 23.0
 
@@ -1445,7 +1445,7 @@ class TestPISensorRecoveryFF:
 
         entity._attr_hvac_mode = HVACMode.HEAT
         pi._desired_temp = 22.0
-        pi._outdoor_temp = 0.0
+        pi._inputs.outdoor_temp = 0.0
         entity._attr_current_temperature = None
         pi._sensor_recovery_pending = False
 
@@ -2715,7 +2715,7 @@ class TestExtraStoredDataViaAsyncAdded:
         # Integral convergence
         assert pi._metrics.integral_convergence == pytest.approx(0.3, abs=0.1)
         # Lag filter state
-        assert pi._model_input_filtered[0] > 0  # Lag filter state restored from persisted data
+        assert pi._inputs.filtered[0] > 0  # Lag filter state restored from persisted data
 
 
 # ── _async_model_input_changed dispatcher integration ────────────────
