@@ -1464,8 +1464,8 @@ class PIController:
             reasons.append("no outdoor temp")
         if learning_suppressed:
             reasons.append("manually suppressed")
-        if integral_change >= 0.3:
-            reasons.append(f"integral not settled (d_integral={integral_change:.2f})")
+        if integral_change * self._pi_ki >= 0.045:
+            reasons.append(f"integral not settled (d_output={integral_change * self._pi_ki:.3f})")
         if abs(room_rate) >= 0.02:
             reasons.append(f"room not settled (dT/dt={room_rate:.4f} °C/min)")
         if self._any_model_input_unavailable():
@@ -1856,11 +1856,16 @@ class PIController:
             if not skip_integration:
                 self._pi_integral += avg_error * dt_factor * rate
 
-            # IDB learning gate: require integral settled and room temp stable
+            # IDB learning gate: require integral settled and room temp stable.
+            # Output-normalized: compare Ki × Δintegral against a fixed output
+            # threshold (0.045°C ≈ 0.3 × 0.15 at the default Ki).  This makes
+            # the gate Ki-invariant — higher Ki needs proportionally smaller
+            # integral swings to produce the same output change.
             integral_change = abs(self._pi_integral - self._prev_integral_for_rls)
+            output_change = integral_change * self._pi_ki
             branch_ready = (
                 self._ff_settled_ticks >= 4
-                and integral_change < 0.3
+                and output_change < 0.045
                 and abs(self._room_temp_rate) < 0.02
             )
             if branch_ready and self._rls_shared_gate_open(learning_suppressed):
@@ -1892,7 +1897,8 @@ class PIController:
             # more settling ticks at larger errors.
             room_stable = abs(self._room_temp_rate) < 0.015  # stricter than IDB gate
             integral_change = abs(self._pi_integral - self._prev_integral_for_oodb)
-            integral_stable = integral_change < 0.5
+            # Output-normalized: 0.075°C ≈ 0.5 × 0.15 at default Ki
+            integral_stable = integral_change * self._pi_ki < 0.075
             self._prev_integral_for_oodb = self._pi_integral
             setpoint_clamped = (
                 self._hp_setpoint <= self._min_temp_c
@@ -1908,7 +1914,7 @@ class PIController:
                     if not room_stable:
                         reasons.append(f"room not settled (dT/dt={self._room_temp_rate:.4f})")
                     if not integral_stable:
-                        reasons.append(f"integral not settled (d_integral={integral_change:.2f})")
+                        reasons.append(f"integral not settled (d_output={integral_change * self._pi_ki:.3f})")
                     if setpoint_clamped:
                         reasons.append("setpoint clamped")
                     _LOGGER.debug(
