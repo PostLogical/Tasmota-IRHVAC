@@ -651,7 +651,11 @@ def _solve_symmetric(A: list[list[float]], b: list[float], n: int) -> list[float
         x[i] = M[i][n]
         for j in range(i + 1, n):
             x[i] -= M[i][j] * x[j]
-        if abs(M[i][i]) < 1e-12:
+        if abs(M[i][i]) < 1e-12:  # pragma: no cover
+            # Currently unreachable: forward elimination only modifies rows
+            # below the pivot, so M[i][i] is the same value that passed the
+            # > 1e-12 pivot check. Retained as a guard for future changes to
+            # the elimination (e.g. pivot-row scaling, threshold changes).
             return None
         x[i] /= M[i][i]
 
