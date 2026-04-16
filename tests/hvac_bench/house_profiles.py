@@ -163,4 +163,19 @@ PROFILES_2R2C = {
                     "Calibrated from 48h production data (Apr 2026). "
                     "Design: 66°F at -15°F outdoor (marginal).",
     ),
+    "bunkroom": HouseProfile2R2C(
+        name="Bunkroom (calibrated)",
+        tau_env=170,
+        tau_couple=20,
+        mass_ratio=30,
+        hp_gain=0.02,
+        solar_gain=0.0,
+        stove_gain=0.0,
+        description="100yo house, smaller zone, no direct solar. "
+                    "Calibrated from 72h production data (Apr 2026). "
+                    "Design: 63°F at -15°F outdoor (undersized HP). "
+                    "tau_env likely over-estimated — April data lacks cold-weather signal.",
+    ),
+    # dining_room: NOT calibrated — only 41 active heating ticks in Apr data.
+    # HP barely ran (solar/stove heated the zone). Needs winter data.
 }
