@@ -1258,6 +1258,70 @@ class PIController:
             self._last_setpoint_change_time = 0.0
         return result.hp_should_send_ir
 
+    # ── RLS learning ─────────────────────────────────────────────────
+
+    def _rls_shared_gate_open(self, learning_suppressed: bool) -> bool:
+        """Check shared RLS learning preconditions (outdoor temp, suppression, tracking)."""
+        return (
+            self._outdoor_temp is not None
+            and not learning_suppressed
+            and not self._any_model_input_unavailable()
+            and not self._supplemental.tracking_mode
+            and not self._supplemental.assist_active
+        )
+
+    def _rls_learn_observation(
+        self,
+        rls: RLSModel,
+        x: list[float],
+        observed_offset: float,
+        label: str,
+    ) -> float:
+        """Update RLS model with observation and log. Returns residual."""
+        beta_before = list(rls.beta)
+        residual = rls.update(x, observed_offset)
+        _LOGGER.debug(
+            "%s: observed=%.2f predicted=%.2f residual=%.2f obs_count=%d dT_dt=%.4f",
+            label, observed_offset, observed_offset - residual, residual,
+            rls.observation_count, self._room_temp_rate,
+        )
+        for idx in range(len(rls.beta)):
+            if beta_before[idx] != 0 and abs(rls.beta[idx] - beta_before[idx]) / abs(beta_before[idx]) > 0.1:
+                _LOGGER.info(
+                    "RLS coefficient[%d] changed %.3f -> %.3f (%.0f%%)",
+                    idx, beta_before[idx], rls.beta[idx],
+                    100 * (rls.beta[idx] - beta_before[idx]) / beta_before[idx],
+                )
+        return residual
+
+    def _log_learning_blocked(
+        self,
+        learning_suppressed: bool,
+        integral_change: float,
+        room_rate: float,
+        is_heating: bool,
+        is_cooling: bool,
+        error: float,
+    ) -> None:
+        """Log reasons why RLS learning gate is blocked (deadband path)."""
+        reasons: list[str] = []
+        if self._outdoor_temp is None:
+            reasons.append("no outdoor temp")
+        if learning_suppressed:
+            reasons.append("manually suppressed")
+        if integral_change >= 0.3:
+            reasons.append(f"integral not settled (d_integral={integral_change:.2f})")
+        if abs(room_rate) >= 0.02:
+            reasons.append(f"room not settled (dT/dt={room_rate:.4f} °C/min)")
+        if self._any_model_input_unavailable():
+            reasons.append("model input unavailable")
+        if (is_heating and error < 0) or (is_cooling and error > 0):
+            reasons.append(
+                f"actuator no authority ({'heating' if is_heating else 'cooling'}, error={error:.2f})"
+            )
+        if reasons:
+            _LOGGER.debug("RLS learning blocked: %s", ", ".join(reasons))
+
     # ── IMC Gain Scheduling (delegated to TauEstimator) ──────────────
 
     def _apply_gain_update(self, gains: GainUpdate) -> None:
@@ -1673,79 +1737,30 @@ class PIController:
 
         if in_deadband:
             self._ff_settled_ticks += 1
-            # Variable-rate: smooth taper from full rate at deadband edge to 5%
-            # floor at setpoint. Prevents integral starvation while reducing
-            # accumulation speed near target.
+            # Variable-rate integration: smooth taper from full rate at deadband
+            # edge to 5% floor at setpoint (Åström §3.5 — don't stop integrating
+            # near setpoint, but reduce speed to limit accumulation).
             rate = max(0.05, min(1.0, abs_error / self._pi_deadband))
             if not skip_integration:
                 self._pi_integral += avg_error * dt_factor * rate
-            # No accelerated decay in deadband — small overshoots are normal
-            # control behavior, not actuator saturation.  The variable-rate
-            # integration (5% floor) already limits accumulation speed.
-            # RLS learning gate: require integral settled and room temp stable.
-            # The old gate also required rate < 0.2 (error < 10% of deadband),
-            # but that starved zones with coarse sensors (1°F) that only briefly
-            # sit at exact target.  Being inside deadband (< 0.5°C) with stable
-            # room temp and low integral change is sufficient for a valid
-            # observation.
-            integral_change = abs(self._pi_integral - self._prev_integral_for_rls)
-            integral_settling = integral_change < 0.3
-            # Room temperature must be genuinely settled — not coasting from a
-            # recent setpoint change or external disturbance.
-            room_settling = abs(self._room_temp_rate) < 0.02  # °C/min
-            can_learn_rls = (
-                self._ff_settled_ticks >= 4
-                and self._outdoor_temp is not None
-                and not learning_suppressed
-                and integral_settling
-                and room_settling
-                and not self._any_model_input_unavailable()
-                and not self._supplemental.tracking_mode
-                and not self._supplemental.assist_active
-            )
-            if not can_learn_rls and self._ff_settled_ticks >= 4 and self._ff_settled_ticks % 4 == 0:
-                # Log why learning was blocked (every 4th tick ≈ 60min)
-                reasons = []
-                if self._outdoor_temp is None:
-                    reasons.append("no outdoor temp")
-                if learning_suppressed:
-                    reasons.append("manually suppressed")
-                if not integral_settling:
-                    reasons.append(f"integral not settled (rate={rate:.2f}, d_integral={integral_change:.2f})")
-                if not room_settling:
-                    reasons.append(f"room not settled (dT/dt={self._room_temp_rate:.4f} °C/min)")
-                if self._any_model_input_unavailable():
-                    reasons.append("model input unavailable")
-                if (is_heating and error < 0) or (is_cooling and error > 0):
-                    reasons.append(
-                        f"actuator no authority ({'heating' if is_heating else 'cooling'}, error={error:.2f})"
-                    )
-                if reasons:
-                    _LOGGER.debug("RLS learning blocked: %s", ", ".join(reasons))
-            if can_learn_rls:
-                # Observe what the plant actually experienced: the integer
-                # HP setpoint that maintained the target temperature.
-                # This is a direct input-output observation at the operating
-                # point (Ljung, System Identification §7.4).
-                observed_offset = float(self._hp_setpoint) - desired_c
-                beta_before = list(rls.beta)
-                residual = rls.update(x, observed_offset)
-                ki_integral = self._pi_ki * self._pi_integral
-                _LOGGER.debug(
-                    "RLS update: observed=%.2f predicted=%.2f residual=%.2f obs_count=%d "
-                    "ki_integral=%.3f dT_dt=%.4f",
-                    observed_offset, observed_offset - residual, residual,
-                    rls.observation_count, ki_integral, self._room_temp_rate,
-                )
-                # Log significant coefficient changes
-                for idx in range(len(rls.beta)):
-                    if beta_before[idx] != 0 and abs(rls.beta[idx] - beta_before[idx]) / abs(beta_before[idx]) > 0.1:
-                        _LOGGER.info(
-                            "RLS coefficient[%d] changed %.3f -> %.3f (%.0f%%)",
-                            idx, beta_before[idx], rls.beta[idx],
-                            100 * (rls.beta[idx] - beta_before[idx]) / beta_before[idx],
-                        )
 
+            # IDB learning gate: require integral settled and room temp stable
+            integral_change = abs(self._pi_integral - self._prev_integral_for_rls)
+            branch_ready = (
+                self._ff_settled_ticks >= 4
+                and integral_change < 0.3
+                and abs(self._room_temp_rate) < 0.02
+            )
+            if branch_ready and self._rls_shared_gate_open(learning_suppressed):
+                # Observe hp_setpoint - desired_c: what offset maintained target
+                self._rls_learn_observation(
+                    rls, x, float(self._hp_setpoint) - desired_c, "RLS update",
+                )
+            elif self._ff_settled_ticks >= 4 and self._ff_settled_ticks % 4 == 0:
+                self._log_learning_blocked(
+                    learning_suppressed, integral_change, self._room_temp_rate,
+                    is_heating, is_cooling, error,
+                )
             self._prev_integral_for_rls = self._pi_integral
 
             if learning_suppressed and self._ff_settled_ticks >= 2:
@@ -1756,42 +1771,23 @@ class PIController:
             p_term = 0.0
         else:
             self._ff_settled_ticks = 0
-            # Out-of-deadband steady-state learning: when the room is at
-            # thermal equilibrium but outside the control deadband, feed a
-            # corrected observation to the RLS.  This breaks the vicious cycle
-            # where a miscalibrated model keeps the room away from target,
-            # preventing the normal learning gate from opening.
-            #
-            # Corrected observation: hp_setpoint - current_c tells the RLS
-            # "what offset maintains room temp at current conditions."  At
-            # equilibrium this mapping is valid at any operating point (Ljung,
-            # System Identification §7.4).  Bias grows with distance from
-            # target (~K_loss/K_hp × |error|), so we require proportionally
+
+            # OODB learning: at thermal equilibrium outside deadband, feed a
+            # corrected observation (hp_setpoint - current_c) to the RLS.
+            # Breaks the cycle where a miscalibrated model keeps the room away
+            # from target, preventing the normal gate from opening.
+            # Bias grows with distance from target, so require proportionally
             # more settling ticks at larger errors.
-            #
-            # Gate on clamping: if the HP setpoint is at min/max the
-            # observation is censored — the controller wanted to go further
-            # but couldn't — so the learned offset would be biased.
-            room_stable = abs(self._room_temp_rate) < 0.015  # stricter than deadband gate
-            # Use a separate integral baseline for oodb — the deadband
-            # tracker (_prev_integral_for_rls) goes stale for zones that
-            # rarely enter deadband, making integral_change enormous.
-            # This tracker updates every tick outside deadband so it
-            # measures RECENT integral movement, not cumulative drift.
+            room_stable = abs(self._room_temp_rate) < 0.015  # stricter than IDB gate
             integral_change = abs(self._pi_integral - self._prev_integral_for_oodb)
-            integral_stable = integral_change < 0.5  # integral not actively winding
+            integral_stable = integral_change < 0.5
             self._prev_integral_for_oodb = self._pi_integral
             setpoint_clamped = (
                 self._hp_setpoint <= self._min_temp_c
                 or self._hp_setpoint >= self._max_temp_c
             )
-            # Require more settling at larger errors: the equilibrium offset
-            # has bias ~(K_loss/K_hp)×|error| from using current_c instead of
-            # desired_c (linear heat-loss approximation).  Longer settling
-            # ensures we only learn from genuinely stable states at larger
-            # deviations, and naturally reduces the frequency of noisier
-            # far-from-target observations.
             min_oodb_ticks = 8 + int(abs_error * 4)  # +4 ticks per °C of error
+
             if room_stable and integral_stable and not setpoint_clamped:
                 self._stable_oodb_ticks += 1
             else:
@@ -1809,40 +1805,18 @@ class PIController:
                         ", ".join(reasons) if reasons else "conditions changed",
                     )
                 self._stable_oodb_ticks = 0
-            if (
-                self._stable_oodb_ticks >= min_oodb_ticks
-                and self._outdoor_temp is not None
-                and not learning_suppressed
-                and not self._any_model_input_unavailable()
-                and not self._supplemental.tracking_mode
-                and not self._supplemental.assist_active
-            ):
-                corrected_offset = float(self._hp_setpoint) - current_c
-                beta_before = list(rls.beta)
-                residual = rls.update(x, corrected_offset)
-                _LOGGER.debug(
-                    "RLS steady-state update (oodb): observed=%.2f predicted=%.2f "
-                    "residual=%.2f obs_count=%d error=%.2f dT_dt=%.4f",
-                    corrected_offset, corrected_offset - residual, residual,
-                    rls.observation_count, error, self._room_temp_rate,
+
+            branch_ready = self._stable_oodb_ticks >= min_oodb_ticks
+            if branch_ready and self._rls_shared_gate_open(learning_suppressed):
+                # Observe hp_setpoint - current_c: what offset maintains equilibrium
+                self._rls_learn_observation(
+                    rls, x, float(self._hp_setpoint) - current_c, "RLS oodb",
                 )
-                for idx in range(len(rls.beta)):
-                    if beta_before[idx] != 0 and abs(rls.beta[idx] - beta_before[idx]) / abs(beta_before[idx]) > 0.1:
-                        _LOGGER.info(
-                            "RLS coefficient[%d] changed %.3f -> %.3f (%.0f%%)",
-                            idx, beta_before[idx], rls.beta[idx],
-                            100 * (rls.beta[idx] - beta_before[idx]) / beta_before[idx],
-                        )
                 self._stable_oodb_ticks = 0  # one observation per settled window
 
-            # Setpoint weighting: reduce P-term to prevent overshoot while
-            # integral drives steady-state accuracy. Standard 2-DOF technique
-            # (Astrom & Hagglund). b < 1 reduces proportional kick.
-            # Smith predictor I-PI variant: only apply correction when it
-            # prevents overshoot (same sign as error). When signs differ, the
-            # correction would fight the current control direction — ignore it.
-            # Heating + warming in pipeline → reduce P (prevent overshoot). ✓
-            # Heating + cooling in pipeline → ignore (don't fight recovery). ✓
+            # P-term with setpoint weighting (2-DOF, Åström & Hägglund).
+            # Smith correction only applied when it prevents overshoot
+            # (same sign as error) — don't fight recovery when signs differ.
             effective_smith = smith_correction if smith_correction * error > 0 else 0.0
             p_term = self._pi_kp * self._pi_setpoint_weight * (error - effective_smith)
             if not skip_integration:
