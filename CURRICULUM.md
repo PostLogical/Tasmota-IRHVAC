@@ -56,7 +56,7 @@ remote (or echoes back what it sent) and publishes state via MQTT.
 - It includes a **PI controller with feedforward** — a closed-loop control system
   that continuously adjusts the temperature the AC *thinks* it should target,
   based on what the room temperature *actually* is
-- It supports vendor-specific features like Fujitsu's Powerful/Econo/Min Heat presets
+- It supports vendor-specific features like Fujitsu's Boost/Eco/Min Heat presets
   via raw IR codes
 
 ---
@@ -152,29 +152,47 @@ This split matters: changing `entry.data` requires reconfiguration; changing
 
 ```
 custom_components/tasmota_irhvac/
-├── __init__.py          (158 lines)  — Entry point: setup, services, migration
-├── const.py             (223 lines)  — All constants, defaults, config keys
-├── climate.py          (1441 lines)  — Base climate entity: MQTT, state, IR commands
-├── pi_controller.py     (568 lines)  — PI+feedforward controller mixin
-├── fujitsu.py           (270 lines)  — Fujitsu vendor subclass (presets, raw IR)
-├── config_flow.py       (998 lines)  — Setup wizard + options flow UI
-├── button.py            (184 lines)  — Vane buttons + user-defined IR action buttons
-├── sensor.py            (141 lines)  — PI diagnostic sensors (setpoint, integral, ff)
-├── diagnostics.py        (84 lines)  — HA diagnostics dump
-├── manifest.json                     — Integration metadata (dependencies, version)
-├── strings.json                      — UI text (English, with formatjs syntax)
+├── __init__.py           (234 lines)  — Entry point: setup, services, migration
+├── const.py              (255 lines)  — All constants, defaults, config keys
+├── config_model.py       (211 lines)  — Typed, frozen config dataclass (parsed once)
+├── climate.py           (1899 lines)  — Base climate entity: MQTT, state, IR commands
+├── config_flow.py       (1399 lines)  — Setup wizard + options flow UI
+├── sensor.py             (378 lines)  — 18 PI diagnostic sensors + health sensor
+├── binary_sensor.py      (194 lines)  — FF learning suppression status
+├── button.py             (281 lines)  — Vane buttons + user-defined IR action buttons
+├── diagnostics.py         (59 lines)  — HA diagnostics dump
+├── pi/                                — PI + feedforward controller subpackage
+│   ├── __init__.py                    — Public API: PIController, NullController, BatchResult
+│   ├── pi_controller.py (2053 lines)  — Core PI tick, anti-windup, learning gates
+│   ├── pi_stored_data.py  (106 lines) — ExtraStoredData for cross-restart persistence
+│   ├── controller_protocol.py (196)   — Protocol class + NullController stub
+│   ├── rls_model.py       (249 lines) — Recursive Least Squares with forgetting + ridge
+│   ├── batch_learning.py  (829 lines) — Diversity-aware buffer + periodic WLS analysis
+│   ├── smith_predictor.py (113 lines) — FOPDT Smith predictor (delay compensation)
+│   ├── tau_estimator.py   (231 lines) — Online τ estimation + IMC gain scheduling
+│   ├── model_input_manager.py (134)   — External HA entity feature management
+│   ├── supplemental_controller.py (136) — Supplemental heat source coordination
+│   ├── performance_metrics.py (135)   — ITAE, CVH, FF load fraction accumulators
+│   └── health_checks.py  (141 lines)  — Comfort, integral, FF, drift health checks
+├── vendors/                           — Vendor handler registry (composition, not inheritance)
+│   ├── __init__.py       (153 lines)  — Registry: maps vendor strings to handlers
+│   ├── base.py           (168 lines)  — VendorHandler base + IRDecode/EntityState types
+│   ├── fujitsu.py        (393 lines)  — Fujitsu presets, raw IR, vane cycling
+│   └── electra.py         (49 lines)  — Electra vendor quirks
+├── manifest.json                      — Integration metadata (dependencies, version)
+├── strings.json                       — UI text (English, with formatjs syntax)
 └── translations/
-    └── en.json                       — Compiled English translations
+    └── en.json                        — Compiled English translations
 ```
 
-**Read order for learning:** `const.py` → `climate.py` → `pi_controller.py` →
-`fujitsu.py` → `config_flow.py` → everything else.
+**Read order for learning:** `const.py` → `climate.py` → `pi/pi_controller.py` →
+`pi/rls_model.py` → `vendors/fujitsu.py` → `config_flow.py` → everything else.
 
 ---
 
 ## Lesson 1: Constants and Configuration
 
-**File:** `const.py` (~223 lines)
+**File:** `const.py` (~255 lines)
 
 Start here. This file defines every configuration key, default value, and enum used
 throughout the integration.
@@ -212,31 +230,33 @@ happen if I changed this?" The defaults encode real-world tuning decisions.
 
 ## Lesson 2: The Base Climate Entity
 
-**File:** `climate.py` (~1441 lines)
+**File:** `climate.py` (~1899 lines)
 
 This is the largest file and the heart of the integration. It implements HA's
 `ClimateEntity` interface — the standard API that makes this show up as a thermostat
 in the UI.
 
-### Class Hierarchy
+### Architecture: Composition, Not Inheritance
+
+The earlier mixin/subclass hierarchy has been replaced with **composition**:
 
 ```python
 class TasmotaIrhvac(RestoreEntity, ClimateEntity):
-    """Base class — works for any vendor."""
+    """Single climate entity — works for any vendor."""
+    _controller: PIController | NullController   # PI logic (composition)
+    _vendor: VendorHandler                        # Vendor-specific behavior (composition)
 ```
 
-Or, when PI is enabled:
+- **`PIController`** (in `pi/pi_controller.py`) is a standalone object, not a mixin.
+  The climate entity delegates PI decisions to it and owns all I/O (MQTT, HA state).
+- **`VendorHandler`** (in `vendors/`) uses a registry pattern. `vendors/__init__.py`
+  maps vendor strings (e.g., `"FUJITSU_AC"`) to handler classes. Unknown vendors get
+  a default pass-through handler — no user is ever locked out.
+- **`NullController`** is a no-op stub that satisfies the same protocol as
+  `PIController`, so climate.py never has `if pi_enabled:` branches.
 
-```python
-class PIControllerMixin:
-    """Injected between the subclass and the base."""
-
-# At runtime, the actual class ends up being:
-# FujitsuTasmotaIrhvac → PIControllerMixin → TasmotaIrhvac → RestoreEntity → ClimateEntity
-```
-
-This is Python's **MRO (Method Resolution Order)** in action. The mixin pattern lets
-PI be vendor-agnostic — it doesn't know or care about Fujitsu.
+This design means PI knows nothing about Fujitsu, Fujitsu knows nothing about PI,
+and climate.py orchestrates both without subclass MRO complexity.
 
 ### Key Sections to Read
 
@@ -415,7 +435,7 @@ Tasmota's IR library doesn't decode into structured fields. For these, we bypass
 the JSON interface entirely:
 
 ```python
-# Fujitsu Powerful preset
+# Fujitsu Boost preset — via vendor handler callback
 await mqtt.async_publish(
     hass,
     f"cmnd/{device}/irsend",
@@ -509,7 +529,8 @@ Near setpoint:      p_error = b   × desired - current    (gentler P, b=0.5 defa
 
 Within ±0.5°C of target, the controller relaxes:
 - P term goes to zero (no proportional action)
-- Integral decays by 10% per tick (gentle wind-down)
+- Integration rate scales with error distance (5% at edge → 100% outside),
+  preserving correction for slow-τ houses (Åström §3.5)
 - Feedforward learning activates (system is "settled")
 
 This prevents the AC from constantly cycling on/off around the setpoint.
@@ -535,39 +556,45 @@ This prevents the AC from constantly cycling on/off around the setpoint.
 
 ## Lesson 6: The PI Controller — Implementation
 
-**File:** `pi_controller.py` (~568 lines)
+**File:** `pi/pi_controller.py` (~2053 lines)
 
 Now let's see how the theory maps to code.
 
 ### Class Structure
 
 ```python
-class PIControllerMixin:
-    """Mixin — injected into the MRO between vendor subclass and base."""
+class PIController:
+    """Standalone controller object — composed into the climate entity."""
 ```
 
-It's a **mixin**, not a parent class. It overrides specific methods and calls
-`super()` to chain to the base. Python's MRO ensures the right order.
+It's a **composed object**, not a mixin or parent class. The climate entity holds
+a `_controller` reference and delegates PI decisions to it. `PIController` never
+touches MQTT or HA state directly — it returns values and the climate entity acts
+on them. A `NullController` stub (same protocol, all no-ops) is used when PI is
+disabled, eliminating `if pi_enabled:` branches in climate.py.
 
-### Initialization (`_pi_init`)
+### Initialization
 
 Sets up all PI state:
-- Gains: `_pi_kp`, `_pi_ki`
+- Gains: `_pi_kp`, `_pi_ki` (may be overridden by IMC — see below)
 - Timing: `_pi_min_interval`, `_pi_last_tick`
 - State: `_pi_integral` (starts at 0), `_hp_setpoint`, `_desired_temp`
 - Feedforward: `_rls_heat`, `_rls_cool` (RLS model objects), `_ff_offset`
-- Learning: `_ff_settled_ticks` counter, `_stable_oodb_ticks`, `_observation_buffer`
+- Smith predictor: `_smith` (FOPDT delay-compensation model)
+- IMC: `_tau_estimator` (online τ estimation + gain scheduling)
+- Learning: `_ff_settled_ticks`, `_stable_oodb_ticks`, `_observation_buffer`
+- Metrics: `_itae_accumulator`, `_comfort_violation_hours`, `_ff_load_fraction`
 
-### The Tick Function (`_pi_tick`)
+### The Tick Function (`_pi_tick_inner`)
 
 This is the core algorithm. It runs:
 - **On every temperature sensor update** (event-driven, with 60s minimum cooldown)
-- **On a timer** every `pi_min_interval` seconds (catches outdoor temp changes)
+- **On a timer** every `pi_min_interval` seconds (fallback for outdoor temp changes)
 
 Here's the flow, simplified:
 
 ```python
-def _pi_tick(self):
+def _pi_tick_inner(self):
     # 1. Bail if we shouldn't run
     if off or paused or no_desired_temp or no_current_temp:
         return
@@ -575,51 +602,118 @@ def _pi_tick(self):
     # 2. Time normalization
     dt_factor = elapsed_seconds / pi_min_interval
 
-    # 3. Error
-    error = desired_temp_C - current_temp_C
+    # 3. Low-pass filter on measurement (reduce sensor noise amplified by Kp)
+    filtered_temp = ema_filter(raw_temp, sensor_filter_tau)
 
-    # 4. Feedforward
+    # 4. Error (on filtered reading)
+    error = desired_temp_C - filtered_temp_C
+
+    # 5. Smith predictor correction (delay compensation)
+    smith_correction = smith.get_correction()  # nodelay - delayed model
+    # Only apply when correction agrees with error direction
+    effective_smith = smith_correction if smith_correction * error > 0 else 0.0
+
+    # 6. Feedforward
     ff_offset = get_ff_offset(outdoor_temp, mode)
+    # Confidence scaling: reduce FF when integral opposes it
+    ff_offset *= ff_confidence
 
-    # 5. Are we in deadband?
+    # 7. Conditional integration freeze
+    if hp_at_limit and error_opposes_actuator:
+        freeze_integration = True   # Don't accumulate debt we can't act on
+
+    # 8. Deadband behavior
     if abs(error) < deadband:
         p_term = 0
-        integral *= 0.9          # Decay
+        # Variable-rate integration: scales with error distance
+        integration_rate = max(0.05, min(1.0, abs_error / deadband))
+        integral += integration_rate * (error + prev_error)/2 * dt_factor
         settled_ticks += 1
-        maybe_learn_ff()         # Auto-learn if settled ≥2 ticks
+        maybe_learn_ff()         # IDB gate: learn if settled ≥4 ticks
     else:
         settled_ticks = 0
-        p_term = Kp * weighted_error
+        # P-term uses Smith-corrected error for anticipation
+        p_term = Kp * (weighted_error + effective_smith)
         integral += (error + prev_error)/2 * dt_factor  # Trapezoidal
+        maybe_learn_oodb()       # OODB gate: learn at thermal equilibrium
 
-    # 6. Anti-windup
-    integral = clamp(integral, -50, +50)
+    # 9. Leaky integrator (universal slow decay)
+    integral *= 0.9999 ** dt_factor  # ~104-day time constant
 
-    # 7. Compute raw setpoint
+    # 10. Compute raw setpoint
     raw = desired_temp + p_term + Ki * integral + ff_offset
 
-    # 8. Clamp to AC's min/max range
+    # 11. Clamp to AC's min/max range
     clamped = clamp(raw, min_temp, max_temp)
 
-    # 9. Back-calculate if clamped (anti-windup)
-    if clamped != raw:
-        integral += (clamped - raw) / Ki
+    # 12. Back-calculation anti-windup (if not already frozen)
+    if clamped != raw and not freeze_integration:
+        integral = (clamped - p_term - ff_offset) / Ki
 
-    # 10. Hysteresis — only change if delta ≥ 0.5°C
+    # 13. Quantization-error feedback (prevents 1°C step limit cycles)
+    if in_deadband and misalignment between 0.3-0.5°C:
+        nudge integral toward integer alignment
+
+    # 14. Hysteresis + dwell time
     if abs(clamped - current_hp_setpoint) >= 0.5:
-        hp_setpoint = round(clamped)
-        send_ir()
+        if enough_dwell_time or urgent (error > 1°C):
+            hp_setpoint = round(clamped)
+            request_ir_send()
 ```
 
-### Key Anti-Windup Mechanisms
+### Anti-Windup Mechanisms
 
 Integral windup is the #1 enemy of PI controllers. This implementation has *four*
 defenses:
 
-1. **Hard clamp:** Integral bounded to [-50, +50]
-2. **Deadband decay:** Inside deadband, integral decays 10% per tick
-3. **Back-calculation:** If setpoint hits AC min/max, integral is adjusted backward
-4. **Overshoot reset:** If error crosses zero (room overshot target), integral zeroes
+1. **Conditional integration freeze:** When the HP setpoint is at its physical
+   limit *and* the error opposes what the actuator can deliver (e.g., heating at
+   min temp with room above target), integration pauses entirely. Prevents
+   accumulating integral debt the controller can never act on.
+
+2. **Leaky integrator:** Exponential decay with α=0.9999 per nominal tick
+   (~10,000 tick time constant ≈ 104 days). Bounds integral growth universally.
+   α=0.9999 was chosen over 0.999 to preserve correction for slow-τ houses.
+
+3. **Back-calculation:** If the clamped setpoint differs from the raw setpoint
+   (actuator saturation), the integral is adjusted backward to the value that
+   produces the clamped output. Skipped when conditional freeze already applied.
+
+4. **Quantization-error feedback:** Nudges integral to align clamped setpoint
+   with integer values, preventing 1°C HP step limit cycles. Only acts in
+   deadband when misalignment is 0.3–0.5°C.
+
+### Smith Predictor (Delay Compensation)
+
+**File:** `pi/smith_predictor.py` (~113 lines)
+
+Heat pumps have significant transport delay — you change the setpoint and the
+room temperature doesn't respond for 15+ minutes. The Smith predictor compensates:
+
+- Maintains two parallel FOPDT (first-order plus dead time) models:
+  - `nodelay`: receives current HP setpoint immediately
+  - `delayed`: receives HP setpoint from L minutes ago (ring buffer)
+- Correction = `nodelay - delayed` = "pending temperature change in the pipeline"
+- Applied **only to the P-term** (integral uses raw error for mismatch robustness)
+- Selectively applied: only when correction has same sign as error (prevents
+  overshoot fighting when the model is inaccurate)
+
+### IMC Gain Scheduling
+
+**File:** `pi/tau_estimator.py` (~231 lines)
+
+Instead of fixed Kp/Ki, gains are computed from the plant's time constant using
+**Internal Model Control** (Skogestad SIMC):
+
+```
+Kp = τ / (K_eff × (λ + L))
+Ki = Kp / Ti,  where Ti = τ/3
+```
+
+- `τ` is estimated online by observing 63.2% step responses
+- `λ` (closed-loop speed) defaults to L/3 (configurable via `pi_imc_lambda`)
+- `L` = HP response lag (15 min default)
+- When τ changes, gains recompute and apply to both PI and Smith predictor
 
 ### Sensor Recovery
 
@@ -628,22 +722,23 @@ If the room temperature sensor goes offline:
 - **After 60s:** Falls back to feedforward-only (no P or I, just FF offset)
 - **When sensor returns:** Full PI resumes immediately
 
-### Method Overrides
+### Interface with Climate Entity
 
-The mixin overrides these base methods (using `super()` chaining):
+The controller communicates with climate.py through a clean interface:
 
-| Method | What the Mixin Does |
-|--------|-------------------|
-| `_async_sensor_changed` | Triggers PI tick on temp update |
-| `_get_ir_temp` | Returns `_hp_setpoint` instead of user target |
-| `async_write_ha_state` | Sends dispatcher signal to update PI sensors |
-| `async_set_temperature` | Stores `_desired_temp` separately from display temp |
-| `extra_state_attributes` | Adds PI diagnostics to entity attributes |
+| Climate Entity Calls | Controller Provides |
+|---------------------|-------------------|
+| `controller.tick()` | New HP setpoint (or None if no change) |
+| `controller.get_hp_setpoint()` | Current computed setpoint |
+| `controller.get_diagnostics()` | Dict of all PI state for sensors/attributes |
+| `controller.set_desired_temp(t)` | Stores target, triggers recalculation |
+| `controller.on_mode_change()` | Resets Smith predictor, adjusts integral |
 
 ### Exercise
-Read `_pi_tick()` line by line. For each section, identify which of the theoretical
-concepts from Lesson 5 it implements. Pay special attention to the deadband logic
-and the four anti-windup mechanisms.
+Read `_pi_tick_inner()` line by line. For each section, identify which of the
+theoretical concepts from Lesson 5 it implements. Pay special attention to the
+deadband logic, the four anti-windup mechanisms, and how the Smith predictor
+correction is selectively applied.
 
 ---
 
@@ -658,7 +753,7 @@ The outdoor temperature directly affects how hard the AC must work. Feedforward
 pre-computes an offset based on outdoor temp and other conditions, so PI doesn't
 have to "discover" the needed adjustment through accumulated error.
 
-### RLS Model (`rls_model.py`)
+### RLS Model (`pi/rls_model.py`)
 
 The feedforward uses **Recursive Least Squares** — a multivariate linear model
 that learns online from observations:
@@ -667,13 +762,15 @@ that learns online from observations:
 ff_offset = β₀ + β₁ × outdoor_delta + β₂ × solar_proxy + β₃ × boiler + ...
 ```
 
-- `β₀` = intercept (base offset)
+- `β₀` = intercept (base offset needed regardless of conditions)
 - `β₁` = outdoor delta coefficient (how much colder outdoor → more offset)
 - `β₂...βₙ` = model input coefficients (solar, boiler, stove, etc.)
 
-Each coefficient is learned by RLS from settled observations.  The model runs in
-normalized feature space (all features scaled to O(1)) with variable forgetting
-factor and ridge regularization to prevent covariance collapse.
+Each coefficient is learned by RLS from settled observations. The model runs in
+normalized feature space (all features scaled to O(1)) with:
+- **Variable forgetting factor** (base λ=0.99, adapts based on residual surprise)
+- **Ridge regularization** (δ=1e-4) to prevent covariance collapse
+- **Coefficient clamping** with P-matrix zeroing when boundaries hit
 
 ### Seed Coefficients and Blending
 
@@ -687,37 +784,9 @@ ff_offset = (1 - alpha) × seed_offset + alpha × rls_offset
 ```
 
 Seeds are expert guesses — reasonable starting points that may not be right for
-every zone.  As observations accumulate (α → 1.0), the learned model takes over.
-
-### Learning Gate (Deadband)
-
-When the system is settled inside the deadband (< 0.5°C error) for ≥ 4
-consecutive ticks with stable room temp and integral, it observes the HP
-setpoint that achieved the target temperature:
-
-```python
-observed_offset = hp_setpoint - desired_c   # what the plant actually saw
-rls.update(features, observed_offset)       # standard RLS update
-```
-
-This is a direct input-output observation at the operating point (Ljung,
-*System Identification* §7.4).
-
-### Out-of-Deadband (OODB) Learning
-
-Zones with miscalibrated FF models may rarely reach the deadband, creating a
-vicious cycle: bad model → room above target → can't learn → model stays bad.
-
-OODB learning breaks this cycle by allowing observations at thermal equilibrium
-outside the deadband.  At equilibrium, `hp_setpoint - current_c` tells the RLS
-"what offset maintains room temp at current conditions."  This is valid at any
-operating point, with bias growing as ~(K_loss/K_hp) × |error|.
-
-Guards:
-- Room temperature must be genuinely stable (|dT/dt| < 0.015°C/min)
-- Integral must not be actively winding (recent change < 0.5)
-- HP setpoint must not be clamped (censored data excluded)
-- Distance-proportional settling: 8 + 4×|error°C| minimum ticks
+every zone. As observations accumulate (α → 1.0), the learned model takes over.
+If the user edits a seed after the model has learned, the affected coefficient
+resets to the new seed with increased uncertainty (P diagonal bump).
 
 ### FF Confidence Scaling
 
@@ -730,122 +799,184 @@ if integral * ff_offset < 0:  # opposing
     confidence = 1 / (1 + max(0, model_error - 3) / 3)
 ```
 
-This is EMA-smoothed to prevent limit cycling at integer setpoint boundaries.
-When integral and FF agree (both wanting more heat), confidence stays at 1.0 —
-the model direction is right and reducing it would worsen an undersized-HP
-situation.
+Below 3°C model error, full FF trust. Above 3°C, smooth reduction. This is
+EMA-smoothed (~10 ticks ≈ 2.5 hours) to prevent limit cycling at integer
+setpoint boundaries. When integral and FF agree (both wanting more heat),
+confidence stays at 1.0 — the model direction is right and reducing it would
+worsen an undersized-HP situation.
+
+### Learning Gate: In-Deadband (IDB)
+
+When the system is settled inside the deadband (< 0.5°C error) for ≥ 4
+consecutive ticks with stable room temp and integral, it observes the HP
+setpoint that achieved the target temperature:
+
+```python
+observed_offset = hp_setpoint - desired_c   # what the plant actually saw
+rls.update(features, observed_offset)       # standard RLS update
+```
+
+This is a direct input-output observation at the operating point (Ljung,
+*System Identification* §7.4). One observation per settled window prevents
+over-learning from steady state.
+
+### Learning Gate: Out-of-Deadband (OODB)
+
+Zones with miscalibrated FF models may rarely reach the deadband, creating a
+vicious cycle: bad model → room above target → can't learn → model stays bad.
+
+OODB learning breaks this cycle by allowing observations at thermal equilibrium
+outside the deadband. At equilibrium, `hp_setpoint - current_c` tells the RLS
+"what offset maintains room temp at current conditions." This is valid at any
+operating point, with bias growing as ~(K_loss/K_hp) × |error|.
+
+Guards:
+- Room temperature must be genuinely stable (|dT/dt| < 0.015°C/min)
+- Integral must not be actively winding (recent change < 0.5)
+- HP setpoint must not be clamped (censored data excluded)
+- Distance-proportional settling: 8 + 4×|error°C| minimum ticks
 
 ### Batch WLS (Offline Analysis)
 
-Every 12 hours, a weighted least squares analysis runs on the accumulated
-observation buffer (~300 entries, ~48h).  Currently in **observe-only mode** —
-it logs what it would recommend but doesn't modify the model.  This catches
-systematic model errors that the real-time gate might miss:
+**File:** `pi/batch_learning.py` (~829 lines)
 
-- Filters to near-equilibrium, unclamped observations
-- Weights by inverse distance to target (at-target = full weight)
-- Compares batch estimate with current RLS coefficients
-- Logs WARNING if any coefficient differs by > 20%
+Twice daily (07:00 and 19:00 local time), a weighted least squares analysis
+runs on the accumulated observation buffer. This catches systematic model
+errors that the real-time learning gates might miss:
 
-### Model Inputs (Suppression and Learning)
+- **Diversity-aware buffer:** ~2000 slots with leverage-scored retention
+  (D-optimal design). Old observations are kept if they cover rare operating
+  conditions, discarded if they're redundant. Persisted across restarts.
+- **Filtering:** Excludes clamped data and non-equilibrium observations
+  (room rate > threshold)
+- **Persistent excitation check:** Holds features with insufficient variance
+  (prevents learning from narrow conditions)
+- **Robust regression:** 3-sigma Huber outlier exclusion
+- **Covariance-weighted blended update:** Kalman-gain fusion with prior std
+- **Drift detection:** Tracks per-coefficient correction direction history
+  to distinguish systematic drift from noise
+
+The batch result is persisted via `ExtraStoredData` for diagnostics continuity
+across restarts.
+
+### Model Inputs (`pi/model_input_manager.py`)
 
 Model inputs are external HA entities (boiler, pellet stove, solar proxy) that
-affect room temperature.  Each can:
-- Suppress FF learning when active (`suppress_learning: true`)
-- Have per-input lag filters (exponential smoothing)
-- Have coefficient clamps (physical bounds)
+affect room temperature. They appear as additional features in the RLS model.
+Each can:
+- **Suppress FF learning** when active (`suppress_learning: true`) — prevents
+  the RLS from learning during atypical conditions
+- Have **per-input lag filters** (exponential smoothing with configurable τ)
+- Have **coefficient clamps** (physical bounds, e.g., a stove can only reduce
+  heating need, never increase it)
+- Have **seed coefficients** (expert initial guess per mode)
+
+See [docs/disturbance_inputs.md](docs/disturbance_inputs.md) for configuration
+examples.
 
 ### Exercise
-Imagine outdoor is 0°C and desired is 20°C (= 20.5 in this example).  The RLS
-model predicts ff_offset = 3.0.  The integral is at -2.0 (ki=0.15, so ki×I = -0.3).
-What is the raw setpoint?  What HP setpoint does the AC get?  If the room is
-at 20.0°C (in deadband), does the learning gate open?
+Imagine outdoor is 0°C and desired is 20°C. The RLS model predicts
+ff_offset = 3.0. The integral is at -2.0 (ki=0.15, so ki×I = -0.3).
+Confidence is 1.0 (integral agrees with FF direction). What is the raw
+setpoint? What HP setpoint does the AC get? If the room is at 20.0°C
+(in deadband), does the IDB learning gate open?
 
 ---
 
-## Lesson 8: The Fujitsu Subclass
+## Lesson 8: The Fujitsu Vendor Handler
 
-**File:** `fujitsu.py` (~270 lines)
+**File:** `vendors/fujitsu.py` (~393 lines)
 
-This file demonstrates how vendor-specific behavior layers on top of the generic base.
+This file demonstrates how vendor-specific behavior layers on top of the generic
+base using the **composition** pattern.
 
-### Why a Subclass?
+### Why a Vendor Handler?
 
 Fujitsu mini-splits have features that can't be controlled through the standard IRHVAC
 JSON interface:
 
-- **Powerful mode** (20-min turbo boost) — requires a specific raw IR code
-- **Economy mode** — requires a different raw IR code
+- **Powerful/Boost mode** (20-min turbo boost) — requires a specific raw IR code
+- **Economy/Eco mode** — requires a different raw IR code
 - **Min Heat** (10°C maintenance mode) — requires yet another raw IR code
 - **Vane cycling** (Set Vertical/Horizontal) — raw IR, not in the protocol
 
 The IRremoteESP8266 library that Tasmota uses *can* decode these when received, but
 can't *encode* them for most Fujitsu models.
 
+### The Vendor Registry (`vendors/__init__.py`)
+
+Handlers register themselves via a decorator:
+
+```python
+@register("FUJITSU")
+class FujitsuHandler(VendorHandler):
+    ...
+```
+
+At runtime, `get_handler("FUJITSU_AC")` finds `FujitsuHandler` by prefix match.
+Unknown vendors get the default pass-through `VendorHandler` — no user is ever
+locked out. The climate entity holds one handler instance and calls its hooks.
+
 ### Raw IR Codes
 
 ```python
-FUJITSU_IR_POWERFUL = "0x146300101039C6"  # 56-bit special command
-FUJITSU_IR_ECONO    = "0x146300101009F6"
-FUJITSU_IR_MIN_HEAT = "0x1463001010FE09..."  # Full 128-bit command
+FUJITSU_IR_POWERFUL = "raw,0,3324,1574,448,390,1182,..."  # 56-bit timing data
+FUJITSU_IR_ECONO    = "raw,0,3324,1574,448,390,1182,..."
+FUJITSU_IR_MIN_HEAT = "raw,0,3324,1574,448,390,1182,..."  # Full 128-bit
 ```
 
 These are sent via `cmnd/{device}/irsend` (not `cmnd/{device}/irhvac`).
 
 ### Preset Implementation
 
-```python
-class FujitsuTasmotaIrhvac(TasmotaIrhvac):  # or PIControllerMixin → TasmotaIrhvac
+The handler uses HA's standard `PRESET_BOOST` and `PRESET_ECO` names (not custom
+strings). Presets return a `PresetResult` dataclass that tells the climate entity
+what to do — the handler never touches I/O directly:
 
-    async def async_set_preset_mode(self, preset_mode):
-        if preset_mode == PRESET_POWERFUL:
-            # Save current state (so we can restore later)
-            self._save_state()
-            # Send raw IR
-            await self._send_raw_ir(FUJITSU_IR_POWERFUL)
-            # Track preset state
-            self._powerful = True
-            # Pause PI (if enabled)
-            self.pi_pause()
-            # Auto-clear after 20 minutes
-            self._schedule_clear(1200, self._clear_powerful)
+```python
+def handle_preset(self, preset, state, send_raw, schedule_timer):
+    if preset == PRESET_BOOST:
+        self._saved_entity_state = state     # snapshot for restore
+        send_raw(FUJITSU_IR_POWERFUL)        # callback to climate entity
+        self._powerful = True
+        schedule_timer(1200, self._clear)    # 20-minute auto-clear
+        return PresetResult(
+            pause_pi=True,
+            active_preset=PRESET_BOOST,
+        )
 ```
 
 ### State Detection (Inbound)
 
 When someone uses the physical remote to activate Powerful mode, the Tasmota device
-receives the IR and publishes it. The Fujitsu subclass detects it:
+receives the IR and publishes it. The handler inspects the `IRDecode`:
 
 ```python
-def _handle_state_payload(self, payload, raw):
-    # Check for 56-bit special commands
-    if payload.get("Bits") == 56:
-        data = payload.get("Data", "")
-        if data == "0x146300101039C6":
+def handle_ir_received(self, decode: IRDecode) -> ...:
+    if decode.bits == 56:
+        if decode.data == FUJITSU_DATA_POWERFUL:
             self._powerful = True
-            self._attr_preset_mode = PRESET_POWERFUL
-            return  # Don't process as normal state update
-    # Otherwise, pass to parent for normal handling
-    super()._handle_state_payload(payload, raw)
+            return PresetResult(active_preset=PRESET_BOOST, pause_pi=True)
+    # Return None for normal IRHVAC messages → base entity handles
 ```
 
 ### PI Interaction
 
-When a preset is active, PI is *paused*:
+When a preset is active, the climate entity pauses PI:
 - Integral continues to exist but doesn't accumulate
 - When preset clears, PI resumes with its existing state
-- Min Heat is special — it also *resets* the integral (since the AC is in a
-  fundamentally different operating mode)
+- Min Heat is special — it also signals an *integral reset* (since the AC is in a
+  fundamentally different operating mode at 10°C)
 
 ### Exercise
-Read `fujitsu.py` and identify: what happens when a user activates Powerful, then
-switches to Econo before Powerful's 20-minute timer expires? Trace the code path.
+Read `vendors/fujitsu.py` and identify: what happens when a user activates Boost,
+then switches to Eco before Boost's 20-minute timer expires? Trace the code path.
 
 ---
 
 ## Lesson 9: Config Flow and Options
 
-**File:** `config_flow.py` (~998 lines)
+**File:** `config_flow.py` (~1399 lines)
 
 This file handles the UI for setting up and modifying the integration. It's the
 longest file after `climate.py`, but much of it is form definitions.
@@ -937,16 +1068,36 @@ class IRActionButton(ButtonEntity):
 
 ### Sensors (`sensor.py`)
 
-Three diagnostic sensors, only created when PI is enabled:
+18 diagnostic sensors + 1 health sensor, only created when PI is enabled:
 
 | Sensor | What It Shows | Why It Matters |
 |--------|-------------|---------------|
 | `hp_setpoint` | Temperature sent to AC | See PI's actual output |
 | `pi_integral` | Accumulated integral term | Debug windup issues |
 | `ff_offset` | Current feedforward contribution | Verify FF learning |
+| `integral_convergence` | Rate of convergence | Track settling behavior |
+| `itae` | Integral of time-weighted absolute error | Overall performance metric |
+| `comfort_violation_hours` | Time outside comfort band | User-facing quality metric |
+| `setpoint_changes` | Count of HP setpoint adjustments | Activity indicator |
+| `controllable_itae` / `uncontrollable_itae` | ITAE split by controller authority | Separate what PI can fix from what it can't |
+| `controllable_cvh` / `uncontrollable_cvh` | CVH split by controller authority | Same split for comfort hours |
+| `ff_load_fraction` | FF contribution as fraction of total offset | Model vs. integral balance |
+| `batch_model_rms` | Residual RMS from last batch WLS run | Model fit quality |
+| `buffer_eligible` / `buffer_total` | Observation buffer fill | Learning data availability |
+| `buffer_oldest_age_hours` | Age of oldest buffered observation | Buffer diversity |
+| `buffer_leverage_max` | Max leverage score in buffer | D-optimal design health |
+| `batch_outliers_excluded` | Outliers removed in last batch | Data quality indicator |
 
-These update via HA's **dispatcher** mechanism — the climate entity fires a signal,
-and sensors listen for it:
+The **health sensor** (`sensor.{device}_health`) is a special ENUM sensor with
+states OK / Warning / Critical / Disabled. It runs multiple checks (comfort,
+integral magnitude, FF confidence, intercept drift, slope drift, model drift,
+feature diversity) and reports the worst status with detailed attributes.
+
+**Binary sensor** (`binary_sensor.py`): `binary_sensor.{device}_ff_learning_suppressed`
+shows whether feedforward learning is currently suppressed, with attributes listing
+active entity suppressors and manual suppress status.
+
+All sensors update via HA's **dispatcher** mechanism:
 
 ```python
 # In climate (sender):
@@ -988,24 +1139,50 @@ after timeout → send exit IR code when deactivated.
 
 ## Lesson 11: State Restoration and Resilience
 
-### RestoreEntity
+### RestoreEntity + ExtraStoredData
 
-All entities inherit from `RestoreEntity`, which saves state to disk. On restart:
+All entities inherit from `RestoreEntity`, which saves state to disk. The
+integration uses two tiers of persistence:
+
+**Tier 1: ExtraStoredData** (modern, preferred for PI state)
 
 ```python
-async def async_added_to_hass(self):
-    old_state = await self.async_get_last_state()
-    if old_state:
-        self._attr_hvac_mode = old_state.state
-        self._attr_target_temperature = old_state.attributes.get("temperature")
-        # ... restore everything
-        # Including PI state:
-        self._pi_integral = old_state.attributes.get("pi_integral", 0)
-        self._ff_heat_buckets = old_state.attributes.get("ff_heat_buckets", {})
+# climate.py exposes PI data for HA's storage:
+@property
+def extra_restore_state_data(self) -> ExtraStoredData | None:
+    return self._controller.get_extra_stored_data()
 ```
 
+`PIExtraStoredData` (in `pi/pi_stored_data.py`) persists everything the
+controller needs across restarts:
+
+| Category | Fields |
+|----------|--------|
+| Core PI | `pi_integral`, `desired_temp`, `hp_setpoint` |
+| RLS models | Full heat/cool model state (coefficients, covariance, obs count) |
+| Observation buffer | Diversity-aware buffer with leverage scores |
+| Batch learning | Last batch result, drift correction direction history |
+| IMC | `tau_estimate` (system time constant) |
+| Metrics | ITAE, CVH, convergence, setpoint changes, FF load fraction |
+| Config tracking | `ki_at_save`, `heat_seeds_at_learn`, `cool_seeds_at_learn` |
+| Model inputs | Lag filter states per input |
+
+On restore, the controller handles configuration changes gracefully:
+- If Ki changed since save, integral is rescaled: `integral *= (ki_at_save / current_ki)`
+- If model inputs were added/removed, new inputs get seeded (not zeroed)
+- If user edited a seed coefficient, the affected RLS coefficient resets to the
+  new seed with increased uncertainty (P diagonal bump)
+- Tau estimate triggers IMC gain recomputation
+
+**Tier 2: State attributes** (legacy fallback)
+
+For upgrades from pre-ExtraStoredData versions, the controller falls back to
+reading `pi_integral`, `desired_temp`, and `hp_setpoint` from entity attributes.
+This ensures no learning is lost during the upgrade.
+
 This means:
-- FF learning persists across restarts (buckets survive)
+- RLS learning persists across restarts (full model state survives)
+- Observation buffer survives (batch WLS has history immediately)
 - PI integral survives (no cold-start overshoot)
 - All AC settings survive (no "AC turns on in wrong mode" after restart)
 
@@ -1033,14 +1210,15 @@ topic. The integration marks the entity as unavailable when offline.
 1. User drags slider to 72°F in HA UI
 2. HA calls async_set_temperature(temperature=72)
 3. Integration converts: 72°F = 22.2°C
-4. PI mixin stores _desired_temp = 22.2°C
+4. Controller stores _desired_temp = 22.2°C
 5. PI tick runs:
    - Current room: 20°C, outdoor: 0°C
    - Error: 22.2 - 20 = 2.2°C (outside deadband)
-   - P_term: 1.0 × 2.2 = 2.2°C
-   - I_term: 0.02 × integral (small, just started)
-   - FF_offset: heat_bucket[0] = 3.0°C
-   - Raw setpoint: 22.2 + 2.2 + 0.1 + 3.0 = 27.5°C
+   - Smith correction: +0.5°C (pending heat in pipeline)
+   - P_term: Kp × (weighted_error + smith) = 1.0 × 2.7 = 2.7°C
+   - I_term: Ki × integral (small, just started) = 0.1°C
+   - FF_offset: RLS predicts 3.0°C for outdoor_delta = 22.2°C
+   - Raw setpoint: 22.2 + 2.7 + 0.1 + 3.0 = 28.0°C
    - Rounded and clamped: 28°C
 6. send_ir() builds JSON with Temp: 28
 7. MQTT publishes to cmnd/ir_living/irhvac
@@ -1056,28 +1234,28 @@ topic. The integration marks the entity as unavailable when offline.
 ```
 1. Outdoor sensor: 5°C → -5°C (cold front)
 2. PI timer tick fires (room temp sensor unchanged)
-3. FF lookup: heat_bucket[-6] = 5.1°C (vs previous 1.5°C at bucket[6])
-4. FF offset increases by ~3.6°C
+3. RLS model: ff_offset(outdoor_delta=27.2) = 5.1°C (vs previous 2.5°C at delta=17.2)
+4. FF offset increases by ~2.6°C
 5. PI proactively raises AC setpoint
 6. AC starts heating harder BEFORE the room cools
 7. Room temperature barely dips (feedforward prevented the error)
 ```
 
-### Walkthrough 3: Powerful Preset Activated
+### Walkthrough 3: Boost Preset Activated
 
 ```
-1. User selects "Powerful" preset in HA UI
-2. FujitsuTasmotaIrhvac.async_set_preset_mode("Powerful")
-3. Current state saved (mode, temp, fan, swing)
-4. Raw IR sent: cmnd/ir_living/irsend → "0x146300101039C6"
-5. PI paused (pi_pause())
-6. Timer scheduled: 20 minutes
-7. AC blasts at max power
-8. ... 20 minutes later ...
-9. _clear_powerful() fires
-10. Saved state restored (mode, temp, fan, swing)
+1. User selects "Boost" preset in HA UI
+2. climate.async_set_preset_mode("boost")
+3. Vendor handler saves entity state snapshot
+4. Raw IR sent via handler callback: cmnd/ir_living/irsend → raw timing data
+5. Handler returns PresetResult(pause_pi=True)
+6. Climate entity pauses PI controller
+7. Timer scheduled: 20 minutes
+8. AC blasts at max power
+9. ... 20 minutes later ...
+10. Timer callback fires, handler restores saved state
 11. Normal IR command sent via send_ir()
-12. PI resumed (pi_resume())
+12. Climate entity resumes PI controller
 13. PI tick runs, adjusts setpoint based on current conditions
 ```
 
@@ -1089,27 +1267,35 @@ topic. The integration marks the entity as unavailable when offline.
    internally. The `_celsius` config flag controls what the *IR protocol* uses.
    These are three different things.
 
-2. **MRO matters.** If you add a method to `PIControllerMixin`, make sure `super()`
-   chains correctly. Print `YourClass.__mro__` if confused.
+2. **Composition, not inheritance.** The PI controller and vendor handler are
+   composed objects, not mixins. Don't subclass them — extend the protocol/base
+   class instead.
 
 3. **MQTT is async and lossy.** The AC might not acknowledge every command. The
    integration uses `StateMode: "SendStore"` so Tasmota at least remembers what
    was sent.
 
-4. **Integral windup is real.** If you change PI gains, the existing integral doesn't
-   automatically adjust. A large accumulated integral can take a long time to decay.
-   Use the `ff_buckets_reset` service if things get weird.
+4. **Integral windup is real.** If you change PI gains, the existing integral
+   is automatically rescaled on restart (via `ki_at_save` tracking). For immediate
+   issues, the `reset_ff_seeds` service resets RLS models and integral. The
+   `suppress_ff_learning` / `resume_ff_learning` services control learning gates.
 
 5. **Climate entity must exist before sensors/buttons.** The `__init__.py` forwards
-   platforms in order: climate first, then sensor and button. This is because sensors
-   reference the climate entity via `hass.data`.
+   platforms in order: climate first, then sensor, binary_sensor, and button. This
+   is because sensors reference the climate entity via `hass.data`.
 
 6. **Config flow stores strings.** `SelectSelector` returns `"1.0"` not `1.0`.
-   Always cast in entity setup.
+   All config parsing happens in `config_model.py` — a typed, frozen dataclass
+   that applies defaults and casts in one place.
 
 7. **56-bit vs 128-bit Fujitsu commands.** Regular AC commands are 128-bit. Special
-   commands (Powerful, Econo, vane) are 56-bit. The subclass detects this via the
-   `Bits` field to distinguish presets from normal state updates.
+   commands (Boost, Eco, vane) are 56-bit. The vendor handler detects this via the
+   `Bits` field in `IRDecode` to distinguish presets from normal state updates.
+
+8. **ExtraStoredData is the persistence mechanism.** PI state (integral, RLS models,
+   observation buffer, tau estimate) persists via `PIExtraStoredData`, not entity
+   attributes. Entity attributes still carry diagnostics for display, but
+   restoration reads from ExtraStoredData first.
 
 ---
 
@@ -1144,13 +1330,13 @@ topic. The integration marks the entity as unavailable when offline.
 | 2 | Base entity | Read `const.py` + `climate.py`. Trace `send_ir()` end to end |
 | 3 | MQTT | Use MQTT Explorer to watch real traffic. Match to code |
 | 4 | PI theory | Watch Brian Douglas videos. Read Wikipedia PID article |
-| 5 | PI code | Read `pi_controller.py`. Trace `_pi_tick()` with pen and paper |
-| 6 | Feedforward | Understand buckets, learning, seeding. Read simulation code |
-| 7 | Vendor layer | Read `fujitsu.py`. Understand preset lifecycle |
+| 5 | PI code | Read `pi/pi_controller.py`. Trace `_pi_tick_inner()` with pen and paper |
+| 6 | Feedforward | Understand RLS model, learning gates, seeding. Read `pi/rls_model.py` |
+| 7 | Vendor layer | Read `vendors/fujitsu.py`. Understand preset lifecycle + registry |
 | 8 | Config flow | Read `config_flow.py`. Set up a test instance if possible |
-| 9 | Extras | Read `button.py`, `sensor.py`. Understand dispatcher pattern |
+| 9 | Extras | Read `sensor.py`, `button.py`, `pi/batch_learning.py`. Understand dispatcher pattern |
 | 10 | Integration | Do the exercises. Modify something small. Run on real HA |
 
 ---
 
-*Generated from the `fujitsu-config-flow` branch. ~4,067 lines of Python across 9 files.*
+*Updated April 2026 from the `architecture-rework` branch. ~10,007 lines of Python across 22 files.*
