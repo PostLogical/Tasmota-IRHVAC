@@ -541,7 +541,7 @@ async def async_setup_entry(
     return None
 
 
-from .pi_controller import PIController
+from .pi import PIController
 
 
 class TasmotaIrhvac(RestoreEntity, ClimateEntity):
@@ -702,7 +702,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
 
         # Controller: PIController when enabled, NullController otherwise.
         # All calls are unconditional — no `if self._pi:` guards needed.
-        from .controller_protocol import NullController
+        from .pi import NullController
         self._controller = PIController(self, raw_config) if cfg.pi_enabled else NullController()
         # Legacy alias for tests that reference self._pi directly
         self._pi = self._controller if cfg.pi_enabled else None
@@ -1501,7 +1501,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
 
     def _check_pi_recovery_needed(self) -> None:
         """If PI flagged a sensor recovery check, schedule it."""
-        from .pi_controller import PIController
+        from .pi import PIController
         pi = self._pi if isinstance(self._pi, PIController) else None
         if pi is not None and pi._recovery_check_needed:
             pi._recovery_check_needed = False
@@ -1521,7 +1521,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
     async def _on_pi_recovery(self, _now: Any = None) -> None:
         """Sensor recovery check — 60s after sensor went unavailable."""
         self._pi_recovery_unsub = None
-        from .pi_controller import PIController
+        from .pi import PIController
         pi = self._pi if isinstance(self._pi, PIController) else None
         if pi is not None and await pi._check_sensor_recovery(_now):
             await self.send_ir()

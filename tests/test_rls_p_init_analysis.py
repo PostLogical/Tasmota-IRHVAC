@@ -11,7 +11,7 @@ import random
 
 import pytest
 
-from custom_components.tasmota_irhvac.rls_model import RLSModel
+from custom_components.tasmota_irhvac.pi.rls_model import RLSModel
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────

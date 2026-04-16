@@ -14,7 +14,7 @@ import random
 
 import pytest
 
-from custom_components.tasmota_irhvac.batch_learning import (
+from custom_components.tasmota_irhvac.pi.batch_learning import (
     DiversityAwareBuffer,
     Observation,
     ObservationBuffer,

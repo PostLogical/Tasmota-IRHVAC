@@ -7,9 +7,9 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .batch_learning import BatchResult
+from .pi import BatchResult
 from .const import DATA_KEY
-from .pi_controller import PIController
+from .pi import PIController
 
 REDACT_KEYS = {"unique_id", "topic", "state_topic", "availability_topic"}
 

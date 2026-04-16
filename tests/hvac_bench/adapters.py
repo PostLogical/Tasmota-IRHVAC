@@ -166,7 +166,7 @@ class _FakeBenchEntity:
     """Minimal fake entity for PIController adapter."""
 
     def __init__(self, config):
-        from custom_components.tasmota_irhvac.pi_controller import PIController
+        from custom_components.tasmota_irhvac.pi.pi_controller import PIController
 
         self.hass = MagicMock()
         self._attr_current_temperature = 20.0

@@ -22,7 +22,7 @@ from tests.test_pi_controller import FakePIEntity
 
 def _make_f_entity(config):
     """Create a FakePIEntity with °F unit — must set before PI reads it."""
-    from custom_components.tasmota_irhvac.pi_controller import PIController
+    from custom_components.tasmota_irhvac.pi.pi_controller import PIController
     entity = FakePIEntity.__new__(FakePIEntity)
     entity.hass = MagicMock()
     entity._attr_hvac_mode = HVACMode.HEAT

@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from .const import (
+from ..const import (
     DEFAULT_RLS_DELTA,
     DEFAULT_RLS_LAMBDA_BASE,
     DEFAULT_RLS_LAMBDA_MIN,

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .climate import TasmotaIrhvac
-    from .pi_controller import PIController
+    from .pi import PIController
 
 from homeassistant.components import mqtt
 from homeassistant.components.button import ButtonEntity, ButtonEntityDescription
@@ -230,7 +230,7 @@ class SaveLearnedSeedsButton(ButtonEntity):
     @property
     def _pi(self) -> PIController | None:
         """Return the PI controller, narrowed from the union type."""
-        from .pi_controller import PIController
+        from .pi import PIController
         pi = self._climate._pi
         return pi if isinstance(pi, PIController) else None
 

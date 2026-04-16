@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 from homeassistant.components.climate.const import HVACMode
 from homeassistant.const import STATE_ON, UnitOfTemperature
 
-from custom_components.tasmota_irhvac.pi_controller import PIController, PIExtraStoredData
+from custom_components.tasmota_irhvac.pi.pi_controller import PIController, PIExtraStoredData
 
 from .conftest import make_pi_config
 

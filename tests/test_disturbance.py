@@ -7,7 +7,7 @@ from homeassistant.components.climate.const import HVACMode
 from homeassistant.const import STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN, UnitOfTemperature
 from homeassistant.core import State
 
-from custom_components.tasmota_irhvac.pi_controller import PIController
+from custom_components.tasmota_irhvac.pi.pi_controller import PIController
 
 from .conftest import make_pi_config
 

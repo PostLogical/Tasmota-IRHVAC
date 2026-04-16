@@ -19,7 +19,7 @@ from custom_components.tasmota_irhvac.const import (
     ATTR_PI_INTEGRAL,
     DOMAIN,
 )
-from custom_components.tasmota_irhvac.pi_controller import PIController, PIExtraStoredData
+from custom_components.tasmota_irhvac.pi.pi_controller import PIController, PIExtraStoredData
 
 from .conftest import make_pi_config
 
@@ -1261,7 +1261,7 @@ class TestPIEdgeCases:
 
     def test_restore_extra_stored_data(self, pi_entity):
         """restore_extra_stored_data should populate PI state."""
-        from custom_components.tasmota_irhvac.pi_controller import PIExtraStoredData
+        from custom_components.tasmota_irhvac.pi.pi_controller import PIExtraStoredData
         data = PIExtraStoredData(
             pi_integral=7.5,
             desired_temp=22.0,
@@ -1275,7 +1275,7 @@ class TestPIEdgeCases:
 
     def test_restore_extra_stored_data_preserves_integral(self, pi_entity):
         """restore_extra_stored_data should preserve integral without clamping."""
-        from custom_components.tasmota_irhvac.pi_controller import PIExtraStoredData
+        from custom_components.tasmota_irhvac.pi.pi_controller import PIExtraStoredData
         data = PIExtraStoredData(
             pi_integral=100.0,
             desired_temp=None,
@@ -1362,7 +1362,7 @@ class TestExtraStoredDataFullRestore:
 
     def test_restore_rls_models(self):
         """restore_extra_stored_data with rls models should restore them."""
-        from custom_components.tasmota_irhvac.pi_controller import PIExtraStoredData, RLSModel
+        from custom_components.tasmota_irhvac.pi.pi_controller import PIExtraStoredData, RLSModel
         config = make_pi_config()
         entity = FakePIEntity(config)
         pi = entity._pi
@@ -1392,7 +1392,7 @@ class TestExtraStoredDataFullRestore:
 
     def test_restore_lag_filter_states(self):
         """restore_extra_stored_data with lag filter states should restore filtered values."""
-        from custom_components.tasmota_irhvac.pi_controller import PIExtraStoredData
+        from custom_components.tasmota_irhvac.pi.pi_controller import PIExtraStoredData
         config = make_pi_config({
             "pi_model_inputs": [{
                 "name": "Stove",
@@ -2271,7 +2271,7 @@ class TestFallbackTimer:
 
         # Mock _hass to capture async_call_later
         from unittest.mock import patch
-        with patch("custom_components.tasmota_irhvac.pi_controller.async_call_later") as mock_acl:
+        with patch("custom_components.tasmota_irhvac.pi.pi_controller.async_call_later") as mock_acl:
             mock_acl.return_value = MagicMock()  # new unsub handle
             await pi.pi_tick()
 
@@ -2297,7 +2297,7 @@ class TestFallbackTimer:
         pi._pi_timer_callback = None
 
         from unittest.mock import patch
-        with patch("custom_components.tasmota_irhvac.pi_controller.async_call_later") as mock_acl:
+        with patch("custom_components.tasmota_irhvac.pi.pi_controller.async_call_later") as mock_acl:
             await pi.pi_tick()
 
         mock_acl.assert_not_called()
@@ -2318,7 +2318,7 @@ class TestFallbackTimer:
         pi._pi_timer_callback = MagicMock()
 
         from unittest.mock import patch
-        with patch("custom_components.tasmota_irhvac.pi_controller.async_call_later") as mock_acl:
+        with patch("custom_components.tasmota_irhvac.pi.pi_controller.async_call_later") as mock_acl:
             mock_acl.return_value = MagicMock()
             await pi.sensor_changed(was_none=False)
 
@@ -3080,7 +3080,7 @@ class TestBatchWLSApply:
 
         # Seed the observation buffer with enough eligible data
         import time as time_mod
-        from custom_components.tasmota_irhvac.batch_learning import Observation
+        from custom_components.tasmota_irhvac.pi.batch_learning import Observation
         now = time_mod.monotonic()
         for i in range(30):
             obs = Observation(
@@ -3119,7 +3119,7 @@ class TestBatchWLSApply:
 
         # Seed with biased data that would suggest large coefficient changes
         import time as time_mod
-        from custom_components.tasmota_irhvac.batch_learning import Observation
+        from custom_components.tasmota_irhvac.pi.batch_learning import Observation
         now = time_mod.monotonic()
         for i in range(40):
             obs = Observation(
@@ -3420,7 +3420,7 @@ class TestBatchModelRMS:
 
         # Seed observation buffer
         import time as time_mod
-        from custom_components.tasmota_irhvac.batch_learning import Observation
+        from custom_components.tasmota_irhvac.pi.batch_learning import Observation
         now = time_mod.monotonic()
         for i in range(30):
             obs = Observation(
@@ -3570,7 +3570,7 @@ class TestStoredDataNewFields:
 
     def test_batch_result_round_trip(self):
         """BatchResult survives serialize → deserialize via PIExtraStoredData."""
-        from custom_components.tasmota_irhvac.batch_learning import BatchResult
+        from custom_components.tasmota_irhvac.pi.batch_learning import BatchResult
 
         config = make_pi_config()
         entity = FakePIEntity(config)
@@ -3758,7 +3758,7 @@ class TestDriftDetection:
         pi._hp_setpoint = 21.0
 
         import time as time_mod
-        from custom_components.tasmota_irhvac.batch_learning import Observation
+        from custom_components.tasmota_irhvac.pi.batch_learning import Observation
         now = time_mod.monotonic()
         for i in range(30):
             obs = Observation(
@@ -3797,7 +3797,7 @@ class TestDriftDetection:
         ]
 
         import time as time_mod
-        from custom_components.tasmota_irhvac.batch_learning import Observation
+        from custom_components.tasmota_irhvac.pi.batch_learning import Observation
         now = time_mod.monotonic()
         for i in range(30):
             obs = Observation(

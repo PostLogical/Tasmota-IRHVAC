@@ -2,7 +2,7 @@
 
 import pytest
 
-from custom_components.tasmota_irhvac.performance_metrics import PerformanceMetrics
+from custom_components.tasmota_irhvac.pi.performance_metrics import PerformanceMetrics
 
 
 class TestPerformanceMetrics:

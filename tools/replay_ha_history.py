@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tests.test_pi_scenarios import SimEntity, _make_sim_config
 from tests.benchmark_metrics import compute_all_metrics
-from custom_components.tasmota_irhvac.batch_learning import (
+from custom_components.tasmota_irhvac.pi.batch_learning import (
     DiversityAwareBuffer,
     Observation,
     weighted_least_squares,

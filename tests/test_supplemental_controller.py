@@ -1,6 +1,6 @@
 """Unit tests for SupplementalController — no PIController or HA dependencies."""
 
-from custom_components.tasmota_irhvac.supplemental_controller import (
+from custom_components.tasmota_irhvac.pi.supplemental_controller import (
     SupplementalController,
     SupplementalResult,
 )

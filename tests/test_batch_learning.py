@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from custom_components.tasmota_irhvac.batch_learning import (
+from custom_components.tasmota_irhvac.pi.batch_learning import (
     DEFAULT_PRIOR_STD,
     MIN_FEATURE_VARIANCE,
     MAX_STEP_ABS,

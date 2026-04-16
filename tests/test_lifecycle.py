@@ -20,8 +20,8 @@ from pytest_homeassistant_custom_component.common import async_fire_mqtt_message
 
 from homeassistant.components.climate.const import PRESET_BOOST
 from custom_components.tasmota_irhvac.const import DATA_KEY
-from custom_components.tasmota_irhvac.controller_protocol import ControllerHook, NullController
-from custom_components.tasmota_irhvac.pi_controller import PIController
+from custom_components.tasmota_irhvac.pi.controller_protocol import ControllerHook, NullController
+from custom_components.tasmota_irhvac.pi.pi_controller import PIController
 from custom_components.tasmota_irhvac.vendors.base import VendorHandler
 from custom_components.tasmota_irhvac.vendors.fujitsu import FujitsuHandler
 

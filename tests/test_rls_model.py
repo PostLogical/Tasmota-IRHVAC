@@ -1,7 +1,7 @@
 """Tests for the RLS (Recursive Least Squares) feedforward model."""
 
 import pytest
-from custom_components.tasmota_irhvac.pi_controller import RLSModel
+from custom_components.tasmota_irhvac.pi.pi_controller import RLSModel
 
 
 class TestRLSPrediction:

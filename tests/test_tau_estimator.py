@@ -2,7 +2,7 @@
 
 import pytest
 
-from custom_components.tasmota_irhvac.tau_estimator import GainUpdate, TauEstimator
+from custom_components.tasmota_irhvac.pi.tau_estimator import GainUpdate, TauEstimator
 
 
 class TestTauEstimator:

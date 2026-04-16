@@ -28,7 +28,7 @@ from pytest_homeassistant_custom_component.common import (
 from homeassistant.data_entry_flow import FlowResultType
 
 from custom_components.tasmota_irhvac.const import DATA_KEY, DOMAIN
-from custom_components.tasmota_irhvac.pi_controller import PIController
+from custom_components.tasmota_irhvac.pi.pi_controller import PIController
 
 from .conftest import get_climate_entity, make_config, make_pi_config, make_mqtt_state_payload
 
@@ -681,7 +681,7 @@ class TestPIControllerRestorationGaps:
     @pytest.mark.asyncio
     async def test_pi_extra_stored_data_serialization(self):
         """ExtraStoredData should round-trip through as_dict/from_dict."""
-        from custom_components.tasmota_irhvac.pi_controller import PIExtraStoredData
+        from custom_components.tasmota_irhvac.pi.pi_controller import PIExtraStoredData
 
         original = PIExtraStoredData(
             pi_integral=5.0,
@@ -2363,7 +2363,7 @@ class TestPIExtraStoredDataRestore:
     async def test_restore_from_extra_data(self):
         """PI should restore from ExtraStoredData when async_get_last_extra_data returns data."""
         from tests.test_pi_controller import FakePIEntity
-        from custom_components.tasmota_irhvac.pi_controller import PIExtraStoredData
+        from custom_components.tasmota_irhvac.pi.pi_controller import PIExtraStoredData
 
         config = make_pi_config({"outdoor_temp_sensor": ""})  # No outdoor sensor to avoid state lookup
         entity = FakePIEntity(config)
@@ -2672,7 +2672,7 @@ class TestExtraStoredDataViaAsyncAdded:
     async def test_full_rls_restore_via_async_added(self):
         """async_added_to_hass should restore RLS, obs counts, warmup, and lag states."""
         from tests.test_pi_controller import FakePIEntity
-        from custom_components.tasmota_irhvac.pi_controller import PIExtraStoredData
+        from custom_components.tasmota_irhvac.pi.pi_controller import PIExtraStoredData
 
         config = make_pi_config({
             "outdoor_temp_sensor": "",
@@ -2971,7 +2971,7 @@ class TestNullControllerGetIrTemp:
 
     def test_get_ir_temp_raises_runtime_error(self):
         """Calling get_ir_temp on NullController should raise RuntimeError."""
-        from custom_components.tasmota_irhvac.controller_protocol import NullController
+        from custom_components.tasmota_irhvac.pi.controller_protocol import NullController
         controller = NullController()
         with pytest.raises(RuntimeError, match="get_ir_temp called on NullController"):
             controller.get_ir_temp()

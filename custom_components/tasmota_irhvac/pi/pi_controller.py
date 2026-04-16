@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from homeassistant.core import Event, EventStateChangedData, HomeAssistant, State
 
-    from .climate import TasmotaIrhvac
+    from ..climate import TasmotaIrhvac
 
 from homeassistant.components.climate.const import HVACMode
 from homeassistant.const import STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN, UnitOfTemperature
@@ -37,7 +37,7 @@ import math
 
 from .batch_learning import BatchResult, DiversityAwareBuffer, Observation, ObservationBuffer, weighted_least_squares, compare_and_report, compute_blended_update
 
-from .const import (
+from ..const import (
     ATTR_DESIRED_TEMP,
     ATTR_FF_OFFSET,
     ATTR_HP_SETPOINT,
@@ -84,7 +84,7 @@ from .const import (
     SIGNAL_PI_UPDATE,
 )
 
-from .const import DEFAULT_RLS_P_INIT
+from ..const import DEFAULT_RLS_P_INIT
 from .rls_model import RLSModel
 from .pi_stored_data import PIExtraStoredData
 from .model_input_manager import ModelInputManager

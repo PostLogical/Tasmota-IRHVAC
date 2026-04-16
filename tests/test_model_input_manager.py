@@ -2,7 +2,7 @@
 
 import math
 
-from custom_components.tasmota_irhvac.model_input_manager import ModelInputManager
+from custom_components.tasmota_irhvac.pi.model_input_manager import ModelInputManager
 
 
 STOVE_INPUT = {
