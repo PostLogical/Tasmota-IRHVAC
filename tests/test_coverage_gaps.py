@@ -263,130 +263,6 @@ class TestPIControllerGaps:
 # ── fujitsu.py gaps (lines 70-77, 115-121, 204, 257-262, 271) ─────────
 
 
-@pytest.mark.skip(reason="pre-handler architecture — see test_vendor_fujitsu.py")
-class TestFujitsuGaps:
-    """Cover fujitsu.py remaining edge cases."""
-
-    @pytest.mark.asyncio
-    async def test_restore_min_heat_preset(self, hass, mqtt_mock, enable_custom_integrations):
-        """Fujitsu entity should restore Min Heat preset from old state."""
-        from pytest_homeassistant_custom_component.common import mock_restore_cache
-        from homeassistant.core import State
-
-        mock_restore_cache(hass, [
-            State("climate.test_ac", "heat", {
-                "preset_mode": "Min Heat",
-                "temperature": 22,
-                "fan_mode": "auto",
-            }),
-        ])
-
-        config = make_config()
-        entry = MockConfigEntry(
-            domain=DOMAIN, data=config, title="Test AC",
-            version=1, minor_version=3,
-        )
-        entry.add_to_hass(hass)
-        assert await hass.config_entries.async_setup(entry.entry_id)
-        await hass.async_block_till_done()
-
-        entity = get_climate_entity(hass, entry)
-        assert entity._min_heat is True
-
-    @pytest.mark.asyncio
-    async def test_restore_econo_preset(self, hass, mqtt_mock, enable_custom_integrations):
-        """Fujitsu entity should restore Economy preset from old state."""
-        from pytest_homeassistant_custom_component.common import mock_restore_cache
-        from homeassistant.core import State
-
-        mock_restore_cache(hass, [
-            State("climate.test_ac", "heat", {
-                "preset_mode": "Economy",
-                "temperature": 22,
-                "fan_mode": "auto",
-            }),
-        ])
-
-        config = make_config()
-        entry = MockConfigEntry(
-            domain=DOMAIN, data=config, title="Test AC",
-            version=1, minor_version=3,
-        )
-        entry.add_to_hass(hass)
-        assert await hass.config_entries.async_setup(entry.entry_id)
-        await hass.async_block_till_done()
-
-        entity = get_climate_entity(hass, entry)
-        assert entity._economy is True
-
-    @pytest.mark.asyncio
-    async def test_restore_powerful_preset(self, hass, mqtt_mock, enable_custom_integrations):
-        """Fujitsu entity should restore Powerful preset from old state."""
-        from pytest_homeassistant_custom_component.common import mock_restore_cache
-        from homeassistant.core import State
-
-        mock_restore_cache(hass, [
-            State("climate.test_ac", "heat", {
-                "preset_mode": "Powerful",
-                "temperature": 22,
-                "fan_mode": "auto",
-            }),
-        ])
-
-        config = make_config()
-        entry = MockConfigEntry(
-            domain=DOMAIN, data=config, title="Test AC",
-            version=1, minor_version=3,
-        )
-        entry.add_to_hass(hass)
-        assert await hass.config_entries.async_setup(entry.entry_id)
-        await hass.async_block_till_done()
-
-        entity = get_climate_entity(hass, entry)
-        assert entity._powerful is True
-
-    @pytest.mark.asyncio
-    async def test_turbo_econo_flags_from_mqtt(self, hass, setup_integration):
-        """Turbo/econo/clean flags from MQTT should map to presets."""
-        entry = await setup_integration()
-        entity = get_climate_entity(hass, entry)
-
-        # Turbo on
-        payload = make_mqtt_state_payload({"Power": "On", "Mode": "Heat", "Turbo": "On"})
-        async_fire_mqtt_message(hass, "tele/irhvac/RESULT", payload)
-        await hass.async_block_till_done()
-        assert entity._powerful is True
-
-        # Econo on
-        payload = make_mqtt_state_payload({"Power": "On", "Mode": "Heat", "Turbo": "Off", "Econo": "On"})
-        async_fire_mqtt_message(hass, "tele/irhvac/RESULT", payload)
-        await hass.async_block_till_done()
-        assert entity._economy is True
-
-        # Clean on (Min Heat)
-        payload = make_mqtt_state_payload({"Power": "On", "Mode": "Heat", "Econo": "Off", "Clean": "On"})
-        async_fire_mqtt_message(hass, "tele/irhvac/RESULT", payload)
-        await hass.async_block_till_done()
-        assert entity._min_heat is True
-
-    @pytest.mark.asyncio
-    async def test_power_off_clears_fujitsu_flags(self, hass, setup_integration):
-        """Power off should clear Fujitsu preset flags."""
-        entry = await setup_integration()
-        entity = get_climate_entity(hass, entry)
-        entity._powerful = True
-        entity._economy = True
-        entity._min_heat = True
-
-        payload = make_mqtt_state_payload({"Power": "Off", "Mode": "Heat"})
-        async_fire_mqtt_message(hass, "tele/irhvac/RESULT", payload)
-        await hass.async_block_till_done()
-
-        assert entity._powerful is False
-        assert entity._economy is False
-        assert entity._min_heat is False
-
-
 # ── climate.py remaining gaps ─────────────────────────────────────────
 
 
@@ -867,40 +743,6 @@ class TestSensorBinarySensorNoEntity:
         all_binary = hass.states.async_all("binary_sensor")
         pi_binary = [s for s in all_binary if "ff_learning" in s.entity_id]
         assert len(pi_binary) == 0
-
-
-@pytest.mark.skip(reason="pre-handler architecture — see test_vendor_fujitsu.py")
-class TestFujitsuClearPowerful:
-    """Cover _clear_powerful callback and _send_raw_ir with delay."""
-
-    @pytest.mark.asyncio
-    async def test_clear_powerful_callback(self, hass, setup_integration):
-        """Powerful preset should auto-clear after timeout."""
-        entry = await setup_integration()
-        entity = get_climate_entity(hass, entry)
-        entity._attr_hvac_mode = HVACMode.HEAT
-
-        await entity.async_set_preset_mode("Powerful")
-        assert entity._powerful is True
-
-        # Advance time past the Powerful timeout (20 min)
-        async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=1201))
-        await hass.async_block_till_done()
-
-        # Should have auto-cleared
-        assert entity._powerful is False
-        assert entity._attr_preset_mode != "Powerful"
-
-    @pytest.mark.asyncio
-    async def test_fujitsu_send_raw_ir_with_delay(self, hass, setup_integration):
-        """Fujitsu _send_raw_ir should respect mqtt_delay."""
-        entry = await setup_integration({"mqtt_delay": "0.01"})
-        entity = get_climate_entity(hass, entry)
-        entity._attr_hvac_mode = HVACMode.HEAT
-
-        # Activate Economy which sends raw IR
-        await entity.async_set_preset_mode("Economy")
-        assert entity._economy is True
 
 
 class TestInitConfigCheck:
@@ -1725,24 +1567,6 @@ class TestConfigFlowImportBranches:
         assert result["type"] == "create_entry"
 
     @pytest.mark.asyncio
-    @pytest.mark.skip(reason="beta migration removed — bias_entity→disturbance_inputs no longer exists")
-    async def test_import_with_bias_entity(self, hass, mqtt_mock, enable_custom_integrations):
-        """Import with legacy bias entity should migrate to disturbance input."""
-        config = make_config({
-            "pi_enabled": True,
-            "pi_ff_bias_entity": "sensor.solar_gain",
-            "temperature_sensor": "sensor.room_temp",
-            "outdoor_temp_sensor": "sensor.outdoor_temp",
-        })
-        result = await hass.config_entries.flow.async_init(
-            DOMAIN, context={"source": "import"}, data=config,
-        )
-        assert result["type"] == "create_entry"
-        entry = result["result"]
-        disturbance = entry.options.get("pi_disturbance_inputs", [])
-        assert any(d["entity_id"] == "sensor.solar_gain" for d in disturbance)
-
-    @pytest.mark.asyncio
     async def test_import_with_existing_disturbance_cleans_old_keys(self, hass, mqtt_mock, enable_custom_integrations):
         """Import with existing disturbance_inputs should clean old keys."""
         config = make_config({
@@ -1848,27 +1672,6 @@ class TestMinMaxTempFallback:
         entity._max_temp = None
         result = entity.max_temp
         assert result is not None
-
-
-@pytest.mark.skip(reason="pre-handler architecture — see test_vendor_fujitsu.py")
-class TestFujitsuCancelPowerful:
-    """Cover fujitsu _clear_powerful timer cancel line 204."""
-
-    @pytest.mark.asyncio
-    async def test_powerful_cancel_existing_timer(self, hass, setup_integration):
-        """Activating Powerful twice should cancel the first timer."""
-        entry = await setup_integration()
-        entity = get_climate_entity(hass, entry)
-        entity._attr_hvac_mode = HVACMode.HEAT
-
-        # First activation sets timer
-        await entity.async_set_preset_mode("Powerful")
-        assert entity._powerful is True
-
-        # Second activation should cancel old timer and set new one
-        entity._powerful = False  # Reset to re-trigger
-        await entity.async_set_preset_mode("Powerful")
-        assert entity._powerful is True
 
 
 class TestSensorPIDisabledReturn:
@@ -2584,43 +2387,6 @@ class TestConfigFlowGaps:
 
 
 # ── Migration v1.4 with non-1.0 gain (lines 108-109) ────────────────
-
-
-@pytest.mark.skip(reason="beta migration stripped — disturbance_inputs no longer exists")
-class TestMigrationGain:
-    """Cover __init__.py migration with non-1.0 gain disturbance input."""
-
-    @pytest.mark.asyncio
-    async def test_migrate_disturbance_with_gain(self, hass):
-        """Migration v1.3->v1.4 with gain != 1.0 should use gain as seed (lines 108-109)."""
-        from custom_components.tasmota_irhvac.__init__ import async_migrate_entry
-        from custom_components.tasmota_irhvac.config_flow import TasmotaIrhvacConfigFlow
-        config = make_config()
-        config["pi_disturbance_inputs"] = [{
-            "name": "Solar Gain",
-            "entity_id": "sensor.solar",
-            "suppress_learning": False,
-            "default_bias": 0.0,
-            "gain": 2.5,
-        }]
-        entry = MockConfigEntry(
-            domain=DOMAIN, data=config, title="Test",
-            version=1, minor_version=3,
-        )
-        entry.add_to_hass(hass)
-
-        result = await async_migrate_entry(hass, entry)
-        assert result is True
-        assert entry.minor_version == TasmotaIrhvacConfigFlow.MINOR_VERSION
-
-        # After migration, model_inputs are in subentries (removed from data/options)
-        # But the v1.4 migration puts them in data first, then v1.6 moves to subentries
-        model_inputs = entry.data.get("pi_model_inputs", [])
-        assert len(model_inputs) == 1
-        # gain != 1.0, so seed_heat and seed_cool should be set to gain value
-        assert model_inputs[0]["seed_heat"] == 2.5
-        assert model_inputs[0]["seed_cool"] == 2.5
-        assert "pi_disturbance_inputs" not in entry.data
 
 
 # ── Diagnostics with model inputs (line 52) ─────────────────────────

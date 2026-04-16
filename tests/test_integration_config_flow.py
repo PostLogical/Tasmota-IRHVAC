@@ -173,30 +173,6 @@ class TestConfigFlowImport:
         assert result["type"] == FlowResultType.ABORT
         assert result["reason"] == "already_configured"
 
-    @pytest.mark.asyncio
-    @pytest.mark.skip(reason="beta migration removed — suppress/bias→disturbance_inputs no longer exists")
-    async def test_import_transforms_legacy_keys(self, hass, mqtt_mock, enable_custom_integrations):
-        """Import should transform legacy suppress/bias entities to disturbance inputs."""
-        config = make_config({
-            "pi_enabled": True,
-            "pi_ff_suppress_learning_entity": "input_boolean.pellet_stove",
-            "temperature_sensor": "sensor.room_temp",
-            "outdoor_temp_sensor": "sensor.outdoor_temp",
-        })
-        result = await hass.config_entries.flow.async_init(
-            DOMAIN,
-            context={"source": config_entries.SOURCE_IMPORT},
-            data=config,
-        )
-        assert result["type"] == FlowResultType.CREATE_ENTRY
-        entry = result["result"]
-        # Legacy key should be transformed — disturbance_inputs goes to options
-        # (migration to model_inputs happens at config entry migration, not import)
-        disturbance = entry.options.get("pi_disturbance_inputs", [])
-        assert len(disturbance) >= 1, f"No disturbance inputs found. options={entry.options}"
-        assert disturbance[0]["entity_id"] == "input_boolean.pellet_stove"
-
-
 class TestOptionsFlow:
     """Tests for the options flow."""
 

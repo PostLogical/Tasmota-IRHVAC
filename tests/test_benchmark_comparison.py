@@ -5,6 +5,7 @@ The -s flag is important to see the comparison table output.
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -194,7 +195,9 @@ class TestBenchmarkComparison:
             _print_comparison(results)
 
         # Also write JSON for further analysis
-        with open("benchmark_results.json", "w") as f:
+        out_dir = Path(__file__).resolve().parent.parent / "local" / "data"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        with open(out_dir / "benchmark_results.json", "w") as f:
             json.dump(results, f, indent=2)
 
         # Basic sanity: at least some scenarios ran
