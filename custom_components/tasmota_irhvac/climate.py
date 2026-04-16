@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from homeassistant.core import Event, EventStateChangedData, State
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
     from homeassistant.helpers.event import CALLBACK_TYPE
+    from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
     from .config_model import IrhvacConfig
     from .vendors.base import TimerRequest, VendorHandler
@@ -470,8 +471,8 @@ SERVICE_TO_METHOD = {
 
 
 async def async_setup_platform(
-    hass: HomeAssistant, config: dict[str, Any], async_add_entities: AddEntitiesCallback,
-    discovery_info: Any = None,
+    hass: HomeAssistant, config: ConfigType, async_add_entities: AddEntitiesCallback,
+    discovery_info: DiscoveryInfoType | None = None,
 ) -> None:
     """Set up via YAML (deprecated — triggers config entry import)."""
     _LOGGER.warning(
@@ -622,7 +623,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         self._ignore_off_temp = cfg.ignore_off_temp
         self._special_mode = cfg.special_mode
         self._use_track_state_change_event: bool = False
-        self._unsubscribes: list[Any] = []
+        self._unsubscribes: list[CALLBACK_TYPE] = []
 
         self.availability_topic: str = cfg.availability_topic or ""
         if not self.availability_topic:
@@ -827,19 +828,19 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         # provides the callback that bridges timer fire → send_ir.
         if isinstance(self._controller, PIController) and self._temp_sensor:
             @callback
-            def _pi_timer_fired(_now):
+            def _pi_timer_fired(_now: datetime) -> None:
                 self.hass.async_create_task(self._on_pi_timer())
             self._controller._pi_timer_callback = _pi_timer_fired
             self._controller.schedule_batch_analysis()
             if self._attr_current_temperature is not None:
                 @callback
-                def _deferred_initial_tick(_now):
+                def _deferred_initial_tick(_now: datetime) -> None:
                     self.hass.async_create_task(self._on_pi_timer())
                 self._deferred_tick_unsub = async_call_later(
                     self.hass, 5, _deferred_initial_tick
                 )
 
-    async def _subscribe_topics(self) -> list[Any]:
+    async def _subscribe_topics(self) -> list[CALLBACK_TYPE]:
         """(Re)Subscribe to topics."""
 
         @callback
@@ -1185,7 +1186,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             self._vendor_timer_unsub()
 
         @callback
-        def _on_vendor_timer(_now=None):
+        def _on_vendor_timer(_now: datetime | None = None) -> None:
             self._vendor_timer_unsub = None
             self._vendor_handler.on_timer(timer_request.callback_id)
             # Apply handler state after timer fires
@@ -1286,7 +1287,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         return self._last_on_mode
 
     @property
-    def hvac_modes(self) -> list[Any]:
+    def hvac_modes(self) -> list[HVACMode]:
         """Return the list of available HVAC modes."""
         return self._controller.filter_hvac_modes(self._attr_hvac_modes)
 
@@ -1519,14 +1520,14 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                 self.hass, 60, self._on_pi_recovery
             )
 
-    async def _on_pi_timer(self, now: Any = None) -> None:
+    async def _on_pi_timer(self, now: datetime | None = None) -> None:
         """PI timer tick — climate.py owns the timer, PI does computation."""
         if await self._controller.pi_tick(now):
             await self.send_ir()
         self._check_pi_recovery_needed()
         self.async_schedule_update_ha_state()
 
-    async def _on_pi_recovery(self, _now: Any = None) -> None:
+    async def _on_pi_recovery(self, _now: datetime | None = None) -> None:
         """Sensor recovery check — 60s after sensor went unavailable."""
         self._pi_recovery_unsub = None
         from .pi import PIController
@@ -1688,7 +1689,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         self._attr_preset_mode = PRESET_AWAY if self._is_away else PRESET_NONE
         await self.send_ir()
 
-    async def _activate_ir_action_preset(self, preset_name, action):
+    async def _activate_ir_action_preset(self, preset_name: str, action: dict[str, Any]) -> None:
         """Activate a user-defined IR action preset."""
         # Send the IR code
         path = self.topic.split("/")
@@ -1709,7 +1710,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             from homeassistant.helpers.event import async_call_later
 
             @callback
-            def _clear_preset(_now):
+            def _clear_preset(_now: datetime) -> None:
                 self._attr_preset_mode = PRESET_NONE
                 if action.get("pause_pi"):
                     self._controller.pi_resume()

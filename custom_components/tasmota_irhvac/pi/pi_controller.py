@@ -15,10 +15,11 @@ import dataclasses
 import logging
 import time
 from datetime import datetime
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from homeassistant.core import Event, EventStateChangedData, HomeAssistant, State
+    from homeassistant.core import CALLBACK_TYPE, Event, EventStateChangedData, HomeAssistant, State
 
     from ..climate import TasmotaIrhvac
 
@@ -240,8 +241,8 @@ class PIController:
         self._recovery_check_needed: bool = False
         self._pi_paused: bool = False
         self._pi_last_tick_time: float = 0.0
-        self._pi_timer_unsub: Any | None = None    # cancel handle for fallback timer
-        self._pi_timer_callback: Any | None = None  # set by climate.py during setup
+        self._pi_timer_unsub: CALLBACK_TYPE | None = None
+        self._pi_timer_callback: Callable[[datetime], None] | None = None
         self._pi_last_error: float = 0.0
         self._pi_d_filtered: float = 0.0    # Filtered derivative term
         self._pi_last_measurement: float | None = None  # Previous temperature measurement for derivative
@@ -367,7 +368,7 @@ class PIController:
         self._observation_buffer = DiversityAwareBuffer(
             n_features=2 + len(self._model_inputs),
         )
-        self._batch_analysis_timer: Any | None = None
+        self._batch_analysis_timer: CALLBACK_TYPE | None = None
         self._last_batch_result: BatchResult | None = None
         self._last_batch_timestamp: float | None = None
 
@@ -497,7 +498,7 @@ class PIController:
         BATCH_INTERVAL = timedelta(hours=12)
 
         @callback
-        def _run_batch(_now: Any) -> None:
+        def _run_batch(_now: datetime) -> None:
             self._run_batch_analysis()
 
         self._batch_analysis_timer = async_track_time_interval(
@@ -1286,7 +1287,7 @@ class PIController:
             ),
         }
 
-    def filter_hvac_modes(self, modes: list[Any]) -> list[Any]:
+    def filter_hvac_modes(self, modes: list[HVACMode]) -> list[HVACMode]:
         """Filter out auto/heat_cool when PI is enabled."""
         if self._pi_enabled and modes:
             return [m for m in modes if m not in (HVACMode.AUTO, HVACMode.HEAT_COOL)]

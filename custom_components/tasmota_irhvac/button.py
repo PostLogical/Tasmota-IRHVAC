@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from homeassistant.helpers.device_registry import DeviceInfo
+
     from .climate import TasmotaIrhvac
     from .pi import PIController
 
@@ -124,7 +126,7 @@ class VaneButton(ButtonEntity):
         self._attr_unique_id = f"{climate_entity.unique_id}_{description.key}"
 
     @property
-    def device_info(self):
+    def device_info(self) -> DeviceInfo:
         """Return device info to group button with climate entity."""
         return self._climate.device_info
 
@@ -181,7 +183,7 @@ class IRActionButton(ButtonEntity):
         self._attr_name = action["name"]
 
     @property
-    def device_info(self):
+    def device_info(self) -> DeviceInfo:
         """Return device info to group with climate entity."""
         return self._climate.device_info
 
@@ -223,7 +225,7 @@ class SaveLearnedSeedsButton(ButtonEntity):
         self._attr_unique_id = f"{climate_entity.unique_id}_save_learned_seeds"
 
     @property
-    def device_info(self):
+    def device_info(self) -> DeviceInfo:
         """Return device info to group with climate entity."""
         return self._climate.device_info
 

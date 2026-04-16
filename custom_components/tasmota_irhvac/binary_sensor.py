@@ -6,6 +6,8 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from homeassistant.helpers.device_registry import DeviceInfo
+
     from .climate import TasmotaIrhvac
     from .pi import PIController
 
@@ -67,7 +69,7 @@ class FFLearningSuppressedBinarySensor(BinarySensorEntity):
         self._attr_unique_id = f"{climate_entity.unique_id}_ff_learning"
 
     @property
-    def device_info(self):
+    def device_info(self) -> DeviceInfo:
         """Return device info to group with climate entity."""
         return self._climate.device_info
 
@@ -108,7 +110,7 @@ class FFLearningSuppressedBinarySensor(BinarySensorEntity):
         """Subscribe to dispatcher signal for state updates."""
 
         @callback
-        def _update_sensor():
+        def _update_sensor() -> None:
             self.async_write_ha_state()
 
         self.async_on_remove(
@@ -136,7 +138,7 @@ class ModelDriftingBinarySensor(BinarySensorEntity):
         self._attr_unique_id = f"{climate_entity.unique_id}_model_drifting"
 
     @property
-    def device_info(self):
+    def device_info(self) -> DeviceInfo:
         """Return device info to group with climate entity."""
         return self._climate.device_info
 
@@ -180,7 +182,7 @@ class ModelDriftingBinarySensor(BinarySensorEntity):
         """Subscribe to dispatcher signal for state updates."""
 
         @callback
-        def _update_sensor():
+        def _update_sensor() -> None:
             self.async_write_ha_state()
 
         self.async_on_remove(

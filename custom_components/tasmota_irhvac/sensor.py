@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from homeassistant.helpers.device_registry import DeviceInfo
+
     from .climate import TasmotaIrhvac
     from .pi import PIController
 
@@ -270,12 +272,12 @@ class TasmotaIrhvacPISensor(SensorEntity):
         self._attr_unique_id = f"{climate_entity.unique_id}_{description.key}"
 
     @property
-    def device_info(self):
+    def device_info(self) -> DeviceInfo:
         """Return device info to group sensor with climate entity."""
         return self._climate.device_info
 
     @property
-    def native_value(self):
+    def native_value(self) -> float | str | None:
         """Read current value from the PI controller."""
         pi = self._climate._pi
         if pi is None:
@@ -291,7 +293,7 @@ class TasmotaIrhvacPISensor(SensorEntity):
         """Subscribe to dispatcher signal for state updates."""
 
         @callback
-        def _update_sensor():
+        def _update_sensor() -> None:
             self.async_write_ha_state()
 
         self.async_on_remove(
@@ -324,7 +326,7 @@ class TasmotaIrhvacHealthSensor(SensorEntity):
         self._attr_unique_id = f"{climate_entity.unique_id}_health"
 
     @property
-    def device_info(self):
+    def device_info(self) -> DeviceInfo:
         """Return device info to group sensor with climate entity."""
         return self._climate.device_info
 
@@ -364,7 +366,7 @@ class TasmotaIrhvacHealthSensor(SensorEntity):
         """Subscribe to dispatcher signal for state updates."""
 
         @callback
-        def _update_sensor():
+        def _update_sensor() -> None:
             self.async_write_ha_state()
 
         self.async_on_remove(

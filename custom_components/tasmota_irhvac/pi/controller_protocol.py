@@ -7,7 +7,13 @@ so the entity never needs `if self._pi:` guards.
 
 from __future__ import annotations
 
-from typing import Any, Protocol, runtime_checkable
+from datetime import datetime
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from homeassistant.components.climate.const import HVACMode
+    from homeassistant.core import State
+    from homeassistant.helpers.restore_state import ExtraStoredData
 
 
 @runtime_checkable
@@ -36,7 +42,7 @@ class ControllerHook(Protocol):
 
     # ── Lifecycle ────────────────────────────────────────────────────
 
-    async def async_added_to_hass(self, *, old_state: Any = None) -> None: ...
+    async def async_added_to_hass(self, *, old_state: State | None = None) -> None: ...
 
     def async_will_remove_from_hass(self) -> None: ...
 
@@ -44,7 +50,7 @@ class ControllerHook(Protocol):
 
     async def on_remote_change(self, reported_temp: float) -> bool: ...
 
-    async def pi_tick(self, now: Any = None) -> bool: ...
+    async def pi_tick(self, now: datetime | None = None) -> bool: ...
 
     async def sensor_changed(self, was_none: bool) -> bool: ...
 
@@ -60,7 +66,7 @@ class ControllerHook(Protocol):
 
     # ── Mode filtering ───────────────────────────────────────────────
 
-    def filter_hvac_modes(self, modes: list[str]) -> list[str]: ...
+    def filter_hvac_modes(self, modes: list[HVACMode]) -> list[HVACMode]: ...
 
     def should_reject_hvac_mode(self, mode: str) -> bool: ...
 
@@ -76,7 +82,7 @@ class ControllerHook(Protocol):
 
     def get_extra_state_attributes(self) -> dict[str, Any]: ...
 
-    def get_extra_stored_data(self) -> Any: ...
+    def get_extra_stored_data(self) -> ExtraStoredData | None: ...
 
     # ── FF learning services ─────────────────────────────────────────
 
@@ -114,75 +120,77 @@ class NullController:
 
     # ── Lifecycle ────────────────────────────────────────────────────
 
-    async def async_added_to_hass(self, *, old_state=None):
+    async def async_added_to_hass(self, *, old_state: State | None = None) -> None:
         pass
 
-    def async_will_remove_from_hass(self):
+    def async_will_remove_from_hass(self) -> None:
         pass
 
-    def schedule_batch_analysis(self):
+    def schedule_batch_analysis(self) -> None:
         pass
 
-    def get_diagnostic_dump(self):
+    def get_diagnostic_dump(self) -> None:
         return None
 
     # ── State processing ─────────────────────────────────────────────
 
-    async def on_remote_change(self, reported_temp):
+    async def on_remote_change(self, reported_temp: float) -> bool:
         return False
 
-    async def pi_tick(self, now=None):
+    async def pi_tick(self, now: datetime | None = None) -> bool:
         return False
 
-    async def sensor_changed(self, was_none):
+    async def sensor_changed(self, was_none: bool) -> bool:
         return False
 
-    def fire_dispatcher(self):
+    def fire_dispatcher(self) -> None:
         pass
 
     # ── Temperature ──────────────────────────────────────────────────
 
-    async def set_temperature(self, temperature, hvac_mode=None):
+    async def set_temperature(
+        self, temperature: float, hvac_mode: str | None = None
+    ) -> bool:
         return False
 
-    def get_ir_temp(self):
+    def get_ir_temp(self) -> float:
         # Should not be called — entity checks is_active before calling
         raise RuntimeError("get_ir_temp called on NullController")
 
     # ── Mode filtering ───────────────────────────────────────────────
 
-    def filter_hvac_modes(self, modes):
+    def filter_hvac_modes(self, modes: list[HVACMode]) -> list[HVACMode]:
         return modes
 
-    def should_reject_hvac_mode(self, mode):
+    def should_reject_hvac_mode(self, mode: str) -> bool:
         return False
 
     # ── Pause / resume ───────────────────────────────────────────────
 
-    def pi_pause(self):
+    def pi_pause(self) -> None:
         pass
 
-    def pi_resume(self):
+    def pi_resume(self) -> None:
         pass
 
-    def pi_reset_integral(self):
+    def pi_reset_integral(self) -> None:
         pass
 
     # ── State attributes & persistence ───────────────────────────────
 
-    def get_extra_state_attributes(self):
+    def get_extra_state_attributes(self) -> dict[str, Any]:
         return {}
 
-    def get_extra_stored_data(self):
+    def get_extra_stored_data(self) -> ExtraStoredData | None:
         return None
 
     # ── FF learning services ─────────────────────────────────────────
 
-    async def async_reset_ff_seeds(self):
+    async def async_reset_ff_seeds(self) -> None:
         pass
 
-    async def async_suppress_ff_learning(self, reason=""):
+    async def async_suppress_ff_learning(self, reason: str = "") -> None:
         pass
 
-    async def async_resume_ff_learning(self):
+    async def async_resume_ff_learning(self) -> None:
         pass
