@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .climate import TasmotaIrhvac
+    from .pi import PIController
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -328,17 +329,24 @@ class TasmotaIrhvacHealthSensor(SensorEntity):
         return self._climate.device_info
 
     @property
+    def _pi(self) -> PIController | None:
+        """Return the PI controller, narrowed from the union type."""
+        from .pi import PIController
+        pi = self._climate._pi
+        return pi if isinstance(pi, PIController) else None
+
+    @property
     def native_value(self) -> str | None:
         """Return current health state."""
-        pi = self._climate._pi
+        pi = self._pi
         if pi is None:
             return None
-        return pi.get_health_status()["state"]
+        return str(pi.get_health_status()["state"])
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return health details as attributes."""
-        pi = self._climate._pi
+        pi = self._pi
         if pi is None:
             return {}
         status = pi.get_health_status()

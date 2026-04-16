@@ -1226,9 +1226,9 @@ class PIController:
         rls = self._rls_heat if is_heating else self._rls_cool
         expected_slope = self._ff_heat_slope if is_heating else -self._ff_cool_slope
         has_obs = rls.observation_count > 0
-        coeffs = rls.get_coefficients() if has_obs else []
-        intercept = coeffs[0] if len(coeffs) > 0 else 0.0
-        outdoor_slope = coeffs[1] if len(coeffs) > 1 else expected_slope
+        coeffs = rls.get_coefficients() if has_obs else {}
+        intercept = coeffs.get(0, 0.0)
+        outdoor_slope = coeffs.get(1, expected_slope)
 
         checks.append(check_intercept_drift(
             intercept, self.HEALTH_INTERCEPT_WARN, has_obs,
@@ -1238,8 +1238,7 @@ class PIController:
             self.HEALTH_SLOPE_DRIFT_PCT, self.HEALTH_SLOPE_DRIFT_FLOOR, has_obs,
         ))
 
-        for result in check_model_drift(self.get_drifting_coefficients()):
-            checks.append(result)
+        checks.extend(check_model_drift(self.get_drifting_coefficients()))
 
         feature_names = ["intercept", "outdoor_delta"]
         for m in self._model_inputs:

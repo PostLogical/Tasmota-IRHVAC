@@ -825,7 +825,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
 
         # PI fallback timer — PI reschedules after every tick, climate.py
         # provides the callback that bridges timer fire → send_ir.
-        if self._controller.is_active and self._temp_sensor:
+        if isinstance(self._controller, PIController) and self._temp_sensor:
             @callback
             def _pi_timer_fired(_now):
                 self.hass.async_create_task(self._on_pi_timer())

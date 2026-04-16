@@ -89,7 +89,7 @@ class FFLearningSuppressedBinarySensor(BinarySensorEntity):
         pi = self._pi
         if pi is None:
             return False
-        return pi.get_learning_status()["suppressed"]
+        return bool(pi.get_learning_status()["suppressed"])
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
