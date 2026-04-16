@@ -491,3 +491,50 @@ class TestSensorTracking:
         await hass.async_block_till_done()
 
         assert entity._attr_current_humidity == 55.0
+
+
+class TestSubscriptionCleanup:
+    """Regression: state-change listeners must be unsubscribed on removal."""
+
+    @pytest.mark.asyncio
+    async def test_sensor_listener_unsubscribed_on_remove(
+        self, hass, setup_integration
+    ):
+        """After async_will_remove_from_hass, sensor changes must not fire."""
+        hass.states.async_set(
+            "sensor.test_temp", "21.0",
+            {"unit_of_measurement": "°C"},
+        )
+        entry = await setup_integration({"temperature_sensor": "sensor.test_temp"})
+        entity = get_climate_entity(hass, entry)
+
+        # Sanity: listener works before removal
+        hass.states.async_set(
+            "sensor.test_temp", "22.0",
+            {"unit_of_measurement": "°C"},
+        )
+        await hass.async_block_till_done()
+        assert entity._attr_current_temperature == 22.0
+
+        # Remove the entity (simulates config-entry reload)
+        await entity.async_will_remove_from_hass()
+
+        # Patch the callback to detect any post-removal invocation
+        called = False
+        original = entity._async_sensor_changed
+
+        async def _spy(event):
+            nonlocal called
+            called = True
+            await original(event)
+
+        entity._async_sensor_changed = _spy
+
+        # Fire another state change — should NOT reach the entity
+        hass.states.async_set(
+            "sensor.test_temp", "25.0",
+            {"unit_of_measurement": "°C"},
+        )
+        await hass.async_block_till_done()
+
+        assert not called, "Sensor listener fired after async_will_remove_from_hass"

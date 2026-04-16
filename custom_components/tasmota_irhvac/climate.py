@@ -713,11 +713,14 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
 
         # PI recovery subscription (PI owns its own fallback timer)
         self._pi_recovery_unsub: CALLBACK_TYPE | None = None
+        self._deferred_tick_unsub: CALLBACK_TYPE | None = None
 
     async def async_added_to_hass(self) -> None:
         def regist_track_state_change_event(entity_id: str) -> None:
-            ha_event.async_track_state_change_event(
-                self.hass, entity_id, self._async_sensor_changed
+            self._unsubscribes.append(
+                ha_event.async_track_state_change_event(
+                    self.hass, entity_id, self._async_sensor_changed
+                )
             )
 
         # Make sure MQTT integration is enabled and the client is available
@@ -832,7 +835,9 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                 @callback
                 def _deferred_initial_tick(_now):
                     self.hass.async_create_task(self._on_pi_timer())
-                async_call_later(self.hass, 5, _deferred_initial_tick)
+                self._deferred_tick_unsub = async_call_later(
+                    self.hass, 5, _deferred_initial_tick
+                )
 
     async def _subscribe_topics(self) -> list[Any]:
         """(Re)Subscribe to topics."""
@@ -1202,6 +1207,9 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         if self._pi_recovery_unsub:
             self._pi_recovery_unsub()
             self._pi_recovery_unsub = None
+        if self._deferred_tick_unsub:
+            self._deferred_tick_unsub()
+            self._deferred_tick_unsub = None
         self._controller.async_will_remove_from_hass()
         for unsubscribe in self._unsubscribes:
             unsubscribe()
