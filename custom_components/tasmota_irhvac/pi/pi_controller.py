@@ -1397,6 +1397,14 @@ class PIController:
             self._last_setpoint_change_time = 0.0
         return result.hp_should_send_ir
 
+    def _deadband_integration_rate(self, abs_error: float) -> float:
+        """Compute integration rate inside the deadband.
+
+        Returns a value in [0.05, 1.0] that scales the integration speed
+        based on distance from the setpoint.  Overridable for testing.
+        """
+        return max(0.05, min(1.0, abs_error / self._pi_deadband))
+
     # ── RLS learning ─────────────────────────────────────────────────
 
     def _rls_shared_gate_open(self, learning_suppressed: bool) -> bool:
@@ -1836,7 +1844,7 @@ class PIController:
             # Variable-rate integration: smooth taper from full rate at deadband
             # edge to 5% floor at setpoint (Åström §3.5 — don't stop integrating
             # near setpoint, but reduce speed to limit accumulation).
-            rate = max(0.05, min(1.0, abs_error / self._pi_deadband))
+            rate = self._deadband_integration_rate(abs_error)
             if not skip_integration:
                 self._pi_integral += avg_error * dt_factor * rate
 

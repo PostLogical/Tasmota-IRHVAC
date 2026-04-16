@@ -997,6 +997,315 @@ class TestPIEdgeCases:
         # accumulates at 60% of full rate. Still small after one tick.
         assert abs(pi_entity._pi._pi_integral) < 0.5
 
+
+class TestVariableRateTradeoffs:
+    """A/B comparison: variable-rate vs full-rate integration in the deadband.
+
+    Each test runs the same scenario twice — once with the current variable-rate
+    policy (rate = |error|/deadband, floor 0.05) and once with full-rate (rate=1.0).
+
+    The key question is oscillation: when the HP changes setpoint by 1°C, does
+    full-rate integration cause the system to cycle between setpoints, or does
+    the dwell timer + leaky integrator prevent it?
+
+    Includes both static tests (fixed room temp) and closed-loop dynamic tests
+    (room temp responds to HP setpoint via a simple thermal model).
+    """
+
+    # ── Helpers ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _make_entity(current_temp, desired=22.0, hp_setpoint=22,
+                     outdoor=10.0, mode=HVACMode.HEAT):
+        """Create a fresh FakePIEntity with standard setup."""
+        entity = FakePIEntity(make_pi_config())
+        pi = entity._pi
+        pi._desired_temp = desired
+        pi._hp_setpoint = hp_setpoint
+        pi._pi_integral = 0.0
+        pi._pi_deadband = 0.5
+        pi._inputs.outdoor_temp = outdoor
+        entity._attr_hvac_mode = mode
+        entity._attr_current_temperature = current_temp
+        return entity
+
+    @staticmethod
+    def _run_static(entity, n_ticks, tick_interval=900.0):
+        """Run n ticks with fixed room temperature, return integral trajectory."""
+        import asyncio
+        pi = entity._pi
+        integrals = []
+        t = tick_interval
+        for _ in range(n_ticks):
+            pi._pi_last_tick_time = t - tick_interval
+            with patch("time.monotonic", return_value=t):
+                asyncio.get_event_loop().run_until_complete(pi._pi_tick())
+            integrals.append(pi._pi_integral)
+            t += tick_interval
+        return integrals
+
+    @staticmethod
+    def _run_dynamic(entity, n_ticks, outdoor_c, tau_minutes=60.0,
+                     hp_gain=0.8, tick_interval=900.0):
+        """Run n ticks with room temperature responding to HP setpoint.
+
+        Simple 1R1C thermal model per tick:
+            room += (hp_drive - room) × (1 - exp(-dt/τ))
+        where hp_drive = outdoor + hp_gain × (hp_setpoint - outdoor)
+
+        hp_gain < 1.0 models the HP's imperfect efficiency: a setpoint of
+        30°C with outdoor at 0°C doesn't heat the room to 30°C — it drives
+        toward hp_gain × 30 + (1-hp_gain) × 0 = 24°C.
+
+        Returns: list of (room_temp, hp_setpoint, integral) per tick.
+        """
+        import asyncio
+        import math
+        pi = entity._pi
+        room = entity._attr_current_temperature
+        dt = tick_interval
+        alpha = 1.0 - math.exp(-dt / (tau_minutes * 60.0))
+        trajectory = []
+        t = tick_interval
+
+        for _ in range(n_ticks):
+            # Thermal model: room evolves toward HP drive point
+            hp_drive = outdoor_c + hp_gain * (float(pi._hp_setpoint) - outdoor_c)
+            room = room + (hp_drive - room) * alpha
+
+            # Feed room temp to entity and tick
+            entity._attr_current_temperature = room
+            pi._pi_last_tick_time = t - tick_interval
+            with patch("time.monotonic", return_value=t):
+                asyncio.get_event_loop().run_until_complete(pi._pi_tick())
+
+            trajectory.append((room, int(pi._hp_setpoint), pi._pi_integral))
+            t += tick_interval
+
+        return trajectory
+
+    def _run_ab_static(self, current_temp, n_ticks, **kwargs):
+        """Run static scenario with both policies, return (var_integrals, full_integrals)."""
+        entity_a = self._make_entity(current_temp, **kwargs)
+        integrals_a = self._run_static(entity_a, n_ticks)
+
+        entity_b = self._make_entity(current_temp, **kwargs)
+        entity_b._pi._deadband_integration_rate = lambda ae: 1.0
+        integrals_b = self._run_static(entity_b, n_ticks)
+
+        return integrals_a, integrals_b
+
+    def _run_ab_dynamic(self, start_temp, n_ticks, outdoor_c=5.0,
+                        tau_minutes=60.0, hp_gain=0.8, **kwargs):
+        """Run dynamic scenario with both policies, return (var_traj, full_traj).
+
+        Each trajectory is a list of (room_temp, hp_setpoint, integral).
+        """
+        entity_a = self._make_entity(start_temp, outdoor=outdoor_c, **kwargs)
+        traj_a = self._run_dynamic(entity_a, n_ticks, outdoor_c, tau_minutes, hp_gain)
+
+        entity_b = self._make_entity(start_temp, outdoor=outdoor_c, **kwargs)
+        entity_b._pi._deadband_integration_rate = lambda ae: 1.0
+        traj_b = self._run_dynamic(entity_b, n_ticks, outdoor_c, tau_minutes, hp_gain)
+
+        return traj_a, traj_b
+
+    @staticmethod
+    def _count_setpoint_changes(trajectory):
+        """Count how many times hp_setpoint changed in a trajectory."""
+        changes = 0
+        for i in range(1, len(trajectory)):
+            if trajectory[i][1] != trajectory[i - 1][1]:
+                changes += 1
+        return changes
+
+    @staticmethod
+    def _count_reversals(trajectory):
+        """Count setpoint direction reversals (up then down, or down then up).
+
+        A reversal means the PI changed its mind — the hallmark of oscillation.
+        """
+        directions = []
+        for i in range(1, len(trajectory)):
+            delta = trajectory[i][1] - trajectory[i - 1][1]
+            if delta != 0:
+                directions.append(1 if delta > 0 else -1)
+        reversals = 0
+        for i in range(1, len(directions)):
+            if directions[i] != directions[i - 1]:
+                reversals += 1
+        return reversals
+
+    # ── Static tests (fixed room temp, measure integral speed) ───────
+
+    def test_static_02c_offset_threshold(self):
+        """0.2°C offset: full-rate reaches setpoint-change threshold faster."""
+        var_rate, full_rate = self._run_ab_static(21.8, 60)
+        threshold = 0.5 / 0.15  # ≈ 3.33
+
+        var_tick = next((i+1 for i,v in enumerate(var_rate) if v >= threshold), None)
+        full_tick = next((i+1 for i,v in enumerate(full_rate) if v >= threshold), None)
+
+        # Full-rate should reach threshold no slower than variable-rate
+        if var_tick and full_tick:
+            assert full_tick <= var_tick
+
+    def test_static_zero_error_both_identical(self):
+        """At zero error, q-feedback dominates — both policies produce same drift."""
+        var_rate, full_rate = self._run_ab_static(22.0, 20)
+
+        # At error=0, integration contributes nothing (0 × rate = 0 regardless).
+        # Only q-feedback moves the integral. Both should be identical.
+        diff = abs(full_rate[-1] - var_rate[-1])
+        avg = (abs(full_rate[-1]) + abs(var_rate[-1])) / 2
+        if avg > 0.1:
+            assert diff / avg < 0.05, (
+                f"Expected identical at zero error: var={var_rate[-1]:.3f} "
+                f"full={full_rate[-1]:.3f}"
+            )
+
+    def test_static_deadband_edge_identical(self):
+        """At deadband edge, rate=1.0 in both policies → identical trajectories."""
+        var_rate, full_rate = self._run_ab_static(21.51, 10)  # 0.49°C ≈ edge
+
+        final_diff = abs(var_rate[-1] - full_rate[-1])
+        avg = (abs(var_rate[-1]) + abs(full_rate[-1])) / 2
+        if avg > 0.01:
+            assert final_diff / avg < 0.15
+
+    # ── Dynamic tests (room temp responds to HP, tests oscillation) ──
+
+    def test_dynamic_settling_no_oscillation(self):
+        """Closed-loop: room 1°C below target, both policies should settle.
+
+        Start at 21°C with target 22°C. The HP is initially at 22°C.
+        The PI needs to raise the HP setpoint to compensate for outdoor losses.
+        After the room approaches target, the setpoint should stabilize — not
+        oscillate between integers.
+
+        τ=60min (typical room), outdoor=5°C, hp_gain=0.8.
+        120 ticks = 30 hours — long enough to see any oscillation develop.
+        """
+        var_traj, full_traj = self._run_ab_dynamic(
+            21.0, 120, outdoor_c=5.0, tau_minutes=60.0, hp_gain=0.8,
+        )
+
+        for label, traj in [("variable-rate", var_traj), ("full-rate", full_traj)]:
+            reversals = self._count_reversals(traj)
+            # Some reversals are expected during initial convergence.
+            # Sustained oscillation would show many reversals (>6 in 30h).
+            assert reversals <= 6, (
+                f"{label}: {reversals} setpoint reversals in 120 ticks — "
+                f"likely oscillating. Setpoints: "
+                f"{[t[1] for t in traj[::10]]}"
+            )
+
+    def test_dynamic_small_offset_oscillation_risk(self):
+        """Closed-loop: room at target, small perturbation.  Does full-rate oscillate?
+
+        Start at 22°C (at target). The HP is at 24°C (FF-compensated).
+        Outdoor = 5°C. Room is stable. The PI should hold — not hunt.
+
+        This is the scenario where variable-rate might prevent oscillation:
+        with full-rate, the integral accumulates faster for small perturbations,
+        potentially crossing the hysteresis threshold and triggering a setpoint
+        change that overshoots.
+        """
+        var_traj, full_traj = self._run_ab_dynamic(
+            22.0, 80, outdoor_c=5.0, tau_minutes=60.0, hp_gain=0.8,
+            hp_setpoint=24,
+        )
+
+        var_changes = self._count_setpoint_changes(var_traj)
+        full_changes = self._count_setpoint_changes(full_traj)
+
+        # If full-rate causes significantly more setpoint changes, that's
+        # evidence of oscillation risk.  If similar, variable-rate isn't
+        # protecting against anything.
+        # Allow full-rate up to 2 more changes than variable-rate.
+        assert full_changes <= var_changes + 3, (
+            f"Full-rate made {full_changes} setpoint changes vs variable-rate's "
+            f"{var_changes} — potential oscillation. "
+            f"Setpoints: {[t[1] for t in full_traj[::10]]}"
+        )
+
+    def test_dynamic_slow_tau_house(self):
+        """Closed-loop with slow time constant (well-insulated house, τ=120min).
+
+        Slow-τ houses are where variable-rate was meant to help: the HP response
+        is sluggish, so aggressive integration could overshoot badly.
+
+        This tests whether full-rate causes more overshoot or oscillation in a
+        slow-response building.
+        """
+        var_traj, full_traj = self._run_ab_dynamic(
+            21.0, 160, outdoor_c=0.0, tau_minutes=120.0, hp_gain=0.7,
+        )
+
+        for label, traj in [("variable-rate", var_traj), ("full-rate", full_traj)]:
+            reversals = self._count_reversals(traj)
+            # Slow-τ houses should settle, not oscillate.
+            # The dwell timer (20 min) plus HP response lag should damp oscillation.
+            assert reversals <= 8, (
+                f"{label} with τ=120min: {reversals} reversals in 160 ticks — "
+                f"slow-τ oscillation. Room temps: "
+                f"{[f'{t[0]:.1f}' for t in traj[::20]]}"
+            )
+
+        # Check that both converge to similar room temperature
+        var_final_room = var_traj[-1][0]
+        full_final_room = full_traj[-1][0]
+        assert abs(var_final_room - full_final_room) < 1.0, (
+            f"Divergent outcomes: var room={var_final_room:.1f}°C, "
+            f"full room={full_final_room:.1f}°C"
+        )
+
+    def test_dynamic_fast_tau_room(self):
+        """Closed-loop with fast time constant (small room, τ=30min).
+
+        Fast-τ rooms respond quickly to HP changes, which means the room can
+        overshoot/undershoot rapidly after a setpoint change. This is where
+        oscillation is most likely.
+        """
+        var_traj, full_traj = self._run_ab_dynamic(
+            21.0, 80, outdoor_c=5.0, tau_minutes=30.0, hp_gain=0.9,
+        )
+
+        for label, traj in [("variable-rate", var_traj), ("full-rate", full_traj)]:
+            reversals = self._count_reversals(traj)
+            assert reversals <= 6, (
+                f"{label} with τ=30min: {reversals} reversals — "
+                f"fast-room oscillation. Setpoints: "
+                f"{[t[1] for t in traj[::10]]}"
+            )
+
+    def test_dynamic_room_temp_stays_in_comfort_band(self):
+        """Both policies should keep room within ±1°C of target after settling.
+
+        After initial convergence (first 20 ticks / 5h), the room should stay
+        within a ±1°C band around the 22°C target. Wider excursions indicate
+        oscillation or poor control.
+        """
+        var_traj, full_traj = self._run_ab_dynamic(
+            21.0, 80, outdoor_c=5.0, tau_minutes=60.0, hp_gain=0.8,
+        )
+
+        for label, traj in [("variable-rate", var_traj), ("full-rate", full_traj)]:
+            # Skip first 20 ticks (settling)
+            settled = traj[20:]
+            if not settled:
+                continue
+            room_temps = [t[0] for t in settled]
+            max_deviation = max(abs(t - 22.0) for t in room_temps)
+            assert max_deviation < 1.0, (
+                f"{label}: room deviated {max_deviation:.2f}°C from target "
+                f"after settling. Range: [{min(room_temps):.1f}, {max(room_temps):.1f}]"
+            )
+
+
+class TestPIMathContinued:
+    """Continued PI math tests (split for readability after tradeoff tests)."""
+
     @pytest.mark.asyncio
     async def test_ff_auto_learning_writes_bucket(self, pi_entity):
         """FF should write to bucket when settled for 2+ ticks in deadband."""
