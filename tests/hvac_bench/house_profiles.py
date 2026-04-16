@@ -20,16 +20,11 @@ class HouseProfile:
         hp_gain: Heat pump effectiveness (°C/min per °C setpoint above equilibrium).
             Derived from tau: gain ≈ 1 / (tau * some_factor). Higher = smaller room
             or more powerful HP.
-        solar_gain: Solar sensitivity coefficient. Multiplied by solar proxy (0-1)
-            to get °C/min of solar heating. Higher = more windows or south-facing.
-        stove_gain: Supplemental heat source gain (°C/min when active).
         description: What kind of building this represents.
     """
     name: str
     tau_minutes: float
     hp_gain: float
-    solar_gain: float = 0.3
-    stove_gain: float = 0.15
     description: str = ""
 
 
@@ -62,8 +57,6 @@ class HouseProfile2R2C:
             from the wall side is τ_couple * mass_ratio.
         hp_gain: HP effectiveness (1/min). HP heating rate per °C of
             setpoint above room temp. Typical: 0.02-0.08.
-        solar_gain: Solar heating rate (°C/min per unit solar proxy).
-        stove_gain: Supplemental heat rate (°C/min when active).
         description: What kind of building this represents.
     """
     name: str
@@ -71,8 +64,6 @@ class HouseProfile2R2C:
     tau_couple: float
     mass_ratio: float
     hp_gain: float
-    solar_gain: float = 0.3
-    stove_gain: float = 0.15
     description: str = ""
 
     @property
@@ -120,36 +111,30 @@ PROFILES_1R1C = {
         name="Studio Apartment",
         tau_minutes=15,
         hp_gain=0.08,
-        solar_gain=0.6,
         description="Small volume, fast response, high solar exposure",
     ),
     "drafty_bungalow": HouseProfile(
         name="Drafty Bungalow",
         tau_minutes=25,
         hp_gain=0.12,
-        solar_gain=0.5,
         description="Older construction, poor insulation, single story — HP sized for -5°C design",
     ),
     "standard_residential": HouseProfile(
         name="Standard Residential",
         tau_minutes=50,
         hp_gain=0.06,
-        solar_gain=0.4,
         description="Typical modern home with decent insulation, HP sized for -5°C design",
     ),
     "well_insulated": HouseProfile(
         name="Well Insulated",
         tau_minutes=120,
         hp_gain=0.025,
-        solar_gain=0.15,
-        stove_gain=0.1,
         description="High-performance envelope, triple glazing, minimal infiltration",
     ),
     "heavy_masonry": HouseProfile(
         name="Heavy Masonry",
         tau_minutes=150,
         hp_gain=0.02,
-        solar_gain=0.2,
         description="Brick/concrete construction with high thermal mass",
     ),
 }
@@ -167,7 +152,6 @@ PROFILES = {
         tau_couple=20,
         mass_ratio=3,
         hp_gain=0.08,
-        solar_gain=0.6,
         description="Small volume, fast air response, high solar exposure",
     ),
     "drafty_bungalow": HouseProfile2R2C(
@@ -176,7 +160,6 @@ PROFILES = {
         tau_couple=40,
         mass_ratio=5,
         hp_gain=0.06,
-        solar_gain=0.5,
         description="Older construction, poor insulation, single story",
     ),
     "standard_residential": HouseProfile2R2C(
@@ -185,7 +168,6 @@ PROFILES = {
         tau_couple=80,
         mass_ratio=15,
         hp_gain=0.025,
-        solar_gain=0.4,
         description="Modern home, decent insulation, HP sized for -5°C design",
     ),
     "well_insulated": HouseProfile2R2C(
@@ -194,8 +176,6 @@ PROFILES = {
         tau_couple=150,
         mass_ratio=15,
         hp_gain=0.010,
-        solar_gain=0.15,
-        stove_gain=0.1,
         description="High-performance envelope, triple glazing, minimal infiltration",
     ),
     "heavy_masonry": HouseProfile2R2C(
@@ -204,7 +184,6 @@ PROFILES = {
         tau_couple=80,
         mass_ratio=25,
         hp_gain=0.012,
-        solar_gain=0.2,
         description="Brick/concrete construction with very high thermal mass",
     ),
 }
@@ -222,8 +201,6 @@ PROFILES_2R2C = {
         tau_couple=30,
         mass_ratio=20,
         hp_gain=0.04,
-        solar_gain=0.05,
-        stove_gain=0.0,
         description="100yo house, single-pane sunroom exposure, mini-split head. "
                     "Calibrated from 48h production data (Apr 2026). "
                     "Design: 66°F at -15°F outdoor (marginal).",
@@ -234,8 +211,6 @@ PROFILES_2R2C = {
         tau_couple=20,
         mass_ratio=30,
         hp_gain=0.02,
-        solar_gain=0.0,
-        stove_gain=0.0,
         description="100yo house, smaller zone, no direct solar. "
                     "Calibrated from 72h production data (Apr 2026). "
                     "Design: 63°F at -15°F outdoor (undersized HP). "

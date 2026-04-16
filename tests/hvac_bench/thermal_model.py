@@ -59,7 +59,8 @@ class ThermalModel:
                  outdoor_temp: float = 5.0, cop_model: COPModel | None = None,
                  sensor_noise_sigma: float = 0.0, sensor_quantization: float = 0.0,
                  noise_seed: int | None = None,
-                 hp_lag_minutes: float = 0.0):
+                 hp_lag_minutes: float = 0.0,
+                 solar_gain: float = 0.0, stove_gain: float = 0.0):
         """Initialize thermal model.
 
         Args:
@@ -72,8 +73,12 @@ class ThermalModel:
             noise_seed: Random seed for reproducible noise. None = random.
             hp_lag_minutes: First-order lag on HP response (minutes). 0 = instant.
                 Models the delay from setpoint change to room temperature effect.
+            solar_gain: Solar sensitivity (°C/min per unit solar proxy). Zone config.
+            stove_gain: Supplemental heat gain (°C/min when active). Zone config.
         """
         self.profile = profile
+        self.solar_gain = solar_gain
+        self.stove_gain = stove_gain
         self.room_temp = initial_temp
         self.outdoor_temp = outdoor_temp
         self.cop_model = cop_model or COPModel()
@@ -132,8 +137,8 @@ class ThermalModel:
         tau_eff = tau * tau_modifier
 
         # Heat inputs
-        solar_heat = self.profile.solar_gain * solar_proxy * dt_minutes
-        stove_heat = self.profile.stove_gain * stove_active * dt_minutes
+        solar_heat = self.solar_gain * solar_proxy * dt_minutes
+        stove_heat = self.stove_gain * stove_active * dt_minutes
 
         # Equilibrium temperature (where room would settle with constant inputs)
         total_gain = 1.0 / tau_eff + hp_gain
@@ -205,8 +210,11 @@ class ThermalModel2R2C:
                  sensor_noise_sigma: float = 0.0, sensor_quantization: float = 0.0,
                  noise_seed: int | None = None,
                  hp_lag_minutes: float = 0.0,
-                 initial_wall_temp: float | None = None):
+                 initial_wall_temp: float | None = None,
+                 solar_gain: float = 0.0, stove_gain: float = 0.0):
         self.profile = profile
+        self.solar_gain = solar_gain
+        self.stove_gain = stove_gain
         self.room_temp = initial_temp  # Air node — what the sensor reads
         self.wall_temp = initial_wall_temp if initial_wall_temp is not None else initial_temp
         self.outdoor_temp = outdoor_temp
@@ -265,10 +273,10 @@ class ThermalModel2R2C:
         # Solar is split: ~30% heats air convectively, ~70% is absorbed
         # by walls/furniture as radiation. This prevents the small air
         # capacitance from over-responding to solar transients.
-        q_solar_total = p.solar_gain * solar_proxy
+        q_solar_total = self.solar_gain * solar_proxy
         q_solar_air = q_solar_total * 0.3
         q_solar_wall = q_solar_total * 0.7
-        q_stove = p.stove_gain * stove_active
+        q_stove = self.stove_gain * stove_active
         q_extra = extra_heat
 
         # System matrix A and forcing vector b:

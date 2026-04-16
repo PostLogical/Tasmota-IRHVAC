@@ -198,7 +198,8 @@ def run_solar_gain(tick_min, hold_seconds, profile):
     ctrl.set_desired_temp(20.5)
     model = ThermalModel(profile=profile, initial_temp=19.0, outdoor_temp=0.0,
                          sensor_noise_sigma=0.05, noise_seed=42,
-                         hp_lag_minutes=HP_LAG)
+                         hp_lag_minutes=HP_LAG,
+                         solar_gain=0.4)
 
     solar_start = int(1 * 60 / tick_min)
     solar_peak = int(3 * 60 / tick_min)

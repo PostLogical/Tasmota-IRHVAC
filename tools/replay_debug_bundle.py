@@ -495,8 +495,6 @@ def run_closed_loop(data: AlignedData,
         name="calibrated_living_room",
         tau_minutes=tau_minutes,
         hp_gain=hp_gain,
-        solar_gain=solar_gain,
-        stove_gain=stove_gain,
     )
 
     model = ThermalModel(
@@ -507,6 +505,8 @@ def run_closed_loop(data: AlignedData,
         sensor_quantization=0.01,  # 0.02°F ≈ 0.011°C
         noise_seed=42,
         hp_lag_minutes=hp_lag_minutes,
+        solar_gain=solar_gain,
+        stove_gain=stove_gain,
     )
 
     # Build PI model inputs config for the adapter
@@ -645,14 +645,15 @@ def print_report(data: AlignedData, best: CalibrationResult,
     print(f"  RMSE:           {best.rmse_c:.4f} °C ({best.rmse_c * 9/5:.4f} °F)")
     print(f"  MAE:            {best.mae_c:.4f} °C ({best.mae_c * 9/5:.4f} °F)")
 
-    print(f"\n── HouseProfile for bench tests ──")
+    print(f"\n── HouseProfile + model gains for bench tests ──")
     print(f'  HouseProfile(')
     print(f'      name="living_room_calibrated",')
     print(f'      tau_minutes={best.tau_minutes:.1f},')
     print(f'      hp_gain={best.hp_gain:.4f},')
-    print(f'      solar_gain={best.solar_gain:.4f},')
-    print(f'      stove_gain={best.stove_gain:.4f},')
     print(f'  )')
+    print(f'  # Zone gains (pass to ThermalModel constructor):')
+    print(f'  solar_gain={best.solar_gain:.4f},')
+    print(f'  stove_gain={best.stove_gain:.4f},')
 
     if closed_loop:
         print(f"\n── Closed-Loop Validation ──")

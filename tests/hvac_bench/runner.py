@@ -14,7 +14,9 @@ def run_scenario(controller: HVACController, model: ThermalModel,
                  n_ticks: int, mode: str = "heat",
                  outdoor_schedule=None, solar_schedule=None,
                  desired_schedule=None, stove_schedule=None,
-                 tick_interval_min: float = 15.0) -> list[dict]:
+                 tick_interval_min: float = 15.0,
+                 solar_gain: float | None = None,
+                 stove_gain: float | None = None) -> list[dict]:
     """Run a benchmark scenario.
 
     Args:
@@ -27,10 +29,16 @@ def run_scenario(controller: HVACController, model: ThermalModel,
         desired_schedule: dict {tick: temp} for setpoint changes.
         stove_schedule: dict {tick: val} or callable(tick) -> val.
         tick_interval_min: Minutes per tick (default 15).
+        solar_gain: Override model's solar gain for this run.
+        stove_gain: Override model's stove gain for this run.
 
     Returns:
         List of history dicts, one per tick.
     """
+    if solar_gain is not None:
+        model.solar_gain = solar_gain
+    if stove_gain is not None:
+        model.stove_gain = stove_gain
     dt_seconds = tick_interval_min * 60.0
     controller.set_mode(mode)
 

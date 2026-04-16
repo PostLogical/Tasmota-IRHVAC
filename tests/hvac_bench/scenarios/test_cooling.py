@@ -114,12 +114,16 @@ class TestCoolingSteadyState:
 class TestCoolingSolarRejection:
     """Solar gain warms room during cooling mode. Controller must compensate."""
 
+    # Zone-level solar sensitivity per archetype (was formerly baked into profiles)
+    SOLAR_GAINS = {"drafty_bungalow": 0.5, "standard_residential": 0.4, "well_insulated": 0.15}
+
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
     def test_solar_rejection(self, profile_name):
         profile = QUICK_PROFILES[profile_name]
         ctrl = _make_controller(seed_factor=1.0)
         ctrl.set_desired_temp(24.0)
-        model = _make_model(profile, initial_temp=24.0, outdoor=30.0)
+        model = _make_model(profile, initial_temp=24.0, outdoor=30.0,
+                            solar_gain=self.SOLAR_GAINS[profile_name])
 
         def solar(tick):
             if tick < 4:
