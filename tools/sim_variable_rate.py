@@ -128,7 +128,8 @@ class SimTrace:
 
 
 async def run_sim(entity, room, duration_hours, desired_c,
-                  outdoor_events=None, dt_room=60.0, pi_interval=900.0):
+                  outdoor_events=None, solar_fn=None, sensor_noise_std=0.0,
+                  dt_room=60.0, pi_interval=900.0):
     """Run closed-loop simulation with real PIController and RoomModel.
 
     Args:
@@ -137,6 +138,8 @@ async def run_sim(entity, room, duration_hours, desired_c,
         duration_hours: Total simulation time.
         desired_c: Target temperature in °C.
         outdoor_events: List of (hour, outdoor_temp_c) for outdoor temp changes.
+        solar_fn: Optional callable(hour) → watts of solar gain to add to room.
+        sensor_noise_std: Gaussian noise std dev on sensor reading (°C).
         dt_room: Room model timestep in seconds.
         pi_interval: PI tick interval in seconds.
     """
@@ -144,6 +147,7 @@ async def run_sim(entity, room, duration_hours, desired_c,
     await pi.set_temperature(desired_c)
     pi._inputs.outdoor_temp = room.outdoor_temp
 
+    rng = np.random.default_rng(42)  # Deterministic noise for reproducibility
     outdoor_events = sorted(outdoor_events or [], key=lambda e: e[0])
     event_idx = 0
     steps = int(duration_hours * 3600 / dt_room)
@@ -163,11 +167,16 @@ async def run_sim(entity, room, duration_hours, desired_c,
             pi._inputs.outdoor_temp = room.outdoor_temp
             event_idx += 1
 
+        # Apply solar gain
+        if solar_fn is not None:
+            room.supplemental_heat = solar_fn(t_hr)
+
         # Room physics step
         room.step(float(pi._hp_setpoint), desired_c, dt_room)
 
-        # Update entity with new room temp
-        entity._attr_current_temperature = room.room_temp
+        # Update entity with noisy sensor reading
+        noise = rng.normal(0, sensor_noise_std) if sensor_noise_std > 0 else 0.0
+        entity._attr_current_temperature = room.room_temp + noise
 
         # PI tick at interval
         if step % pi_interval_steps == 0 and step > 0:
@@ -274,6 +283,7 @@ async def run_ab(label, room_factory, desired_c, duration_hours,
 
 async def run_ab_with_warmup(label, room_factory, desired_c, duration_hours,
                             warmup_hours=6, outdoor_events=None,
+                            solar_fn=None, sensor_noise_std=0.0,
                             config_overrides=None):
     """Run A/B with a warmup phase so the system starts near equilibrium.
 
@@ -284,7 +294,7 @@ async def run_ab_with_warmup(label, room_factory, desired_c, duration_hours,
     config = make_pi_config(config_overrides)
     outdoor_c = room_factory().outdoor_temp
 
-    # Warmup: run variable-rate to equilibrium
+    # Warmup: run variable-rate to equilibrium (no noise/solar during warmup)
     warmup_room = room_factory()
     warmup_entity = SimEntity(config, warmup_room.room_temp, warmup_room.outdoor_temp)
     await run_sim(warmup_entity, warmup_room, warmup_hours, desired_c)
@@ -322,7 +332,9 @@ async def run_ab_with_warmup(label, room_factory, desired_c, duration_hours,
             pi._deadband_integration_rate = rate_fn
 
         trace = await run_sim(entity, room, duration_hours, desired_c,
-                              outdoor_events=outdoor_events)
+                              outdoor_events=outdoor_events,
+                              solar_fn=solar_fn,
+                              sensor_noise_std=sensor_noise_std)
         history = trace_to_history(trace, desired_c, outdoor_c)
 
         metrics = {
@@ -420,6 +432,54 @@ async def main():
         "Bunkroom: Door-open perturbation from equilibrium (12h)",
         lambda: make_bunkroom(room_temp=20.5, outdoor_temp=10.0),
         desired_c=21.0, duration_hours=12,
+    )
+
+    # ── Edge Cases ────────────────────────────────────────────────────
+
+    # Edge case 1: Sensor noise near setpoint boundary
+    # Room at equilibrium, ±0.1°C Gaussian noise on sensor.
+    # If the room is near a midpoint (e.g., raw_setpoint near X.5),
+    # noise could ratchet the integral past the hysteresis threshold.
+    # Variable-rate's slower accumulation would resist ratcheting.
+    # Full-rate would accumulate the noise-driven error faster.
+    all_results["br_noise"] = await run_ab_with_warmup(
+        "EDGE: Bunkroom + sensor noise ±0.1°C (12h)",
+        lambda: make_bunkroom(room_temp=19.0, outdoor_temp=10.0),
+        desired_c=21.0, duration_hours=12,
+        sensor_noise_std=0.1,
+    )
+
+    # Edge case 2: Solar day/night cycle
+    # Solar gain peaks at ~1500W midday (south-facing windows), zero at night.
+    # Sinusoidal: peaks at hour 6 (midday relative to sim start).
+    # The FF model doesn't know about solar (no model input configured).
+    # The integral must compensate reactively.
+    #
+    # Day: solar warms room above target → integral goes negative
+    # Night: solar gone → room cools, integral must recover from negative
+    # The deadband transit at dusk/dawn is where integration rate matters.
+    # Run 48h to see two full cycles.
+    def solar_cycle(t_hr):
+        """Sinusoidal solar gain: 0 at night, peaks at 1500W midday."""
+        # 24h period, peak at t=6h (noon in sim time), zero at t=18h
+        phase = (t_hr % 24.0) / 24.0 * 2 * math.pi - math.pi / 2
+        return max(0.0, 1500.0 * math.sin(phase))
+
+    all_results["lr_solar"] = await run_ab_with_warmup(
+        "EDGE: Living Room + solar day/night cycle, no model input (48h)",
+        lambda: make_living_room(room_temp=22.0, outdoor_temp=10.0),
+        desired_c=22.0, duration_hours=48,
+        warmup_hours=6,
+        solar_fn=solar_cycle,
+    )
+
+    # Same solar scenario but bunkroom (fast τ — more responsive to solar)
+    all_results["br_solar"] = await run_ab_with_warmup(
+        "EDGE: Bunkroom + solar day/night cycle, no model input (48h)",
+        lambda: make_bunkroom(room_temp=21.0, outdoor_temp=10.0),
+        desired_c=21.0, duration_hours=48,
+        warmup_hours=6,
+        solar_fn=solar_cycle,
     )
 
     # Summary table
