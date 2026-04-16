@@ -1398,12 +1398,20 @@ class PIController:
         return result.hp_should_send_ir
 
     def _deadband_integration_rate(self, abs_error: float) -> float:
-        """Compute integration rate inside the deadband.
+        """Integration rate inside the deadband.
 
-        Returns a value in [0.05, 1.0] that scales the integration speed
-        based on distance from the setpoint.  Overridable for testing.
+        Full-rate: the integrator accumulates the actual error regardless of
+        proximity to setpoint.  Anti-cycling is handled by hysteresis, dwell
+        timer, and leaky integrator — not by throttling the integration signal.
+
+        Literature basis: standard PI practice for quantized actuators
+        (McMillan, Åström & Hägglund).  Confirmed by A/B simulation across
+        steady-state, sensor noise, and solar day/night cycling scenarios.
+        Full-rate produces lower ITAE, fewer reversals, and fewer setpoint
+        changes than the previous variable-rate (error²/deadband) policy
+        during regime transitions through the deadband.
         """
-        return max(0.05, min(1.0, abs_error / self._pi_deadband))
+        return 1.0
 
     # ── RLS learning ─────────────────────────────────────────────────
 
@@ -1841,9 +1849,9 @@ class PIController:
 
         if in_deadband:
             self._ff_settled_ticks += 1
-            # Variable-rate integration: smooth taper from full rate at deadband
-            # edge to 5% floor at setpoint (Åström §3.5 — don't stop integrating
-            # near setpoint, but reduce speed to limit accumulation).
+            # Full-rate integration in deadband: accumulate the actual error.
+            # P-term is zero here; the integrator is the only mechanism
+            # correcting steady-state offset from HP quantization.
             rate = self._deadband_integration_rate(abs_error)
             if not skip_integration:
                 self._pi_integral += avg_error * dt_factor * rate

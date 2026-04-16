@@ -934,13 +934,13 @@ class TestPIEdgeCases:
         assert pi_entity._pi._hp_setpoint == old_setpoint
 
     @pytest.mark.asyncio
-    async def test_variable_rate_integration_in_deadband(self, pi_entity):
-        """In deadband, integral should accumulate at reduced rate, not freeze.
+    async def test_full_rate_integration_in_deadband(self, pi_entity):
+        """In deadband, integral should accumulate at full rate, not freeze.
 
-        Variable-rate integration (Åström §3.5) replaces the old freeze.
-        Rate scales linearly with |error|/deadband, floor 0.05.
+        Full-rate integration: the integrator accumulates the actual error.
+        Anti-cycling handled by hysteresis, dwell timer, leaky integrator.
         """
-        pi_entity._attr_current_temperature = 22.0  # Error = 0 → rate = 0.05 (floor)
+        pi_entity._attr_current_temperature = 22.0  # Error = 0
         pi_entity._pi._desired_temp = 22.0
         pi_entity._pi._hp_setpoint = 22.0
         pi_entity._pi._pi_integral = -5.0
@@ -949,15 +949,14 @@ class TestPIEdgeCases:
 
         await pi_entity._pi._pi_tick()
 
-        # Integral should change slightly from variable-rate integration + leaky decay,
-        # NOT be frozen. With error=0, rate=0.05, accumulation is minimal but leak applies.
-        # Leak: -5.0 * 0.999 = -4.995
+        # Integral should change from leaky decay (error=0 → no accumulation).
+        # Leak: -5.0 * 0.9999 ≈ -4.9995
         assert pi_entity._pi._pi_integral != -5.0  # Not frozen
         assert pi_entity._pi._pi_integral < -4.9  # Leak doesn't drain it quickly
 
     @pytest.mark.asyncio
-    async def test_variable_rate_scales_with_error(self, pi_entity):
-        """Integration rate should scale with |error|/deadband in deadband."""
+    async def test_deadband_integration_proportional_to_error(self, pi_entity):
+        """Full-rate integration: larger error → proportionally more accumulation."""
         pi = pi_entity._pi
         pi._desired_temp = 22.0
         pi._hp_setpoint = 22.0
@@ -965,25 +964,27 @@ class TestPIEdgeCases:
         pi._pi_deadband = 0.5
         pi_entity._attr_hvac_mode = HVACMode.HEAT
 
-        # Small error (near setpoint): rate ≈ 0.1/0.5 = 0.2
+        # Small error: 0.1°C
         pi._pi_integral = 0.0
         pi_entity._attr_current_temperature = 21.9  # Error = +0.1
         await pi._pi_tick()
         integral_small_error = pi._pi_integral
 
-        # Larger error (near deadband edge): rate ≈ 0.4/0.5 = 0.8
+        # Larger error: 0.4°C
         pi._pi_integral = 0.0
         pi._pi_last_tick_time = 0
         pi_entity._attr_current_temperature = 21.6  # Error = +0.4
         await pi._pi_tick()
         integral_large_error = pi._pi_integral
 
-        # Larger error → faster integration → larger integral magnitude
+        # Full-rate: integral scales linearly with error (4× error → ~4× integral)
         assert abs(integral_large_error) > abs(integral_small_error)
+        ratio = abs(integral_large_error) / abs(integral_small_error)
+        assert ratio > 3.0, f"Expected ~4× ratio, got {ratio:.1f}×"
 
     @pytest.mark.asyncio
-    async def test_deadband_integration_small_near_setpoint(self, pi_entity):
-        """Error within deadband should accumulate slowly, not at full rate."""
+    async def test_deadband_integration_not_throttled(self, pi_entity):
+        """Error within deadband should accumulate at full rate."""
         pi_entity._attr_current_temperature = 22.3  # Error = -0.3 (in deadband)
         pi_entity._pi._desired_temp = 22.0
         pi_entity._pi._hp_setpoint = 22.0
@@ -993,20 +994,19 @@ class TestPIEdgeCases:
 
         await pi_entity._pi._pi_tick()
 
-        # Variable-rate integration at rate = 0.3/0.5 = 0.6, so integral
-        # accumulates at 60% of full rate. Still small after one tick.
-        assert abs(pi_entity._pi._pi_integral) < 0.5
+        # Full-rate: 0.3°C error × 1.0 rate × 1.0 dt_factor = ~0.3 integral
+        # (trapezoidal with prev_error=0 → avg = 0.15, but first tick uses error directly)
+        assert abs(pi_entity._pi._pi_integral) > 0.1, (
+            f"Full-rate should accumulate meaningfully, got {pi_entity._pi._pi_integral:.3f}"
+        )
 
 
-class TestVariableRateTradeoffs:
-    """A/B comparison: variable-rate vs full-rate integration in the deadband.
+class TestFullRateIntegrationRegression:
+    """Regression tests confirming full-rate deadband integration is correct.
 
-    Each test runs the same scenario twice — once with the current variable-rate
-    policy (rate = |error|/deadband, floor 0.05) and once with full-rate (rate=1.0).
-
-    The key question is oscillation: when the HP changes setpoint by 1°C, does
-    full-rate integration cause the system to cycle between setpoints, or does
-    the dwell timer + leaky integrator prevent it?
+    Each test runs the same scenario twice — once with full-rate (current policy,
+    rate=1.0) and once with the old variable-rate (rate = |error|/deadband,
+    floor 0.05) to confirm full-rate is at least as good.
 
     Includes both static tests (fixed room temp) and closed-loop dynamic tests
     (room temp responds to HP setpoint via a simple thermal model).
@@ -1084,16 +1084,22 @@ class TestVariableRateTradeoffs:
 
         return trajectory
 
+    @staticmethod
+    def _old_variable_rate(deadband):
+        """Return the old variable-rate policy for comparison."""
+        return lambda ae: max(0.05, min(1.0, ae / deadband))
+
     def _run_ab_static(self, current_temp, n_ticks, **kwargs):
-        """Run static scenario with both policies, return (var_integrals, full_integrals)."""
-        entity_a = self._make_entity(current_temp, **kwargs)
-        integrals_a = self._run_static(entity_a, n_ticks)
+        """Run static scenario with both policies, return (full_integrals, var_integrals)."""
+        entity_full = self._make_entity(current_temp, **kwargs)
+        integrals_full = self._run_static(entity_full, n_ticks)
 
-        entity_b = self._make_entity(current_temp, **kwargs)
-        entity_b._pi._deadband_integration_rate = lambda ae: 1.0
-        integrals_b = self._run_static(entity_b, n_ticks)
+        entity_var = self._make_entity(current_temp, **kwargs)
+        entity_var._pi._deadband_integration_rate = self._old_variable_rate(
+            entity_var._pi._pi_deadband)
+        integrals_var = self._run_static(entity_var, n_ticks)
 
-        return integrals_a, integrals_b
+        return integrals_full, integrals_var
 
     def _run_ab_dynamic(self, start_temp, n_ticks, outdoor_c=5.0,
                         tau_minutes=60.0, hp_gain=0.8, **kwargs):
@@ -1101,14 +1107,15 @@ class TestVariableRateTradeoffs:
 
         Each trajectory is a list of (room_temp, hp_setpoint, integral).
         """
-        entity_a = self._make_entity(start_temp, outdoor=outdoor_c, **kwargs)
-        traj_a = self._run_dynamic(entity_a, n_ticks, outdoor_c, tau_minutes, hp_gain)
+        entity_full = self._make_entity(start_temp, outdoor=outdoor_c, **kwargs)
+        traj_full = self._run_dynamic(entity_full, n_ticks, outdoor_c, tau_minutes, hp_gain)
 
-        entity_b = self._make_entity(start_temp, outdoor=outdoor_c, **kwargs)
-        entity_b._pi._deadband_integration_rate = lambda ae: 1.0
-        traj_b = self._run_dynamic(entity_b, n_ticks, outdoor_c, tau_minutes, hp_gain)
+        entity_var = self._make_entity(start_temp, outdoor=outdoor_c, **kwargs)
+        entity_var._pi._deadband_integration_rate = self._old_variable_rate(
+            entity_var._pi._pi_deadband)
+        traj_var = self._run_dynamic(entity_var, n_ticks, outdoor_c, tau_minutes, hp_gain)
 
-        return traj_a, traj_b
+        return traj_full, traj_var
 
     @staticmethod
     def _count_setpoint_changes(trajectory):
@@ -1140,7 +1147,7 @@ class TestVariableRateTradeoffs:
 
     def test_static_02c_offset_threshold(self):
         """0.2°C offset: full-rate reaches setpoint-change threshold faster."""
-        var_rate, full_rate = self._run_ab_static(21.8, 60)
+        full_rate, var_rate = self._run_ab_static(21.8, 60)
         threshold = 0.5 / 0.15  # ≈ 3.33
 
         var_tick = next((i+1 for i,v in enumerate(var_rate) if v >= threshold), None)
@@ -1152,7 +1159,7 @@ class TestVariableRateTradeoffs:
 
     def test_static_zero_error_both_identical(self):
         """At zero error, q-feedback dominates — both policies produce same drift."""
-        var_rate, full_rate = self._run_ab_static(22.0, 20)
+        full_rate, var_rate = self._run_ab_static(22.0, 20)
 
         # At error=0, integration contributes nothing (0 × rate = 0 regardless).
         # Only q-feedback moves the integral. Both should be identical.
@@ -1165,11 +1172,11 @@ class TestVariableRateTradeoffs:
             )
 
     def test_static_deadband_edge_identical(self):
-        """At deadband edge, rate=1.0 in both policies → identical trajectories."""
-        var_rate, full_rate = self._run_ab_static(21.51, 10)  # 0.49°C ≈ edge
+        """At deadband edge, both policies produce identical trajectories."""
+        full_rate, var_rate = self._run_ab_static(21.51, 10)  # 0.49°C ≈ edge
 
-        final_diff = abs(var_rate[-1] - full_rate[-1])
-        avg = (abs(var_rate[-1]) + abs(full_rate[-1])) / 2
+        final_diff = abs(full_rate[-1] - var_rate[-1])
+        avg = (abs(full_rate[-1]) + abs(var_rate[-1])) / 2
         if avg > 0.01:
             assert final_diff / avg < 0.15
 
@@ -1186,11 +1193,11 @@ class TestVariableRateTradeoffs:
         τ=60min (typical room), outdoor=5°C, hp_gain=0.8.
         120 ticks = 30 hours — long enough to see any oscillation develop.
         """
-        var_traj, full_traj = self._run_ab_dynamic(
+        full_traj, var_traj = self._run_ab_dynamic(
             21.0, 120, outdoor_c=5.0, tau_minutes=60.0, hp_gain=0.8,
         )
 
-        for label, traj in [("variable-rate", var_traj), ("full-rate", full_traj)]:
+        for label, traj in [("full-rate", full_traj), ("variable-rate", var_traj)]:
             reversals = self._count_reversals(traj)
             # Some reversals are expected during initial convergence.
             # Sustained oscillation would show many reversals (>6 in 30h).
@@ -1211,7 +1218,7 @@ class TestVariableRateTradeoffs:
         potentially crossing the hysteresis threshold and triggering a setpoint
         change that overshoots.
         """
-        var_traj, full_traj = self._run_ab_dynamic(
+        full_traj, var_traj = self._run_ab_dynamic(
             22.0, 80, outdoor_c=5.0, tau_minutes=60.0, hp_gain=0.8,
             hp_setpoint=24,
         )
@@ -1238,11 +1245,11 @@ class TestVariableRateTradeoffs:
         This tests whether full-rate causes more overshoot or oscillation in a
         slow-response building.
         """
-        var_traj, full_traj = self._run_ab_dynamic(
+        full_traj, var_traj = self._run_ab_dynamic(
             21.0, 160, outdoor_c=0.0, tau_minutes=120.0, hp_gain=0.7,
         )
 
-        for label, traj in [("variable-rate", var_traj), ("full-rate", full_traj)]:
+        for label, traj in [("full-rate", full_traj), ("variable-rate", var_traj)]:
             reversals = self._count_reversals(traj)
             # Slow-τ houses should settle, not oscillate.
             # The dwell timer (20 min) plus HP response lag should damp oscillation.
@@ -1267,11 +1274,11 @@ class TestVariableRateTradeoffs:
         overshoot/undershoot rapidly after a setpoint change. This is where
         oscillation is most likely.
         """
-        var_traj, full_traj = self._run_ab_dynamic(
+        full_traj, var_traj = self._run_ab_dynamic(
             21.0, 80, outdoor_c=5.0, tau_minutes=30.0, hp_gain=0.9,
         )
 
-        for label, traj in [("variable-rate", var_traj), ("full-rate", full_traj)]:
+        for label, traj in [("full-rate", full_traj), ("variable-rate", var_traj)]:
             reversals = self._count_reversals(traj)
             assert reversals <= 6, (
                 f"{label} with τ=30min: {reversals} reversals — "
@@ -1286,11 +1293,11 @@ class TestVariableRateTradeoffs:
         within a ±1°C band around the 22°C target. Wider excursions indicate
         oscillation or poor control.
         """
-        var_traj, full_traj = self._run_ab_dynamic(
+        full_traj, var_traj = self._run_ab_dynamic(
             21.0, 80, outdoor_c=5.0, tau_minutes=60.0, hp_gain=0.8,
         )
 
-        for label, traj in [("variable-rate", var_traj), ("full-rate", full_traj)]:
+        for label, traj in [("full-rate", full_traj), ("variable-rate", var_traj)]:
             # Skip first 20 ticks (settling)
             settled = traj[20:]
             if not settled:
