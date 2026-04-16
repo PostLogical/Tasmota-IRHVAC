@@ -36,7 +36,7 @@ async def async_setup_entry(
 
     if not climate_entity._pi:
         return
-    if not climate_entity._pi._pi_enabled:
+    if not climate_entity._pi.is_active:
         return
 
     async_add_entities([
@@ -89,7 +89,7 @@ class FFLearningSuppressedBinarySensor(BinarySensorEntity):
         pi = self._pi
         if pi is None:
             return False
-        return bool(pi._disturbance_suppress_active)
+        return pi.get_learning_status()["suppressed"]
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -97,10 +97,11 @@ class FFLearningSuppressedBinarySensor(BinarySensorEntity):
         pi = self._pi
         if pi is None:
             return {}
+        status = pi.get_learning_status()
         return {
-            "manual_suppress": pi._manual_ff_suppress,
-            "manual_suppress_reason": pi._manual_ff_suppress_reason,
-            "active_suppressors": pi._disturbance_active_suppressors,
+            "manual_suppress": status["manual_suppress"],
+            "manual_suppress_reason": status["manual_suppress_reason"],
+            "active_suppressors": status["active_suppressors"],
         }
 
     async def async_added_to_hass(self) -> None:

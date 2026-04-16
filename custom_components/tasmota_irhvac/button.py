@@ -95,7 +95,7 @@ async def async_setup_entry(
             )
 
     # Save Learned Seeds button (PI controller only)
-    if climate_entity._pi and climate_entity._pi._pi_enabled:
+    if climate_entity._pi and climate_entity._pi.is_active:
         buttons.append(
             SaveLearnedSeedsButton(
                 climate_entity=climate_entity,
@@ -241,7 +241,7 @@ class SaveLearnedSeedsButton(ButtonEntity):
         return (
             bool(self._climate.available)
             and pi is not None
-            and pi._rls_heat.observation_count > 0
+            and pi.has_rls_observations()
         )
 
     async def async_press(self) -> None:
@@ -250,44 +250,26 @@ class SaveLearnedSeedsButton(ButtonEntity):
         if pi is None:
             return
 
-        heat_beta = pi._rls_heat.beta
-        cool_beta = pi._rls_cool.beta
-
-        # Build updated options
+        learned = pi.get_learned_seed_config()
         new_options = dict(self._entry.options)
 
-        # Outdoor delta slope (beta[1], stored as positive for heat)
-        if len(heat_beta) > 1:
-            new_options[CONF_PI_FF_HEAT_SLOPE] = round(heat_beta[1], 4)
-        if len(cool_beta) > 1:
-            new_options[CONF_PI_FF_COOL_SLOPE] = round(abs(cool_beta[1]), 4)
+        if "heat_slope" in learned:
+            new_options[CONF_PI_FF_HEAT_SLOPE] = learned["heat_slope"]
+        if "cool_slope" in learned:
+            new_options[CONF_PI_FF_COOL_SLOPE] = learned["cool_slope"]
 
-        # Model input seeds (beta[2+])
         model_inputs = list(new_options.get(CONF_PI_MODEL_INPUTS, []))
-        for i, m_input in enumerate(model_inputs):
-            beta_idx = i + 2  # 0=intercept, 1=outdoor_delta, 2+=model inputs
-            updated = dict(m_input)
-            if beta_idx < len(heat_beta):
-                updated["seed_heat"] = round(heat_beta[beta_idx], 4)
-            if beta_idx < len(cool_beta):
-                updated["seed_cool"] = round(cool_beta[beta_idx], 4)
-            model_inputs[i] = updated
-
+        for i, seeds in enumerate(learned.get("input_seeds", [])):
+            if i < len(model_inputs):
+                updated = dict(model_inputs[i])
+                updated.update(seeds)
+                model_inputs[i] = updated
         new_options[CONF_PI_MODEL_INPUTS] = model_inputs
 
-        # Update config entry (triggers reload via OptionsFlowWithReload)
         self.hass.config_entries.async_update_entry(
             self._entry, options=new_options,
         )
-
-        # Update beta_seed and internal seeds so Bayesian ridge anchors to
-        # saved values and seed change detection doesn't flag the save.
-        for i in range(min(len(heat_beta), len(pi._heat_seeds), pi._rls_heat.n)):
-            pi._heat_seeds[i] = round(heat_beta[i], 4)
-            pi._rls_heat.beta_seed[i] = round(heat_beta[i], 4)
-        for i in range(min(len(cool_beta), len(pi._cool_seeds), pi._rls_cool.n)):
-            pi._cool_seeds[i] = round(cool_beta[i], 4)
-            pi._rls_cool.beta_seed[i] = round(cool_beta[i], 4)
+        pi.apply_saved_seeds()
 
         _LOGGER.info(
             "Saved learned seeds: heat_slope=%.4f, cool_slope=%.4f, inputs=%s",

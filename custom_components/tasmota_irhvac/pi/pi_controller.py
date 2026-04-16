@@ -935,16 +935,16 @@ class PIController:
             ),
         }
 
-    def get_diagnostic_dump(self) -> dict[str, Any]:
-        """Return full diagnostic state for offline analysis.
-
-        Contains the observation buffer, current RLS coefficients, and
-        config — everything needed to reproduce this session's debug
-        bundle without manual HA CLI work.
-        """
-        coeff_names = ["intercept", "outdoor_delta"]
+    def _coeff_names(self) -> list[str]:
+        """Build coefficient name list: intercept, outdoor_delta, then model inputs."""
+        names = ["intercept", "outdoor_delta"]
         for m in self._model_inputs:
-            coeff_names.append(m.get("name", "input"))
+            names.append(m.get("name", "input"))
+        return names
+
+    def get_diagnostic_dump(self) -> dict[str, Any]:
+        """Return full diagnostic state for offline analysis (debug bundles)."""
+        coeff_names = self._coeff_names()
         heat_dict = self._rls_heat.get_coefficients()
         cool_dict = self._rls_cool.get_coefficients()
         return {
@@ -972,6 +972,202 @@ class PIController:
                 "tau_estimate": round(self._tau_estimator.tau, 1) if self._tau_estimator.enabled else None,
             },
         }
+
+    def get_full_diagnostics(self) -> dict[str, Any]:
+        """Return complete PI state for HA diagnostics platform.
+
+        This is the single entry point for diagnostics.py — it should not
+        need to reach into PI internals beyond this method.
+        """
+        import time as time_mod
+
+        coeff_names = self._coeff_names()
+        heat_phys = self._rls_heat.get_coefficients()
+        cool_phys = self._rls_cool.get_coefficients()
+
+        result: dict[str, Any] = {
+            "enabled": True,
+            "paused": self._pi_paused,
+            "desired_temp": self._desired_temp,
+            "hp_setpoint": self._hp_setpoint,
+            "integral": round(self._pi_integral, 3),
+            "integral_convergence": round(self._metrics.integral_convergence, 2),
+            "ff_offset": round(self._ff_offset, 2),
+            "ff_confidence": round(self._ff_confidence, 4),
+            "outdoor_temp": self._inputs.outdoor_temp,
+            "sensor_unavailable": self._sensor_unavailable,
+            "sensor_recovery_pending": self._sensor_recovery_pending,
+            "room_temp_rate": round(self._room_temp_rate, 4),
+            "tau_estimate": round(self._tau_estimator.tau, 1) if self._tau_estimator.enabled else None,
+            "config": {
+                "kp": self._pi_kp,
+                "ki": self._pi_ki,
+                "deadband": self._pi_deadband,
+                "setpoint_weight": self._pi_setpoint_weight,
+                "min_interval": self._pi_min_interval,
+                "outdoor_temp_sensor": self._inputs.outdoor_temp_sensor,
+                "model_inputs": self._model_inputs,
+            },
+            "rls_model": {
+                "heat_coefficients": {
+                    coeff_names[i]: round(heat_phys[i], 4)
+                    for i in range(min(len(coeff_names), len(heat_phys)))
+                },
+                "cool_coefficients": {
+                    coeff_names[i]: round(cool_phys[i], 4)
+                    for i in range(min(len(coeff_names), len(cool_phys)))
+                },
+                "heat_uncertainty": {
+                    coeff_names[i]: round(self._rls_heat.get_covariance_diagonal()[i], 4)
+                    for i in range(min(len(coeff_names), len(self._rls_heat.beta)))
+                },
+                "heat_observation_count": self._rls_heat.observation_count,
+                "cool_observation_count": self._rls_cool.observation_count,
+                "learning_suppressed": self._manual_ff_suppress,
+                "manual_suppress_reason": self._manual_ff_suppress_reason,
+            },
+            "performance": {
+                "itae_accumulator": round(self._metrics.itae_accumulator, 2),
+                "comfort_violation_hours": round(self._metrics.comfort_violation_hours, 2),
+                "setpoint_changes": self._metrics.setpoint_changes,
+                "controllable_itae": round(self._metrics.controllable_itae, 2),
+                "uncontrollable_itae": round(self._metrics.uncontrollable_itae, 2),
+                "controllable_cvh": round(self._metrics.controllable_cvh, 2),
+                "uncontrollable_cvh": round(self._metrics.uncontrollable_cvh, 2),
+                "ff_load_fraction": round(self._metrics.ff_load_fraction, 4),
+                "batch_model_rms": (
+                    round(self._metrics.batch_model_rms, 3)
+                    if self._metrics.batch_model_rms is not None else None
+                ),
+            },
+        }
+
+        # Batch learning
+        if self._last_batch_result is not None:
+            br = self._last_batch_result
+            batch_names = coeff_names[:len(br.beta_batch)]
+            batch: dict[str, Any] = {
+                "last_run_mono": self._last_batch_timestamp,
+                "n_total": br.n_total,
+                "n_eligible": br.n_eligible,
+                "residual_rms": round(br.residual_rms, 4),
+                "recommend_update": br.recommend_update,
+                "max_coeff_change_pct": round(br.max_coeff_change_pct, 1),
+                "coefficients": {
+                    batch_names[i]: {
+                        "current": round(br.beta_current[i], 4),
+                        "batch": round(br.beta_batch[i], 4),
+                    }
+                    for i in range(len(batch_names))
+                    if i < len(br.beta_current)
+                },
+                "held_features": [
+                    batch_names[i] for i in br.held_features
+                    if i < len(batch_names)
+                ],
+                "n_outliers_excluded": br.n_outliers_excluded,
+            }
+            drifting = self.get_drifting_coefficients()
+            batch["drift_detection"] = {
+                "drifting_coefficients": [
+                    {"index": idx, "name": name, "consecutive_cycles": count}
+                    for idx, name, count in drifting
+                ],
+                "correction_history": {
+                    (coeff_names[i] if i < len(coeff_names) else f"β{i}"): signs
+                    for i, signs in enumerate(self._drift_correction_signs)
+                },
+            }
+            result["batch_learning"] = batch
+        else:
+            result["batch_learning"] = None
+
+        # Observation buffer stats
+        obs = self._observation_buffer.get_all()
+        n_eligible = sum(
+            1 for o in obs if not o.clamped and abs(o.room_rate) < 0.02
+        )
+        buf_stats: dict[str, Any] = {"total": len(obs), "eligible": n_eligible}
+        if hasattr(self._observation_buffer, "get_leverage_scores"):
+            scores = self._observation_buffer.get_leverage_scores()
+            if scores:
+                buf_stats["leverage_min"] = round(min(scores), 6)
+                buf_stats["leverage_median"] = round(sorted(scores)[len(scores) // 2], 6)
+                buf_stats["leverage_max"] = round(max(scores), 6)
+            if obs:
+                now = time_mod.monotonic()
+                oldest = min(o.timestamp for o in obs)
+                buf_stats["oldest_age_hours"] = round((now - oldest) / 3600, 1)
+            buf_stats["max_size"] = self._observation_buffer._max_size
+            n_features = self._observation_buffer.n_features
+            feature_active: dict[str, int] = {}
+            for j in range(2, n_features):
+                name = coeff_names[j] if j < len(coeff_names) else f"feature_{j}"
+                feature_active[name] = sum(
+                    1 for o in obs if j < len(o.features) and abs(o.features[j]) > 1e-6
+                )
+            if feature_active:
+                buf_stats["feature_active_counts"] = feature_active
+        result["observation_buffer"] = buf_stats
+
+        return result
+
+    def get_learning_status(self) -> dict[str, Any]:
+        """Return FF learning suppression state for binary_sensor platform."""
+        return {
+            "suppressed": self._disturbance_suppress_active,
+            "manual_suppress": self._manual_ff_suppress,
+            "manual_suppress_reason": self._manual_ff_suppress_reason,
+            "active_suppressors": list(self._disturbance_active_suppressors),
+        }
+
+    def has_rls_observations(self) -> bool:
+        """Whether any RLS observations have been recorded (for button availability)."""
+        return self._rls_heat.observation_count > 0
+
+    def get_learned_seed_config(self) -> dict[str, Any]:
+        """Return current learned coefficients formatted for config entry options.
+
+        Used by the 'save learned seeds' button to write back to config.
+        Returns a dict with keys matching CONF_PI_FF_HEAT_SLOPE, CONF_PI_FF_COOL_SLOPE,
+        and updated model_inputs list with seed_heat/seed_cool per input.
+        """
+        heat_beta = self._rls_heat.beta
+        cool_beta = self._rls_cool.beta
+        result: dict[str, Any] = {}
+
+        if len(heat_beta) > 1:
+            result["heat_slope"] = round(heat_beta[1], 4)
+        if len(cool_beta) > 1:
+            result["cool_slope"] = round(abs(cool_beta[1]), 4)
+
+        input_seeds: list[dict[str, float]] = []
+        for i in range(len(self._model_inputs)):
+            beta_idx = i + 2  # 0=intercept, 1=outdoor_delta, 2+=model inputs
+            seeds: dict[str, float] = {}
+            if beta_idx < len(heat_beta):
+                seeds["seed_heat"] = round(heat_beta[beta_idx], 4)
+            if beta_idx < len(cool_beta):
+                seeds["seed_cool"] = round(cool_beta[beta_idx], 4)
+            input_seeds.append(seeds)
+        result["input_seeds"] = input_seeds
+
+        return result
+
+    def apply_saved_seeds(self) -> None:
+        """Update internal seeds to match current coefficients.
+
+        Called after saving seeds to config so seed-change detection
+        doesn't flag the save as a user edit.
+        """
+        heat_beta = self._rls_heat.beta
+        cool_beta = self._rls_cool.beta
+        for i in range(min(len(heat_beta), len(self._heat_seeds), self._rls_heat.n)):
+            self._heat_seeds[i] = round(heat_beta[i], 4)
+            self._rls_heat.beta_seed[i] = round(heat_beta[i], 4)
+        for i in range(min(len(cool_beta), len(self._cool_seeds), self._rls_cool.n)):
+            self._cool_seeds[i] = round(cool_beta[i], 4)
+            self._rls_cool.beta_seed[i] = round(cool_beta[i], 4)
 
     def get_health_status(self) -> dict[str, Any]:
         """Evaluate PI controller health and return status with alerts."""

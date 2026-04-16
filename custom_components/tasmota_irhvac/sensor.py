@@ -229,7 +229,7 @@ async def async_setup_entry(
 
     if not climate_entity._pi:
         return
-    if not climate_entity._pi._pi_enabled:
+    if not climate_entity._pi.is_active:
         return
 
     sensors: list[SensorEntity] = [
