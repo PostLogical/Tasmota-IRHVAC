@@ -261,8 +261,13 @@ class ThermalModel2R2C:
                 tau_modifier *= 1.0 - (1.0 - d.tau_factor) * intensity
         tau_env_eff = tau_env * tau_modifier
 
-        # Heat input rates (°C/min into air node)
-        q_solar = p.solar_gain * solar_proxy
+        # Heat input rates (°C/min).
+        # Solar is split: ~30% heats air convectively, ~70% is absorbed
+        # by walls/furniture as radiation. This prevents the small air
+        # capacitance from over-responding to solar transients.
+        q_solar_total = p.solar_gain * solar_proxy
+        q_solar_air = q_solar_total * 0.3
+        q_solar_wall = q_solar_total * 0.7
         q_stove = p.stove_gain * stove_active
         q_extra = extra_heat
 
@@ -272,8 +277,8 @@ class ThermalModel2R2C:
         # A = [[-1/τ_env - g - 1/τ_c,   1/τ_c ],
         #      [ 1/τ_m,               -1/τ_m  ]]
         #
-        # b = [T_out/τ_env + g*sp + q_solar + q_stove + q_extra,
-        #      0]
+        # b = [T_out/τ_env + g*sp + q_solar_air + q_stove + q_extra,
+        #      q_solar_wall / mass_ratio]
 
         a11 = -(1.0 / tau_env_eff + g + 1.0 / tau_c)
         a12 = 1.0 / tau_c
@@ -282,8 +287,8 @@ class ThermalModel2R2C:
 
         b1 = (self.outdoor_temp / tau_env_eff
               + g * self._effective_setpoint
-              + q_solar + q_stove + q_extra)
-        b2 = 0.0
+              + q_solar_air + q_stove + q_extra)
+        b2 = q_solar_wall / p.mass_ratio  # Normalized by wall capacitance ratio
 
         # Equilibrium: T_eq = -A^{-1} * b
         det_A = a11 * a22 - a12 * a21

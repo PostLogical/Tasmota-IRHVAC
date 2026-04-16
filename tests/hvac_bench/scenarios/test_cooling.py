@@ -8,7 +8,7 @@ import pytest
 
 from tests.hvac_bench.adapters import TasmotaPIAdapter
 from tests.hvac_bench.house_profiles import QUICK_PROFILES
-from tests.hvac_bench.thermal_model import ThermalModel
+from tests.hvac_bench.thermal_model import ThermalModel2R2C as ThermalModel
 from tests.hvac_bench.runner import run_scenario
 from tests.hvac_bench.metrics import compute_all_metrics
 

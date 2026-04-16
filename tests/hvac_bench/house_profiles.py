@@ -81,6 +81,16 @@ class HouseProfile2R2C:
         return self.tau_couple * self.mass_ratio
 
     @property
+    def tau_minutes(self) -> float:
+        """Apparent system time constant for IMC gain scheduling.
+
+        Returns the fast mode time constant, which is what the PI
+        controller's tau estimator would measure from step responses.
+        This is the relevant tau for Kp = τ/(λ+L) gain scheduling.
+        """
+        return self.fast_tau
+
+    @property
     def fast_tau(self) -> float:
         """Fast mode time constant (approximate, dominated by air node)."""
         a11 = 1.0 / self.tau_env + self.hp_gain + 1.0 / self.tau_couple
@@ -103,9 +113,9 @@ class HouseProfile2R2C:
         return 1.0 / lam_slow if lam_slow > 0 else 999.0
 
 
-# ── Standard profiles ─────────────────────────────────────────────────────
+# ── Standard 1R1C profiles (legacy) ───────────────────────────────────────
 
-PROFILES = {
+PROFILES_1R1C = {
     "studio_apartment": HouseProfile(
         name="Studio Apartment",
         tau_minutes=15,
@@ -141,6 +151,61 @@ PROFILES = {
         hp_gain=0.02,
         solar_gain=0.2,
         description="Brick/concrete construction with high thermal mass",
+    ),
+}
+
+# ── Standard 2R2C profiles (archetype) ───────────────────────────────────
+#
+# Designed to cover the same range of building types as the 1R1C profiles
+# but with physically decomposed parameters. Each profile can maintain
+# ~20°C at -5°C outdoor with HP at 30°C.
+
+PROFILES = {
+    "studio_apartment": HouseProfile2R2C(
+        name="Studio Apartment",
+        tau_env=25,
+        tau_couple=20,
+        mass_ratio=3,
+        hp_gain=0.08,
+        solar_gain=0.6,
+        description="Small volume, fast air response, high solar exposure",
+    ),
+    "drafty_bungalow": HouseProfile2R2C(
+        name="Drafty Bungalow",
+        tau_env=50,
+        tau_couple=40,
+        mass_ratio=5,
+        hp_gain=0.06,
+        solar_gain=0.5,
+        description="Older construction, poor insulation, single story",
+    ),
+    "standard_residential": HouseProfile2R2C(
+        name="Standard Residential",
+        tau_env=100,
+        tau_couple=80,
+        mass_ratio=15,
+        hp_gain=0.025,
+        solar_gain=0.4,
+        description="Modern home, decent insulation, HP sized for -5°C design",
+    ),
+    "well_insulated": HouseProfile2R2C(
+        name="Well Insulated",
+        tau_env=250,
+        tau_couple=150,
+        mass_ratio=15,
+        hp_gain=0.010,
+        solar_gain=0.15,
+        stove_gain=0.1,
+        description="High-performance envelope, triple glazing, minimal infiltration",
+    ),
+    "heavy_masonry": HouseProfile2R2C(
+        name="Heavy Masonry",
+        tau_env=200,
+        tau_couple=80,
+        mass_ratio=25,
+        hp_gain=0.012,
+        solar_gain=0.2,
+        description="Brick/concrete construction with very high thermal mass",
     ),
 }
 
