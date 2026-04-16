@@ -254,7 +254,6 @@ class PIController:
         # Auto-generate model inputs from supplemental sources with auto_model_input=true.
         # These use the supplemental's climate entity as a binary signal (heat/cool=1, else=0).
         # The PI controller reads the entity state each tick to update the value.
-        self._supplemental_auto_inputs: list[dict[str, Any]] = []
         for source in supplemental_sources:
             if not source.get("auto_model_input", True):
                 continue
@@ -265,17 +264,15 @@ class PIController:
             if existing:
                 _LOGGER.debug("Supplemental %s: skipping auto model input (manual input exists)", name)
                 continue
-            auto_input = {
+            self._model_inputs.append({
                 "name": f"{name} (auto)",
                 "entity_id": entity_id,
                 "seed_heat": float(source.get("seed_heat", -3.0)),
                 "seed_cool": float(source.get("seed_cool", 0.0)),
                 "lag_tau": 0,
                 "suppress_learning": True,  # Learning deferred per research
-                "_auto_supplemental": True,  # Internal flag for signal generation
-            }
-            self._model_inputs.append(auto_input)
-            self._supplemental_auto_inputs.append(auto_input)
+                "_auto_supplemental": True,  # Internal flag for filtering
+            })
         # Outdoor delta is always the first model input (index 1, after intercept)
         # Other model inputs follow in order of _model_inputs list
         self._n_model_inputs = 1 + len(self._model_inputs)  # outdoor_delta + configured inputs
@@ -323,7 +320,6 @@ class PIController:
         # Model input current values and lag filter states
         self._model_input_values = [0.0] * len(self._model_inputs)
         self._model_input_filtered = [0.0] * len(self._model_inputs)
-        self._model_input_last_values = [0.0] * len(self._model_inputs)  # For lag filter
 
         # Outdoor temp state
         self._outdoor_temp: float | None = None

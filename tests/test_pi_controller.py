@@ -1837,18 +1837,16 @@ class TestSupplementalAutoModelInputs:
         entity = FakePIEntity(config)
         pi = entity._pi
 
-        # Should have auto-generated one model input
-        assert len(pi._supplemental_auto_inputs) == 1
-        auto = pi._supplemental_auto_inputs[0]
+        # Should have auto-generated one model input (flagged in _model_inputs)
+        auto_inputs = [m for m in pi._model_inputs if m.get("_auto_supplemental")]
+        assert len(auto_inputs) == 1
+        auto = auto_inputs[0]
         assert auto["name"] == "Pellet Stove (auto)"
         assert auto["entity_id"] == "climate.pellet_stove"
         assert auto["seed_heat"] == -4.0
         assert auto["seed_cool"] == 0.0
         assert auto["lag_tau"] == 0
         assert auto["suppress_learning"] is True
-        assert auto["_auto_supplemental"] is True
-        # Should also be in _model_inputs
-        assert auto in pi._model_inputs
 
     def test_supplemental_auto_model_input_opt_out(self):
         """Supplemental source with auto_model_input=False skips auto generation."""
@@ -1862,7 +1860,7 @@ class TestSupplementalAutoModelInputs:
         entity = FakePIEntity(config)
         pi = entity._pi
 
-        assert len(pi._supplemental_auto_inputs) == 0
+        assert not any(m.get("_auto_supplemental") for m in pi._model_inputs)
 
     def test_supplemental_skips_if_manual_input_exists(self):
         """Auto model input skipped when user already has a manual input for same entity."""
@@ -1882,7 +1880,7 @@ class TestSupplementalAutoModelInputs:
         entity = FakePIEntity(config)
         pi = entity._pi
 
-        assert len(pi._supplemental_auto_inputs) == 0
+        assert not any(m.get("_auto_supplemental") for m in pi._model_inputs)
         # Only the manual input should be in _model_inputs
         assert len(pi._model_inputs) == 1
         assert pi._model_inputs[0]["name"] == "Stove Manual"
@@ -1896,7 +1894,7 @@ class TestSupplementalAutoModelInputs:
             }],
         })
         entity = FakePIEntity(config)
-        auto = entity._pi._supplemental_auto_inputs[0]
+        auto = [m for m in entity._pi._model_inputs if m.get("_auto_supplemental")][0]
 
         assert auto["seed_heat"] == -3.0
         assert auto["seed_cool"] == 0.0
