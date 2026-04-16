@@ -370,7 +370,6 @@ class PIController:
             n_features=2 + len(self._model_inputs),
         )
         self._batch_analysis_timer: CALLBACK_TYPE | None = None
-        self._batch_startup_unsub: CALLBACK_TYPE | None = None
         self._last_batch_result: BatchResult | None = None
         self._last_batch_timestamp: float | None = None
 
@@ -488,9 +487,6 @@ class PIController:
         if self._pi_timer_unsub:
             self._pi_timer_unsub()
             self._pi_timer_unsub = None
-        if self._batch_startup_unsub:
-            self._batch_startup_unsub()
-            self._batch_startup_unsub = None
         if self._batch_analysis_timer:
             self._batch_analysis_timer()
             self._batch_analysis_timer = None
@@ -499,7 +495,6 @@ class PIController:
         """Schedule batch WLS analysis at 07:00 and 19:00 local time.
 
         Uses wall-clock scheduling so reboots don't reset the countdown.
-        Also runs once shortly after startup if the buffer is populated.
         """
 
         @callback
@@ -508,16 +503,6 @@ class PIController:
 
         self._batch_analysis_timer = async_track_time_change(
             self._hass, _run_batch, hour=(7, 19), minute=0, second=0,
-        )
-
-        # Catch-up: run once 90s after boot so frequent reboots
-        # don't prevent batch WLS from ever executing.
-        @callback
-        def _startup_batch(_now: datetime) -> None:
-            self._run_batch_analysis()
-
-        self._batch_startup_unsub = async_call_later(
-            self._hass, 90, _startup_batch,
         )
 
     def _run_batch_analysis(self) -> None:

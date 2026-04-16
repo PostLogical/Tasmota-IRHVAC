@@ -4133,14 +4133,13 @@ class TestPIControllerPropertyGaps:
 
     @pytest.mark.asyncio
     async def test_schedule_batch_analysis(self, hass, setup_pi_integration):
-        """schedule_batch_analysis sets up wall-clock timer and startup catch-up."""
+        """schedule_batch_analysis sets up wall-clock timer at 07:00 and 19:00."""
         entry = await setup_pi_integration()
         entity = get_climate_entity(hass, entry)
         pi = entity._pi
         # Timer was scheduled during setup; calling again shouldn't crash
         pi.schedule_batch_analysis()
         assert pi._batch_analysis_timer is not None
-        assert pi._batch_startup_unsub is not None
 
     @pytest.mark.asyncio
     async def test_buffer_leverage_max_no_data(self, hass, setup_pi_integration):
