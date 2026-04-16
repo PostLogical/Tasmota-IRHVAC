@@ -149,7 +149,9 @@ async def run_sim(entity, room, duration_hours, desired_c,
     steps = int(duration_hours * 3600 / dt_room)
     pi_interval_steps = int(pi_interval / dt_room)
     trace = SimTrace()
-    mono_time = pi_interval  # Start past zero so first tick has elapsed > 0
+    # Sync mono_time with any existing _last_setpoint_change_time so dwell
+    # calculations work correctly across warmup → measurement boundaries.
+    mono_time = max(pi_interval, pi._last_setpoint_change_time + pi_interval)
 
     for step in range(steps):
         t_sec = step * dt_room
