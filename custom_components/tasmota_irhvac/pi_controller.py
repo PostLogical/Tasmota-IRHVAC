@@ -87,6 +87,15 @@ from .const import (
 from .const import DEFAULT_RLS_P_INIT
 from .rls_model import RLSModel
 from .pi_stored_data import PIExtraStoredData
+from .health_checks import (
+    check_comfort,
+    check_feature_diversity,
+    check_ff_confidence,
+    check_integral,
+    check_intercept_drift,
+    check_model_drift,
+    check_slope_drift,
+)
 from .performance_metrics import PerformanceMetrics
 from .smith_predictor import SmithPredictor
 from .supplemental_controller import SupplementalController
@@ -989,18 +998,14 @@ class PIController:
                 "alert_count": 0,
             }
 
-        alerts: list[str] = []
-        reasons: list[str] = []
-        severity = "OK"
-
         e = self._entity
+        checks: list[tuple[str, str, str] | None] = []
 
         # Grace period: suppress comfort check for one tick after setpoint change
         if self._desired_temp != self._health_prev_desired:
             self._health_comfort_skip = 1
             self._health_prev_desired = self._desired_temp
 
-        # Check 1: Comfort error
         if self._health_comfort_skip > 0:
             self._health_comfort_skip -= 1
         elif (
@@ -1017,116 +1022,61 @@ class PIController:
                 e._attr_temperature_unit,
                 UnitOfTemperature.CELSIUS,
             )
-            error_c = abs(cur_c - desired_c)
-            if error_c > self.HEALTH_COMFORT_CRIT:
-                severity = "Critical"
-                alerts.append(
-                    f"Temperature {error_c:.1f}°C from setpoint — comfort critical"
-                )
-                reasons.append("comfort_critical")
-            elif error_c > self.HEALTH_COMFORT_WARN:
-                severity = "Warning"
-                alerts.append(
-                    f"Temperature {error_c:.1f}°C from setpoint — comfort warning"
-                )
-                reasons.append("comfort_warn")
+            checks.append(check_comfort(
+                abs(cur_c - desired_c),
+                self.HEALTH_COMFORT_WARN, self.HEALTH_COMFORT_CRIT,
+            ))
 
-        # Check 2: PI integral correction magnitude (in °C, not raw integral)
-        # With FF confidence scaling, large integrals are expected when the
-        # model is adapting — the system is handling it.  Alert on the actual
-        # correction the integral is applying, which is the real load.
-        ki_integral = abs(self._pi_ki * self._pi_integral)
-        if ki_integral > self.HEALTH_INTEGRAL_WARN:
-            if severity != "Critical":
-                severity = "Warning"
-            alerts.append(
-                f"PI integral correction {ki_integral:.1f}°C — controller struggling"
-            )
-            reasons.append("integral_high")
+        checks.append(check_integral(
+            abs(self._pi_ki * self._pi_integral), self.HEALTH_INTEGRAL_WARN,
+        ))
+        checks.append(check_ff_confidence(self._ff_confidence))
 
-        # Check 2b: FF confidence sustained low
-        if self._ff_confidence < 0.5:
-            if severity != "Critical":
-                severity = "Warning"
-            alerts.append(
-                f"FF confidence at {self._ff_confidence:.0%} — model prediction unreliable"
-            )
-            reasons.append("ff_confidence_low")
-
-        # Determine active RLS model for checks 3 & 4
+        # Active RLS model for coefficient checks
         is_heating = e._attr_hvac_mode in (HVACMode.HEAT, HVACMode.HEAT_COOL, None)
         rls = self._rls_heat if is_heating else self._rls_cool
-        expected_slope = (
-            self._ff_heat_slope if is_heating else -self._ff_cool_slope
-        )
+        expected_slope = self._ff_heat_slope if is_heating else -self._ff_cool_slope
         has_obs = rls.observation_count > 0
-
         coeffs = rls.get_coefficients() if has_obs else []
         intercept = coeffs[0] if len(coeffs) > 0 else 0.0
         outdoor_slope = coeffs[1] if len(coeffs) > 1 else expected_slope
 
-        # Check 3: RLS intercept drift
-        if has_obs and abs(intercept) > self.HEALTH_INTERCEPT_WARN:
-            if severity != "Critical":
+        checks.append(check_intercept_drift(
+            intercept, self.HEALTH_INTERCEPT_WARN, has_obs,
+        ))
+        checks.append(check_slope_drift(
+            outdoor_slope, expected_slope,
+            self.HEALTH_SLOPE_DRIFT_PCT, self.HEALTH_SLOPE_DRIFT_FLOOR, has_obs,
+        ))
+
+        for result in check_model_drift(self.get_drifting_coefficients()):
+            checks.append(result)
+
+        feature_names = ["intercept", "outdoor_delta"]
+        for m in self._model_inputs:
+            feature_names.append(m.get("name", "input"))
+        checks.append(check_feature_diversity(
+            self._observation_buffer.get_all(),
+            getattr(self._observation_buffer, "n_features", 0),
+            feature_names,
+            self.HEALTH_FEATURE_DIVERSITY_MIN,
+            self.HEALTH_FEATURE_DIVERSITY_MIN_OBS,
+        ))
+
+        # Assemble results — highest severity wins
+        alerts: list[str] = []
+        reasons: list[str] = []
+        severity = "OK"
+        for result in checks:
+            if result is None:
+                continue
+            msg, reason, sev = result
+            alerts.append(msg)
+            reasons.append(reason)
+            if sev == "Critical":
+                severity = "Critical"
+            elif sev == "Warning" and severity != "Critical":
                 severity = "Warning"
-            alerts.append(
-                f"RLS intercept drifted to {intercept:.3f} (expect near 0)"
-            )
-            reasons.append("intercept_drift")
-
-        # Check 4: Outdoor delta slope drift
-        if has_obs and expected_slope != 0:
-            drift_abs = abs(outdoor_slope - expected_slope)
-            drift_pct = (drift_abs / abs(expected_slope)) * 100
-            if (
-                drift_pct > self.HEALTH_SLOPE_DRIFT_PCT
-                and drift_abs > self.HEALTH_SLOPE_DRIFT_FLOOR
-            ):
-                if severity != "Critical":
-                    severity = "Warning"
-                alerts.append(
-                    f"RLS outdoor slope {outdoor_slope:.4f} drifted "
-                    f"{drift_pct:.0f}% from seed {expected_slope:.4f}"
-                )
-                reasons.append("slope_drift")
-
-        # Check 5: Persistent same-direction batch correction (model drift)
-        drifting = self.get_drifting_coefficients()
-        if drifting:
-            if severity != "Critical":
-                severity = "Warning"
-            for _idx, name, count in drifting:
-                alerts.append(
-                    f"Batch consistently correcting {name} in same direction "
-                    f"({count} cycles) — possible physical change"
-                )
-            reasons.append("model_drift")
-
-        # Check 6: Buffer feature diversity
-        obs = self._observation_buffer.get_all()
-        total_obs = len(obs)
-        if total_obs >= self.HEALTH_FEATURE_DIVERSITY_MIN_OBS:
-            n_features = getattr(self._observation_buffer, "n_features", 0)
-            starved: list[str] = []
-            feature_names = ["intercept", "outdoor_delta"]
-            for m in self._model_inputs:
-                feature_names.append(m.get("name", "input"))
-            for j in range(2, n_features):  # skip intercept & outdoor_delta
-                active = sum(
-                    1 for o in obs
-                    if j < len(o.features) and abs(o.features[j]) > 1e-6
-                )
-                if active / total_obs < self.HEALTH_FEATURE_DIVERSITY_MIN:
-                    name = feature_names[j] if j < len(feature_names) else f"feature_{j}"
-                    starved.append(name)
-            if starved:
-                if severity != "Critical":
-                    severity = "Warning"
-                alerts.append(
-                    f"Low feature diversity: {', '.join(starved)} "
-                    f"active in <{self.HEALTH_FEATURE_DIVERSITY_MIN:.0%} of {total_obs} observations"
-                )
-                reasons.append("low_feature_diversity")
 
         return {
             "state": severity,
