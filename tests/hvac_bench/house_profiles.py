@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class HouseProfile:
-    """Thermal characteristics of a building zone.
+    """Thermal characteristics of a building zone (1R1C model).
 
     Attributes:
         name: Human-readable label.
@@ -31,6 +31,76 @@ class HouseProfile:
     solar_gain: float = 0.3
     stove_gain: float = 0.15
     description: str = ""
+
+
+@dataclass(frozen=True)
+class HouseProfile2R2C:
+    """Two-node thermal model: air + wall/mass (2R2C).
+
+    Models the room as two coupled thermal nodes:
+    - Air node: heated directly by HP, loses heat to outdoors through
+      envelope, exchanges heat with thermal mass. The sensor reads this.
+    - Wall/mass node: walls, floors, furniture. Only exchanges heat with
+      air. Provides thermal inertia that buffers temperature swings.
+
+    ODEs (all time constants in minutes):
+        dT_air/dt  = (T_out - T_air)/τ_env + hp_gain*(sp - T_air)
+                     + (T_wall - T_air)/τ_couple + solar + stove
+        dT_wall/dt = (T_air - T_wall)/(τ_couple * mass_ratio)
+
+    Attributes:
+        name: Human-readable label.
+        tau_env: Envelope time constant (min). Air-to-outdoor through
+            insulation, windows, infiltration. Lower = draftier.
+            Typical: 30-60 min (drafty old house), 100-200 (modern).
+        tau_couple: Air-wall coupling time constant (min). How fast air
+            equilibrates with thermal mass. Lower = better coupling
+            (e.g., exposed brick/concrete). Typical: 60-200 min.
+        mass_ratio: C_wall/C_air. Ratio of wall thermal capacitance to
+            air capacitance. Higher = more thermal mass (thick masonry,
+            concrete slab). Typical: 5-20. The wall time constant seen
+            from the wall side is τ_couple * mass_ratio.
+        hp_gain: HP effectiveness (1/min). HP heating rate per °C of
+            setpoint above room temp. Typical: 0.02-0.08.
+        solar_gain: Solar heating rate (°C/min per unit solar proxy).
+        stove_gain: Supplemental heat rate (°C/min when active).
+        description: What kind of building this represents.
+    """
+    name: str
+    tau_env: float
+    tau_couple: float
+    mass_ratio: float
+    hp_gain: float
+    solar_gain: float = 0.3
+    stove_gain: float = 0.15
+    description: str = ""
+
+    @property
+    def tau_wall(self) -> float:
+        """Wall-side time constant: τ_couple * mass_ratio."""
+        return self.tau_couple * self.mass_ratio
+
+    @property
+    def fast_tau(self) -> float:
+        """Fast mode time constant (approximate, dominated by air node)."""
+        a11 = 1.0 / self.tau_env + self.hp_gain + 1.0 / self.tau_couple
+        a22 = 1.0 / self.tau_wall
+        tr = a11 + a22
+        det = a11 * a22 - (1.0 / self.tau_couple) * (1.0 / self.tau_wall)
+        disc = max(0.0, tr * tr - 4 * det)
+        lam_fast = (tr + disc ** 0.5) / 2
+        return 1.0 / lam_fast if lam_fast > 0 else 999.0
+
+    @property
+    def slow_tau(self) -> float:
+        """Slow mode time constant (approximate, dominated by wall node)."""
+        a11 = 1.0 / self.tau_env + self.hp_gain + 1.0 / self.tau_couple
+        a22 = 1.0 / self.tau_wall
+        tr = a11 + a22
+        det = a11 * a22 - (1.0 / self.tau_couple) * (1.0 / self.tau_wall)
+        disc = max(0.0, tr * tr - 4 * det)
+        lam_slow = (tr - disc ** 0.5) / 2
+        return 1.0 / lam_slow if lam_slow > 0 else 999.0
 
 
 # ── Standard profiles ─────────────────────────────────────────────────────
@@ -76,3 +146,21 @@ PROFILES = {
 
 # Subset for quick test runs
 QUICK_PROFILES = {k: PROFILES[k] for k in ["drafty_bungalow", "standard_residential", "well_insulated"]}
+
+
+# ── 2R2C profiles (production-calibrated) ─────────────────────────────
+
+PROFILES_2R2C = {
+    "living_room": HouseProfile2R2C(
+        name="Living Room (calibrated)",
+        tau_env=100,
+        tau_couple=30,
+        mass_ratio=20,
+        hp_gain=0.04,
+        solar_gain=0.05,
+        stove_gain=0.0,
+        description="100yo house, single-pane sunroom exposure, mini-split head. "
+                    "Calibrated from 48h production data (Apr 2026). "
+                    "Design: 66°F at -15°F outdoor (marginal).",
+    ),
+}

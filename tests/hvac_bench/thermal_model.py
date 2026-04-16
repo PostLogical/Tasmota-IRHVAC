@@ -1,14 +1,16 @@
-"""Enhanced thermal model for HVAC benchmark.
+"""Thermal models for HVAC benchmark.
 
-Single-node (1R) room model with exact exponential integration,
-sensor noise injection, disturbance support, and COP tracking.
+Two model variants:
+- ThermalModel: Single-node (1R1C) with proportional HP coupling.
+- ThermalModel2R2C: Two-node (2R2C) with separate air and wall mass
+  nodes. Exact matrix-exponential integration for both.
 """
 
 import math
 import random
 from dataclasses import dataclass, field
 
-from .house_profiles import HouseProfile
+from .house_profiles import HouseProfile, HouseProfile2R2C
 from .disturbances import Disturbance
 
 
@@ -165,6 +167,190 @@ class ThermalModel:
         Returns the room temperature as a sensor would report it,
         with optional Gaussian noise and resolution quantization.
         """
+        temp = self.room_temp
+        if self.sensor_noise_sigma > 0:
+            temp += self._rng.gauss(0, self.sensor_noise_sigma)
+        if self.sensor_quantization > 0:
+            temp = round(temp / self.sensor_quantization) * self.sensor_quantization
+        return temp
+
+    @property
+    def average_cop(self) -> float:
+        """Average COP over all ticks."""
+        if self.cumulative_kwh <= 0:
+            return 0.0
+        return self.cumulative_cop_weighted_output / (self.cumulative_kwh * 60.0)
+
+
+class ThermalModel2R2C:
+    """Two-node room thermal model: air + wall/mass.
+
+    Physics: exact 2x2 matrix-exponential integration via
+    Cayley-Hamilton theorem (stable at any step size).
+
+    Two coupled nodes:
+        Air:  dT_a/dt = (T_out - T_a)/τ_env + g*(sp - T_a)
+                        + (T_w - T_a)/τ_c + Q_solar + Q_stove
+        Wall: dT_w/dt = (T_a - T_w)/τ_m
+
+    where τ_c = tau_couple, τ_m = tau_couple * mass_ratio,
+    g = hp_gain.
+
+    The sensor reads T_air. Wall temperature provides thermal
+    inertia that buffers air temperature swings.
+    """
+
+    def __init__(self, profile: HouseProfile2R2C, initial_temp: float = 20.0,
+                 outdoor_temp: float = 5.0, cop_model: COPModel | None = None,
+                 sensor_noise_sigma: float = 0.0, sensor_quantization: float = 0.0,
+                 noise_seed: int | None = None,
+                 hp_lag_minutes: float = 0.0,
+                 initial_wall_temp: float | None = None):
+        self.profile = profile
+        self.room_temp = initial_temp  # Air node — what the sensor reads
+        self.wall_temp = initial_wall_temp if initial_wall_temp is not None else initial_temp
+        self.outdoor_temp = outdoor_temp
+        self.cop_model = cop_model or COPModel()
+        self.sensor_noise_sigma = sensor_noise_sigma
+        self.sensor_quantization = sensor_quantization
+        self._rng = random.Random(noise_seed)
+        self.hp_lag_minutes = hp_lag_minutes
+        self._effective_setpoint: float = initial_temp
+
+        # Energy tracking
+        self.cumulative_kwh = 0.0
+        self.cumulative_cop_weighted_output = 0.0
+        self.tick_count = 0
+
+        # Active disturbances
+        self._disturbances: list[Disturbance] = []
+
+    def add_disturbance(self, disturbance: Disturbance):
+        """Schedule a disturbance."""
+        self._disturbances.append(disturbance)
+
+    def step(self, hp_setpoint: float, dt_minutes: float = 15.0,
+             solar_proxy: float = 0.0, stove_active: float = 0.0,
+             tick: int = 0, mode: str = "heat") -> None:
+        """Advance both nodes by one time step.
+
+        Same interface as ThermalModel for drop-in compatibility.
+        """
+        # HP response lag
+        if self.hp_lag_minutes > 0:
+            lag_decay = math.exp(-dt_minutes / self.hp_lag_minutes)
+            self._effective_setpoint = (
+                hp_setpoint + (self._effective_setpoint - hp_setpoint) * lag_decay
+            )
+        else:
+            self._effective_setpoint = hp_setpoint
+
+        p = self.profile
+        tau_env = p.tau_env
+        tau_c = p.tau_couple
+        tau_m = p.tau_wall  # tau_couple * mass_ratio
+        g = p.hp_gain
+
+        # Apply disturbances (affect envelope only, like the 1R1C model)
+        extra_heat = 0.0
+        tau_modifier = 1.0
+        for d in self._disturbances:
+            intensity = d.intensity(tick)
+            if intensity > 0:
+                extra_heat += d.heat_gain_c_per_min * intensity
+                tau_modifier *= 1.0 - (1.0 - d.tau_factor) * intensity
+        tau_env_eff = tau_env * tau_modifier
+
+        # Heat input rates (°C/min into air node)
+        q_solar = p.solar_gain * solar_proxy
+        q_stove = p.stove_gain * stove_active
+        q_extra = extra_heat
+
+        # System matrix A and forcing vector b:
+        #   d/dt [T_a, T_w]^T = A * [T_a, T_w]^T + b
+        #
+        # A = [[-1/τ_env - g - 1/τ_c,   1/τ_c ],
+        #      [ 1/τ_m,               -1/τ_m  ]]
+        #
+        # b = [T_out/τ_env + g*sp + q_solar + q_stove + q_extra,
+        #      0]
+
+        a11 = -(1.0 / tau_env_eff + g + 1.0 / tau_c)
+        a12 = 1.0 / tau_c
+        a21 = 1.0 / tau_m
+        a22 = -1.0 / tau_m
+
+        b1 = (self.outdoor_temp / tau_env_eff
+              + g * self._effective_setpoint
+              + q_solar + q_stove + q_extra)
+        b2 = 0.0
+
+        # Equilibrium: T_eq = -A^{-1} * b
+        det_A = a11 * a22 - a12 * a21
+        if abs(det_A) < 1e-15:
+            self.tick_count += 1
+            return
+        t_eq_a = -(a22 * b1 - a12 * b2) / det_A
+        t_eq_w = -(-a21 * b1 + a11 * b2) / det_A
+
+        # Deviation from equilibrium
+        da = self.room_temp - t_eq_a
+        dw = self.wall_temp - t_eq_w
+
+        # Matrix exponential via Cayley-Hamilton:
+        #   exp(A*dt) = α₀*I + α₁*A
+        # where α₀, α₁ depend on eigenvalues of A.
+        #
+        # Eigenvalues of 2x2: λ = (tr ± √(tr²-4det)) / 2
+        tr = a11 + a22
+        disc = tr * tr - 4 * det_A
+        dt = dt_minutes
+
+        if disc > 1e-12:
+            # Two distinct real eigenvalues (typical case)
+            sqrt_disc = math.sqrt(disc)
+            lam1 = (tr + sqrt_disc) / 2
+            lam2 = (tr - sqrt_disc) / 2
+            e1 = math.exp(lam1 * dt)
+            e2 = math.exp(lam2 * dt)
+            d_lam = lam1 - lam2
+            alpha0 = (lam1 * e2 - lam2 * e1) / d_lam
+            alpha1 = (e1 - e2) / d_lam
+        elif disc < -1e-12:
+            # Complex conjugate eigenvalues (rare but possible)
+            real_part = tr / 2
+            imag_part = math.sqrt(-disc) / 2
+            e_real = math.exp(real_part * dt)
+            cos_val = math.cos(imag_part * dt)
+            sin_val = math.sin(imag_part * dt)
+            alpha0 = e_real * (cos_val - real_part * sin_val / imag_part)
+            alpha1 = e_real * sin_val / imag_part
+        else:
+            # Repeated eigenvalue (degenerate)
+            lam = tr / 2
+            e_lam = math.exp(lam * dt)
+            alpha0 = e_lam * (1 - lam * dt)
+            alpha1 = e_lam * dt
+
+        # exp(A*dt) * [da, dw]^T  =  (α₀*I + α₁*A) * [da, dw]^T
+        new_da = alpha0 * da + alpha1 * (a11 * da + a12 * dw)
+        new_dw = alpha0 * dw + alpha1 * (a21 * da + a22 * dw)
+
+        self.room_temp = t_eq_a + new_da
+        self.wall_temp = t_eq_w + new_dw
+
+        # Energy tracking (same approach as 1R1C)
+        thermal_output = abs(self._effective_setpoint - self.room_temp) * g * dt_minutes
+        cop = self.cop_model.cop(self.outdoor_temp, hp_setpoint, mode)
+        if cop > 0:
+            electrical_input = thermal_output / cop
+            self.cumulative_kwh += electrical_input / 60.0
+            self.cumulative_cop_weighted_output += thermal_output
+
+        self.tick_count += 1
+
+    def read_sensor(self) -> float:
+        """Read air temperature with noise and quantization."""
         temp = self.room_temp
         if self.sensor_noise_sigma > 0:
             temp += self._rng.gauss(0, self.sensor_noise_sigma)

@@ -315,8 +315,12 @@ def run_open_loop(data: AlignedData,
             + stove_heat / dt_min
         ) / total_gain
 
-        # Exponential decay
-        decay = math.exp(-dt_min / tau_minutes)
+        # Exponential decay toward equilibrium.
+        # The ODE is dT/dt = -total_gain*(T - t_eq), so the exact
+        # solution uses total_gain, not just 1/τ. The ThermalModel
+        # has a bug here (uses exp(-dt/τ)), but we use correct physics
+        # so calibrated params are physically meaningful.
+        decay = math.exp(-dt_min * total_gain)
         room_temp = t_eq + (room_temp - t_eq) * decay
 
         sim_temps.append(room_temp)
