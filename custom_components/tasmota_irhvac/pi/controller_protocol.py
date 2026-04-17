@@ -92,6 +92,8 @@ class ControllerHook(Protocol):
 
     async def async_resume_ff_learning(self) -> None: ...
 
+    async def async_flush_observation_buffer(self) -> None: ...
+
 
 class NullController:
     """No-op controller for entities without PI enabled.
@@ -193,4 +195,7 @@ class NullController:
         pass
 
     async def async_resume_ff_learning(self) -> None:
+        pass
+
+    async def async_flush_observation_buffer(self) -> None:
         pass

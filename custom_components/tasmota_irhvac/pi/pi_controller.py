@@ -1170,6 +1170,19 @@ class PIController:
             self._cool_seeds[i] = round(cool_beta[i], 4)
             self._rls_cool.beta_seed[i] = round(cool_beta[i], 4)
 
+    def flush_observation_buffer(self) -> None:
+        """Clear the observation buffer and reset batch learning state.
+
+        Nuclear option for major renovation or equipment change.  Clears all
+        accumulated observations, the last batch result, and drift correction
+        history so the model re-learns from scratch.
+        """
+        self._observation_buffer.clear()
+        self._last_batch_result = None
+        self._last_batch_timestamp = None
+        self._drift_correction_signs = []
+        _LOGGER.info("Observation buffer flushed — batch learning will restart from scratch")
+
     def get_health_status(self) -> dict[str, Any]:
         """Evaluate PI controller health and return status with alerts."""
         if not self._pi_enabled:
@@ -1371,6 +1384,10 @@ class PIController:
         self._rls_cool.observation_count = 0
         self._pi_integral = 0.0
         _LOGGER.info("FF models reset to seed values, integral zeroed")
+
+    async def async_flush_observation_buffer(self) -> None:
+        """Clear the observation buffer and reset batch learning state (service handler)."""
+        self.flush_observation_buffer()
 
     def _resolve_active_supplemental_sources(self) -> list[str]:
         """Resolve which supplemental sources are currently active from HA state."""

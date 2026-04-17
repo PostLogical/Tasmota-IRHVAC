@@ -160,6 +160,17 @@ class DiversityAwareBuffer:
     def n_features(self) -> int:
         return self._n_features
 
+    def clear(self) -> None:
+        """Remove all observations and reset the information matrix."""
+        self._buffer.clear()
+        n = self._n_features
+        reg_inv = 1.0 / INFO_MATRIX_REGULARIZATION
+        self._info_inv = [
+            [reg_inv if i == j else 0.0 for j in range(n)]
+            for i in range(n)
+        ]
+        self._updates_since_recompute = 0
+
     def add(self, obs: Observation) -> None:
         """Add an observation, using leverage-scored eviction when full."""
         x = self._get_feature_vector(obs)

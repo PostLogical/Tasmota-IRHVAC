@@ -467,6 +467,10 @@ SERVICE_TO_METHOD = {
         "method": "async_diagnostic_dump",
         "schema": IRHVAC_SERVICE_SCHEMA,
     },
+    "flush_observation_buffer": {
+        "method": "async_flush_observation_buffer",
+        "schema": IRHVAC_SERVICE_SCHEMA,
+    },
 }
 
 
@@ -1767,6 +1771,10 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                            f"FF confidence: {dump.get('pi_state', {}).get('ff_confidence', '?')}",
             },
         )
+
+    async def async_flush_observation_buffer(self) -> None:
+        """Clear the observation buffer and reset batch learning state."""
+        await self._controller.async_flush_observation_buffer()
 
     async def set_mode(self, hvac_mode: str) -> None:
         """Set hvac mode."""

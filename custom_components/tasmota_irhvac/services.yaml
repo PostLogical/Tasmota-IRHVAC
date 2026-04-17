@@ -255,6 +255,13 @@ diagnostic_dump:
     entity:
       integration: tasmota_irhvac
 
+flush_observation_buffer:
+  name: Flush observation buffer
+  description: Clear the observation buffer and reset batch learning state. This is a destructive operation — all accumulated observations, batch results, and drift correction history will be lost. Use after major renovation or equipment changes.
+  target:
+    entity:
+      integration: tasmota_irhvac
+
 set_swingh:
   name: Set swingh
   description: Sets vane horizonal position.

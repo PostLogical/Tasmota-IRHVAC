@@ -735,3 +735,49 @@ class TestRegimeCoverage:
                     f"Coefficient {i}: {result.beta_batch[i]:.3f} not within "
                     f"2σ ({2*se:.3f}) of true {true_beta[i]:.3f}"
                 )
+
+
+# ── Buffer clear ────────────────────────────────────────────────────
+
+
+class TestBufferClear:
+    """Tests for DiversityAwareBuffer.clear()."""
+
+    def test_clear_empties_buffer(self):
+        """clear() should remove all observations."""
+        buf = DiversityAwareBuffer(n_features=3, max_size=50)
+        for i in range(20):
+            buf.add(_make_obs(t=float(i), outdoor_delta=float(i)))
+        assert len(buf) == 20
+
+        buf.clear()
+        assert len(buf) == 0
+        assert buf.get_all() == []
+
+    def test_clear_resets_info_matrix(self):
+        """After clear, info matrix should be back to regularized identity."""
+        from custom_components.tasmota_irhvac.pi.batch_learning import INFO_MATRIX_REGULARIZATION
+
+        buf = DiversityAwareBuffer(n_features=3, max_size=50)
+        for i in range(20):
+            buf.add(_make_obs(t=float(i), outdoor_delta=float(i)))
+
+        buf.clear()
+
+        reg_inv = 1.0 / INFO_MATRIX_REGULARIZATION
+        for i in range(3):
+            for j in range(3):
+                expected = reg_inv if i == j else 0.0
+                assert buf._info_inv[i][j] == pytest.approx(expected)
+
+    def test_clear_allows_refill(self):
+        """Buffer should accept new observations after clear."""
+        buf = DiversityAwareBuffer(n_features=3, max_size=10)
+        for i in range(10):
+            buf.add(_make_obs(t=float(i), outdoor_delta=5.0))
+        assert len(buf) == 10
+
+        buf.clear()
+        for i in range(5):
+            buf.add(_make_obs(t=100.0 + i, outdoor_delta=15.0))
+        assert len(buf) == 5
