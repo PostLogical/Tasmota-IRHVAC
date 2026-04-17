@@ -454,28 +454,43 @@ def refine_around_best(data: AlignedData, best: CalibrationResult,
 # Map each to a column in AlignedData for feeding the PI controller.
 # "data_key" is the AlignedData attribute name; "name" must match RLS.
 
-LIVING_ROOM_MODEL_INPUTS = [
-    {"name": "Pellet Stove",      "data_key": "pellet_stove",  "seed_heat": -8.0, "typical_value": 0.5},
-    {"name": "Solar Proxy",       "data_key": "solar_proxy",   "seed_heat": -8.0, "typical_value": 0.5},
-    {"name": "Outdoor Temp Rate", "data_key": "outdoor_rate",  "seed_heat": 0.7,  "typical_value": 0.5},
-    {"name": "Living Room Boiler","data_key": None,            "seed_heat": 0.0,  "typical_value": 0.5},
-    {"name": "Dining Room Boiler","data_key": None,            "seed_heat": 0.0,  "typical_value": 0.5},
-    {"name": "Sunroom Boiler",    "data_key": None,            "seed_heat": 0.0,  "typical_value": 0.5},
-]
+ZONE_MODEL_INPUTS = {
+    "living_room": [
+        {"name": "Pellet Stove",      "data_key": "pellet_stove",  "seed_heat": -8.0, "typical_value": 0.5},
+        {"name": "Solar Proxy",       "data_key": "solar_proxy",   "seed_heat": -8.0, "typical_value": 0.5},
+        {"name": "Outdoor Temp Rate", "data_key": "outdoor_rate",  "seed_heat": 0.7,  "typical_value": 0.5},
+        {"name": "Living Room Boiler","data_key": None,            "seed_heat": 0.0,  "typical_value": 0.5},
+        {"name": "Dining Room Boiler","data_key": None,            "seed_heat": 0.0,  "typical_value": 0.5},
+        {"name": "Sunroom Boiler",    "data_key": None,            "seed_heat": 0.0,  "typical_value": 0.5},
+    ],
+    "bunkroom": [
+        {"name": "Bunkroom Door",     "data_key": None,            "seed_heat": 2.9,  "typical_value": 0.5},
+        {"name": "Solar Proxy",       "data_key": "solar_proxy",   "seed_heat": 0.0,  "typical_value": 0.5},
+        {"name": "Outdoor Temp Rate", "data_key": "outdoor_rate",  "seed_heat": -0.28,"typical_value": 0.5},
+    ],
+}
+
+# Backwards compatibility alias
+LIVING_ROOM_MODEL_INPUTS = ZONE_MODEL_INPUTS["living_room"]
 
 
 def run_closed_loop(data: AlignedData,
-                    tau_minutes: float,
-                    hp_gain: float,
-                    solar_gain: float,
-                    stove_gain: float,
+                    tau_minutes: float = 0.0,
+                    hp_gain: float = 0.0,
+                    solar_gain: float = 0.0,
+                    stove_gain: float = 0.0,
                     hp_lag_minutes: float = 5.0,
                     model_input_configs: list[dict] | None = None,
                     pi_overrides: dict | None = None,
+                    profile_2r2c: object | None = None,
                     ) -> dict:
     """Run PI controller through calibrated room model.
 
     Args:
+        profile_2r2c: If provided, use this HouseProfile2R2C with
+            ThermalModel2R2C instead of the legacy 1R1C path.
+            solar_gain and stove_gain are passed to the model constructor.
+        tau_minutes, hp_gain: Legacy 1R1C params (ignored if profile_2r2c set).
         model_input_configs: List of dicts, each with:
             - name: matches production RLS coefficient name
             - data_key: AlignedData attribute name (or None to skip feeding)
@@ -483,31 +498,44 @@ def run_closed_loop(data: AlignedData,
             - typical_value: feature scale for RLS normalization
         pi_overrides: Extra config overrides for the TasmotaPIAdapter.
 
-    Returns dict with sim_room_temp, sim_hp_setpoint, and metrics.
+    Returns dict with sim_room_temp, sim_hp_setpoint, history, and metrics.
     """
     # Import here to avoid hard dependency for open-loop-only runs
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from tests.hvac_bench.adapters import TasmotaPIAdapter
-    from tests.hvac_bench.house_profiles import HouseProfile
-    from tests.hvac_bench.thermal_model import ThermalModel
 
-    profile = HouseProfile(
-        name="calibrated_living_room",
-        tau_minutes=tau_minutes,
-        hp_gain=hp_gain,
-    )
-
-    model = ThermalModel(
-        profile=profile,
-        initial_temp=data.room_temp_c[0],
-        outdoor_temp=data.outdoor_c[0],
-        sensor_noise_sigma=0.055,  # σ=0.098°C measured, but halved for sim
-        sensor_quantization=0.01,  # 0.02°F ≈ 0.011°C
-        noise_seed=42,
-        hp_lag_minutes=hp_lag_minutes,
-        solar_gain=solar_gain,
-        stove_gain=stove_gain,
-    )
+    if profile_2r2c is not None:
+        from tests.hvac_bench.thermal_model import ThermalModel2R2C
+        model = ThermalModel2R2C(
+            profile=profile_2r2c,
+            initial_temp=data.room_temp_c[0],
+            outdoor_temp=data.outdoor_c[0],
+            sensor_noise_sigma=0.055,
+            sensor_quantization=0.01,
+            noise_seed=42,
+            hp_lag_minutes=hp_lag_minutes,
+            solar_gain=solar_gain,
+            stove_gain=stove_gain,
+        )
+    else:
+        from tests.hvac_bench.house_profiles import HouseProfile
+        from tests.hvac_bench.thermal_model import ThermalModel
+        profile = HouseProfile(
+            name="calibrated",
+            tau_minutes=tau_minutes,
+            hp_gain=hp_gain,
+        )
+        model = ThermalModel(
+            profile=profile,
+            initial_temp=data.room_temp_c[0],
+            outdoor_temp=data.outdoor_c[0],
+            sensor_noise_sigma=0.055,
+            sensor_quantization=0.01,
+            noise_seed=42,
+            hp_lag_minutes=hp_lag_minutes,
+            solar_gain=solar_gain,
+            stove_gain=stove_gain,
+        )
 
     # Build PI model inputs config for the adapter
     mi_configs = model_input_configs or []
@@ -565,6 +593,7 @@ def run_closed_loop(data: AlignedData,
     dt_seconds = data.dt_seconds
     sim_room_temps: list[float] = []
     sim_hp_setpoints: list[float] = []
+    history: list[dict] = []
 
     for i in range(data.n_ticks):
         model.outdoor_temp = data.outdoor_c[i]
@@ -594,8 +623,24 @@ def run_closed_loop(data: AlignedData,
             mode="heat",
         )
 
+        state = adapter.get_state()
+        desired = data.desired_c[i]
         sim_room_temps.append(model.room_temp)
         sim_hp_setpoints.append(hp_sp)
+        history.append({
+            "tick": i,
+            "room_temp": model.room_temp,
+            "sensor_reading": sensor,
+            "desired": desired,
+            "hp_setpoint": hp_sp,
+            "integral": state.get("integral", 0.0),
+            "ff_offset": state.get("ff_offset", 0.0),
+            "error": desired - model.room_temp,
+            "outdoor": data.outdoor_c[i],
+            "d_term": state.get("d_term", 0.0),
+            "rls_obs_count": state.get("rls_obs_count", 0),
+            "smith_correction": state.get("smith_correction", 0.0),
+        })
 
     # Metrics
     mask = data.active_heating
@@ -611,6 +656,7 @@ def run_closed_loop(data: AlignedData,
     return {
         "sim_room_temp": sim_room_temps,
         "sim_hp_setpoint": sim_hp_setpoints,
+        "history": history,
         "room_rmse_c": room_rmse,
         "room_rmse_active_c": room_rmse_active,
         "room_mae_c": room_mae,
@@ -710,6 +756,85 @@ def export_comparison(data: AlignedData, sim_temps: list[float],
 
 
 # ---------------------------------------------------------------------------
+# Kd sweep
+# ---------------------------------------------------------------------------
+
+# Zone-specific solar/stove gains (from production calibration).
+# These are model instance config, not profile params.
+ZONE_GAINS = {
+    "living_room": {"solar_gain": 0.003, "stove_gain": 0.0},
+    "bunkroom":    {"solar_gain": 0.0,   "stove_gain": 0.0},
+}
+
+
+def _run_kd_sweep(data: AlignedData, zone: str) -> None:
+    """Sweep Kd values in closed-loop against calibrated 2R2C room model.
+
+    Uses production disturbances (outdoor, solar, stove) with the PI
+    controller driving the thermal model — so different Kd values produce
+    different room temp trajectories, unlike open-loop replay.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from tests.hvac_bench.house_profiles import PROFILES_2R2C
+    from tests.benchmark_metrics import compute_all_metrics
+
+    if zone not in PROFILES_2R2C:
+        print(f"No calibrated 2R2C profile for zone '{zone}'.")
+        print(f"Available: {list(PROFILES_2R2C.keys())}")
+        return
+
+    profile = PROFILES_2R2C[zone]
+    gains = ZONE_GAINS.get(zone, {"solar_gain": 0.0, "stove_gain": 0.0})
+    mi_configs = ZONE_MODEL_INPUTS.get(zone, [])
+
+    KD_VALUES = [0.0, 0.5, 2.0, 5.0, 7.5, 10.0]
+    duration_h = data.n_ticks * data.dt_seconds / 3600
+
+    print(f"\n{'='*90}")
+    print(f"Kd SWEEP — {zone} ({duration_h:.0f}h, 2R2C: τ_env={profile.tau_env} "
+          f"hp={profile.hp_gain} τ_c={profile.tau_couple} mr={profile.mass_ratio})")
+    print(f"{'='*90}")
+    print(f"{'Kd':>5} {'N':>3} {'ITAE':>8} {'CVH':>6} {'Overshoot':>10} "
+          f"{'Reversals':>10} {'SP Chg':>7} {'max|D|':>8} {'D_std':>8} "
+          f"{'RMSE':>7} {'SP match':>9}")
+    print("-" * 90)
+
+    for kd in KD_VALUES:
+        filt_n = max(8, int(kd * 2)) if kd > 0 else 8
+        pi_overrides = {
+            "pi_kd": kd,
+            "pi_kd_filter_n": filt_n,
+        }
+
+        result = run_closed_loop(
+            data,
+            solar_gain=gains["solar_gain"],
+            stove_gain=gains["stove_gain"],
+            hp_lag_minutes=5.0,
+            model_input_configs=mi_configs,
+            pi_overrides=pi_overrides,
+            profile_2r2c=profile,
+        )
+
+        history = result["history"]
+        m = compute_all_metrics(history)
+
+        d_terms = [h["d_term"] for h in history]
+        d_mean = sum(d_terms) / len(d_terms)
+        d_std = (sum((d - d_mean)**2 for d in d_terms) / max(1, len(d_terms)-1)) ** 0.5
+        max_d = max(abs(d) for d in d_terms)
+        cvh = m.get("comfort_violation_hours", 0.0)
+
+        print(f"{kd:5.1f} {filt_n:3d} {m['itae']:8.1f} {cvh:6.2f} "
+              f"{m['overshoot']:10.2f} "
+              f"{m['reversals']:10d} {m['setpoint_changes']:7d} "
+              f"{max_d:8.4f} {d_std:8.4f} "
+              f"{result['room_rmse_c']:7.4f} {result['setpoint_match_pct']:8.1f}%")
+
+    print("-" * 90)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -726,6 +851,8 @@ def main():
                         help="Skip closed-loop validation")
     parser.add_argument("--export", type=Path, default=None,
                         help="Export comparison CSV")
+    parser.add_argument("--kd-sweep", action="store_true",
+                        help="Run Kd derivative gain sweep (closed-loop, 2R2C)")
     args = parser.parse_args()
 
     print(f"Loading data from {args.bundle} zone={args.zone}...")
@@ -733,6 +860,10 @@ def main():
     print(f"Aligned {data.n_ticks} ticks over "
           f"{data.n_ticks * data.dt_seconds / 3600:.1f} hours")
     print(f"Initial RLS coefficients: {data.initial_rls_coefficients}")
+
+    if args.kd_sweep:
+        _run_kd_sweep(data, args.zone)
+        return
 
     # Phase 1: Coarse sweep with 2-hour reset windows
     # Scored only on ticks where HP is actively heating (setpoint > desired)
