@@ -21,9 +21,6 @@ from typing import Any
 
 _LOGGER = logging.getLogger(__name__)
 
-# Maximum observations to retain (48h at ~15-min ticks ≈ 192)
-MAX_BUFFER_SIZE = 300
-
 
 @dataclass
 class Observation:
@@ -72,44 +69,6 @@ class Observation:
             ff_confidence=d.get("ffc", 1.0),
             raw_c=d.get("raw", d["cur"]),
         )
-
-
-class ObservationBuffer:
-    """Ring buffer of observations for batch learning.
-
-    Stores every PI tick's state regardless of learning gate, so batch
-    analysis has a richer dataset than online-only learning.  Capped at
-    MAX_BUFFER_SIZE entries (~48h).
-    """
-
-    def __init__(self, max_size: int = MAX_BUFFER_SIZE) -> None:
-        self._buffer: list[Observation] = []
-        self._max_size = max_size
-
-    def add(self, obs: Observation) -> None:
-        """Add an observation, evicting oldest if full."""
-        self._buffer.append(obs)
-        if len(self._buffer) > self._max_size:
-            self._buffer.pop(0)
-
-    def get_all(self) -> list[Observation]:
-        return list(self._buffer)
-
-    def __len__(self) -> int:
-        return len(self._buffer)
-
-    def as_list(self) -> list[dict[str, Any]]:
-        return [o.as_dict() for o in self._buffer]
-
-    @classmethod
-    def from_list(cls, data: list[dict[str, Any]], max_size: int = MAX_BUFFER_SIZE) -> ObservationBuffer:
-        buf = cls(max_size)
-        for d in data[-max_size:]:  # keep only most recent
-            try:
-                buf._buffer.append(Observation.from_dict(d))
-            except (KeyError, TypeError, ValueError):
-                continue
-        return buf
 
 
 # Default capacity for diversity-aware buffer.  ~2000 observations at

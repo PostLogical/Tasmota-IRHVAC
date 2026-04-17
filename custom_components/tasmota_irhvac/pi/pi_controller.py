@@ -37,7 +37,7 @@ from homeassistant.util.unit_conversion import TemperatureConverter
 
 import math
 
-from .batch_learning import BatchResult, DiversityAwareBuffer, Observation, ObservationBuffer, weighted_least_squares, compare_and_report, compute_blended_update
+from .batch_learning import BatchResult, DiversityAwareBuffer, Observation, weighted_least_squares, compare_and_report, compute_blended_update
 
 from ..const import (
     ATTR_DESIRED_TEMP,
@@ -645,9 +645,7 @@ class PIController:
 
     @property
     def buffer_leverage_max(self) -> float | None:
-        """Maximum leverage score in the buffer, or None if unavailable."""
-        if not hasattr(self._observation_buffer, "get_leverage_scores"):
-            return None
+        """Maximum leverage score in the buffer, or None if empty."""
         scores = self._observation_buffer.get_leverage_scores()
         if not scores:
             return None

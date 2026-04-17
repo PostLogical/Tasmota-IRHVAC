@@ -9,7 +9,6 @@ from custom_components.tasmota_irhvac.pi.batch_learning import (
     MIN_FEATURE_VARIANCE,
     MAX_STEP_ABS,
     Observation,
-    ObservationBuffer,
     BatchResult,
     _diagonal_of_inverse,
     _weighted_variance,
@@ -17,46 +16,6 @@ from custom_components.tasmota_irhvac.pi.batch_learning import (
     compute_blended_update,
     weighted_least_squares,
 )
-
-
-# ── ObservationBuffer ─────────────────────────────────────────────────
-
-
-class TestObservationBuffer:
-    def _make_obs(self, t=0.0, sp=22.0, cur=20.0, des=20.0, rate=0.0, clamped=False):
-        return Observation(
-            timestamp=t, features=[1.0, 5.0], hp_setpoint=sp,
-            current_c=cur, desired_c=des, room_rate=rate, clamped=clamped,
-        )
-
-    def test_add_and_get(self):
-        buf = ObservationBuffer(max_size=10)
-        for i in range(5):
-            buf.add(self._make_obs(t=float(i)))
-        assert len(buf) == 5
-        assert buf.get_all()[0].timestamp == 0.0
-        assert buf.get_all()[-1].timestamp == 4.0
-
-    def test_eviction(self):
-        buf = ObservationBuffer(max_size=3)
-        for i in range(5):
-            buf.add(self._make_obs(t=float(i)))
-        assert len(buf) == 3
-        assert buf.get_all()[0].timestamp == 2.0  # oldest evicted
-
-    def test_serialization_roundtrip(self):
-        buf = ObservationBuffer()
-        for i in range(3):
-            buf.add(self._make_obs(t=float(i), sp=20.0 + i))
-        serialized = buf.as_list()
-        restored = ObservationBuffer.from_list(serialized)
-        assert len(restored) == 3
-        assert restored.get_all()[2].hp_setpoint == 22.0
-
-    def test_from_list_handles_corrupt_entries(self):
-        data = [{"t": 1.0, "bad": True}, {"t": 2.0, "x": [1.0], "sp": 22, "cur": 20, "des": 20, "rate": 0, "clamp": False}]
-        buf = ObservationBuffer.from_list(data)
-        assert len(buf) == 1  # only valid entry kept
 
 
 # ── Weighted Least Squares ────────────────────────────────────────────

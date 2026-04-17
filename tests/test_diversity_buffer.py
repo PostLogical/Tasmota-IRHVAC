@@ -17,7 +17,6 @@ import pytest
 from custom_components.tasmota_irhvac.pi.batch_learning import (
     DiversityAwareBuffer,
     Observation,
-    ObservationBuffer,
     weighted_least_squares,
 )
 
@@ -601,14 +600,14 @@ class TestBufferMechanics:
             f"All leverage scores should be finite: {scores}"
         )
 
-    def test_22_migration_from_fifo_buffer(self):
-        """Diversity buffer initializes correctly from old FIFO data."""
-        # Create old-style FIFO buffer data
-        old_buf = ObservationBuffer(max_size=50)
-        for i in range(50):
-            old_buf.add(_make_obs(t=float(i), outdoor_delta=float(i % 10),
-                                  solar=0.1 * (i % 5)))
-        serialized = old_buf.as_list()
+    def test_22_migration_from_serialized_data(self):
+        """Diversity buffer initializes correctly from serialized observation dicts."""
+        # Simulate old serialized data (list of dicts, as stored in HA)
+        serialized = [
+            _make_obs(t=float(i), outdoor_delta=float(i % 10),
+                      solar=0.1 * (i % 5)).as_dict()
+            for i in range(50)
+        ]
 
         # Import into diversity buffer
         new_buf = DiversityAwareBuffer.from_list(serialized, n_features=5)

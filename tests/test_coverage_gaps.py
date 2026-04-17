@@ -4866,19 +4866,6 @@ class TestTauEstimatorGaps:
         assert not pi._smith._initialized
 
     @pytest.mark.asyncio
-    async def test_buffer_leverage_max_legacy_buffer(self, hass, setup_pi_integration):
-        """buffer_leverage_max with ObservationBuffer (no leverage) returns None."""
-        from custom_components.tasmota_irhvac.pi.batch_learning import ObservationBuffer
-
-        entry = await setup_pi_integration()
-        entity = get_climate_entity(hass, entry)
-        pi = entity._pi
-
-        # Replace with legacy ObservationBuffer (no get_leverage_scores)
-        pi._observation_buffer = ObservationBuffer()
-        assert pi.buffer_leverage_max is None
-
-    @pytest.mark.asyncio
     async def test_batch_outliers_excluded_with_result(self, hass, setup_pi_integration):
         """batch_outliers_excluded returns count from last batch result."""
         from custom_components.tasmota_irhvac.pi.batch_learning import BatchResult
