@@ -409,3 +409,43 @@ def check_intercept_absorbing_repair(
             )
 
     return None
+
+
+def check_batch_online_disagreement_repair(
+    coeff_index: int,
+    coeff_name: str,
+    drift_signs: list[int],
+    current_beta: float,
+    last_blended_beta: float | None,
+    min_same_direction: int = 3,
+) -> tuple[str, dict[str, str], bool] | None:
+    """Check if batch and online learning are fighting over a coefficient.
+
+    Detected when the last N batch corrections are in the same direction
+    but the current beta has drifted back in the opposite direction.
+    """
+    if last_blended_beta is None or len(drift_signs) < min_same_direction:
+        return None
+
+    recent = drift_signs[-min_same_direction:]
+    # Check all recent corrections are in the same direction (all +1 or all -1)
+    if not (all(s == 1 for s in recent) or all(s == -1 for s in recent)):
+        return None
+
+    correction_direction = recent[0]  # +1 or -1
+    drift_back = current_beta - last_blended_beta
+
+    # Disagreement: current beta drifted in opposite direction from corrections
+    if correction_direction * drift_back < 0 and abs(drift_back) > 0.01:
+        direction = "upward" if correction_direction == 1 else "downward"
+        return (
+            "batch_online_disagreement",
+            {
+                "coeff_name": coeff_name,
+                "direction": direction,
+            },
+            True,
+        )
+
+    # Corrections in same direction but no drift-back — corrections are sticking
+    return ("batch_online_disagreement", {}, False)
