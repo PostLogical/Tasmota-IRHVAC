@@ -1228,7 +1228,10 @@ class PIController:
         should_create) tuples.  Called after each batch cycle and on startup.
         """
         from .health_checks import (
+            check_covariance_collapse_repair,
             check_high_integral_repair,
+            check_intercept_absorbing_repair,
+            check_model_drift_repair,
             check_save_seeds_repair,
             check_slope_divergence_repair,
         )
@@ -1349,6 +1352,97 @@ class PIController:
                 placeholders,
                 should_create,
             ))
+
+        # ── Covariance collapse at clamp ────────────────────────────
+        from ..const import DEFAULT_RLS_DELTA
+        for mode_label, rls_model, clamps in [
+            ("heat", self._rls_heat, self._rls_heat_clamps),
+            ("cool", self._rls_cool, self._rls_cool_clamps),
+        ]:
+            if rls_model.observation_count == 0:
+                continue
+            coeffs = rls_model.get_coefficients()
+            p_diag = rls_model.get_covariance_diagonal()
+            coeff_names = ["intercept", "outdoor_delta"]
+            for m in self._model_inputs:
+                coeff_names.append(m.get("name", "input"))
+
+            for i in range(1, rls_model.n):  # skip intercept (no clamp)
+                clamp = clamps[i] if i < len(clamps) else None
+                name = coeff_names[i] if i < len(coeff_names) else f"coeff_{i}"
+                result = check_covariance_collapse_repair(
+                    coeff_index=i,
+                    coeff_name=name,
+                    coeff_value=coeffs.get(i, 0.0),
+                    clamp=clamp,
+                    p_diagonal=p_diag[i] if i < len(p_diag) else 1.0,
+                    delta=DEFAULT_RLS_DELTA,
+                )
+                if result is not None:
+                    key, placeholders, should_create = result
+                    issues.append((
+                        f"{key}_{entry_id}_{mode_label}_{name}",
+                        "warning",
+                        key,
+                        placeholders,
+                        should_create,
+                    ))
+
+        # ── Model drift with maturity gate ──────────────────────────
+        drift_results = check_model_drift_repair(
+            drifting_coefficients=self.get_drifting_coefficients(),
+            has_had_stable_batch=self._has_had_stable_batch,
+        )
+        for key, placeholders, should_create in drift_results:
+            coeff_name = placeholders.get("coeff_name", "unknown")
+            issues.append((
+                f"{key}_{entry_id}_{coeff_name}",
+                "warning",
+                key,
+                placeholders,
+                should_create,
+            ))
+
+        # ── Intercept absorbing coefficient ─────────────────────────
+        # Check both heat and cool models
+        for mode_label, rls_model, clamps in [
+            ("heat", self._rls_heat, self._rls_heat_clamps),
+            ("cool", self._rls_cool, self._rls_cool_clamps),
+        ]:
+            if rls_model.observation_count == 0:
+                continue
+            coeffs = rls_model.get_coefficients()
+            p_diag = rls_model.get_covariance_diagonal()
+            intercept = coeffs.get(0, 0.0)
+            coeff_names = ["intercept", "outdoor_delta"]
+            for m in self._model_inputs:
+                coeff_names.append(m.get("name", "input"))
+
+            coeff_tuples = []
+            for i in range(1, rls_model.n):
+                name = coeff_names[i] if i < len(coeff_names) else f"coeff_{i}"
+                clamp = clamps[i] if i < len(clamps) else None
+                coeff_tuples.append((
+                    name,
+                    coeffs.get(i, 0.0),
+                    clamp,
+                    p_diag[i] if i < len(p_diag) else 1.0,
+                ))
+
+            result = check_intercept_absorbing_repair(
+                intercept_value=intercept,
+                coefficients=coeff_tuples,
+                delta=DEFAULT_RLS_DELTA,
+            )
+            if result is not None:
+                key, placeholders, should_create = result
+                issues.append((
+                    f"{key}_{entry_id}_{mode_label}",
+                    "warning",
+                    key,
+                    placeholders,
+                    should_create,
+                ))
 
         return issues
 

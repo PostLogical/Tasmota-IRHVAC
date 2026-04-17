@@ -3,7 +3,10 @@
 import pytest
 
 from custom_components.tasmota_irhvac.pi.health_checks import (
+    check_covariance_collapse_repair,
     check_high_integral_repair,
+    check_intercept_absorbing_repair,
+    check_model_drift_repair,
     check_save_seeds_repair,
     check_slope_divergence_repair,
 )
@@ -368,3 +371,242 @@ class TestCheckTuningHealthOrchestration:
         await hass.async_block_till_done()
 
         assert signal_received.called
+
+
+# ── check_covariance_collapse_repair ────────────────────────────────
+
+
+class TestCovarianceCollapseRepair:
+    """Tests for covariance collapse detection."""
+
+    def test_creates_when_at_clamp_with_collapsed_p(self):
+        """Issue created when coefficient at clamp with P ≈ delta."""
+        result = check_covariance_collapse_repair(
+            coeff_index=1, coeff_name="outdoor_delta",
+            coeff_value=0.0, clamp=(0.0, 2.0),
+            p_diagonal=0.002, delta=0.001,
+        )
+        assert result is not None
+        key, placeholders, should_create = result
+        assert should_create is True
+        assert key == "covariance_collapse"
+        assert placeholders["coeff_name"] == "outdoor_delta"
+
+    def test_no_issue_when_p_healthy(self):
+        """No issue when P is still large even though at clamp."""
+        result = check_covariance_collapse_repair(
+            coeff_index=1, coeff_name="outdoor_delta",
+            coeff_value=0.0, clamp=(0.0, 2.0),
+            p_diagonal=0.5, delta=0.001,
+        )
+        assert result is None
+
+    def test_clears_when_away_from_clamp(self):
+        """Issue cleared when coefficient moves away from clamp."""
+        result = check_covariance_collapse_repair(
+            coeff_index=1, coeff_name="outdoor_delta",
+            coeff_value=0.3, clamp=(0.0, 2.0),
+            p_diagonal=0.002, delta=0.001,
+        )
+        assert result is not None
+        assert result[2] is False
+
+    def test_no_clamp_returns_none(self):
+        """Returns None for unclamped coefficients."""
+        result = check_covariance_collapse_repair(
+            coeff_index=0, coeff_name="intercept",
+            coeff_value=-1.5, clamp=None,
+            p_diagonal=0.001, delta=0.001,
+        )
+        assert result is None
+
+    def test_at_upper_clamp(self):
+        """Detects collapse at upper clamp boundary."""
+        result = check_covariance_collapse_repair(
+            coeff_index=1, coeff_name="outdoor_delta",
+            coeff_value=2.0, clamp=(0.0, 2.0),
+            p_diagonal=0.001, delta=0.001,
+        )
+        assert result is not None
+        assert result[2] is True
+        assert result[1]["clamp_value"] == "2.0000"
+
+
+# ── check_model_drift_repair ───────────────────────────────────────
+
+
+class TestModelDriftRepair:
+    """Tests for model drift with maturity gate."""
+
+    def test_suppressed_before_stable_batch(self):
+        """No drift alerts before system has had a stable batch cycle."""
+        result = check_model_drift_repair(
+            drifting_coefficients=[(1, "outdoor_delta", 7)],
+            has_had_stable_batch=False,
+        )
+        assert result == []
+
+    def test_creates_after_stable_batch(self):
+        """Drift alerts fire after system has stabilized once."""
+        result = check_model_drift_repair(
+            drifting_coefficients=[(1, "outdoor_delta", 7)],
+            has_had_stable_batch=True,
+        )
+        assert len(result) == 1
+        key, placeholders, should_create = result[0]
+        assert should_create is True
+        assert key == "model_drift"
+        assert placeholders["coeff_name"] == "outdoor_delta"
+        assert "insulation" in placeholders["suggestion"].lower()
+
+    def test_intercept_drift_suggestion(self):
+        """Intercept drift gets sensor calibration suggestion."""
+        result = check_model_drift_repair(
+            drifting_coefficients=[(0, "intercept", 5)],
+            has_had_stable_batch=True,
+        )
+        assert len(result) == 1
+        assert "sensor calibration" in result[0][1]["suggestion"].lower()
+
+    def test_model_input_drift_suggestion(self):
+        """Model input drift gets input-specific suggestion."""
+        result = check_model_drift_repair(
+            drifting_coefficients=[(2, "Pellet Stove", 6)],
+            has_had_stable_batch=True,
+        )
+        assert len(result) == 1
+        assert "Pellet Stove" in result[0][1]["suggestion"]
+
+    def test_below_threshold_skipped(self):
+        """Coefficients below min_consecutive threshold are skipped."""
+        result = check_model_drift_repair(
+            drifting_coefficients=[(1, "outdoor_delta", 3)],
+            has_had_stable_batch=True,
+        )
+        assert result == []
+
+    def test_multiple_drifting(self):
+        """Multiple drifting coefficients produce multiple results."""
+        result = check_model_drift_repair(
+            drifting_coefficients=[
+                (0, "intercept", 6),
+                (1, "outdoor_delta", 8),
+            ],
+            has_had_stable_batch=True,
+        )
+        assert len(result) == 2
+
+
+# ── check_intercept_absorbing_repair ────────────────────────────────
+
+
+class TestInterceptAbsorbingRepair:
+    """Tests for intercept absorbing coefficient detection."""
+
+    def test_creates_when_intercept_large_and_coeff_collapsed(self):
+        """Issue created when intercept is large and a coefficient has collapsed."""
+        result = check_intercept_absorbing_repair(
+            intercept_value=-1.5,
+            coefficients=[
+                ("outdoor_delta", 0.0, (0.0, 2.0), 0.001),
+            ],
+            delta=0.001,
+        )
+        assert result is not None
+        key, placeholders, should_create = result
+        assert should_create is True
+        assert key == "intercept_absorbing"
+        assert placeholders["absorbed_name"] == "outdoor_delta"
+        assert placeholders["intercept_value"] == "-1.50"
+
+    def test_clears_when_intercept_small(self):
+        """Issue cleared when intercept drops below threshold."""
+        result = check_intercept_absorbing_repair(
+            intercept_value=0.3,
+            coefficients=[
+                ("outdoor_delta", 0.0, (0.0, 2.0), 0.001),
+            ],
+        )
+        assert result is not None
+        assert result[2] is False
+
+    def test_no_issue_when_no_collapsed_coeff(self):
+        """No issue when intercept is large but no coefficient has collapsed."""
+        result = check_intercept_absorbing_repair(
+            intercept_value=-2.0,
+            coefficients=[
+                ("outdoor_delta", 0.3, (0.0, 2.0), 0.5),
+            ],
+        )
+        assert result is None
+
+    def test_no_issue_when_coeff_at_clamp_but_p_healthy(self):
+        """No issue when coefficient at clamp but P hasn't collapsed."""
+        result = check_intercept_absorbing_repair(
+            intercept_value=-1.5,
+            coefficients=[
+                ("outdoor_delta", 0.0, (0.0, 2.0), 0.5),
+            ],
+        )
+        assert result is None
+
+
+# ── Integration: Phase 3 orchestration ──────────────────────────────
+
+
+class TestPhase3Orchestration:
+    """Test Phase 3 checks wired into _check_tuning_health()."""
+
+    @pytest.mark.asyncio
+    async def test_covariance_collapse_detected(self, hass, setup_pi_integration):
+        """Covariance collapse is detected in orchestration."""
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        # Simulate: outdoor_delta at lower clamp with collapsed P
+        n = pi._rls_heat.n
+        pi._rls_heat.beta[1] = 0.0  # at lower clamp
+        pi._rls_heat.observation_count = 100
+        # Collapse P[1,1]
+        pi._rls_heat.P[1 * n + 1] = 0.001
+
+        issues = pi._check_tuning_health()
+        collapse_issues = [i for i in issues if "covariance_collapse" in i[0]]
+        assert len(collapse_issues) >= 1
+        assert collapse_issues[0][4] is True
+
+    @pytest.mark.asyncio
+    async def test_drift_suppressed_before_stable(self, hass, setup_pi_integration):
+        """Model drift is suppressed before first stable batch."""
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        pi._has_had_stable_batch = False
+        # Simulate drifting coefficients
+        pi._drift_correction_signs = [[1, 1, 1, 1, 1, 1]]
+
+        issues = pi._check_tuning_health()
+        drift_issues = [i for i in issues if "model_drift" in i[0]]
+        assert len(drift_issues) == 0
+
+    @pytest.mark.asyncio
+    async def test_intercept_absorbing_detected(self, hass, setup_pi_integration):
+        """Intercept absorbing is detected when conditions match."""
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        n = pi._rls_heat.n
+        # Large intercept
+        pi._rls_heat.beta[0] = -1.5 * pi._rls_heat.feature_scales[0]
+        # outdoor_delta at lower clamp with collapsed P
+        pi._rls_heat.beta[1] = 0.0
+        pi._rls_heat.P[1 * n + 1] = 0.001
+        pi._rls_heat.observation_count = 100
+
+        issues = pi._check_tuning_health()
+        absorbing_issues = [i for i in issues if "intercept_absorbing" in i[0]]
+        assert len(absorbing_issues) >= 1
+        assert absorbing_issues[0][4] is True

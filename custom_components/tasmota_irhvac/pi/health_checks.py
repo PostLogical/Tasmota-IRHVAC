@@ -294,3 +294,118 @@ def check_high_integral_repair(
         },
         True,
     )
+
+
+def check_covariance_collapse_repair(
+    coeff_index: int,
+    coeff_name: str,
+    coeff_value: float,
+    clamp: tuple[float, float] | None,
+    p_diagonal: float,
+    delta: float = 0.001,
+) -> tuple[str, dict[str, str], bool] | None:
+    """Check if a coefficient is stuck at its clamp with collapsed uncertainty.
+
+    When P[i,i] ≈ delta and the coefficient is at a clamp boundary,
+    online RLS learning cannot recover — the covariance has collapsed.
+    """
+    if clamp is None:
+        return None
+
+    lo, hi = clamp
+    at_lower = abs(coeff_value - lo) < 1e-3
+    at_upper = abs(coeff_value - hi) < 1e-3
+
+    if not (at_lower or at_upper):
+        # Coefficient not at clamp — clear any existing issue
+        return ("covariance_collapse", {}, False)
+
+    if p_diagonal < 3 * delta:
+        clamp_value = lo if at_lower else hi
+        return (
+            "covariance_collapse",
+            {
+                "coeff_name": coeff_name,
+                "value": f"{coeff_value:.4f}",
+                "clamp_value": f"{clamp_value:.4f}",
+                "p_diagonal": f"{p_diagonal:.6f}",
+            },
+            True,
+        )
+
+    # At clamp but P hasn't collapsed yet — no issue
+    return None
+
+
+def check_model_drift_repair(
+    drifting_coefficients: list[tuple[int, str, int]],
+    has_had_stable_batch: bool,
+    min_consecutive: int = 5,
+) -> list[tuple[str, dict[str, str], bool]]:
+    """Check for persistent model drift with maturity gate.
+
+    Suppresses drift alerts until at least one batch cycle has had
+    recommend_update=False (system stabilized at least once).
+    """
+    results = []
+    if not has_had_stable_batch:
+        return results
+
+    for idx, name, count in drifting_coefficients:
+        if count < min_consecutive:
+            continue
+        direction = "upward" if count > 0 else "downward"
+        # Per-coefficient suggestions
+        if name == "outdoor_delta":
+            suggestion = "Check window seals, insulation, or HVAC ducting changes."
+        elif name == "intercept":
+            suggestion = "Check sensor calibration or look for an unmodeled heat/cool source."
+        else:
+            suggestion = f"Check whether {name} has changed (different fuel, settings, schedule)."
+
+        results.append((
+            "model_drift",
+            {
+                "coeff_name": name,
+                "direction": direction,
+                "count": str(abs(count)),
+                "suggestion": suggestion,
+            },
+            True,
+        ))
+    return results
+
+
+def check_intercept_absorbing_repair(
+    intercept_value: float,
+    coefficients: list[tuple[str, float, tuple[float, float] | None, float]],
+    delta: float = 0.001,
+    intercept_threshold: float = 1.0,
+) -> tuple[str, dict[str, str], bool] | None:
+    """Check if intercept has grown large by absorbing a clamped coefficient's effect.
+
+    coefficients: list of (name, value, clamp, p_diagonal) for non-intercept coefficients.
+    """
+    if abs(intercept_value) < intercept_threshold:
+        return ("intercept_absorbing", {}, False)
+
+    # Find any coefficient with covariance collapse at its clamp
+    for name, value, clamp, p_diag in coefficients:
+        if clamp is None:
+            continue
+        lo, hi = clamp
+        at_clamp = abs(value - lo) < 1e-3 or abs(value - hi) < 1e-3
+        collapsed = p_diag < 3 * delta
+        if at_clamp and collapsed:
+            clamp_value = lo if abs(value - lo) < 1e-3 else hi
+            return (
+                "intercept_absorbing",
+                {
+                    "intercept_value": f"{intercept_value:.2f}",
+                    "absorbed_name": name,
+                    "absorbed_clamp": f"{clamp_value:.4f}",
+                },
+                True,
+            )
+
+    return None
