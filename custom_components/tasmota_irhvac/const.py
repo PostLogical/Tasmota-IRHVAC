@@ -191,6 +191,10 @@ CONF_PI_FF_HEAT_REFERENCE = "pi_ff_heat_reference"
 CONF_PI_FF_HEAT_SLOPE = "pi_ff_heat_slope"
 CONF_PI_FF_COOL_REFERENCE = "pi_ff_cool_reference"
 CONF_PI_FF_COOL_SLOPE = "pi_ff_cool_slope"
+CONF_PI_OUTDOOR_DELTA_CLAMP_HEAT_MIN = "pi_outdoor_delta_clamp_heat_min"
+CONF_PI_OUTDOOR_DELTA_CLAMP_HEAT_MAX = "pi_outdoor_delta_clamp_heat_max"
+CONF_PI_OUTDOOR_DELTA_CLAMP_COOL_MIN = "pi_outdoor_delta_clamp_cool_min"
+CONF_PI_OUTDOOR_DELTA_CLAMP_COOL_MAX = "pi_outdoor_delta_clamp_cool_max"
 CONF_PI_SETPOINT_WEIGHT = "pi_setpoint_weight"
 CONF_PI_TAU_ESTIMATE = "pi_tau_estimate"
 CONF_PI_RESPONSE_LAG = "pi_response_lag"
@@ -230,6 +234,10 @@ DEFAULT_PI_FF_HEAT_REFERENCE = 15.0
 DEFAULT_PI_FF_HEAT_SLOPE = 0.3
 DEFAULT_PI_FF_COOL_REFERENCE = 25.0
 DEFAULT_PI_FF_COOL_SLOPE = 0.3
+DEFAULT_PI_OUTDOOR_DELTA_CLAMP_HEAT_MIN = 0.0
+DEFAULT_PI_OUTDOOR_DELTA_CLAMP_HEAT_MAX = 2.0
+DEFAULT_PI_OUTDOOR_DELTA_CLAMP_COOL_MIN = -2.0
+DEFAULT_PI_OUTDOOR_DELTA_CLAMP_COOL_MAX = 0.0
 DEFAULT_PI_SETPOINT_WEIGHT = 0.3  # 2-DOF: p_term = kp * b * error. Lower b reduces overshoot.
 DEFAULT_PI_TAU_ESTIMATE = 0.0      # Room thermal τ (minutes). 0 = disabled (use manual Kp/Ki).
 DEFAULT_PI_RESPONSE_LAG = 15.0     # HP response lag L (minutes). Compressor→room first-order lag.
@@ -253,3 +261,4 @@ ATTR_FF_OFFSET = "ff_offset"
 # Dispatcher signals (format with entry_id)
 SIGNAL_PI_UPDATE = "tasmota_irhvac_pi_update_{}"
 SIGNAL_FF_SUPPRESS_UPDATE = "tasmota_irhvac_ff_suppress_update_{}"
+SIGNAL_PI_BATCH_COMPLETE = "tasmota_irhvac_batch_complete_{}"

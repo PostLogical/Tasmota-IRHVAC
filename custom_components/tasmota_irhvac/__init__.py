@@ -15,12 +15,15 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.typing import ConfigType
 
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
+
 from .const import (
     CONF_PI_ENABLED,
     CONF_OUTDOOR_TEMP_SENSOR,
     DATA_KEY,
     DOMAIN,
     PLATFORMS,
+    SIGNAL_PI_BATCH_COMPLETE,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -57,8 +60,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     @callback
     def _deferred_check(_now: datetime) -> None:
         _check_config_issues(hass, entry)
+        _check_tuning_health_issues(hass, entry)
 
     async_call_later(hass, 120, _deferred_check)
+
+    # Listen for batch completion to re-check tuning health
+    @callback
+    def _on_batch_complete() -> None:
+        _check_tuning_health_issues(hass, entry)
+
+    unsub = async_dispatcher_connect(
+        hass, SIGNAL_PI_BATCH_COMPLETE.format(entry.entry_id), _on_batch_complete,
+    )
+    entry.async_on_unload(unsub)
 
     return True
 
@@ -189,6 +203,32 @@ def _check_config_issues(hass: HomeAssistant, entry: ConfigEntry) -> None:
     for legacy_key in ("suppress_learning_entity_not_found", "bias_entity_not_found",
                        "disturbance_entity_not_found"):
         ir.async_delete_issue(hass, DOMAIN, f"{legacy_key}_{entry.entry_id}")
+
+
+def _check_tuning_health_issues(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Check PI tuning health and surface/clear issues via HA Repairs."""
+    climate_entity = hass.data.get(DATA_KEY, {}).get(entry.entry_id)
+    if climate_entity is None:
+        return
+
+    from .pi import PIController
+    pi = climate_entity._pi
+    if not isinstance(pi, PIController):
+        return
+
+    issues = pi._check_tuning_health()
+    for issue_id, severity, translation_key, placeholders, should_create in issues:
+        if should_create:
+            ir.async_create_issue(
+                hass, DOMAIN, issue_id, is_fixable=False,
+                severity=ir.IssueSeverity.WARNING if severity == "warning"
+                else ir.IssueSeverity.CRITICAL if severity == "critical"
+                else ir.IssueSeverity.WARNING,
+                translation_key=translation_key,
+                translation_placeholders=placeholders,
+            )
+        else:
+            ir.async_delete_issue(hass, DOMAIN, issue_id)
 
 
 def _register_services(hass: HomeAssistant) -> None:

@@ -99,6 +99,10 @@ from .const import (
     CONF_PI_FF_COOL_SLOPE,
     CONF_PI_FF_HEAT_REFERENCE,
     CONF_PI_FF_HEAT_SLOPE,
+    CONF_PI_OUTDOOR_DELTA_CLAMP_COOL_MAX,
+    CONF_PI_OUTDOOR_DELTA_CLAMP_COOL_MIN,
+    CONF_PI_OUTDOOR_DELTA_CLAMP_HEAT_MAX,
+    CONF_PI_OUTDOOR_DELTA_CLAMP_HEAT_MIN,
     CONF_PI_KD,
     CONF_PI_KD_FILTER_N,
     CONF_PI_IMC_LAMBDA,
@@ -145,6 +149,10 @@ from .const import (
     DEFAULT_PI_FF_COOL_SLOPE,
     DEFAULT_PI_FF_HEAT_REFERENCE,
     DEFAULT_PI_FF_HEAT_SLOPE,
+    DEFAULT_PI_OUTDOOR_DELTA_CLAMP_COOL_MAX,
+    DEFAULT_PI_OUTDOOR_DELTA_CLAMP_COOL_MIN,
+    DEFAULT_PI_OUTDOOR_DELTA_CLAMP_HEAT_MAX,
+    DEFAULT_PI_OUTDOOR_DELTA_CLAMP_HEAT_MIN,
     DEFAULT_PI_KD,
     DEFAULT_PI_KD_FILTER_N,
     DEFAULT_PI_IMC_LAMBDA,
@@ -431,6 +439,18 @@ OPTIONS_PI_CONTROLLER_SCHEMA = vol.Schema(
         ),
         vol.Optional(CONF_PI_FF_COOL_SLOPE, default=DEFAULT_PI_FF_COOL_SLOPE): NumberSelector(
             NumberSelectorConfig(min=0, max=5, step=0.01, mode=NumberSelectorMode.BOX)
+        ),
+        vol.Optional(CONF_PI_OUTDOOR_DELTA_CLAMP_HEAT_MIN, default=DEFAULT_PI_OUTDOOR_DELTA_CLAMP_HEAT_MIN): NumberSelector(
+            NumberSelectorConfig(min=-5, max=5, step=0.1, mode=NumberSelectorMode.BOX)
+        ),
+        vol.Optional(CONF_PI_OUTDOOR_DELTA_CLAMP_HEAT_MAX, default=DEFAULT_PI_OUTDOOR_DELTA_CLAMP_HEAT_MAX): NumberSelector(
+            NumberSelectorConfig(min=-5, max=5, step=0.1, mode=NumberSelectorMode.BOX)
+        ),
+        vol.Optional(CONF_PI_OUTDOOR_DELTA_CLAMP_COOL_MIN, default=DEFAULT_PI_OUTDOOR_DELTA_CLAMP_COOL_MIN): NumberSelector(
+            NumberSelectorConfig(min=-5, max=5, step=0.1, mode=NumberSelectorMode.BOX)
+        ),
+        vol.Optional(CONF_PI_OUTDOOR_DELTA_CLAMP_COOL_MAX, default=DEFAULT_PI_OUTDOOR_DELTA_CLAMP_COOL_MAX): NumberSelector(
+            NumberSelectorConfig(min=-5, max=5, step=0.1, mode=NumberSelectorMode.BOX)
         ),
         vol.Optional(CONF_PI_SETPOINT_WEIGHT, default=DEFAULT_PI_SETPOINT_WEIGHT): NumberSelector(
             NumberSelectorConfig(min=0, max=1, step=0.05, mode=NumberSelectorMode.BOX)
@@ -796,6 +816,18 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_PI_FF_COOL_SLOPE, default=DEFAULT_PI_FF_COOL_SLOPE
                     ): NumberSelector(
                         NumberSelectorConfig(min=0, max=5, step=0.01, mode=NumberSelectorMode.BOX)
+                    ),
+                    vol.Optional(CONF_PI_OUTDOOR_DELTA_CLAMP_HEAT_MIN, default=DEFAULT_PI_OUTDOOR_DELTA_CLAMP_HEAT_MIN): NumberSelector(
+                        NumberSelectorConfig(min=-5, max=5, step=0.1, mode=NumberSelectorMode.BOX)
+                    ),
+                    vol.Optional(CONF_PI_OUTDOOR_DELTA_CLAMP_HEAT_MAX, default=DEFAULT_PI_OUTDOOR_DELTA_CLAMP_HEAT_MAX): NumberSelector(
+                        NumberSelectorConfig(min=-5, max=5, step=0.1, mode=NumberSelectorMode.BOX)
+                    ),
+                    vol.Optional(CONF_PI_OUTDOOR_DELTA_CLAMP_COOL_MIN, default=DEFAULT_PI_OUTDOOR_DELTA_CLAMP_COOL_MIN): NumberSelector(
+                        NumberSelectorConfig(min=-5, max=5, step=0.1, mode=NumberSelectorMode.BOX)
+                    ),
+                    vol.Optional(CONF_PI_OUTDOOR_DELTA_CLAMP_COOL_MAX, default=DEFAULT_PI_OUTDOOR_DELTA_CLAMP_COOL_MAX): NumberSelector(
+                        NumberSelectorConfig(min=-5, max=5, step=0.1, mode=NumberSelectorMode.BOX)
                     ),
                     vol.Optional(CONF_PI_SETPOINT_WEIGHT, default=DEFAULT_PI_SETPOINT_WEIGHT): NumberSelector(
                         NumberSelectorConfig(min=0, max=1, step=0.05, mode=NumberSelectorMode.BOX)

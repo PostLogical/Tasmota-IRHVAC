@@ -51,6 +51,10 @@ from ..const import (
     CONF_PI_FF_COOL_SLOPE,
     CONF_PI_FF_HEAT_REFERENCE,
     CONF_PI_FF_HEAT_SLOPE,
+    CONF_PI_OUTDOOR_DELTA_CLAMP_COOL_MAX,
+    CONF_PI_OUTDOOR_DELTA_CLAMP_COOL_MIN,
+    CONF_PI_OUTDOOR_DELTA_CLAMP_HEAT_MAX,
+    CONF_PI_OUTDOOR_DELTA_CLAMP_HEAT_MIN,
     CONF_PI_IMC_LAMBDA,
     CONF_PI_KD,
     CONF_PI_SENSOR_FILTER_TAU,
@@ -70,6 +74,10 @@ from ..const import (
     DEFAULT_PI_FF_COOL_SLOPE,
     DEFAULT_PI_FF_HEAT_REFERENCE,
     DEFAULT_PI_FF_HEAT_SLOPE,
+    DEFAULT_PI_OUTDOOR_DELTA_CLAMP_COOL_MAX,
+    DEFAULT_PI_OUTDOOR_DELTA_CLAMP_COOL_MIN,
+    DEFAULT_PI_OUTDOOR_DELTA_CLAMP_HEAT_MAX,
+    DEFAULT_PI_OUTDOOR_DELTA_CLAMP_HEAT_MIN,
     DEFAULT_PI_IMC_LAMBDA,
     DEFAULT_PI_KD,
     DEFAULT_PI_SENSOR_FILTER_TAU,
@@ -83,6 +91,7 @@ from ..const import (
     DEFAULT_PI_SMITH_ENABLED,
     DEFAULT_PI_TAU_ESTIMATE,
     SIGNAL_FF_SUPPRESS_UPDATE,
+    SIGNAL_PI_BATCH_COMPLETE,
     SIGNAL_PI_UPDATE,
 )
 
@@ -294,8 +303,14 @@ class PIController:
         # Index 2+: model inputs in order
         self._heat_seeds = [0.0, self._ff_heat_slope]
         self._cool_seeds = [0.0, -self._ff_cool_slope]  # Negative: hotter outdoor → lower HP setpoint
-        self._rls_heat_clamps: list[tuple[float, float] | None] = [None, (0.0, 2.0)]
-        self._rls_cool_clamps: list[tuple[float, float] | None] = [None, (-2.0, 0.0)]
+        self._rls_heat_clamps: list[tuple[float, float] | None] = [None, (
+            config.get(CONF_PI_OUTDOOR_DELTA_CLAMP_HEAT_MIN, DEFAULT_PI_OUTDOOR_DELTA_CLAMP_HEAT_MIN),
+            config.get(CONF_PI_OUTDOOR_DELTA_CLAMP_HEAT_MAX, DEFAULT_PI_OUTDOOR_DELTA_CLAMP_HEAT_MAX),
+        )]
+        self._rls_cool_clamps: list[tuple[float, float] | None] = [None, (
+            config.get(CONF_PI_OUTDOOR_DELTA_CLAMP_COOL_MIN, DEFAULT_PI_OUTDOOR_DELTA_CLAMP_COOL_MIN),
+            config.get(CONF_PI_OUTDOOR_DELTA_CLAMP_COOL_MAX, DEFAULT_PI_OUTDOOR_DELTA_CLAMP_COOL_MAX),
+        )]
         for m_input in self._model_inputs:
             self._heat_seeds.append(float(m_input.get("seed_heat", 0.0)))
             self._cool_seeds.append(float(m_input.get("seed_cool", 0.0)))
@@ -372,6 +387,8 @@ class PIController:
         self._batch_analysis_timer: CALLBACK_TYPE | None = None
         self._last_batch_result: BatchResult | None = None
         self._last_batch_timestamp: float | None = None
+        self._has_had_stable_batch: bool = False
+        self._tuning_alert_counters: dict[str, int] = {}
 
         # Room temperature rate of change tracking (°C/min)
         self._room_temp_history: list[tuple[float, float]] = []  # [(monotonic_time, temp_c), ...]
@@ -593,6 +610,17 @@ class PIController:
                 if len(self._drift_correction_signs[i]) > 10:
                     self._drift_correction_signs[i].pop(0)
 
+        # Track maturity: at least one batch cycle without recommending update
+        if not result.recommend_update:
+            self._has_had_stable_batch = True
+
+        # Signal batch completion for tuning health checks
+        if hasattr(self._entity, "_config_entry_id"):
+            async_dispatcher_send(
+                self._hass,
+                SIGNAL_PI_BATCH_COMPLETE.format(self._entity._config_entry_id),
+            )
+
     def get_drifting_coefficients(self) -> list[tuple[int, str, int]]:
         """Return coefficients with persistent same-direction correction.
 
@@ -694,6 +722,10 @@ class PIController:
                 if self._last_batch_result is not None
                 else None
             ),
+            tuning_alert_counters={
+                **self._tuning_alert_counters,
+                "had_stable_batch": self._has_had_stable_batch,
+            },
         )
 
     def restore_extra_stored_data(self, data: PIExtraStoredData) -> None:
@@ -749,6 +781,12 @@ class PIController:
         # Restore drift detection history
         if data.drift_correction_signs:
             self._drift_correction_signs = data.drift_correction_signs
+        # Restore tuning alert counters
+        if data.tuning_alert_counters:
+            self._tuning_alert_counters = data.tuning_alert_counters
+            self._has_had_stable_batch = bool(
+                self._tuning_alert_counters.get("had_stable_batch", False)
+            )
         # Restore last batch result for diagnostics continuity
         if data.last_batch_result is not None:
             br = data.last_batch_result
@@ -1179,7 +1217,20 @@ class PIController:
         self._last_batch_result = None
         self._last_batch_timestamp = None
         self._drift_correction_signs = []
+        self._has_had_stable_batch = False
+        self._tuning_alert_counters = {}
         _LOGGER.info("Observation buffer flushed — batch learning will restart from scratch")
+
+    def _check_tuning_health(self) -> list[tuple[str, str, str, dict[str, str], bool]]:
+        """Evaluate tuning health and return issues for HA Repairs.
+
+        Returns list of (issue_id, severity, translation_key, placeholders,
+        should_create) tuples.  Called after each batch cycle and on startup.
+        """
+        entry_id = getattr(self._entity, "_config_entry_id", "unknown")
+        issues: list[tuple[str, str, str, dict[str, str], bool]] = []
+        # Phase 2-4 will add detection logic here.
+        return issues
 
     def get_health_status(self) -> dict[str, Any]:
         """Evaluate PI controller health and return status with alerts."""

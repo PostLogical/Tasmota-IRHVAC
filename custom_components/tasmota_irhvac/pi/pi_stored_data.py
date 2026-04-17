@@ -42,6 +42,7 @@ class PIExtraStoredData(ExtraStoredData):
     observation_buffer: list = dataclasses.field(default_factory=list)
     drift_correction_signs: list = dataclasses.field(default_factory=list)
     last_batch_result: dict | None = None
+    tuning_alert_counters: dict = dataclasses.field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize to JSON-compatible dict."""
@@ -68,6 +69,7 @@ class PIExtraStoredData(ExtraStoredData):
             "observation_buffer": self.observation_buffer,
             "drift_correction_signs": self.drift_correction_signs,
             "last_batch_result": self.last_batch_result,
+            "tuning_alert_counters": self.tuning_alert_counters,
         }
 
     @classmethod
@@ -101,6 +103,7 @@ class PIExtraStoredData(ExtraStoredData):
                 observation_buffer=restored.get("observation_buffer", []),
                 drift_correction_signs=restored.get("drift_correction_signs", []),
                 last_batch_result=restored.get("last_batch_result"),
+                tuning_alert_counters=restored.get("tuning_alert_counters", {}),
             )
         except (KeyError, ValueError, TypeError, AttributeError):
             return None
