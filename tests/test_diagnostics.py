@@ -83,11 +83,12 @@ class TestDiagnosticsWithEntity:
         entry = await setup_pi_integration()
         diag = await async_get_config_entry_diagnostics(hass, entry)
 
-        assert "observation_buffer" in diag["pi_controller"]
-        buf = diag["pi_controller"]["observation_buffer"]
+        assert "observation_buffer_heat" in diag["pi_controller"]
+        buf = diag["pi_controller"]["observation_buffer_heat"]
         assert "total" in buf
         assert "eligible" in buf
         assert buf["total"] >= 0
+        assert "observation_buffer_cool" in diag["pi_controller"]
 
     @pytest.mark.asyncio
     async def test_diagnostics_performance_fields(self, hass, setup_pi_integration):

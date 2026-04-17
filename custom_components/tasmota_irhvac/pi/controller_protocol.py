@@ -86,13 +86,13 @@ class ControllerHook(Protocol):
 
     # ── FF learning services ─────────────────────────────────────────
 
-    async def async_reset_ff_seeds(self) -> None: ...
+    async def async_reset_ff_seeds(self, mode: str | None = None) -> None: ...
 
     async def async_suppress_ff_learning(self, reason: str = "") -> None: ...
 
     async def async_resume_ff_learning(self) -> None: ...
 
-    async def async_flush_observation_buffer(self) -> None: ...
+    async def async_flush_observation_buffer(self, mode: str | None = None) -> None: ...
 
 
 class NullController:
@@ -188,7 +188,7 @@ class NullController:
 
     # ── FF learning services ─────────────────────────────────────────
 
-    async def async_reset_ff_seeds(self) -> None:
+    async def async_reset_ff_seeds(self, mode: str | None = None) -> None:
         pass
 
     async def async_suppress_ff_learning(self, reason: str = "") -> None:
@@ -197,5 +197,5 @@ class NullController:
     async def async_resume_ff_learning(self) -> None:
         pass
 
-    async def async_flush_observation_buffer(self) -> None:
+    async def async_flush_observation_buffer(self, mode: str | None = None) -> None:
         pass

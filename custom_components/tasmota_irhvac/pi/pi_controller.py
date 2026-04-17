@@ -378,11 +378,17 @@ class PIController:
         # Number of consecutive same-direction corrections to trigger alert.
         self._drift_threshold: int = 5
 
-        # Batch learning: diversity-aware buffer of every tick's state for
-        # periodic offline WLS analysis.  Records regardless of learning gate.
+        # Batch learning: per-mode diversity-aware buffers of every tick's
+        # state for periodic offline WLS analysis.  Heat and cool models
+        # learn independently — outdoor_delta sign differs — so observations
+        # must not be mixed.  Records regardless of learning gate.
         # n_features = intercept + outdoor_delta + model_inputs
-        self._observation_buffer = DiversityAwareBuffer(
-            n_features=2 + len(self._model_inputs),
+        _n_buf_features = 2 + len(self._model_inputs)
+        self._observation_buffer_heat = DiversityAwareBuffer(
+            n_features=_n_buf_features,
+        )
+        self._observation_buffer_cool = DiversityAwareBuffer(
+            n_features=_n_buf_features,
         )
         self._batch_analysis_timer: CALLBACK_TYPE | None = None
         self._last_batch_result: BatchResult | None = None
@@ -533,13 +539,14 @@ class PIController:
         e = self._entity
         is_heating = e._attr_hvac_mode == HVACMode.HEAT
         rls = self._rls_heat if is_heating else self._rls_cool
+        buffer = self._observation_buffer_heat if is_heating else self._observation_buffer_cool
 
         # Periodic recomputation of info matrix to prevent numerical drift.
-        if hasattr(self._observation_buffer, 'recompute_info_matrix'):
-            if self._observation_buffer.needs_recompute:
-                self._observation_buffer.recompute_info_matrix()
+        if hasattr(buffer, 'recompute_info_matrix'):
+            if buffer.needs_recompute:
+                buffer.recompute_info_matrix()
 
-        observations = self._observation_buffer.get_all()
+        observations = buffer.get_all()
         if len(observations) < 20:
             _LOGGER.debug(
                 "%sBatch WLS: insufficient observations (%d < 20)",
@@ -649,20 +656,31 @@ class PIController:
     # ── Buffer / batch sensor properties ──────────────────────────────
 
     @property
+    def _active_buffer(self) -> DiversityAwareBuffer:
+        """Return the observation buffer for the active HVAC mode.
+
+        Defaults to heat buffer when mode is ambiguous (OFF, HEAT_COOL,
+        None) — heat is the dominant mode and buffer sensors should
+        report useful data in the default state.
+        """
+        is_cooling = self._entity._attr_hvac_mode in (HVACMode.COOL, HVACMode.DRY)
+        return self._observation_buffer_cool if is_cooling else self._observation_buffer_heat
+
+    @property
     def buffer_eligible(self) -> int:
-        """Count of eligible (unclamped, low-rate) observations in the buffer."""
-        obs = self._observation_buffer.get_all()
+        """Count of eligible (unclamped, low-rate) observations in the active buffer."""
+        obs = self._active_buffer.get_all()
         return sum(1 for o in obs if not o.clamped and abs(o.room_rate) < 0.02)
 
     @property
     def buffer_total(self) -> int:
-        """Total observations currently in the buffer."""
-        return len(self._observation_buffer)
+        """Total observations in the active mode's buffer."""
+        return len(self._active_buffer)
 
     @property
     def buffer_oldest_age_hours(self) -> float | None:
         """Age of the oldest observation in hours, or None if buffer is empty."""
-        obs = self._observation_buffer.get_all()
+        obs = self._active_buffer.get_all()
         if not obs:
             return None
         import time as time_mod
@@ -673,8 +691,8 @@ class PIController:
 
     @property
     def buffer_leverage_max(self) -> float | None:
-        """Maximum leverage score in the buffer, or None if empty."""
-        scores = self._observation_buffer.get_leverage_scores()
+        """Maximum leverage score in the active buffer, or None if empty."""
+        scores = self._active_buffer.get_leverage_scores()
         if not scores:
             return None
         return round(max(scores), 6)
@@ -712,7 +730,8 @@ class PIController:
             cool_seeds_at_learn=list(self._cool_seeds),
             ki_at_save=self._pi_ki,
             tau_estimate=self._tau_estimator.tau,
-            observation_buffer=self._observation_buffer.as_list(),
+            observation_buffer_heat=self._observation_buffer_heat.as_list(),
+            observation_buffer_cool=self._observation_buffer_cool.as_list(),
             drift_correction_signs=self._drift_correction_signs,
             last_batch_result=(
                 {
@@ -771,12 +790,22 @@ class PIController:
                 coeff_clamps=self._rls_cool_clamps,
                 feature_scales=self._feature_scales,
             )
-        # Restore observation buffer for batch learning.
-        # Accepts data from both legacy FIFO and diversity-aware buffers.
-        if data.observation_buffer:
-            self._observation_buffer = DiversityAwareBuffer.from_list(
-                data.observation_buffer,
-                n_features=2 + len(self._model_inputs),
+        # Restore per-mode observation buffers for batch learning.
+        # Migration: legacy single observation_buffer → heat buffer
+        # (heating-dominant assumption — no production user has cool data).
+        _n_buf_features = 2 + len(self._model_inputs)
+        if data.observation_buffer_heat:
+            self._observation_buffer_heat = DiversityAwareBuffer.from_list(
+                data.observation_buffer_heat, n_features=_n_buf_features,
+            )
+        elif data.observation_buffer:
+            # Legacy single-buffer migration
+            self._observation_buffer_heat = DiversityAwareBuffer.from_list(
+                data.observation_buffer, n_features=_n_buf_features,
+            )
+        if data.observation_buffer_cool:
+            self._observation_buffer_cool = DiversityAwareBuffer.from_list(
+                data.observation_buffer_cool, n_features=_n_buf_features,
             )
         # Restore drift detection history
         if data.drift_correction_signs:
@@ -985,8 +1014,10 @@ class PIController:
         heat_dict = self._rls_heat.get_coefficients()
         cool_dict = self._rls_cool.get_coefficients()
         return {
-            "observation_buffer": self._observation_buffer.as_list(),
-            "buffer_size": len(self._observation_buffer),
+            "observation_buffer_heat": self._observation_buffer_heat.as_list(),
+            "observation_buffer_cool": self._observation_buffer_cool.as_list(),
+            "buffer_size_heat": len(self._observation_buffer_heat),
+            "buffer_size_cool": len(self._observation_buffer_cool),
             "rls_heat": {
                 "coefficients": {coeff_names[i] if i < len(coeff_names) else f"β{i}": heat_dict[i]
                                  for i in range(self._rls_heat.n)},
@@ -1119,24 +1150,24 @@ class PIController:
         else:
             result["batch_learning"] = None
 
-        # Observation buffer stats
-        obs = self._observation_buffer.get_all()
-        n_eligible = sum(
-            1 for o in obs if not o.clamped and abs(o.room_rate) < 0.02
-        )
-        buf_stats: dict[str, Any] = {"total": len(obs), "eligible": n_eligible}
-        if hasattr(self._observation_buffer, "get_leverage_scores"):
-            scores = self._observation_buffer.get_leverage_scores()
+        # Observation buffer stats (per-mode)
+        def _buf_stats(buf: DiversityAwareBuffer) -> dict[str, Any]:
+            obs = buf.get_all()
+            n_eligible = sum(
+                1 for o in obs if not o.clamped and abs(o.room_rate) < 0.02
+            )
+            stats: dict[str, Any] = {"total": len(obs), "eligible": n_eligible}
+            scores = buf.get_leverage_scores()
             if scores:
-                buf_stats["leverage_min"] = round(min(scores), 6)
-                buf_stats["leverage_median"] = round(sorted(scores)[len(scores) // 2], 6)
-                buf_stats["leverage_max"] = round(max(scores), 6)
+                stats["leverage_min"] = round(min(scores), 6)
+                stats["leverage_median"] = round(sorted(scores)[len(scores) // 2], 6)
+                stats["leverage_max"] = round(max(scores), 6)
             if obs:
                 now = time_mod.monotonic()
                 oldest = min(o.timestamp for o in obs)
-                buf_stats["oldest_age_hours"] = round((now - oldest) / 3600, 1)
-            buf_stats["max_size"] = self._observation_buffer._max_size
-            n_features = self._observation_buffer.n_features
+                stats["oldest_age_hours"] = round((now - oldest) / 3600, 1)
+            stats["max_size"] = buf._max_size
+            n_features = buf.n_features
             feature_active: dict[str, int] = {}
             for j in range(2, n_features):
                 name = coeff_names[j] if j < len(coeff_names) else f"feature_{j}"
@@ -1144,8 +1175,11 @@ class PIController:
                     1 for o in obs if j < len(o.features) and abs(o.features[j]) > 1e-6
                 )
             if feature_active:
-                buf_stats["feature_active_counts"] = feature_active
-        result["observation_buffer"] = buf_stats
+                stats["feature_active_counts"] = feature_active
+            return stats
+
+        result["observation_buffer_heat"] = _buf_stats(self._observation_buffer_heat)
+        result["observation_buffer_cool"] = _buf_stats(self._observation_buffer_cool)
 
         return result
 
@@ -1206,20 +1240,27 @@ class PIController:
             self._cool_seeds[i] = round(cool_beta[i], 4)
             self._rls_cool.beta_seed[i] = round(cool_beta[i], 4)
 
-    def flush_observation_buffer(self) -> None:
-        """Clear the observation buffer and reset batch learning state.
+    def flush_observation_buffer(self, mode: str | None = None) -> None:
+        """Clear observation buffer(s) and reset batch learning state.
 
-        Nuclear option for major renovation or equipment change.  Clears all
-        accumulated observations, the last batch result, and drift correction
-        history so the model re-learns from scratch.
+        Nuclear option for major renovation or equipment change.
+
+        Args:
+            mode: "heat", "cool", or None (both).  When flushing a single
+                  mode, drift correction history and batch result are also
+                  cleared because they reference the now-invalid data.
         """
-        self._observation_buffer.clear()
+        if mode in (None, "heat"):
+            self._observation_buffer_heat.clear()
+        if mode in (None, "cool"):
+            self._observation_buffer_cool.clear()
         self._last_batch_result = None
         self._last_batch_timestamp = None
         self._drift_correction_signs = []
         self._has_had_stable_batch = False
         self._tuning_alert_counters = {}
-        _LOGGER.info("Observation buffer flushed — batch learning will restart from scratch")
+        label = mode or "heat+cool"
+        _LOGGER.info("Observation buffer (%s) flushed — batch learning will restart from scratch", label)
 
     def _check_tuning_health(self) -> list[tuple[str, str, str, dict[str, str], bool]]:
         """Evaluate tuning health and return issues for HA Repairs.
@@ -1563,9 +1604,10 @@ class PIController:
         feature_names = ["intercept", "outdoor_delta"]
         for m in self._model_inputs:
             feature_names.append(m.get("name", "input"))
+        active_buf = self._active_buffer
         checks.append(check_feature_diversity(
-            self._observation_buffer.get_all(),
-            getattr(self._observation_buffer, "n_features", 0),
+            active_buf.get_all(),
+            getattr(active_buf, "n_features", 0),
             feature_names,
             self.HEALTH_FEATURE_DIVERSITY_MIN,
             self.HEALTH_FEATURE_DIVERSITY_MIN_OBS,
@@ -1660,40 +1702,49 @@ class PIController:
                 SIGNAL_FF_SUPPRESS_UPDATE.format(self._entity._config_entry_id),
             )
 
-    async def async_reset_ff_seeds(self) -> None:
-        """Reset feedforward RLS models to seed values from config."""
-        # Reset RLS models to seed coefficients
-        heat_seeds = [0.0, self._ff_heat_slope]
-        cool_seeds = [0.0, -self._ff_cool_slope]  # Negative: hotter outdoor → lower HP setpoint
-        for m_input in self._model_inputs:
-            heat_seeds.append(float(m_input.get("seed_heat", 0.0)))
-            cool_seeds.append(float(m_input.get("seed_cool", 0.0)))
-        # Convert physical-space seeds to normalized space
-        n = self._rls_heat.n
-        heat_norm = [
-            heat_seeds[i] * self._feature_scales[i] if i < len(heat_seeds) else 0.0
-            for i in range(n)
-        ]
-        cool_norm = [
-            cool_seeds[i] * self._feature_scales[i] if i < len(cool_seeds) else 0.0
-            for i in range(n)
-        ]
-        self._rls_heat.beta = heat_norm
-        self._rls_cool.beta = cool_norm
-        # Reset covariance to uniform initial uncertainty
-        for i in range(n):
-            for j in range(n):
-                val = DEFAULT_RLS_P_INIT if i == j else 0.0
-                self._rls_heat.P[i * n + j] = val
-                self._rls_cool.P[i * n + j] = val
-        self._rls_heat.observation_count = 0
-        self._rls_cool.observation_count = 0
-        self._pi_integral = 0.0
-        _LOGGER.info("FF models reset to seed values, integral zeroed")
+    async def async_reset_ff_seeds(self, mode: str | None = None) -> None:
+        """Reset feedforward RLS models to seed values from config.
 
-    async def async_flush_observation_buffer(self) -> None:
-        """Clear the observation buffer and reset batch learning state (service handler)."""
-        self.flush_observation_buffer()
+        Args:
+            mode: "heat", "cool", or None (both).  Integral is always zeroed.
+        """
+        n = self._rls_heat.n  # same for both models
+
+        if mode in (None, "heat"):
+            heat_seeds = [0.0, self._ff_heat_slope]
+            for m_input in self._model_inputs:
+                heat_seeds.append(float(m_input.get("seed_heat", 0.0)))
+            heat_norm = [
+                heat_seeds[i] * self._feature_scales[i] if i < len(heat_seeds) else 0.0
+                for i in range(n)
+            ]
+            self._rls_heat.beta = heat_norm
+            for i in range(n):
+                for j in range(n):
+                    self._rls_heat.P[i * n + j] = DEFAULT_RLS_P_INIT if i == j else 0.0
+            self._rls_heat.observation_count = 0
+
+        if mode in (None, "cool"):
+            cool_seeds = [0.0, -self._ff_cool_slope]
+            for m_input in self._model_inputs:
+                cool_seeds.append(float(m_input.get("seed_cool", 0.0)))
+            cool_norm = [
+                cool_seeds[i] * self._feature_scales[i] if i < len(cool_seeds) else 0.0
+                for i in range(n)
+            ]
+            self._rls_cool.beta = cool_norm
+            for i in range(n):
+                for j in range(n):
+                    self._rls_cool.P[i * n + j] = DEFAULT_RLS_P_INIT if i == j else 0.0
+            self._rls_cool.observation_count = 0
+
+        self._pi_integral = 0.0
+        label = mode or "heat+cool"
+        _LOGGER.info("FF models (%s) reset to seed values, integral zeroed", label)
+
+    async def async_flush_observation_buffer(self, mode: str | None = None) -> None:
+        """Clear observation buffer(s) and reset batch learning state (service handler)."""
+        self.flush_observation_buffer(mode=mode)
 
     def _resolve_active_supplemental_sources(self) -> list[str]:
         """Resolve which supplemental sources are currently active from HA state."""
@@ -2322,7 +2373,8 @@ class PIController:
                 self._pi_integral += (q_error / self._pi_ki) * 0.4
 
         # Record observation for batch learning (every tick, regardless of gate)
-        self._observation_buffer.add(Observation(
+        active_buffer = self._observation_buffer_heat if is_heating else self._observation_buffer_cool
+        active_buffer.add(Observation(
             timestamp=now_mono,
             features=list(x),
             hp_setpoint=float(self._hp_setpoint),

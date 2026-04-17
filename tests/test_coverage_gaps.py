@@ -4161,7 +4161,7 @@ class TestPIControllerPropertyGaps:
         entity = get_climate_entity(hass, entry)
         pi = entity._pi
         for i in range(3):
-            pi._observation_buffer.add(Observation(
+            pi._observation_buffer_heat.add(Observation(
                 timestamp=float(i), features=[1.0, float(i)],
                 hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
                 room_rate=0.0, clamped=False,
@@ -4312,7 +4312,7 @@ class TestPIControllerDiagnosticDumpGaps:
 
         # Add some observations for buffer stats
         for i in range(5):
-            pi._observation_buffer.add(Observation(
+            pi._observation_buffer_heat.add(Observation(
                 timestamp=float(i), features=[1.0, float(i)],
                 hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
                 room_rate=0.0, clamped=False,
@@ -4323,9 +4323,10 @@ class TestPIControllerDiagnosticDumpGaps:
         assert dump["batch_learning"]["n_total"] == 50
         assert dump["batch_learning"]["n_outliers_excluded"] == 2
         assert "drift_detection" in dump["batch_learning"]
-        assert "observation_buffer" in dump
-        assert dump["observation_buffer"]["total"] == 5
-        assert "leverage_max" in dump["observation_buffer"]
+        assert "observation_buffer_heat" in dump
+        assert dump["observation_buffer_heat"]["total"] == 5
+        assert "leverage_max" in dump["observation_buffer_heat"]
+        assert "observation_buffer_cool" in dump
 
     @pytest.mark.asyncio
     async def test_full_diagnostics_no_batch_result(self, hass, setup_pi_integration):
@@ -4378,7 +4379,7 @@ class TestPIControllerRestoreGaps:
         )
 
         pi.restore_extra_stored_data(data)
-        assert len(pi._observation_buffer) == 3
+        assert len(pi._observation_buffer_heat) == 3
         assert pi._drift_correction_signs == [[1, -1], [0, 1]]
 
     @pytest.mark.asyncio
@@ -4511,7 +4512,7 @@ class TestPIHealthStatusIntegration:
 
         # Add observations for feature diversity check
         for i in range(30):
-            pi._observation_buffer.add(Observation(
+            pi._observation_buffer_heat.add(Observation(
                 timestamp=float(i), features=[1.0, float(i % 5)],
                 hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
                 room_rate=0.0, clamped=False,
@@ -4784,7 +4785,7 @@ class TestTauEstimatorGaps:
 
         # Add 25 diverse, unclamped, low-rate observations
         for i in range(25):
-            pi._observation_buffer.add(Observation(
+            pi._observation_buffer_heat.add(Observation(
                 timestamp=float(i), features=[1.0, float(i % 10) - 5],
                 hp_setpoint=20.0 + float(i % 10) * 0.3,
                 current_c=20.0 + float(i % 3) * 0.1,
@@ -4811,7 +4812,7 @@ class TestTauEstimatorGaps:
         # Only 5 observations — not enough
         from custom_components.tasmota_irhvac.pi.batch_learning import Observation
         for i in range(5):
-            pi._observation_buffer.add(Observation(
+            pi._observation_buffer_heat.add(Observation(
                 timestamp=float(i), features=[1.0, 5.0],
                 hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
                 room_rate=0.0, clamped=False,
@@ -4831,11 +4832,11 @@ class TestTauEstimatorGaps:
         entity._attr_hvac_mode = HVACMode.HEAT
 
         # Force the buffer to need recompute
-        pi._observation_buffer._updates_since_recompute = 999
+        pi._observation_buffer_heat._updates_since_recompute = 999
 
         # Add enough observations
         for i in range(25):
-            pi._observation_buffer.add(Observation(
+            pi._observation_buffer_heat.add(Observation(
                 timestamp=float(i), features=[1.0, float(i % 10) - 5],
                 hp_setpoint=20.0 + float(i % 10) * 0.3,
                 current_c=20.0, desired_c=20.0,
@@ -4844,7 +4845,7 @@ class TestTauEstimatorGaps:
 
         pi._run_batch_analysis()
         # After batch, recompute should have reset the counter
-        assert pi._observation_buffer._updates_since_recompute == 0
+        assert pi._observation_buffer_heat._updates_since_recompute == 0
 
     @pytest.mark.asyncio
     async def test_pi_tick_inner_off_mode_with_smith(self, hass, setup_pi_integration):
@@ -4957,7 +4958,7 @@ class TestTauEstimatorGaps:
 
         # Add 25 observations that are ALL clamped — WLS will filter them out
         for i in range(25):
-            pi._observation_buffer.add(Observation(
+            pi._observation_buffer_heat.add(Observation(
                 timestamp=float(i), features=[1.0, 5.0],
                 hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
                 room_rate=0.0, clamped=True,  # all clamped → filtered out
@@ -4982,7 +4983,7 @@ class TestTauEstimatorGaps:
 
         # Add diverse observations
         for i in range(30):
-            pi._observation_buffer.add(Observation(
+            pi._observation_buffer_heat.add(Observation(
                 timestamp=float(i), features=[1.0, float(i % 10) - 5],
                 hp_setpoint=20.0 + float(i % 10) * 0.3,
                 current_c=20.0 + float(i % 3) * 0.1,
@@ -5201,7 +5202,7 @@ class TestTauEstimatorGaps:
 
         # Add observations with 3 features (intercept, outdoor_delta, pellet)
         for i in range(30):
-            pi._observation_buffer.add(Observation(
+            pi._observation_buffer_heat.add(Observation(
                 timestamp=float(i),
                 features=[1.0, float(i % 10) - 5, float(i % 3)],
                 hp_setpoint=20.0 + float(i % 10) * 0.3,

@@ -3408,7 +3408,7 @@ class TestBatchWLSApply:
                 room_rate=0.001,  # stable
                 clamped=False,
             )
-            pi._observation_buffer.add(obs)
+            pi._observation_buffer_heat.add(obs)
 
         beta_before = list(rls.beta)
         pi._run_batch_analysis()
@@ -3447,7 +3447,7 @@ class TestBatchWLSApply:
                 room_rate=0.005,
                 clamped=False,
             )
-            pi._observation_buffer.add(obs)
+            pi._observation_buffer_heat.add(obs)
 
         pi._run_batch_analysis()
 
@@ -3748,7 +3748,7 @@ class TestBatchModelRMS:
                 room_rate=0.001,
                 clamped=False,
             )
-            pi._observation_buffer.add(obs)
+            pi._observation_buffer_heat.add(obs)
 
         pi._run_batch_analysis()
 
@@ -4086,7 +4086,7 @@ class TestDriftDetection:
                 room_rate=0.001,
                 clamped=False,
             )
-            pi._observation_buffer.add(obs)
+            pi._observation_buffer_heat.add(obs)
 
         pi._run_batch_analysis()
 
@@ -4125,7 +4125,7 @@ class TestDriftDetection:
                 room_rate=0.001,
                 clamped=False,
             )
-            pi._observation_buffer.add(obs)
+            pi._observation_buffer_heat.add(obs)
 
         # Run a batch cycle — should append and truncate
         pi._run_batch_analysis()

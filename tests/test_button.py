@@ -176,16 +176,16 @@ class TestFlushObservationBufferService:
                 room_rate=0.01,
                 clamped=False,
             )
-            pi._observation_buffer.add(obs)
+            pi._observation_buffer_heat.add(obs)
 
-        assert len(pi._observation_buffer) == 5
+        assert len(pi._observation_buffer_heat) == 5
 
         await hass.services.async_call(
             "tasmota_irhvac", "flush_observation_buffer",
             {"entity_id": entity.entity_id}, blocking=True,
         )
 
-        assert len(pi._observation_buffer) == 0
+        assert len(pi._observation_buffer_heat) == 0
 
     @pytest.mark.asyncio
     async def test_flush_resets_batch_result(self, hass, setup_pi_integration):
@@ -240,7 +240,7 @@ class TestFlushObservationBufferService:
 
         # Add, flush, add again
         for i in range(3):
-            pi._observation_buffer.add(Observation(
+            pi._observation_buffer_heat.add(Observation(
                 timestamp=time.monotonic() + i,
                 features=[1.0, 10.0],
                 hp_setpoint=22.0, current_c=21.0, desired_c=22.0,
@@ -254,11 +254,11 @@ class TestFlushObservationBufferService:
 
         # Add new observations after flush
         for i in range(2):
-            pi._observation_buffer.add(Observation(
+            pi._observation_buffer_heat.add(Observation(
                 timestamp=time.monotonic() + 100 + i,
                 features=[1.0, 15.0],
                 hp_setpoint=23.0, current_c=20.0, desired_c=22.0,
                 room_rate=0.02, clamped=False,
             ))
 
-        assert len(pi._observation_buffer) == 2
+        assert len(pi._observation_buffer_heat) == 2

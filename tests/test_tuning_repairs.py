@@ -1,6 +1,7 @@
 """Tests for HA Repairs tuning recommendations (Phase 2+)."""
 
 import pytest
+from homeassistant.components.climate import HVACMode
 
 from custom_components.tasmota_irhvac.pi.health_checks import (
     check_batch_online_disagreement_repair,
@@ -351,6 +352,7 @@ class TestCheckTuningHealthOrchestration:
         entry = await setup_pi_integration()
         entity = get_climate_entity(hass, entry)
         pi = entity._pi
+        entity._attr_hvac_mode = HVACMode.HEAT
 
         signal_received = MagicMock()
         async_dispatcher_connect(
@@ -361,7 +363,7 @@ class TestCheckTuningHealthOrchestration:
         from custom_components.tasmota_irhvac.pi.batch_learning import Observation
         import time
         for i in range(25):
-            pi._observation_buffer.add(Observation(
+            pi._observation_buffer_heat.add(Observation(
                 timestamp=time.monotonic() + i,
                 features=[1.0, float(i % 10)],
                 hp_setpoint=22.0, current_c=21.0, desired_c=22.0,

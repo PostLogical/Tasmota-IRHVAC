@@ -451,7 +451,9 @@ SERVICE_TO_METHOD = {
     },
     "reset_ff_seeds": {
         "method": "async_reset_ff_seeds",
-        "schema": IRHVAC_SERVICE_SCHEMA,
+        "schema": IRHVAC_SERVICE_SCHEMA.extend(
+            {vol.Optional("mode"): vol.In(["heat", "cool"])}
+        ),
     },
     "suppress_ff_learning": {
         "method": "async_suppress_ff_learning",
@@ -469,7 +471,9 @@ SERVICE_TO_METHOD = {
     },
     "flush_observation_buffer": {
         "method": "async_flush_observation_buffer",
-        "schema": IRHVAC_SERVICE_SCHEMA,
+        "schema": IRHVAC_SERVICE_SCHEMA.extend(
+            {vol.Optional("mode"): vol.In(["heat", "cool"])}
+        ),
     },
 }
 
@@ -1727,9 +1731,9 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
 
     # ── PI service delegations (called by SERVICE_TO_METHOD handler) ──
 
-    async def async_reset_ff_seeds(self) -> None:
+    async def async_reset_ff_seeds(self, mode: str | None = None) -> None:
         """Reset feedforward RLS models to seed values."""
-        await self._controller.async_reset_ff_seeds()
+        await self._controller.async_reset_ff_seeds(mode=mode)
         self.async_schedule_update_ha_state()
 
     async def async_suppress_ff_learning(self, reason: str = "") -> None:
@@ -1757,7 +1761,9 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         await self.hass.async_add_executor_job(
             lambda: path.write_text(json.dumps(dump, indent=2))
         )
-        _LOGGER.info("Diagnostic dump written to %s (%d observations)", path, dump.get("buffer_size", 0))
+        buf_heat = dump.get("buffer_size_heat", 0)
+        buf_cool = dump.get("buffer_size_cool", 0)
+        _LOGGER.info("Diagnostic dump written to %s (heat=%d, cool=%d observations)", path, buf_heat, buf_cool)
 
         # Fire persistent notification so the user knows where to find it
         await self.hass.services.async_call(
@@ -1765,16 +1771,16 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             {
                 "title": f"PI Diagnostic Dump: {self.name}",
                 "message": f"Written to `{path}`\n\n"
-                           f"Buffer: {dump.get('buffer_size', 0)} observations\n"
+                           f"Buffer heat: {buf_heat}, cool: {buf_cool} observations\n"
                            f"RLS heat obs: {dump.get('rls_heat', {}).get('observation_count', '?')}\n"
                            f"Integral: {dump.get('pi_state', {}).get('integral', '?')}\n"
                            f"FF confidence: {dump.get('pi_state', {}).get('ff_confidence', '?')}",
             },
         )
 
-    async def async_flush_observation_buffer(self) -> None:
-        """Clear the observation buffer and reset batch learning state."""
-        await self._controller.async_flush_observation_buffer()
+    async def async_flush_observation_buffer(self, mode: str | None = None) -> None:
+        """Clear observation buffer(s) and reset batch learning state."""
+        await self._controller.async_flush_observation_buffer(mode=mode)
 
     async def set_mode(self, hvac_mode: str) -> None:
         """Set hvac mode."""

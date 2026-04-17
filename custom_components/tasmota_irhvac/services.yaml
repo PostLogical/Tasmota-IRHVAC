@@ -224,10 +224,19 @@ set_swingv:
             - SendStore
 
 reset_ff_seeds:
-  description: Reset feedforward RLS models to seed values from config slopes. Also zeros the PI integral.
+  description: Reset feedforward RLS models to seed values from config slopes. Also zeros the PI integral. Optionally reset only one mode.
   target:
     entity:
       integration: tasmota_irhvac
+  fields:
+    mode:
+      description: Reset only this mode's RLS model (heat or cool). Omit to reset both.
+      required: false
+      selector:
+        select:
+          options:
+            - heat
+            - cool
 
 suppress_ff_learning:
   description: Manually suppress feedforward auto-learning. Learning stays suppressed until resume_ff_learning is called or HA restarts.
@@ -257,10 +266,19 @@ diagnostic_dump:
 
 flush_observation_buffer:
   name: Flush observation buffer
-  description: Clear the observation buffer and reset batch learning state. This is a destructive operation — all accumulated observations, batch results, and drift correction history will be lost. Use after major renovation or equipment changes.
+  description: Clear observation buffer(s) and reset batch learning state. This is a destructive operation — accumulated observations, batch results, and drift correction history will be lost. Use after major renovation or equipment changes. Optionally flush only one mode's buffer.
   target:
     entity:
       integration: tasmota_irhvac
+  fields:
+    mode:
+      description: Flush only this mode's observation buffer (heat or cool). Omit to flush both.
+      required: false
+      selector:
+        select:
+          options:
+            - heat
+            - cool
 
 set_swingh:
   name: Set swingh
