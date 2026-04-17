@@ -1227,9 +1227,129 @@ class PIController:
         Returns list of (issue_id, severity, translation_key, placeholders,
         should_create) tuples.  Called after each batch cycle and on startup.
         """
+        from .health_checks import (
+            check_high_integral_repair,
+            check_save_seeds_repair,
+            check_slope_divergence_repair,
+        )
+
         entry_id = getattr(self._entity, "_config_entry_id", "unknown")
         issues: list[tuple[str, str, str, dict[str, str], bool]] = []
-        # Phase 2-4 will add detection logic here.
+
+        if not self._pi_enabled:
+            return issues
+
+        # ── Slope divergence (heat and cool) ────────────────────────
+        for mode, rls, configured in [
+            ("heat", self._rls_heat, self._ff_heat_slope),
+            ("cool", self._rls_cool, self._ff_cool_slope),
+        ]:
+            if rls.observation_count == 0:
+                continue
+            coeffs = rls.get_coefficients()
+            learned = coeffs.get(1, configured)
+            # For cool, configured slope is stored positive but coefficient is negative
+            if mode == "cool":
+                learned = abs(learned)
+
+            counter_key = f"slope_div_{mode}"
+            # Check if currently drifting
+            drift_abs = abs(learned - configured)
+            drift_pct = (drift_abs / abs(configured)) * 100 if configured != 0 else 0
+            if drift_pct > 30.0 and drift_abs > 0.05:
+                self._tuning_alert_counters[counter_key] = self._tuning_alert_counters.get(counter_key, 0) + 1
+            else:
+                self._tuning_alert_counters[counter_key] = 0
+
+            result = check_slope_divergence_repair(
+                learned_slope=learned,
+                configured_slope=configured,
+                sustained_cycles=self._tuning_alert_counters.get(counter_key, 0),
+                mode=mode,
+            )
+            if result is not None:
+                key, placeholders, should_create = result
+                issues.append((
+                    f"{key}_{entry_id}_{mode}",
+                    "warning",
+                    key,
+                    placeholders,
+                    should_create,
+                ))
+
+        # ── Save seeds ──────────────────────────────────────────────
+        # Check if seeds match learned values (within rounding tolerance)
+        seeds_match = True
+        for i in range(min(len(self._heat_seeds), self._rls_heat.n)):
+            learned_phys = self._rls_heat.beta[i] / self._rls_heat.feature_scales[i] if self._rls_heat.feature_scales[i] != 0 else 0
+            if abs(round(learned_phys, 4) - round(self._heat_seeds[i], 4)) > 0.001:
+                seeds_match = False
+                break
+
+        heat_coeffs = self._rls_heat.get_coefficients()
+        outdoor_delta_heat = heat_coeffs.get(1, self._ff_heat_slope)
+
+        result = check_save_seeds_repair(
+            integral_convergence=self._metrics.integral_convergence,
+            seeds_match_learned=seeds_match,
+            already_notified=bool(self._tuning_alert_counters.get("save_seeds_notified")),
+            outdoor_delta_heat=outdoor_delta_heat,
+        )
+        if result is not None:
+            key, placeholders, should_create = result
+            if should_create:
+                self._tuning_alert_counters["save_seeds_notified"] = 1
+            elif not should_create and seeds_match:
+                # Seeds were saved — allow re-notification after next significant change
+                self._tuning_alert_counters["save_seeds_notified"] = 0
+            issues.append((
+                f"{key}_{entry_id}",
+                "warning",
+                key,
+                placeholders,
+                should_create,
+            ))
+
+        # ── High integral (diagnosed) ───────────────────────────────
+        is_heating = self._entity._attr_hvac_mode in (HVACMode.HEAT, HVACMode.HEAT_COOL, None)
+        active_mode = "heat" if is_heating else "cool"
+        rls = self._rls_heat if is_heating else self._rls_cool
+        configured_slope = self._ff_heat_slope if is_heating else self._ff_cool_slope
+        active_coeffs = rls.get_coefficients()
+        learned_slope = active_coeffs.get(1, configured_slope)
+        if not is_heating:
+            learned_slope = abs(learned_slope)
+
+        ki_correction = abs(self._pi_ki * self._metrics.integral_convergence)
+
+        counter_key = "high_integral"
+        if ki_correction > 2.0:
+            self._tuning_alert_counters[counter_key] = self._tuning_alert_counters.get(counter_key, 0) + 1
+        else:
+            self._tuning_alert_counters[counter_key] = 0
+
+        result = check_high_integral_repair(
+            ki_integral_correction=ki_correction,
+            sustained_cycles=self._tuning_alert_counters.get(counter_key, 0),
+            observation_count=rls.observation_count,
+            learned_slope=learned_slope,
+            configured_slope=configured_slope,
+            uncontrollable_cvh=self._metrics.uncontrollable_cvh,
+            total_cvh=self._metrics.comfort_violation_hours,
+            pi_ki=self._pi_ki,
+            integral_convergence=self._metrics.integral_convergence,
+            mode=active_mode,
+        )
+        if result is not None:
+            key, placeholders, should_create = result
+            issues.append((
+                f"high_integral_{entry_id}",
+                "warning",
+                key,
+                placeholders,
+                should_create,
+            ))
+
         return issues
 
     def get_health_status(self) -> dict[str, Any]:

@@ -3,6 +3,9 @@
 Each function evaluates one aspect of controller health and returns
 an (alert_message, reason_code, severity) tuple, or None if healthy.
 PIController.get_health_status() calls these and assembles the result.
+
+Tuning-repair functions (check_slope_divergence_repair, etc.) return
+(translation_key, placeholders, should_create) for HA Repairs issues.
 """
 
 from __future__ import annotations
@@ -139,3 +142,155 @@ def check_feature_diversity(
             "Warning",
         )
     return None
+
+
+# ── Tuning repair checks (for HA Repairs panel) ────────────────────
+
+
+def check_slope_divergence_repair(
+    learned_slope: float,
+    configured_slope: float,
+    sustained_cycles: int,
+    mode: str,
+    create_threshold_pct: float = 30.0,
+    clear_threshold_pct: float = 15.0,
+    min_sustained_cycles: int = 6,
+    abs_floor: float = 0.05,
+) -> tuple[str, dict[str, str], bool] | None:
+    """Check if learned outdoor slope has diverged from configured seed.
+
+    Returns (translation_key, placeholders, should_create) or None if
+    the condition is in the hysteresis band (no change needed).
+    """
+    if configured_slope == 0:
+        return None
+    drift_abs = abs(learned_slope - configured_slope)
+    drift_pct = (drift_abs / abs(configured_slope)) * 100
+
+    if drift_pct > create_threshold_pct and drift_abs > abs_floor and sustained_cycles >= min_sustained_cycles:
+        return (
+            "slope_divergence",
+            {
+                "mode": mode,
+                "mode_cap": mode.capitalize(),
+                "learned": f"{learned_slope:.4f}",
+                "configured": f"{configured_slope:.4f}",
+                "drift_pct": f"{drift_pct:.0f}",
+            },
+            True,
+        )
+    if drift_pct < clear_threshold_pct:
+        return (
+            "slope_divergence",
+            {},
+            False,
+        )
+    # In hysteresis band — no change
+    return None
+
+
+def check_save_seeds_repair(
+    integral_convergence: float,
+    seeds_match_learned: bool,
+    already_notified: bool,
+    convergence_threshold: float = 2.0,
+    outdoor_delta_heat: float = 0.0,
+) -> tuple[str, dict[str, str], bool] | None:
+    """Check if model has converged and seeds should be saved.
+
+    One-shot: fires once when converged, clears when seeds are saved.
+    Does not re-fire if already notified (until model changes significantly).
+    """
+    if seeds_match_learned:
+        return ("save_seeds", {}, False)
+
+    if already_notified:
+        return None
+
+    if integral_convergence < convergence_threshold:
+        return (
+            "save_seeds",
+            {"outdoor_delta": f"{outdoor_delta_heat:.4f}"},
+            True,
+        )
+    return None
+
+
+def check_high_integral_repair(
+    ki_integral_correction: float,
+    sustained_cycles: int,
+    observation_count: int,
+    learned_slope: float,
+    configured_slope: float,
+    uncontrollable_cvh: float,
+    total_cvh: float,
+    pi_ki: float,
+    integral_convergence: float,
+    mode: str,
+    create_threshold: float = 2.0,
+    clear_threshold: float = 1.0,
+    min_sustained_cycles: int = 6,
+    maturity_obs: int = 50,
+    slope_gap_pct: float = 20.0,
+) -> tuple[str, dict[str, str], bool] | None:
+    """Diagnose high integral correction and return the most specific cause.
+
+    Sub-cases checked in priority order:
+    1. Immature model (not enough observations)
+    2. FF slope gap (learned vs configured mismatch)
+    3. Equipment limits (high uncontrollable fraction)
+    4. Tuning (suggest Ki reduction)
+
+    Returns None in hysteresis band.
+    """
+    if ki_integral_correction < clear_threshold:
+        return ("high_integral_immature", {}, False)
+
+    if ki_integral_correction < create_threshold or sustained_cycles < min_sustained_cycles:
+        return None
+
+    correction_str = f"{ki_integral_correction:.1f}"
+
+    # Sub-case 1: Model still learning
+    if observation_count < maturity_obs:
+        return (
+            "high_integral_immature",
+            {"correction": correction_str, "count": str(observation_count)},
+            True,
+        )
+
+    # Sub-case 2: FF slope gap
+    if configured_slope != 0:
+        gap_pct = (abs(learned_slope - configured_slope) / abs(configured_slope)) * 100
+        if gap_pct > slope_gap_pct:
+            return (
+                "high_integral_slope_gap",
+                {
+                    "mode": mode,
+                    "configured": f"{configured_slope:.4f}",
+                    "learned": f"{learned_slope:.4f}",
+                    "correction": correction_str,
+                },
+                True,
+            )
+
+    # Sub-case 3: Equipment at limits
+    if total_cvh > 0 and uncontrollable_cvh / total_cvh > 0.5:
+        return (
+            "high_integral_equipment",
+            {"correction": correction_str},
+            True,
+        )
+
+    # Sub-case 4: Tuning — suggest specific Ki
+    suggested_ki = pi_ki * (1.0 / ki_integral_correction)
+    suggested_ki = max(0.01, min(suggested_ki, pi_ki))  # clamp to reasonable range
+    return (
+        "high_integral_tuning",
+        {
+            "correction": correction_str,
+            "current_ki": f"{pi_ki:.3f}",
+            "suggested_ki": f"{suggested_ki:.3f}",
+        },
+        True,
+    )
