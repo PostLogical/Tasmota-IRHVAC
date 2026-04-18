@@ -584,6 +584,40 @@ class PIController:
             for i, val in enumerate(result.beta_blended):
                 if i < rls.n:
                     rls.beta[i] = val * rls.feature_scales[i]
+
+            # P-aware update: reduce covariance for updated coefficients
+            # so RLS treats the batch correction as real posterior
+            # information and doesn't immediately drift back.
+            # P[i,i] *= (1 - K_i): higher batch confidence → lower P.
+            # Floor = max(batch_var_normalized, delta) to preserve
+            # adaptability to real physical changes.
+            if result.blend_gains:
+                n = min(len(result.blend_gains), rls.n)
+                for i in range(n):
+                    k_i = result.blend_gains[i]
+                    if k_i <= 0:
+                        continue
+                    # Compute floor from batch std_err in normalized space
+                    se = (
+                        result.beta_std_err[i]
+                        if i < len(result.beta_std_err)
+                        else float("inf")
+                    )
+                    if math.isinf(se):
+                        continue
+                    se_norm = se * rls.feature_scales[i]
+                    p_floor = max(se_norm * se_norm, rls.delta)
+                    # Reduce diagonal by (1 - K_i)
+                    old_pii = rls.P[i * rls.n + i]
+                    rls.P[i * rls.n + i] = max(p_floor, old_pii * (1 - k_i))
+                    # Zero off-diagonal elements for updated coefficient
+                    # (same projection as clamp behavior) so cross-
+                    # correlations don't pull the corrected value back.
+                    for j in range(rls.n):
+                        if j != i:
+                            rls.P[i * rls.n + j] = 0.0
+                            rls.P[j * rls.n + i] = 0.0
+
             _LOGGER.info(
                 "%sBatch WLS: applied blended update to %s model",
                 self._log_prefix, "heat" if is_heating else "cool",
