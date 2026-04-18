@@ -1105,27 +1105,29 @@ class PIController:
                 "tau_estimate": round(self._tau_estimator.tau, 1) if self._tau_estimator.enabled else None,
             },
         }
-        # Multicollinearity per buffer
+        # Multicollinearity per buffer — gate on sufficient data
         for label, buf in [("heat", self._observation_buffer_heat), ("cool", self._observation_buffer_cool)]:
-            cond = buf.compute_condition_number()
-            if not math.isinf(cond):
-                dump[f"condition_number_{label}"] = round(cond, 1)
-            corr = buf.get_pairwise_correlations(coeff_names)
-            if corr:
+            n_eligible = sum(1 for o in buf.get_all() if not o.clamped and abs(o.room_rate) < 0.02)
+            if n_eligible >= 2 * buf.n_features:
+                cond = buf.compute_condition_number()
+                if not math.isinf(cond):
+                    dump[f"condition_number_{label}"] = round(cond, 1)
+                corr = buf.get_pairwise_correlations(coeff_names)
                 dump[f"correlated_pairs_{label}"] = [
-                    {"a": a, "b": b, "r": round(r, 3)} for a, b, r in corr
+                    {"feature_a": a, "feature_b": b, "r": round(r, 3)} for a, b, r in corr
                 ]
+            else:
+                dump[f"correlated_pairs_{label}"] = []
         # Residual patterns
-        if self._last_residual_patterns:
-            dump["residual_patterns"] = [
-                {
-                    "start_hour": p.start_hour,
-                    "end_hour": p.end_hour,
-                    "mean_residual": round(p.mean_residual, 3),
-                    "n_observations": p.n_observations,
-                }
-                for p in self._last_residual_patterns
-            ]
+        dump["residual_patterns"] = [
+            {
+                "start_hour": p.start_hour,
+                "end_hour": p.end_hour,
+                "mean_residual": round(p.mean_residual, 3),
+                "n_observations": p.n_observations,
+            }
+            for p in self._last_residual_patterns
+        ]
         return dump
 
     def get_full_diagnostics(self) -> dict[str, Any]:
@@ -1263,27 +1265,34 @@ class PIController:
                 )
             if feature_active:
                 stats["feature_active_counts"] = feature_active
-            # Multicollinearity diagnostics
-            cond = buf.compute_condition_number()
-            if not math.isinf(cond):
-                stats["condition_number"] = round(cond, 1)
-                if cond > 30:
-                    stats["condition_rating"] = "severe" if cond > 100 else "moderate"
-                else:
-                    stats["condition_rating"] = "weak"
-            corr = buf.get_pairwise_correlations(coeff_names)
-            if corr:
+            # Multicollinearity diagnostics — gate on sufficient data
+            # to avoid rank-deficient noise from the regularizer.
+            if n_eligible >= 2 * n_features:
+                cond = buf.compute_condition_number()
+                if not math.isinf(cond):
+                    stats["condition_number"] = round(cond, 1)
+                    if cond > 100:
+                        stats["condition_rating"] = "severe"
+                    elif cond > 30:
+                        stats["condition_rating"] = "moderate"
+                    else:
+                        stats["condition_rating"] = "weak"
+                corr = buf.get_pairwise_correlations(coeff_names)
                 stats["correlated_pairs"] = [
-                    {"a": a, "b": b, "r": round(r, 3)} for a, b, r in corr
+                    {"feature_a": a, "feature_b": b, "r": round(r, 3)}
+                    for a, b, r in corr
                 ]
+            else:
+                stats["condition_rating"] = "insufficient_data"
+                stats["correlated_pairs"] = []
             return stats
 
         result["observation_buffer_heat"] = _buf_stats(self._observation_buffer_heat)
         result["observation_buffer_cool"] = _buf_stats(self._observation_buffer_cool)
 
-        # Residual time-of-day patterns
-        if self._last_residual_patterns:
-            result["residual_patterns"] = [
+        # Residual time-of-day patterns — under batch_learning
+        if result.get("batch_learning") is not None:
+            result["batch_learning"]["residual_patterns"] = [
                 {
                     "start_hour": p.start_hour,
                     "end_hour": p.end_hour,
