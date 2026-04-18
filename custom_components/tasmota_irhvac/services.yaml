@@ -280,6 +280,65 @@ flush_observation_buffer:
             - heat
             - cool
 
+set_coefficient:
+  name: Set coefficient
+  description: Manually set an RLS feedforward coefficient value. The coefficient is identified by name (intercept, outdoor_delta, or model input name) and mode (heat/cool).
+  target:
+    entity:
+      integration: tasmota_irhvac
+  fields:
+    mode:
+      description: Which mode's RLS model to modify.
+      required: true
+      selector:
+        select:
+          options:
+            - heat
+            - cool
+    name:
+      description: Coefficient name (intercept, outdoor_delta, or a model input name).
+      required: true
+      example: "outdoor_delta"
+      selector:
+        text:
+    value:
+      description: New coefficient value in physical units.
+      required: true
+      example: 0.35
+      selector:
+        number:
+          min: -20
+          max: 20
+          step: 0.01
+          mode: box
+
+freeze_coefficient:
+  name: Freeze coefficient
+  description: Freeze or unfreeze RLS learning for a specific coefficient. When frozen, the coefficient retains its current value and online learning skips it.
+  target:
+    entity:
+      integration: tasmota_irhvac
+  fields:
+    mode:
+      description: Which mode's RLS model to modify.
+      required: true
+      selector:
+        select:
+          options:
+            - heat
+            - cool
+    name:
+      description: Coefficient name (intercept, outdoor_delta, or a model input name).
+      required: true
+      example: "outdoor_delta"
+      selector:
+        text:
+    frozen:
+      description: True to freeze (stop learning), false to unfreeze (resume learning).
+      required: true
+      selector:
+        boolean:
+
 set_swingh:
   name: Set swingh
   description: Sets vane horizonal position.

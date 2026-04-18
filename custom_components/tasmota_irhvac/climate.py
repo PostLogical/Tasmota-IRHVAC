@@ -475,6 +475,22 @@ SERVICE_TO_METHOD = {
             {vol.Optional("mode"): vol.In(["heat", "cool"])}
         ),
     },
+    "set_coefficient": {
+        "method": "async_set_coefficient",
+        "schema": IRHVAC_SERVICE_SCHEMA.extend({
+            vol.Required("mode"): vol.In(["heat", "cool"]),
+            vol.Required("name"): cv.string,
+            vol.Required("value"): vol.Coerce(float),
+        }),
+    },
+    "freeze_coefficient": {
+        "method": "async_freeze_coefficient",
+        "schema": IRHVAC_SERVICE_SCHEMA.extend({
+            vol.Required("mode"): vol.In(["heat", "cool"]),
+            vol.Required("name"): cv.string,
+            vol.Required("frozen"): cv.boolean,
+        }),
+    },
 }
 
 
@@ -1781,6 +1797,40 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
     async def async_flush_observation_buffer(self, mode: str | None = None) -> None:
         """Clear observation buffer(s) and reset batch learning state."""
         await self._controller.async_flush_observation_buffer(mode=mode)
+
+    async def async_set_coefficient(self, mode: str, name: str, value: float) -> None:
+        """Set an RLS coefficient by name."""
+        pi = self._pi
+        if pi is None:
+            return
+        idx = self._resolve_coeff_index(name)
+        if idx is None:
+            return
+        pi.set_coefficient(mode, idx, value)
+        self.async_schedule_update_ha_state()
+
+    async def async_freeze_coefficient(self, mode: str, name: str, frozen: bool) -> None:
+        """Freeze or unfreeze an RLS coefficient by name."""
+        pi = self._pi
+        if pi is None:
+            return
+        idx = self._resolve_coeff_index(name)
+        if idx is None:
+            return
+        pi.set_frozen(mode, idx, frozen)
+
+    def _resolve_coeff_index(self, name: str) -> int | None:
+        """Resolve a coefficient name to its index."""
+        from .pi import PIController
+        pi = self._pi
+        if not isinstance(pi, PIController):
+            return None
+        names = pi.coeff_names
+        try:
+            return names.index(name)
+        except ValueError:
+            _LOGGER.warning("Unknown coefficient name '%s', known: %s", name, names)
+            return None
 
     async def set_mode(self, hvac_mode: str) -> None:
         """Set hvac mode."""

@@ -108,6 +108,10 @@ class RLSModel:
         else:
             self.coeff_clamps = [None] * self.n
 
+        # Per-coefficient freeze mask: when True, coefficient is locked
+        # (K[i] zeroed so beta[i] and P row/col are unchanged by updates).
+        self.frozen: list[bool] = [False] * self.n
+
         # Observation counter
         self.observation_count: int = 0
 
@@ -163,6 +167,11 @@ class RLSModel:
             return residual
         K = [Px[i] / denom for i in range(n)]
 
+        # Zero Kalman gain for frozen coefficients so beta and P are unchanged.
+        for i in range(n):
+            if self.frozen[i]:
+                K[i] = 0.0
+
         # Update coefficients: standard RLS (no ad-hoc beta penalty).
         # Seed anchoring comes from initial conditions and the delta*I
         # term in the P update, which prevents covariance collapse.
@@ -210,11 +219,14 @@ class RLSModel:
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize model state to dict (beta in normalized space)."""
-        return {
+        result: dict[str, Any] = {
             "beta": list(self.beta),
             "P": list(self.P),
             "observation_count": self.observation_count,
         }
+        if any(self.frozen):
+            result["frozen"] = list(self.frozen)
+        return result
 
     @classmethod
     def from_dict(cls, data: dict[str, Any], n_inputs: int, **kwargs: Any) -> RLSModel:
@@ -246,4 +258,8 @@ class RLSModel:
                 _LOGGER.info("RLS restore: covariance matrix size mismatch, using initial P")
         if "observation_count" in data:
             model.observation_count = int(data["observation_count"])
+        if "frozen" in data:
+            frozen = data["frozen"]
+            for i in range(min(len(frozen), model.n)):
+                model.frozen[i] = bool(frozen[i])
         return model

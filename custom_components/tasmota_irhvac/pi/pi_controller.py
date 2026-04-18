@@ -1240,6 +1240,71 @@ class PIController:
             self._cool_seeds[i] = round(cool_beta[i], 4)
             self._rls_cool.beta_seed[i] = round(cool_beta[i], 4)
 
+    @property
+    def coeff_names(self) -> list[str]:
+        """Public access to coefficient name list."""
+        return self._coeff_names()
+
+    @property
+    def n_coefficients(self) -> int:
+        """Number of coefficients per mode."""
+        return self._rls_heat.n
+
+    def _rls_for_mode(self, mode: str) -> RLSModel:
+        """Return the RLS model for the given mode."""
+        if mode == "cool":
+            return self._rls_cool
+        return self._rls_heat
+
+    def get_coefficient(self, mode: str, index: int) -> float | None:
+        """Get coefficient value in physical units."""
+        rls = self._rls_for_mode(mode)
+        if index >= rls.n:
+            return None
+        return rls.beta[index] / rls.feature_scales[index]
+
+    def set_coefficient(self, mode: str, index: int, value: float) -> None:
+        """Set coefficient value (physical units). Converts to normalized space."""
+        rls = self._rls_for_mode(mode)
+        if index >= rls.n:
+            return
+        rls.beta[index] = value * rls.feature_scales[index]
+        _LOGGER.info(
+            "Coefficient %s[%d] manually set to %.4f (%s mode)",
+            self._coeff_names()[index] if index < len(self._coeff_names()) else f"β{index}",
+            index, value, mode,
+        )
+
+    def get_frozen(self, mode: str, index: int) -> bool:
+        """Get whether a coefficient is frozen."""
+        rls = self._rls_for_mode(mode)
+        if index >= rls.n:
+            return False
+        return rls.frozen[index]
+
+    def set_frozen(self, mode: str, index: int, frozen: bool) -> None:
+        """Set freeze state for a coefficient."""
+        rls = self._rls_for_mode(mode)
+        if index >= rls.n:
+            return
+        rls.frozen[index] = frozen
+        name = self._coeff_names()[index] if index < len(self._coeff_names()) else f"β{index}"
+        _LOGGER.info(
+            "Coefficient %s[%d] %s (%s mode)",
+            name, index, "frozen" if frozen else "unfrozen", mode,
+        )
+
+    def get_coefficient_clamp(self, mode: str, index: int) -> tuple[float, float] | None:
+        """Get coefficient clamp in physical units, or None if unclamped."""
+        rls = self._rls_for_mode(mode)
+        if index >= rls.n or index >= len(rls.coeff_clamps):
+            return None
+        clamp = rls.coeff_clamps[index]
+        if clamp is None:
+            return None
+        scale = rls.feature_scales[index]
+        return (clamp[0] / scale, clamp[1] / scale)
+
     def flush_observation_buffer(self, mode: str | None = None) -> None:
         """Clear observation buffer(s) and reset batch learning state.
 
