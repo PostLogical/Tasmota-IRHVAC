@@ -37,7 +37,7 @@ from homeassistant.util.unit_conversion import TemperatureConverter
 
 import math
 
-from .batch_learning import BatchResult, DiversityAwareBuffer, Observation, weighted_least_squares, compare_and_report, compute_blended_update
+from .batch_learning import BatchResult, DiversityAwareBuffer, HourlyResidualPattern, Observation, analyze_residuals_by_hour, weighted_least_squares, compare_and_report, compute_blended_update
 
 from ..const import (
     ATTR_DESIRED_TEMP,
@@ -393,6 +393,7 @@ class PIController:
         self._batch_analysis_timer: CALLBACK_TYPE | None = None
         self._last_batch_result: BatchResult | None = None
         self._last_batch_timestamp: float | None = None
+        self._last_residual_patterns: list[HourlyResidualPattern] = []
         self._has_had_stable_batch: bool = False
         self._tuning_alert_counters: dict[str, int] = {}
 
@@ -626,6 +627,20 @@ class PIController:
         self._last_batch_result = result
         self._last_batch_timestamp = time.monotonic()
         self._metrics.batch_model_rms = result.residual_rms
+
+        # ── Residual time-of-day analysis ──
+        # Use the blended or batch beta for residual computation
+        beta_for_residuals = result.beta_blended if result.beta_blended else result.beta_batch
+        self._last_residual_patterns = analyze_residuals_by_hour(
+            observations, beta_for_residuals, n_features=rls.n,
+        )
+        if self._last_residual_patterns:
+            for p in self._last_residual_patterns:
+                _LOGGER.info(
+                    "%sResidual pattern: %02d:00–%02d:59 mean=%.2f°C (%d obs)",
+                    self._log_prefix, p.start_hour, p.end_hour,
+                    p.mean_residual, p.n_observations,
+                )
 
         # ── Drift detection: track per-coefficient correction direction ──
         if result.beta_blended and result.beta_current:
@@ -1389,6 +1404,8 @@ class PIController:
             check_high_integral_repair,
             check_intercept_absorbing_repair,
             check_model_drift_repair,
+            check_multicollinearity_repair,
+            check_residual_pattern_repair,
             check_save_seeds_repair,
             check_slope_divergence_repair,
         )
@@ -1642,6 +1659,62 @@ class PIController:
                         placeholders,
                         should_create,
                     ))
+
+        # ── Residual time-of-day patterns ──────────────────────────
+        for idx, pattern in enumerate(self._last_residual_patterns):
+            counter_key = f"residual_pattern_{pattern.start_hour}_{pattern.end_hour}"
+            if abs(pattern.mean_residual) > 0.5:
+                self._tuning_alert_counters[counter_key] = self._tuning_alert_counters.get(counter_key, 0) + 1
+            else:
+                self._tuning_alert_counters[counter_key] = 0
+
+            result = check_residual_pattern_repair(
+                start_hour=pattern.start_hour,
+                end_hour=pattern.end_hour,
+                mean_residual=pattern.mean_residual,
+                n_observations=pattern.n_observations,
+                sustained_cycles=self._tuning_alert_counters.get(counter_key, 0),
+            )
+            if result is not None:
+                key, placeholders, should_create = result
+                issues.append((
+                    f"{key}_{entry_id}_{pattern.start_hour}_{pattern.end_hour}",
+                    "warning",
+                    key,
+                    placeholders,
+                    should_create,
+                ))
+
+        # ── Multicollinearity / condition number ───────────────────
+        is_heating_mc = self._entity._attr_hvac_mode in (HVACMode.HEAT, HVACMode.HEAT_COOL, None)
+        mc_buffer = self._observation_buffer_heat if is_heating_mc else self._observation_buffer_cool
+        if len(mc_buffer) >= 20:
+            cond_num = mc_buffer.compute_condition_number()
+            coeff_names_mc = ["intercept", "outdoor_delta"]
+            for m in self._model_inputs:
+                coeff_names_mc.append(m.get("name", "input"))
+            corr_pairs = mc_buffer.get_pairwise_correlations(coeff_names_mc)
+
+            counter_key = "multicollinearity"
+            if cond_num > 30.0:  # Belsley (1980): κ > 30 = moderate
+                self._tuning_alert_counters[counter_key] = self._tuning_alert_counters.get(counter_key, 0) + 1
+            else:
+                self._tuning_alert_counters[counter_key] = 0
+
+            result = check_multicollinearity_repair(
+                condition_number=cond_num,
+                correlated_pairs=corr_pairs,
+                sustained_cycles=self._tuning_alert_counters.get(counter_key, 0),
+            )
+            if result is not None:
+                key, placeholders, should_create = result
+                issues.append((
+                    f"{key}_{entry_id}",
+                    "warning",
+                    key,
+                    placeholders,
+                    should_create,
+                ))
 
         return issues
 
@@ -2523,6 +2596,7 @@ class PIController:
             ff_offset=self._ff_offset,
             ff_confidence=self._ff_confidence,
             raw_c=raw_c,
+            wall_hour=datetime.now().hour,
         ))
 
         # Midpoint-crossing hysteresis

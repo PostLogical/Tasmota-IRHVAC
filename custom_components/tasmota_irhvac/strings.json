@@ -547,6 +547,14 @@
     "batch_online_disagreement": {
       "title": "Batch and online learning disagree on {coeff_name}",
       "description": "The batch model keeps correcting {coeff_name} {direction} but online learning pulls it back. This may indicate seasonal variation. The system will stabilize as the observation buffer accumulates more data from current conditions. No action needed."
+    },
+    "residual_pattern": {
+      "title": "Unmodeled disturbance detected ({time_range})",
+      "description": "Residuals are consistently {direction} ({mean_residual}°C) between {time_range} across {n_observations} observations. This suggests {cause_hint}. Consider adding a model input for this source."
+    },
+    "multicollinearity": {
+      "title": "Highly correlated model inputs",
+      "description": "The information matrix condition number is {condition_number}, indicating multicollinearity. Correlated features: {pairs}. The system cannot reliably separate their effects, which may cause unstable coefficient estimates. Consider removing one of the correlated inputs, or wait for conditions where they vary independently."
     }
   },
   "config_subentries": {

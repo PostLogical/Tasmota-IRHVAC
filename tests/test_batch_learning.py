@@ -9,10 +9,12 @@ from custom_components.tasmota_irhvac.pi.batch_learning import (
     MIN_FEATURE_VARIANCE,
     MAX_STEP_ABS,
     DiversityAwareBuffer,
+    HourlyResidualPattern,
     Observation,
     BatchResult,
     _diagonal_of_inverse,
     _weighted_variance,
+    analyze_residuals_by_hour,
     compare_and_report,
     compute_blended_update,
     weighted_least_squares,
@@ -524,3 +526,252 @@ class TestFilterInactive:
 
         # Should NOT have recomputed since nothing was removed
         assert buf._updates_since_recompute == 50
+
+
+# ── Condition Number & Multicollinearity ──────────────────────────────
+
+
+class TestConditionNumber:
+    def _make_obs(self, features, sp=22.0, cur=20.0, clamped=False):
+        return Observation(
+            timestamp=0.0, features=features, hp_setpoint=sp,
+            current_c=cur, desired_c=20.0, room_rate=0.005, clamped=clamped,
+        )
+
+    def test_condition_number_inf_before_recompute(self):
+        """Returns inf when xtx matrix hasn't been computed yet."""
+        buf = DiversityAwareBuffer(n_features=2, max_size=100)
+        assert buf.compute_condition_number() == float("inf")
+
+    def test_condition_number_well_conditioned(self):
+        """Diverse data produces κ < 20 (Belsley: weak dependencies).
+
+        Outdoor delta spanning 0-9°C covers a wide operating range — the
+        intercept and slope are well-separated and individually identifiable.
+        Belsley (1980): κ < 20 means coefficient estimates are reliable.
+        """
+        buf = DiversityAwareBuffer(n_features=2, max_size=100)
+        for i in range(50):
+            outdoor_delta = float(i % 10)  # 0-9°C spread
+            buf.add(self._make_obs([1.0, outdoor_delta]))
+        buf.recompute_info_matrix()
+        cond = buf.compute_condition_number()
+        assert cond < 20.0
+
+    def test_condition_number_moderate_collinearity(self):
+        """Narrow outdoor range gives moderate collinearity (Belsley: κ > 30).
+
+        Outdoor delta confined to 5.0-10.0°C — the intercept and slope
+        become partially confounded because the feature never approaches
+        zero.  This is the real-world case of collecting data only during
+        mild weather when outdoor temp barely varies.
+        Belsley (1980): 30 < κ < 100 means some coefficients unreliable.
+        """
+        buf = DiversityAwareBuffer(n_features=2, max_size=100)
+        for i in range(50):
+            # outdoor_delta varies 5.0-10.0 (never near zero)
+            buf.add(self._make_obs([1.0, 5.0 + (i % 10) * 0.5]))
+        buf.recompute_info_matrix()
+        cond = buf.compute_condition_number()
+        assert 30.0 < cond < 100.0
+
+    def test_condition_number_severe_collinearity(self):
+        """Near-constant feature produces κ > 100 (Belsley: severe).
+
+        Outdoor delta varies only 5.0-5.1°C — the intercept and outdoor
+        slope are nearly indistinguishable and small perturbations cause
+        large coefficient swings.
+        Belsley (1980): κ > 100 means coefficient estimates numerically unstable.
+        """
+        buf = DiversityAwareBuffer(n_features=2, max_size=100)
+        for i in range(50):
+            buf.add(self._make_obs([1.0, 5.0 + (i % 10) * 0.01]))
+        buf.recompute_info_matrix()
+        cond = buf.compute_condition_number()
+        assert cond > 100.0
+
+    def test_pairwise_correlations_empty_buffer(self):
+        """Returns empty list with insufficient data."""
+        buf = DiversityAwareBuffer(n_features=3, max_size=100)
+        assert buf.get_pairwise_correlations() == []
+
+    def test_pairwise_correlations_detects_correlated(self):
+        """Detects highly correlated features."""
+        buf = DiversityAwareBuffer(n_features=3, max_size=100)
+        for i in range(30):
+            outdoor_delta = float(i)
+            solar = outdoor_delta * 0.5 + 1.0  # perfectly correlated
+            buf.add(self._make_obs([1.0, outdoor_delta, solar]))
+        pairs = buf.get_pairwise_correlations(["intercept", "outdoor_delta", "solar"])
+        assert len(pairs) == 1
+        name_a, name_b, r = pairs[0]
+        assert name_a == "outdoor_delta"
+        assert name_b == "solar"
+        assert abs(r) > 0.99
+
+    def test_pairwise_correlations_independent_features(self):
+        """Independent features produce no correlated pairs."""
+        buf = DiversityAwareBuffer(n_features=3, max_size=100)
+        for i in range(30):
+            outdoor_delta = float(i % 10)
+            pellet = float((i + 5) % 3)  # uncorrelated pattern
+            buf.add(self._make_obs([1.0, outdoor_delta, pellet]))
+        pairs = buf.get_pairwise_correlations(["intercept", "outdoor_delta", "pellet"])
+        assert len(pairs) == 0
+
+    def test_pairwise_correlations_skips_clamped(self):
+        """Correlation computed only from unclamped observations."""
+        buf = DiversityAwareBuffer(n_features=3, max_size=100)
+        # All unclamped obs are independent
+        for i in range(25):
+            buf.add(self._make_obs([1.0, float(i % 10), float((i + 5) % 3)]))
+        # Clamped obs are perfectly correlated but should be ignored
+        for i in range(25):
+            buf.add(self._make_obs([1.0, float(i), float(i)], clamped=True))
+        pairs = buf.get_pairwise_correlations(["intercept", "a", "b"])
+        assert len(pairs) == 0
+
+
+# ── Residual Time-of-Day Analysis ─────────────────────────────────────
+
+
+class TestResidualsByHour:
+    def _make_obs(self, features, sp, cur, wall_hour, des=20.0, rate=0.005, clamped=False):
+        return Observation(
+            timestamp=0.0, features=features, hp_setpoint=sp,
+            current_c=cur, desired_c=des, room_rate=rate, clamped=clamped,
+            wall_hour=wall_hour,
+        )
+
+    def test_detects_afternoon_solar_gain(self):
+        """Negative residuals in afternoon suggest unmodeled solar gain."""
+        # True model: offset = 1.0 + 0.3 * outdoor_delta
+        beta = [1.0, 0.3]
+        obs = []
+        for hour in range(24):
+            for _ in range(8):
+                outdoor_delta = 5.0
+                true_offset = 1.0 + 0.3 * outdoor_delta
+                # Solar gain during 13-16: HP needs 0.8°C less offset
+                solar_effect = -0.8 if 13 <= hour <= 16 else 0.0
+                obs.append(self._make_obs(
+                    features=[1.0, outdoor_delta],
+                    sp=20.0 + true_offset + solar_effect,
+                    cur=20.0,
+                    wall_hour=hour,
+                ))
+        patterns = analyze_residuals_by_hour(obs, beta, n_features=2)
+        # Should detect the afternoon pattern
+        assert len(patterns) >= 1
+        afternoon = [p for p in patterns if 13 <= p.start_hour <= 16]
+        assert len(afternoon) == 1
+        assert afternoon[0].mean_residual < -0.5  # negative = gain
+
+    def test_no_pattern_when_model_fits(self):
+        """No patterns when model prediction matches observations."""
+        beta = [1.0, 0.3]
+        obs = []
+        for hour in range(24):
+            for _ in range(8):
+                outdoor_delta = 5.0
+                true_offset = 1.0 + 0.3 * outdoor_delta
+                obs.append(self._make_obs(
+                    features=[1.0, outdoor_delta],
+                    sp=20.0 + true_offset,
+                    cur=20.0,
+                    wall_hour=hour,
+                ))
+        patterns = analyze_residuals_by_hour(obs, beta, n_features=2)
+        assert len(patterns) == 0
+
+    def test_skips_clamped_observations(self):
+        """Clamped observations excluded from residual analysis."""
+        beta = [1.0, 0.3]
+        obs = []
+        for hour in range(24):
+            for _ in range(8):
+                # Big residual but all clamped
+                obs.append(self._make_obs(
+                    features=[1.0, 5.0],
+                    sp=25.0,  # 3.5°C residual
+                    cur=20.0,
+                    wall_hour=hour,
+                    clamped=True,
+                ))
+        patterns = analyze_residuals_by_hour(obs, beta, n_features=2)
+        assert len(patterns) == 0
+
+    def test_skips_missing_wall_hour(self):
+        """Observations with wall_hour=-1 (legacy) are excluded."""
+        beta = [1.0, 0.3]
+        obs = []
+        for _ in range(50):
+            obs.append(self._make_obs(
+                features=[1.0, 5.0], sp=25.0, cur=20.0, wall_hour=-1,
+            ))
+        patterns = analyze_residuals_by_hour(obs, beta, n_features=2)
+        assert len(patterns) == 0
+
+    def test_insufficient_obs_per_hour(self):
+        """Hours with fewer than min_obs_per_hour are not flagged."""
+        beta = [1.0, 0.3]
+        obs = []
+        # Only 2 obs at hour 14 — big residual but not enough data
+        for _ in range(2):
+            obs.append(self._make_obs(
+                features=[1.0, 5.0], sp=25.0, cur=20.0, wall_hour=14,
+            ))
+        # Fill other hours with good data
+        for hour in range(24):
+            if hour == 14:
+                continue
+            for _ in range(8):
+                obs.append(self._make_obs(
+                    features=[1.0, 5.0],
+                    sp=20.0 + 1.0 + 0.3 * 5.0,
+                    cur=20.0,
+                    wall_hour=hour,
+                ))
+        patterns = analyze_residuals_by_hour(obs, beta, n_features=2)
+        # Hour 14 should not appear in any pattern
+        for p in patterns:
+            assert not (p.start_hour <= 14 <= p.end_hour)
+
+    def test_contiguous_span_merging(self):
+        """Adjacent hours with same-sign residuals merge into one span."""
+        beta = [1.0, 0.3]
+        obs = []
+        for hour in range(24):
+            for _ in range(8):
+                outdoor_delta = 5.0
+                true_offset = 1.0 + 0.3 * outdoor_delta
+                # Heat loss 22-02: need +0.7°C more than model predicts
+                loss = 0.7 if hour >= 22 or hour <= 2 else 0.0
+                obs.append(self._make_obs(
+                    features=[1.0, outdoor_delta],
+                    sp=20.0 + true_offset + loss,
+                    cur=20.0,
+                    wall_hour=hour,
+                ))
+        patterns = analyze_residuals_by_hour(obs, beta, n_features=2)
+        assert len(patterns) >= 1
+        night = [p for p in patterns if p.start_hour == 22 or p.start_hour <= 2]
+        assert len(night) >= 1
+        assert night[0].mean_residual > 0.5  # positive = heat loss
+
+    def test_observation_wall_hour_serialization(self):
+        """wall_hour round-trips through as_dict/from_dict."""
+        obs = self._make_obs([1.0, 5.0], sp=22.0, cur=20.0, wall_hour=14)
+        d = obs.as_dict()
+        assert d["wh"] == 14
+        restored = Observation.from_dict(d)
+        assert restored.wall_hour == 14
+
+    def test_observation_wall_hour_default(self):
+        """Legacy observations without wall_hour get -1."""
+        d = {
+            "t": 0.0, "x": [1.0], "sp": 22.0,
+            "cur": 20.0, "des": 20.0, "rate": 0.005, "clamp": False,
+        }
+        obs = Observation.from_dict(d)
+        assert obs.wall_hour == -1

@@ -9,6 +9,8 @@ from custom_components.tasmota_irhvac.pi.health_checks import (
     check_high_integral_repair,
     check_intercept_absorbing_repair,
     check_model_drift_repair,
+    check_multicollinearity_repair,
+    check_residual_pattern_repair,
     check_save_seeds_repair,
     check_slope_divergence_repair,
 )
@@ -724,3 +726,162 @@ class TestBatchOnlineDisagreementOrchestration:
         disagreement_issues = [i for i in issues if "batch_online_disagreement" in i[0]]
         assert len(disagreement_issues) >= 1
         assert disagreement_issues[0][4] is True
+
+
+# ── check_multicollinearity_repair ─────────────────────────────────
+
+
+class TestMulticollinearityRepair:
+    """Tests for multicollinearity / condition number detection."""
+
+    def test_no_issue_low_condition_number(self):
+        """No issue when κ < 20 (Belsley: weak dependencies)."""
+        result = check_multicollinearity_repair(
+            condition_number=10.0,
+            correlated_pairs=[],
+            sustained_cycles=10,
+        )
+        assert result is not None
+        assert result[2] is False  # should clear
+
+    def test_creates_issue_above_threshold(self):
+        """Issue created when κ > 30 (Belsley: moderate) and sustained."""
+        result = check_multicollinearity_repair(
+            condition_number=50.0,
+            correlated_pairs=[("outdoor_delta", "solar", 0.92)],
+            sustained_cycles=3,
+        )
+        assert result is not None
+        key, placeholders, should_create = result
+        assert should_create is True
+        assert key == "multicollinearity"
+        assert placeholders["condition_number"] == "50"
+        assert "outdoor_delta" in placeholders["pairs"]
+        assert "solar" in placeholders["pairs"]
+
+    def test_hysteresis_band(self):
+        """No change when κ in hysteresis band (20-30)."""
+        result = check_multicollinearity_repair(
+            condition_number=25.0,
+            correlated_pairs=[],
+            sustained_cycles=10,
+        )
+        assert result is None
+
+    def test_not_created_before_sustained(self):
+        """Issue not created before min sustained cycles."""
+        result = check_multicollinearity_repair(
+            condition_number=50.0,
+            correlated_pairs=[("a", "b", 0.9)],
+            sustained_cycles=1,
+        )
+        assert result is None
+
+    def test_clears_below_threshold(self):
+        """Issue cleared when κ drops below 20 (Belsley: weak)."""
+        result = check_multicollinearity_repair(
+            condition_number=15.0,
+            correlated_pairs=[],
+            sustained_cycles=0,
+        )
+        assert result is not None
+        assert result[2] is False
+
+    def test_no_pairs_message(self):
+        """Graceful message when κ is high but no single pair dominates."""
+        result = check_multicollinearity_repair(
+            condition_number=50.0,
+            correlated_pairs=[],
+            sustained_cycles=5,
+        )
+        assert result is not None
+        assert result[2] is True
+        assert "unknown" in result[1]["pairs"]
+
+    def test_multiple_pairs_truncated(self):
+        """At most 3 correlated pairs shown."""
+        pairs = [
+            ("a", "b", 0.9), ("c", "d", 0.85),
+            ("e", "f", 0.8), ("g", "h", 0.75),
+        ]
+        result = check_multicollinearity_repair(
+            condition_number=100.0,
+            correlated_pairs=pairs,
+            sustained_cycles=3,
+        )
+        assert result is not None
+        # Should show 3 pairs, not 4
+        assert result[1]["pairs"].count("r=") == 3
+
+
+# ── check_residual_pattern_repair ──────────────────────────────────
+
+
+class TestResidualPatternRepair:
+    """Tests for time-of-day residual pattern detection."""
+
+    def test_no_issue_small_residual(self):
+        """No issue when residual is below threshold."""
+        result = check_residual_pattern_repair(
+            start_hour=14, end_hour=16,
+            mean_residual=-0.2, n_observations=50,
+            sustained_cycles=10,
+        )
+        assert result is not None
+        assert result[2] is False  # should clear
+
+    def test_creates_issue_negative_residual(self):
+        """Issue created for negative residual (heat gain)."""
+        result = check_residual_pattern_repair(
+            start_hour=13, end_hour=16,
+            mean_residual=-0.8, n_observations=40,
+            sustained_cycles=3,
+        )
+        assert result is not None
+        key, placeholders, should_create = result
+        assert should_create is True
+        assert key == "residual_pattern"
+        assert placeholders["time_range"] == "13:00–16:59"
+        assert placeholders["direction"] == "negative"
+        assert "solar" in placeholders["cause_hint"]
+
+    def test_creates_issue_positive_residual(self):
+        """Issue created for positive residual (heat loss)."""
+        result = check_residual_pattern_repair(
+            start_hour=22, end_hour=2,
+            mean_residual=0.7, n_observations=35,
+            sustained_cycles=3,
+        )
+        assert result is not None
+        key, placeholders, should_create = result
+        assert should_create is True
+        assert placeholders["direction"] == "positive"
+        assert "heat loss" in placeholders["cause_hint"]
+
+    def test_hysteresis_band(self):
+        """No change when in hysteresis band (0.3-0.5)."""
+        result = check_residual_pattern_repair(
+            start_hour=14, end_hour=16,
+            mean_residual=-0.4, n_observations=50,
+            sustained_cycles=10,
+        )
+        assert result is None
+
+    def test_not_created_before_sustained(self):
+        """Issue not created before min sustained cycles."""
+        result = check_residual_pattern_repair(
+            start_hour=14, end_hour=16,
+            mean_residual=-0.8, n_observations=50,
+            sustained_cycles=1,
+        )
+        assert result is None
+
+    def test_single_hour_time_range(self):
+        """Single-hour pattern formats correctly."""
+        result = check_residual_pattern_repair(
+            start_hour=14, end_hour=14,
+            mean_residual=-0.8, n_observations=30,
+            sustained_cycles=3,
+        )
+        assert result is not None
+        assert result[1]["time_range"] == "14:00–14:59"

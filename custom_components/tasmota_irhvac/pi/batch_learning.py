@@ -38,6 +38,7 @@ class Observation:
     ff_offset: float = 0.0
     ff_confidence: float = 1.0
     raw_c: float = 0.0  # unfiltered room temperature
+    wall_hour: int = -1  # wall-clock hour (0-23) for time-of-day analysis
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -52,6 +53,7 @@ class Observation:
             "ff": self.ff_offset,
             "ffc": self.ff_confidence,
             "raw": self.raw_c,
+            "wh": self.wall_hour,
         }
 
     @classmethod
@@ -68,6 +70,7 @@ class Observation:
             ff_offset=d.get("ff", 0.0),
             ff_confidence=d.get("ffc", 1.0),
             raw_c=d.get("raw", d["cur"]),
+            wall_hour=d.get("wh", -1),
         )
 
 
@@ -112,6 +115,8 @@ class DiversityAwareBuffer:
             [reg_inv if i == j else 0.0 for j in range(n)]
             for i in range(n)
         ]
+        # Forward matrix X^T X + λI for condition number estimation.
+        self._xtx_matrix: list[list[float]] | None = None
         # Counter for incremental updates since last full recomputation.
         self._updates_since_recompute: int = 0
 
@@ -230,6 +235,7 @@ class DiversityAwareBuffer:
 
         Call periodically (e.g., at each 12h batch cycle) to prevent
         numerical drift from incremental Sherman-Morrison updates.
+        Also stores the forward matrix for condition number estimation.
         """
         n = self._n_features
         # Build X^T X + λI
@@ -242,6 +248,9 @@ class DiversityAwareBuffer:
             for i in range(n):
                 for j in range(n):
                     xtx[i][j] += x[i] * x[j]
+
+        # Store forward matrix for condition number estimation
+        self._xtx_matrix = [row[:] for row in xtx]
 
         # Invert via Gaussian elimination
         inv = self._invert_matrix(xtx, n)
@@ -256,6 +265,113 @@ class DiversityAwareBuffer:
                 self._info_inv = inv
 
         self._updates_since_recompute = 0
+
+    def compute_condition_number(self) -> float:
+        """Compute the spectral condition number of the information matrix.
+
+        κ = √(λ_max / λ_min) where λ are eigenvalues of X^T X + λI.
+
+        Thresholds (Belsley, Kuh & Welsch, "Regression Diagnostics", 1980):
+        - κ > 30: moderate multicollinearity, coefficients becoming unreliable
+        - κ > 100: severe multicollinearity, coefficient estimates numerically unstable
+
+        Uses power iteration for λ_max and inverse iteration (via the
+        already-computed inverse) for λ_min.  Converges in <20 iterations
+        for the small matrices used here (n=3-8).
+
+        Returns inf if the forward matrix hasn't been computed yet.
+        """
+        if self._xtx_matrix is None:
+            return float('inf')
+        n = self._n_features
+        if n < 2:
+            return 1.0
+
+        # Power iteration for λ_max of xtx
+        v = [1.0 / math.sqrt(n)] * n
+        lambda_max = 0.0
+        for _ in range(50):
+            # w = A @ v
+            w = [sum(self._xtx_matrix[i][j] * v[j] for j in range(n)) for i in range(n)]
+            # Rayleigh quotient
+            lambda_max = sum(v[i] * w[i] for i in range(n))
+            # Normalize
+            norm = math.sqrt(sum(wi * wi for wi in w))
+            if norm < 1e-15:
+                return float('inf')
+            v = [wi / norm for wi in w]
+
+        # Inverse iteration for λ_min: power iteration on A^{-1} gives
+        # 1/λ_min.  We already have _info_inv = (X^T X + λI)^{-1}.
+        v = [1.0 / math.sqrt(n)] * n
+        # Perturb to avoid starting on the dominant eigenvector
+        v[0] += 0.1
+        norm = math.sqrt(sum(vi * vi for vi in v))
+        v = [vi / norm for vi in v]
+
+        inv_lambda_min = 0.0
+        for _ in range(50):
+            w = [sum(self._info_inv[i][j] * v[j] for j in range(n)) for i in range(n)]
+            inv_lambda_min = sum(v[i] * w[i] for i in range(n))
+            norm = math.sqrt(sum(wi * wi for wi in w))
+            if norm < 1e-15:
+                return float('inf')
+            v = [wi / norm for wi in w]
+
+        if inv_lambda_min < 1e-15:
+            return float('inf')
+
+        lambda_min = 1.0 / inv_lambda_min
+        if lambda_min < 1e-15:
+            return float('inf')
+
+        return math.sqrt(lambda_max / lambda_min)
+
+    def get_pairwise_correlations(
+        self, feature_names: list[str] | None = None,
+    ) -> list[tuple[str, str, float]]:
+        """Compute pairwise Pearson correlations between features.
+
+        Returns (name_i, name_j, r) for all pairs with |r| > 0.7,
+        skipping the intercept (always 1.0, undefined correlation).
+        Only uses unclamped observations for relevance to WLS.
+        """
+        n = self._n_features
+        if n < 3 or len(self._buffer) < 20:
+            return []
+
+        names = feature_names or [f"feature_{i}" for i in range(n)]
+        unclamped = [o for o in self._buffer if not o.clamped]
+        if len(unclamped) < 20:
+            return []
+
+        m = len(unclamped)
+        # Extract columns (skip intercept at index 0)
+        cols: list[list[float]] = []
+        for j in range(1, n):
+            cols.append([
+                unclamped[k].features[j] if j < len(unclamped[k].features) else 0.0
+                for k in range(m)
+            ])
+
+        results: list[tuple[str, str, float]] = []
+        nc = len(cols)
+        for a in range(nc):
+            for b in range(a + 1, nc):
+                mean_a = sum(cols[a]) / m
+                mean_b = sum(cols[b]) / m
+                cov_ab = sum((cols[a][k] - mean_a) * (cols[b][k] - mean_b) for k in range(m)) / m
+                var_a = sum((cols[a][k] - mean_a) ** 2 for k in range(m)) / m
+                var_b = sum((cols[b][k] - mean_b) ** 2 for k in range(m)) / m
+                denom = math.sqrt(var_a * var_b)
+                if denom < 1e-12:
+                    continue
+                r = cov_ab / denom
+                if abs(r) > 0.7:
+                    # a, b are 0-indexed into cols which starts at feature 1
+                    results.append((names[a + 1], names[b + 1], r))
+
+        return results
 
     def get_leverage_scores(self) -> list[float]:
         """Compute and return current leverage scores (for diagnostics)."""
@@ -825,3 +941,113 @@ def compute_blended_update(
             )
 
     return result
+
+
+# ── Residual time-of-day analysis ──────────────────────────────────
+
+
+@dataclass
+class HourlyResidualPattern:
+    """A detected time-of-day residual pattern."""
+
+    start_hour: int  # inclusive
+    end_hour: int  # inclusive
+    mean_residual: float  # signed mean residual (°C)
+    n_observations: int  # total obs in the span
+
+
+def analyze_residuals_by_hour(
+    observations: list[Observation],
+    beta: list[float],
+    n_features: int,
+    room_rate_threshold: float = 0.02,
+    min_obs_per_hour: int = 5,
+    residual_threshold: float = 0.5,
+) -> list[HourlyResidualPattern]:
+    """Detect systematic time-of-day residual patterns.
+
+    Computes residual = (hp_setpoint - current_c) - Σ βᵢ xᵢ for each
+    eligible observation, bins by wall-clock hour, and finds contiguous
+    hour spans where the mean residual consistently exceeds the threshold.
+    A positive residual means the HP needed more offset than the model
+    predicted (unmodeled heat loss); negative means less (unmodeled gain).
+
+    Args:
+        observations: all observations (filtered internally).
+        beta: current model coefficients.
+        n_features: number of features.
+        room_rate_threshold: max |room_rate| for eligibility.
+        min_obs_per_hour: minimum observations per hour bucket.
+        residual_threshold: minimum |mean residual| to flag (°C).
+
+    Returns:
+        List of detected patterns (contiguous hour spans with consistent
+        bias). Empty if no patterns exceed threshold.
+    """
+    # Bin residuals by wall-clock hour
+    hour_residuals: dict[int, list[float]] = {h: [] for h in range(24)}
+
+    for o in observations:
+        if o.clamped or abs(o.room_rate) >= room_rate_threshold or o.wall_hour < 0:
+            continue
+        x = o.features[:n_features]
+        while len(x) < n_features:
+            x.append(0.0)
+        predicted = sum(beta[i] * x[i] for i in range(n_features))
+        actual = o.hp_setpoint - o.current_c
+        residual = actual - predicted
+        hour_residuals[o.wall_hour].append(residual)
+
+    # Compute per-hour means
+    hour_means: dict[int, float] = {}
+    hour_counts: dict[int, int] = {}
+    for h in range(24):
+        vals = hour_residuals[h]
+        hour_counts[h] = len(vals)
+        if len(vals) >= min_obs_per_hour:
+            hour_means[h] = sum(vals) / len(vals)
+        else:
+            hour_means[h] = 0.0  # insufficient data, treat as neutral
+
+    # Find contiguous spans where mean residual exceeds threshold
+    # with consistent sign
+    patterns: list[HourlyResidualPattern] = []
+    visited: set[int] = set()
+
+    for start in range(24):
+        if start in visited:
+            continue
+        if hour_counts[start] < min_obs_per_hour:
+            continue
+        if abs(hour_means[start]) < residual_threshold:
+            continue
+
+        sign = 1 if hour_means[start] > 0 else -1
+        end = start
+        total_residual = 0.0
+        total_obs = 0
+
+        # Extend the span forward (wrapping at 24)
+        for offset in range(24):
+            h = (start + offset) % 24
+            if hour_counts[h] < min_obs_per_hour:
+                break
+            if abs(hour_means[h]) < residual_threshold:
+                break
+            h_sign = 1 if hour_means[h] > 0 else -1
+            if h_sign != sign:
+                break
+            end = h
+            visited.add(h)
+            total_residual += sum(hour_residuals[h])
+            total_obs += hour_counts[h]
+
+        if total_obs > 0:
+            patterns.append(HourlyResidualPattern(
+                start_hour=start,
+                end_hour=end,
+                mean_residual=total_residual / total_obs,
+                n_observations=total_obs,
+            ))
+
+    return patterns

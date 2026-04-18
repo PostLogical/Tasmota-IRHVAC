@@ -449,3 +449,108 @@ def check_batch_online_disagreement_repair(
 
     # Corrections in same direction but no drift-back — corrections are sticking
     return ("batch_online_disagreement", {}, False)
+
+
+def check_residual_pattern_repair(
+    start_hour: int,
+    end_hour: int,
+    mean_residual: float,
+    n_observations: int,
+    sustained_cycles: int,
+    create_threshold: float = 0.5,
+    clear_threshold: float = 0.3,
+    min_sustained_cycles: int = 3,
+) -> tuple[str, dict[str, str], bool] | None:
+    """Check if a time-of-day residual pattern indicates an unmodeled disturbance.
+
+    A consistent positive residual means the HP needs more offset than the
+    model predicts (unmodeled heat loss at that time). Negative means
+    unmodeled heat gain (solar, occupancy, scheduled heating).
+
+    Args:
+        start_hour: start of the pattern span (0-23).
+        end_hour: end of the pattern span (0-23).
+        mean_residual: signed mean residual in °C.
+        n_observations: total observations in the span.
+        sustained_cycles: how many consecutive batch cycles detected this.
+        create_threshold: minimum |mean_residual| to create issue.
+        clear_threshold: |mean_residual| below which to clear.
+        min_sustained_cycles: minimum sustained cycles before creating.
+    """
+    if abs(mean_residual) < clear_threshold:
+        return ("residual_pattern", {}, False)
+
+    if abs(mean_residual) < create_threshold or sustained_cycles < min_sustained_cycles:
+        return None  # hysteresis band
+
+    if mean_residual < 0:
+        direction = "negative"
+        cause_hint = "unmodeled heat gain (common causes: solar gain, occupancy, scheduled heating from another source)"
+    else:
+        direction = "positive"
+        cause_hint = "unmodeled heat loss (common causes: drafts, scheduled ventilation, door/window opening patterns)"
+
+    if start_hour == end_hour:
+        time_range = f"{start_hour:02d}:00–{start_hour:02d}:59"
+    else:
+        time_range = f"{start_hour:02d}:00–{end_hour:02d}:59"
+
+    return (
+        "residual_pattern",
+        {
+            "time_range": time_range,
+            "direction": direction,
+            "mean_residual": f"{mean_residual:+.2f}",
+            "n_observations": str(n_observations),
+            "cause_hint": cause_hint,
+        },
+        True,
+    )
+
+
+def check_multicollinearity_repair(
+    condition_number: float,
+    correlated_pairs: list[tuple[str, str, float]],
+    sustained_cycles: int,
+    create_threshold: float = 30.0,
+    clear_threshold: float = 20.0,
+    min_sustained_cycles: int = 3,
+) -> tuple[str, dict[str, str], bool] | None:
+    """Check if features are multicollinear (condition number too high).
+
+    When two input features are highly correlated, the RLS cannot
+    separate their effects and coefficient estimates become unstable.
+
+    Args:
+        condition_number: spectral condition number √(λ_max/λ_min) of X^T X + λI.
+        correlated_pairs: (name_i, name_j, r) for pairs with |r| > 0.7.
+        sustained_cycles: how many consecutive batch cycles above threshold.
+        create_threshold: condition number above which to create issue.
+            Belsley (1980): κ > 30 = moderate multicollinearity.
+        clear_threshold: condition number below which to clear issue.
+            κ < 20 = weak dependencies, coefficients reliable.
+        min_sustained_cycles: minimum sustained cycles before creating.
+
+    Reference: Belsley, Kuh & Welsch, "Regression Diagnostics" (1980), Ch. 3.
+    """
+    if condition_number < clear_threshold:
+        return ("multicollinearity", {}, False)
+
+    if condition_number < create_threshold or sustained_cycles < min_sustained_cycles:
+        return None  # hysteresis band
+
+    # Build human-readable pair list
+    if correlated_pairs:
+        pair_strs = [f"{a} and {b} (r={r:.2f})" for a, b, r in correlated_pairs[:3]]
+        pairs_text = "; ".join(pair_strs)
+    else:
+        pairs_text = "unknown (condition number high but no single pair dominates)"
+
+    return (
+        "multicollinearity",
+        {
+            "condition_number": f"{condition_number:.0f}",
+            "pairs": pairs_text,
+        },
+        True,
+    )

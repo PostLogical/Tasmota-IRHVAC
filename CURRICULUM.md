@@ -163,17 +163,17 @@ custom_components/tasmota_irhvac/
 ├── diagnostics.py         (59 lines)  — HA diagnostics dump
 ├── pi/                                — PI + feedforward controller subpackage
 │   ├── __init__.py                    — Public API: PIController, NullController, BatchResult
-│   ├── pi_controller.py (2053 lines)  — Core PI tick, anti-windup, learning gates
+│   ├── pi_controller.py (2661 lines)  — Core PI tick, anti-windup, learning gates
 │   ├── pi_stored_data.py  (106 lines) — ExtraStoredData for cross-restart persistence
 │   ├── controller_protocol.py (196)   — Protocol class + NullController stub
 │   ├── rls_model.py       (249 lines) — Recursive Least Squares with forgetting + ridge
-│   ├── batch_learning.py  (829 lines) — Diversity-aware buffer + periodic WLS analysis
+│   ├── batch_learning.py (1053 lines) — Diversity-aware buffer, WLS, residual analysis
 │   ├── smith_predictor.py (113 lines) — FOPDT Smith predictor (delay compensation)
 │   ├── tau_estimator.py   (231 lines) — Online τ estimation + IMC gain scheduling
 │   ├── model_input_manager.py (134)   — External HA entity feature management
 │   ├── supplemental_controller.py (136) — Supplemental heat source coordination
 │   ├── performance_metrics.py (135)   — ITAE, CVH, FF load fraction accumulators
-│   └── health_checks.py  (141 lines)  — Comfort, integral, FF, drift health checks
+│   └── health_checks.py  (556 lines)  — Health checks + 9 HA Repairs diagnostics
 ├── vendors/                           — Vendor handler registry (composition, not inheritance)
 │   ├── __init__.py       (153 lines)  — Registry: maps vendor strings to handlers
 │   ├── base.py           (168 lines)  — VendorHandler base + IRDecode/EntityState types
@@ -667,7 +667,10 @@ defenses:
 1. **Conditional integration freeze:** When the HP setpoint is at its physical
    limit *and* the error opposes what the actuator can deliver (e.g., heating at
    min temp with room above target), integration pauses entirely. Prevents
-   accumulating integral debt the controller can never act on.
+   accumulating integral debt the controller can never act on. Also triggers
+   when the HP has **no output** — setpoint below room temp in heating (or
+   above in cooling), meaning the compressor is off and the controller has
+   no actuator authority (Åström §6.4).
 
 2. **Leaky integrator:** Exponential decay with α=0.9999 per nominal tick
    (~10,000 tick time constant ≈ 104 days). Bounds integral growth universally.
@@ -836,7 +839,7 @@ Guards:
 
 ### Batch WLS (Offline Analysis)
 
-**File:** `pi/batch_learning.py` (~829 lines)
+**File:** `pi/batch_learning.py` (~1053 lines)
 
 Twice daily (07:00 and 19:00 local time), a weighted least squares analysis
 runs on the accumulated observation buffer. This catches systematic model
@@ -845,14 +848,34 @@ errors that the real-time learning gates might miss:
 - **Diversity-aware buffer:** ~2000 slots with leverage-scored retention
   (D-optimal design). Old observations are kept if they cover rare operating
   conditions, discarded if they're redundant. Persisted across restarts.
-- **Filtering:** Excludes clamped data and non-equilibrium observations
+- **Filtering:** Excludes clamped data (including hp-no-output observations
+  where the compressor is off) and non-equilibrium observations
   (room rate > threshold)
 - **Persistent excitation check:** Holds features with insufficient variance
   (prevents learning from narrow conditions)
 - **Robust regression:** 3-sigma Huber outlier exclusion
 - **Covariance-weighted blended update:** Kalman-gain fusion with prior std
+- **P-aware covariance update:** After applying blended coefficients,
+  P[i,i] *= (1 - K_i) so RLS treats the correction as real posterior
+  information and doesn't drift back
 - **Drift detection:** Tracks per-coefficient correction direction history
   to distinguish systematic drift from noise
+
+Each observation records a `wall_hour` (0-23) for time-of-day analysis.
+
+**Residual time-of-day analysis:** After each batch WLS fit, the system bins
+residuals by wall-clock hour and detects contiguous spans where the model
+consistently over- or under-predicts. A systematic negative residual in the
+afternoon suggests unmodeled solar gain; a positive residual at night suggests
+unmodeled heat loss. These patterns surface as HA Repairs recommendations
+suggesting which model input to add.
+
+**Multicollinearity detection:** The buffer maintains the forward information
+matrix X^TX alongside its inverse. The spectral condition number
+κ = √(λ_max/λ_min) is computed via power iteration. When κ exceeds 30
+(Belsley, Kuh & Welsch, 1980: moderate multicollinearity), the system flags
+which feature pairs are correlated (|r| > 0.7) and warns the user via HA
+Repairs. At κ > 100, coefficient estimates are numerically unstable.
 
 The batch result is persisted via `ExtraStoredData` for diagnostics continuity
 across restarts.
@@ -1090,6 +1113,21 @@ The **health sensor** (`sensor.{device}_health`) is a special ENUM sensor with
 states OK / Warning / Critical / Disabled. It runs multiple checks (comfort,
 integral magnitude, FF confidence, intercept drift, slope drift, model drift,
 feature diversity) and reports the worst status with detailed attributes.
+
+**HA Repairs recommendations** (`health_checks.py`) — 9 tuning diagnostics that
+surface as actionable items in the HA Repairs panel:
+
+| Repair | Trigger | What It Means |
+|--------|---------|--------------|
+| Slope divergence | Learned slope ≠ configured >30% for 6 cycles | Building envelope changed; update seed |
+| Save seeds | Model converged, seeds not saved | Checkpoint learned values against data loss |
+| High integral (4 sub-causes) | Ki×I > 2°C sustained | Immature model, slope gap, equipment limits, or needs Ki reduction |
+| Covariance collapse | P[i,i] ≈ δ at clamp boundary | RLS stuck, batch must correct |
+| Model drift | Same-direction batch correction ≥5 cycles | Physical change (insulation, sensor, schedule) |
+| Intercept absorbing | |intercept| > 1°C with collapsed coefficient | One coefficient stuck, intercept compensating |
+| Batch-online disagreement | Batch corrects same direction, RLS drifts back | Transient vs. structural mismatch |
+| Residual pattern | |mean residual| > 0.5°C in contiguous hours, 3 cycles | Unmodeled time-of-day disturbance (solar, occupancy) |
+| Multicollinearity | Spectral κ > 30 sustained 3 cycles (Belsley 1980) | Correlated features; RLS can't separate effects |
 
 **Binary sensor** (`binary_sensor.py`): `binary_sensor.{device}_ff_learning_suppressed`
 shows whether feedforward learning is currently suppressed, with attributes listing
@@ -1337,4 +1375,4 @@ topic. The integration marks the entity as unavailable when offline.
 
 ---
 
-*Updated April 2026 from the `architecture-rework` branch. ~10,007 lines of Python across 22 files.*
+*Updated April 2026 from the `architecture-rework` branch. ~11,432 lines of Python across 22 files.*
