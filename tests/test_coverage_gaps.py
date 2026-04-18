@@ -216,7 +216,7 @@ class TestPIControllerGaps:
 
     @pytest.mark.asyncio
     async def test_ff_constant_when_overshooting(self, hass, setup_pi_integration):
-        """FF stays constant regardless of room temp — PI handles overshoot."""
+        """FF stays constant regardless of room temp — HP no-output freezes integral."""
         entry = await setup_pi_integration()
         entity = get_climate_entity(hass, entry)
         pi = entity._pi
@@ -228,16 +228,16 @@ class TestPIControllerGaps:
         pi._pi_last_tick_time = 0
         pi._inputs.outdoor_temp = 0.0
 
-        # Room is ABOVE desired — overshooting in heat mode
+        # Room is ABOVE desired — overshooting in heat mode.
+        # hp_setpoint (22) < room (23) → hp_no_output → integration frozen.
         entity._attr_current_temperature = 23.0
 
         await pi._pi_tick()
 
         # FF is based on outdoor temp, not room temp — stays constant.
-        # Integral goes negative with error (room above target in heat mode).
-        # One tick with error = -1°C: integral ≈ -1.0 (no accelerated decay).
         assert pi._ff_offset > 0  # FF still active
-        assert pi._pi_integral < 0  # Integral accumulates with negative error
+        # Integral frozen: HP has no output (setpoint < room temp)
+        assert abs(pi._pi_integral) < 0.5  # frozen at ~0
 
     @pytest.mark.asyncio
     async def test_ff_ramp_gradient_cooling(self, hass, setup_pi_integration):

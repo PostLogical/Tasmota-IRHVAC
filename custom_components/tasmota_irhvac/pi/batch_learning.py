@@ -130,6 +130,34 @@ class DiversityAwareBuffer:
         ]
         self._updates_since_recompute = 0
 
+    def filter_inactive(self, mode: str) -> int:
+        """Remove observations where the HP had zero output.
+
+        When the HP setpoint is below room temp in heating (or above in
+        cooling), the HP's internal thermostat turns off the compressor.
+        These observations carry no plant information (Ljung §13.3) and
+        corrupt the WLS regression with passive room dynamics.
+
+        Re-evaluates the condition from stored hp_setpoint and current_c
+        on each observation.  Call once after adding the hp_no_output
+        condition to purge historical poisoned data.
+
+        Args:
+            mode: "heat" or "cool"
+
+        Returns:
+            Number of observations removed.
+        """
+        before = len(self._buffer)
+        if mode == "heat":
+            self._buffer = [o for o in self._buffer if not (o.hp_setpoint < o.current_c)]
+        else:
+            self._buffer = [o for o in self._buffer if not (o.hp_setpoint > o.current_c)]
+        removed = before - len(self._buffer)
+        if removed:
+            self.recompute_info_matrix()
+        return removed
+
     def add(self, obs: Observation) -> None:
         """Add an observation, using leverage-scored eviction when full."""
         x = self._get_feature_vector(obs)

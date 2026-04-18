@@ -46,6 +46,7 @@ class PIExtraStoredData(ExtraStoredData):
     drift_correction_signs: list = dataclasses.field(default_factory=list)
     last_batch_result: dict | None = None
     tuning_alert_counters: dict = dataclasses.field(default_factory=dict)
+    obs_buffer_purged_v2: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize to JSON-compatible dict."""
@@ -74,6 +75,7 @@ class PIExtraStoredData(ExtraStoredData):
             "drift_correction_signs": self.drift_correction_signs,
             "last_batch_result": self.last_batch_result,
             "tuning_alert_counters": self.tuning_alert_counters,
+            "obs_buffer_purged_v2": self.obs_buffer_purged_v2,
         }
 
     @classmethod
@@ -110,6 +112,7 @@ class PIExtraStoredData(ExtraStoredData):
                 drift_correction_signs=restored.get("drift_correction_signs", []),
                 last_batch_result=restored.get("last_batch_result"),
                 tuning_alert_counters=restored.get("tuning_alert_counters", {}),
+                obs_buffer_purged_v2=restored.get("obs_buffer_purged_v2", False),
             )
         except (KeyError, ValueError, TypeError, AttributeError):
             return None

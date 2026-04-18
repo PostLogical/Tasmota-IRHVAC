@@ -637,3 +637,123 @@ class TestLimitCycle:
         )
         _assert_setpoint_in_bounds(history)
         _assert_integral_bounded(history)
+
+
+class TestHPNoOutputScenario:
+    """Regression scenario for the 2026-04-17→18 overshoot incident.
+
+    Simulates a warm afternoon (solar gain, outdoor 23°C) causing the room
+    to overshoot, followed by overnight cooling (outdoor drops to 7°C).
+    Before the hp_no_output fix, the integral wound from -7.8 to -27
+    during the open-loop overshoot period.  With the fix, integration
+    freezes when hp_setpoint < current_c.
+
+    The ThermalModel is modified to zero out HP contribution when the HP
+    has no output (setpoint < room in heating), matching real HP behavior.
+    """
+
+    def test_overnight_overshoot_integral_bounded(self):
+        """Integral should stay bounded during solar overshoot + overnight cooling."""
+        config = _make_sim_config(seed_factor=1.0)
+        entity = SimEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 20.5
+
+        # Thermal model: warm start, HP gain from default
+        thermal = ThermalModel(initial_temp=20.5, outdoor_temp=10.0,
+                               time_constant_min=60.0)
+
+        # Solar schedule: ramps up (warm afternoon), then drops to zero (night).
+        # Outdoor schedule: warm afternoon (23°C), then overnight cooling to 7°C.
+        def solar_fn(tick):
+            if tick < 8:
+                return 0.3 + 0.1 * tick / 8  # morning ramp
+            elif tick < 16:
+                return 0.4 - 0.4 * (tick - 8) / 8  # afternoon decline
+            return 0.0  # night
+
+        def outdoor_fn(tick):
+            if tick < 12:
+                return 10.0 + 13.0 * tick / 12  # warm up to 23°C
+            else:
+                return 23.0 - 16.0 * (tick - 12) / 36  # cool to 7°C overnight
+
+        # Run simulation with HP-no-output modeled in the thermal step:
+        # when hp_setpoint < room, HP contributes zero (instead of negative).
+        import asyncio
+        from unittest.mock import patch
+        loop = asyncio.new_event_loop()
+
+        history = []
+        sim_clock = [0.0]
+
+        def mock_monotonic():
+            return sim_clock[0]
+
+        with patch("custom_components.tasmota_irhvac.pi.pi_controller.time") as mock_time:
+            mock_time.monotonic = mock_monotonic
+            for tick in range(48):  # 12 hours
+                sim_clock[0] = tick * 900.0
+                pi._pi_last_tick_time = (tick - 1) * 900.0 if tick > 0 else 0
+
+                thermal.outdoor_temp = outdoor_fn(tick)
+                solar = solar_fn(tick)
+                entity._attr_current_temperature = thermal.room_temp
+                pi._inputs.outdoor_temp = thermal.outdoor_temp
+
+                loop.run_until_complete(pi._pi_tick())
+
+                # Record room temp that PI actually saw (before thermal step).
+                room_at_tick = thermal.room_temp
+
+                # Model HP-no-output: when setpoint < room, HP contributes
+                # zero heat (compressor off).  Use room temp as effective
+                # setpoint so hp_gain * (room - room) = 0.
+                effective_sp = pi._hp_setpoint
+                if pi._hp_setpoint < thermal.room_temp:
+                    effective_sp = thermal.room_temp  # zero HP contribution
+
+                thermal.step(effective_sp, dt_minutes=15.0, solar_proxy=solar)
+
+                history.append({
+                    "tick": tick,
+                    "room_at_tick": room_at_tick,  # what PI saw
+                    "room_temp": thermal.room_temp,  # after thermal step
+                    "hp_setpoint": pi._hp_setpoint,
+                    "integral": pi._pi_integral,
+                    "ff_offset": pi._ff_offset,
+                    "outdoor": thermal.outdoor_temp,
+                    "frozen": pi._integration_frozen,
+                })
+
+        loop.close()
+
+        # Find the peak room temp and the integral at that point
+        peak_temp = max(h["room_temp"] for h in history)
+        peak_tick = next(h for h in history if h["room_temp"] == peak_temp)
+
+        # The room should overshoot (solar gain pushes it above 20.5°C target)
+        assert peak_temp > 21.5, (
+            f"Room should overshoot from solar gain, peak={peak_temp:.1f}"
+        )
+
+        # KEY ASSERTION: Integral should NOT wind deeply negative.
+        # Before fix: integral reached -27.  With fix: should stay bounded.
+        min_integral = min(h["integral"] for h in history)
+        assert min_integral > -15.0, (
+            f"Integral should be bounded during HP-no-output period, "
+            f"min={min_integral:.1f}. History: "
+            + ", ".join(f"t{h['tick']}:I={h['integral']:.1f}" for h in history[::4])
+        )
+
+        # Integration should be frozen during the overshoot period.
+        # Use room_at_tick (what PI actually saw) for consistency with
+        # the hp_no_output condition evaluated during the tick.
+        overshoot_ticks = [h for h in history if h["room_at_tick"] > 21.0
+                           and h["hp_setpoint"] < h["room_at_tick"]]
+        if overshoot_ticks:
+            frozen_count = sum(1 for h in overshoot_ticks if h["frozen"])
+            assert frozen_count == len(overshoot_ticks), (
+                f"Integration should be frozen during all HP-no-output ticks, "
+                f"but {len(overshoot_ticks) - frozen_count}/{len(overshoot_ticks)} were unfrozen"
+            )

@@ -779,6 +779,7 @@ class PIController:
                 **self._tuning_alert_counters,
                 "had_stable_batch": self._has_had_stable_batch,
             },
+            obs_buffer_purged_v2=getattr(self, "_obs_buffer_purge_v2_done", False),
         )
 
     def restore_extra_stored_data(self, data: PIExtraStoredData) -> None:
@@ -841,6 +842,21 @@ class PIController:
             self._observation_buffer_cool = DiversityAwareBuffer.from_list(
                 data.observation_buffer_cool, n_features=_n_buf_features,
             )
+        # One-time migration: purge observations where the HP had zero
+        # output (setpoint wrong side of room temp).  These observations
+        # were recorded before hp_no_output detection was added and carry
+        # no plant information — they corrupt the WLS regression.
+        if not data.obs_buffer_purged_v2:
+            n_heat = self._observation_buffer_heat.filter_inactive("heat")
+            n_cool = self._observation_buffer_cool.filter_inactive("cool")
+            if n_heat or n_cool:
+                _LOGGER.info(
+                    "%sBuffer migration: purged %d heat + %d cool "
+                    "HP-no-output observations",
+                    self._log_prefix, n_heat, n_cool,
+                )
+            self._obs_buffer_purge_v2_done = True
+
         # Restore drift detection history
         if data.drift_correction_signs:
             self._drift_correction_signs = data.drift_correction_signs
@@ -2303,20 +2319,37 @@ class PIController:
         # so the integral can recover and drive the setpoint up.
         #
         # Symmetric for cooling mode at max setpoint.
+        # HP compressor inactive: when setpoint < room temp in heating
+        # (or > in cooling), the HP's internal thermostat turns off the
+        # compressor — zero output, open loop.
+        # Ljung §13.3: no plant information during actuator saturation.
+        # Åström & Hägglund §6.4: stop integrating when actuator is saturated.
+        hp_no_output = (
+            (is_heating and self._hp_setpoint < current_c)
+            or (is_cooling and self._hp_setpoint > current_c)
+        )
         skip_integration = (
             (is_heating and self._hp_setpoint <= self._min_temp_c and error < 0)
             or (is_cooling and self._hp_setpoint >= self._max_temp_c and error > 0)
+            or hp_no_output
         )
 
         # Log transitions into/out of conditional integration freeze.
         if skip_integration and not self._integration_frozen:
-            _LOGGER.debug(
-                "%sIntegration frozen: %s at %s limit, error=%.2f°C",
-                self._log_prefix,
-                "heating" if is_heating else "cooling",
-                "min" if is_heating else "max",
-                error,
-            )
+            if hp_no_output:
+                _LOGGER.debug(
+                    "%sIntegration frozen: HP no output "
+                    "(setpoint=%d°C, room=%.1f°C), error=%.2f°C",
+                    self._log_prefix, self._hp_setpoint, current_c, error,
+                )
+            else:
+                _LOGGER.debug(
+                    "%sIntegration frozen: %s at %s limit, error=%.2f°C",
+                    self._log_prefix,
+                    "heating" if is_heating else "cooling",
+                    "min" if is_heating else "max",
+                    error,
+                )
         elif not skip_integration and self._integration_frozen:
             _LOGGER.debug(
                 "%sIntegration unfrozen: error=%.2f°C, setpoint=%.1f°C",
@@ -2379,6 +2412,7 @@ class PIController:
             setpoint_clamped = (
                 self._hp_setpoint <= self._min_temp_c
                 or self._hp_setpoint >= self._max_temp_c
+                or hp_no_output
             )
             min_oodb_ticks = 8 + int(abs_error * 4)  # +4 ticks per °C of error
 
@@ -2483,6 +2517,7 @@ class PIController:
             clamped=(
                 self._hp_setpoint <= self._min_temp_c
                 or self._hp_setpoint >= self._max_temp_c
+                or hp_no_output
             ),
             pi_integral=self._pi_integral,
             ff_offset=self._ff_offset,

@@ -8,6 +8,7 @@ from custom_components.tasmota_irhvac.pi.batch_learning import (
     DEFAULT_PRIOR_STD,
     MIN_FEATURE_VARIANCE,
     MAX_STEP_ABS,
+    DiversityAwareBuffer,
     Observation,
     BatchResult,
     _diagonal_of_inverse,
@@ -435,3 +436,91 @@ class TestComputeBlendedUpdate:
         assert diag is not None
         assert abs(diag[0] - 0.375) < 1e-9
         assert abs(diag[1] - 0.5) < 1e-9
+
+
+class TestFilterInactive:
+    """Tests for DiversityAwareBuffer.filter_inactive().
+
+    Removes observations where the HP had zero output (setpoint wrong
+    side of room temp), used for one-time buffer migration after adding
+    the hp_no_output condition.
+    """
+
+    def _make_obs(self, sp, cur, features=None):
+        return Observation(
+            timestamp=0.0,
+            features=features or [1.0, 5.0],
+            hp_setpoint=sp,
+            current_c=cur,
+            desired_c=21.0,
+            room_rate=0.005,
+            clamped=False,
+        )
+
+    def test_heat_removes_setpoint_below_room(self):
+        """filter_inactive('heat') removes obs where sp < current_c."""
+        buf = DiversityAwareBuffer(n_features=2, max_size=100)
+        # 5 clean (sp > room), 3 poisoned (sp < room)
+        for _ in range(5):
+            buf.add(self._make_obs(sp=22.0, cur=20.0))
+        for _ in range(3):
+            buf.add(self._make_obs(sp=17.0, cur=24.0))
+        assert len(buf) == 8
+
+        removed = buf.filter_inactive("heat")
+
+        assert removed == 3
+        assert len(buf) == 5
+        for obs in buf.get_all():
+            assert obs.hp_setpoint >= obs.current_c
+
+    def test_cool_removes_setpoint_above_room(self):
+        """filter_inactive('cool') removes obs where sp > current_c."""
+        buf = DiversityAwareBuffer(n_features=2, max_size=100)
+        for _ in range(5):
+            buf.add(self._make_obs(sp=22.0, cur=25.0))  # clean: sp < room in cool
+        for _ in range(3):
+            buf.add(self._make_obs(sp=26.0, cur=23.0))  # poisoned: sp > room
+        assert len(buf) == 8
+
+        removed = buf.filter_inactive("cool")
+
+        assert removed == 3
+        assert len(buf) == 5
+
+    def test_recomputes_info_matrix(self):
+        """filter_inactive should recompute the info matrix after removal."""
+        buf = DiversityAwareBuffer(n_features=2, max_size=100)
+        for _ in range(5):
+            buf.add(self._make_obs(sp=22.0, cur=20.0))
+        for _ in range(3):
+            buf.add(self._make_obs(sp=17.0, cur=24.0))
+        # Force some incremental updates
+        buf._updates_since_recompute = 100
+
+        buf.filter_inactive("heat")
+
+        assert buf._updates_since_recompute == 0
+
+    def test_preserves_clean_observations(self):
+        """filter_inactive should not remove clean observations."""
+        buf = DiversityAwareBuffer(n_features=2, max_size=100)
+        for i in range(10):
+            buf.add(self._make_obs(sp=22.0 + i * 0.1, cur=20.0))
+
+        removed = buf.filter_inactive("heat")
+
+        assert removed == 0
+        assert len(buf) == 10
+
+    def test_no_recompute_when_nothing_removed(self):
+        """If no observations are removed, skip the info matrix recompute."""
+        buf = DiversityAwareBuffer(n_features=2, max_size=100)
+        for _ in range(5):
+            buf.add(self._make_obs(sp=22.0, cur=20.0))
+        buf._updates_since_recompute = 50
+
+        buf.filter_inactive("heat")
+
+        # Should NOT have recomputed since nothing was removed
+        assert buf._updates_since_recompute == 50

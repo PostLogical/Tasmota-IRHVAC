@@ -985,9 +985,9 @@ class TestPIEdgeCases:
     @pytest.mark.asyncio
     async def test_deadband_integration_not_throttled(self, pi_entity):
         """Error within deadband should accumulate at full rate."""
-        pi_entity._attr_current_temperature = 22.3  # Error = -0.3 (in deadband)
+        pi_entity._attr_current_temperature = 21.7  # Error = +0.3 (in deadband)
         pi_entity._pi._desired_temp = 22.0
-        pi_entity._pi._hp_setpoint = 22.0
+        pi_entity._pi._hp_setpoint = 22.0  # above room → HP active
         pi_entity._pi._pi_integral = 0.0
         pi_entity._pi._pi_last_tick_time = 0
         pi_entity._attr_hvac_mode = HVACMode.HEAT
@@ -3038,15 +3038,14 @@ class TestOneSidedAntiWindup:
     """
 
     @pytest.mark.asyncio
-    async def test_heat_mode_negative_error_integral_accumulates(self, pi_entity):
-        """In heat mode with room above target, integral should accumulate to correct FF."""
+    async def test_heat_mode_negative_error_hp_no_output_freezes(self, pi_entity):
+        """In heat mode with room above HP setpoint → hp_no_output → integral frozen."""
         pi_entity._attr_hvac_mode = HVACMode.HEAT
-        pi_entity._attr_current_temperature = 24.0  # °C, well above target
-        pi_entity._pi._desired_temp = 22.0  # error = -2.0°C, outside deadband
-        pi_entity._pi._hp_setpoint = 22.0
+        pi_entity._attr_current_temperature = 24.0  # °C, well above target AND setpoint
+        pi_entity._pi._desired_temp = 22.0  # error = -2.0°C
+        pi_entity._pi._hp_setpoint = 22.0  # 22 < 24 → hp_no_output
         pi_entity._pi._pi_integral = 0.0
 
-        # Run multiple ticks with advancing time so dt_factor > 0
         for i in range(10):
             pi_entity._pi._pi_last_tick_time = float(i * 900)
             with patch("time.monotonic", return_value=float((i + 1) * 900)):
@@ -3054,21 +3053,19 @@ class TestOneSidedAntiWindup:
 
         integral_after = pi_entity._pi._pi_integral
 
-        # Integral accumulates with error (~-2 per tick, 10 ticks).
-        # Back-calculation may cap it if raw setpoint < min_temp.
-        # But it should be significantly negative — the integral is
-        # correctly trying to pull the HP setpoint down.
-        assert integral_after < -5.0, (
-            f"Integral should accumulate with negative error, got {integral_after}"
+        # HP has no output (setpoint < room) → integral should be frozen.
+        # Only leaky decay (0.9999^10) applies — negligible.
+        assert abs(integral_after) < 1.0, (
+            f"Integral should be frozen when HP has no output, got {integral_after}"
         )
 
     @pytest.mark.asyncio
-    async def test_heat_mode_negative_error_grows_existing_integral(self, pi_entity):
-        """Pre-wound negative integral should grow more negative with ongoing error."""
+    async def test_heat_mode_negative_error_hp_active_accumulates(self, pi_entity):
+        """In heat mode with setpoint > room, negative error still accumulates."""
         pi_entity._attr_hvac_mode = HVACMode.HEAT
-        pi_entity._attr_current_temperature = 24.0  # °C, above target
-        pi_entity._pi._desired_temp = 22.0  # error = -2.0°C
-        pi_entity._pi._hp_setpoint = 22.0
+        pi_entity._attr_current_temperature = 20.0  # room below setpoint
+        pi_entity._pi._desired_temp = 22.0  # error = +2.0°C
+        pi_entity._pi._hp_setpoint = 23.0  # 23 > 20 → HP is active
         pi_entity._pi._pi_integral = -10.0  # Pre-wound negative
         pi_entity._pi._pi_last_tick_time = 0.0
 
@@ -3076,10 +3073,9 @@ class TestOneSidedAntiWindup:
             await pi_entity._pi._pi_tick()
         integral_after = pi_entity._pi._pi_integral
 
-        # With error = -2, integral should go more negative (not decay toward zero).
-        # Only leaky decay (α=0.9999) applies — negligible per tick.
-        assert integral_after < -10.0, (
-            f"Integral should grow more negative with ongoing error, got {integral_after}"
+        # HP is active (setpoint > room) with positive error → integral grows
+        assert integral_after > -10.0, (
+            f"Integral should accumulate when HP is active, got {integral_after}"
         )
 
     @pytest.mark.asyncio
@@ -3100,12 +3096,12 @@ class TestOneSidedAntiWindup:
         )
 
     @pytest.mark.asyncio
-    async def test_cool_mode_positive_error_integral_accumulates(self, pi_entity):
-        """In cool mode with room below target, integral should accumulate to correct FF."""
+    async def test_cool_mode_positive_error_hp_no_output_freezes(self, pi_entity):
+        """In cool mode with setpoint > room → hp_no_output → integral frozen."""
         pi_entity._attr_hvac_mode = HVACMode.COOL
-        pi_entity._attr_current_temperature = 20.0  # °C, below target
+        pi_entity._attr_current_temperature = 20.0  # °C, below target AND setpoint
         pi_entity._pi._desired_temp = 22.0  # error = +2.0°C
-        pi_entity._pi._hp_setpoint = 22.0
+        pi_entity._pi._hp_setpoint = 22.0  # 22 > 20 → hp_no_output in cooling
         pi_entity._pi._pi_integral = 0.0
 
         for i in range(10):
@@ -3115,10 +3111,9 @@ class TestOneSidedAntiWindup:
 
         integral_after = pi_entity._pi._pi_integral
 
-        # Integral accumulates with positive error (~+2 per tick).
-        # Back-calculation may cap it if raw setpoint > max_temp.
-        assert integral_after > 5.0, (
-            f"Integral should accumulate with positive error in cool mode, got {integral_after}"
+        # HP has no cooling output (setpoint > room) → frozen
+        assert abs(integral_after) < 1.0, (
+            f"Integral should be frozen when HP has no cooling output, got {integral_after}"
         )
 
     @pytest.mark.asyncio
@@ -3140,24 +3135,24 @@ class TestOneSidedAntiWindup:
         )
 
     @pytest.mark.asyncio
-    async def test_heat_mode_deadband_normal_accumulation(self, pi_entity):
-        """In deadband, integral accumulates normally even with small overshoot.
+    async def test_heat_mode_deadband_hp_active_accumulates(self, pi_entity):
+        """In deadband with HP active, integral accumulates normally.
 
-        Small overshoots within deadband are normal control behavior.
+        Small errors within deadband are normal control behavior.
         Full-rate integration: accumulates the actual error.
         """
         pi_entity._attr_hvac_mode = HVACMode.HEAT
-        pi_entity._attr_current_temperature = 22.3  # °C, slightly above target
-        pi_entity._pi._desired_temp = 22.0  # error = -0.3°C (within 0.5 deadband)
-        pi_entity._pi._hp_setpoint = 22.0
+        pi_entity._attr_current_temperature = 21.7  # °C, slightly below target
+        pi_entity._pi._desired_temp = 22.0  # error = +0.3°C (within 0.5 deadband)
+        pi_entity._pi._hp_setpoint = 22.0  # 22 > 21.7 → HP active
         pi_entity._pi._pi_integral = 0.0
 
         await pi_entity._pi._pi_tick()
         integral_after = pi_entity._pi._pi_integral
 
-        # Integral accumulates at reduced variable rate (normal deadband behavior)
-        assert integral_after < 0, (
-            f"Integral should accumulate normally in deadband, got {integral_after}"
+        # HP active, positive error → integral accumulates
+        assert integral_after > 0, (
+            f"Integral should accumulate when HP is active in deadband, got {integral_after}"
         )
 
     @pytest.mark.asyncio
@@ -3167,24 +3162,24 @@ class TestOneSidedAntiWindup:
         Without accelerated decay, the integral builds until the HP setpoint
         corrects the error. This is essential for FF learning: the observation
         at equilibrium (ff + ki*integral) reflects the true offset needed.
+        HP must be active (setpoint > room) for integration to proceed.
         """
         config = make_pi_config({"pi_tau_estimate": 60.0, "min_temp": 0})
         entity = FakePIEntity(config)
         pi = entity._pi
         pi._desired_temp = 20.0
-        pi._hp_setpoint = 20.0
+        pi._hp_setpoint = 22.0  # above room → HP active
         entity._attr_hvac_mode = HVACMode.HEAT
-        entity._attr_current_temperature = 21.0  # error = -1.0°C, outside deadband
-        pi._pi_integral = -5.0
+        entity._attr_current_temperature = 18.0  # error = +2.0°C, room below target
+        pi._pi_integral = 1.0
 
         # Run one tick — integral should accumulate with error, not decay
         await pi._pi_tick()
         integral_after = pi._pi_integral
 
-        # Integral = (-5 + -1.0) * 0.9999 ≈ -5.999 (leaky only, no accel decay)
-        # Back-calculation may limit if raw setpoint < min_temp.
-        assert integral_after < -5.4, (
-            f"Integral should accumulate with error, got {integral_after:.2f}"
+        # Integral = (1 + 2.0) * 0.9999 ≈ 2.999 (leaky only, no accel decay)
+        assert integral_after > 1.5, (
+            f"Integral should accumulate with error when HP active, got {integral_after:.2f}"
         )
 
     @pytest.mark.asyncio
@@ -3267,10 +3262,12 @@ class TestConditionalIntegration:
             f"Phase 1: integral should be frozen at min, got {integral_phase1_end}"
         )
 
-        # Phase 2: Room cools slightly, HP rises above min — integration resumes
-        entity._attr_current_temperature = 21.5  # error = -0.5, still above target
+        # Phase 2: Room cools below HP setpoint — HP is now active,
+        # integration resumes.  hp_setpoint must be > current_c for the HP
+        # to have nonzero output (hp_no_output condition).
+        entity._attr_current_temperature = 19.0  # error = +2.0, room below target
         pi._pi_integral = -3.0  # simulate partial recovery
-        pi._hp_setpoint = 20  # NOT at min anymore
+        pi._hp_setpoint = 20  # above room temp → HP is active
         integral_phase2_start = pi._pi_integral
         for i in range(4, 8):
             pi._pi_last_tick_time = float(i * 900)
@@ -3278,9 +3275,9 @@ class TestConditionalIntegration:
                 await pi._pi_tick()
         integral_phase2_end = pi._pi_integral
 
-        # HP not at min → should integrate normally (more negative, error < 0)
-        assert integral_phase2_end < integral_phase2_start, (
-            f"Phase 2: should integrate normally when HP above min, got {integral_phase2_end}"
+        # HP above room temp → actively heating → integration resumes
+        assert integral_phase2_end > integral_phase2_start, (
+            f"Phase 2: should integrate when HP active (setpoint > room), got {integral_phase2_end}"
         )
 
         # Phase 3: Solar intensifies again, HP back to min — freeze again
@@ -3298,12 +3295,14 @@ class TestConditionalIntegration:
             f"Phase 3: integral should freeze again at min, got {integral_phase3_end}"
         )
 
-        # Phase 4: Sunset — room drops below target, HP still at min but
-        # error is now positive → skip_integration does NOT fire (error
-        # helps recovery), normal integration resumes
-        entity._attr_current_temperature = 20.0  # error = +1.0
-        pi._pi_integral = -5.0  # still wound from solar
-        pi._hp_setpoint = 16  # HP at min but error positive
+        # Phase 4: Sunset — room drops below target, HP setpoint rises
+        # above room temp → HP is now active, integration resumes.
+        # With hp_no_output fix, HP at setpoint=16 and room=20 would
+        # still be frozen (16 < 20 → no output).  For recovery, the FF
+        # must push setpoint above room temp first.
+        entity._attr_current_temperature = 19.0  # error = +2.0
+        pi._pi_integral = -1.0  # small negative (mostly recovered)
+        pi._hp_setpoint = 22  # FF pushed setpoint above room → HP active
         integral_phase4_start = pi._pi_integral
         for i in range(12, 16):
             pi._pi_last_tick_time = float(i * 900)
@@ -3311,11 +3310,11 @@ class TestConditionalIntegration:
                 await pi._pi_tick()
         integral_phase4_end = pi._pi_integral
 
-        # Error is positive (room below target) → skip_integration is FALSE
-        # (heating at min but error > 0 — HP IS helping, room needs heat).
-        # Integration resumes, integral grows toward zero.
+        # HP setpoint (22) > room temp (19) → actively heating.
+        # Error is positive (room below target) → integration resumes,
+        # integral grows toward zero and beyond.
         assert integral_phase4_end > integral_phase4_start, (
-            f"Phase 4: integral should recover (positive integration) when error > 0, got {integral_phase4_end}"
+            f"Phase 4: integral should recover when HP active, got {integral_phase4_end}"
         )
 
     @pytest.mark.asyncio
@@ -3359,24 +3358,331 @@ class TestConditionalIntegration:
         )
 
     @pytest.mark.asyncio
-    async def test_hp_at_min_but_error_positive_integrates(self):
-        """HP at min but error is positive (recovery) → integration continues."""
+    async def test_hp_at_min_but_error_positive_still_frozen_if_no_output(self):
+        """HP at min, room below target but above setpoint → hp_no_output → frozen.
+
+        Even though error is positive (room below target), the HP at
+        setpoint=16 when room=19°C has zero output (16 < 19 → HP thermostat
+        off).  Integration should stay frozen until the setpoint rises
+        above the room temperature.
+        """
         config = make_pi_config()
         entity = FakePIEntity(config)
         pi = entity._pi
         pi._desired_temp = 21.0
-        pi._hp_setpoint = 16  # At minimum
+        pi._hp_setpoint = 16  # At minimum, below room temp
         entity._attr_hvac_mode = HVACMode.HEAT
-        entity._attr_current_temperature = 19.0  # error = +2.0, room BELOW target
+        entity._attr_current_temperature = 19.0  # error = +2.0, but 16 < 19 → no output
         pi._pi_integral = -3.0
 
         integral_before = pi._pi_integral
         await pi._pi_tick()
 
-        # Error is positive (room below target) — integration helps recovery
-        # skip_integration should NOT fire
+        # hp_no_output: setpoint (16) < room (19) → frozen despite positive error
+        assert abs(pi._pi_integral - integral_before) < 0.5, (
+            f"Should be frozen when HP has no output, got {pi._pi_integral}"
+        )
+
+
+class TestHPNoOutput:
+    """Tests for hp_no_output integration freeze and observation gating.
+
+    When hp_setpoint < current_c in heating (or > in cooling), the HP's
+    internal thermostat turns off the compressor.  The feedback loop is
+    open: integration must freeze and observations must be marked clamped.
+
+    Literature: Ljung §13.3 (persistent excitation), Åström & Hägglund §6.4
+    (conditional integration during actuator saturation).
+    """
+
+    @pytest.mark.asyncio
+    async def test_heating_setpoint_below_room_freezes(self):
+        """Heating with setpoint < room → hp_no_output → integration frozen."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 17  # below room temp
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 22.0  # room above setpoint
+        pi._pi_integral = -5.0
+
+        integral_before = pi._pi_integral
+        for i in range(4):
+            pi._pi_last_tick_time = float(i * 900)
+            with patch("time.monotonic", return_value=float((i + 1) * 900)):
+                await pi._pi_tick()
+
+        assert abs(pi._pi_integral - integral_before) < 0.5, (
+            f"Integral should be frozen when HP has no output, got {pi._pi_integral}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_heating_setpoint_equal_room_not_frozen(self):
+        """Heating with setpoint == room → boundary, strict < means not frozen."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 21  # equal to room temp (integer vs float boundary)
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 21.0  # room equals setpoint
+        pi._pi_integral = 0.0
+
+        await pi._pi_tick()
+
+        # Strict < means equality doesn't freeze.  The leaky integrator
+        # (0.9999^dt) might cause a tiny change but integration is active.
+        assert pi._integration_frozen is False
+
+    @pytest.mark.asyncio
+    async def test_heating_setpoint_above_room_integrates(self):
+        """Heating with setpoint > room → HP active → normal integration."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 23  # above room temp
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 20.0  # room below setpoint
+        pi._pi_integral = 0.0
+
+        integral_before = pi._pi_integral
+        await pi._pi_tick()
+
+        # HP setpoint (23) > room (20) → HP is active → integration proceeds
         assert pi._pi_integral > integral_before, (
-            f"Should integrate when error helps recovery, got {pi._pi_integral}"
+            f"Should integrate when HP is active, got {pi._pi_integral}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_cooling_setpoint_above_room_freezes(self):
+        """Cooling with setpoint > room → hp_no_output → integration frozen."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 24.0
+        pi._hp_setpoint = 26  # above room temp in cooling → no cool output
+        entity._attr_hvac_mode = HVACMode.COOL
+        entity._attr_current_temperature = 23.0  # room below setpoint
+        pi._pi_integral = 3.0
+
+        integral_before = pi._pi_integral
+        for i in range(4):
+            pi._pi_last_tick_time = float(i * 900)
+            with patch("time.monotonic", return_value=float((i + 1) * 900)):
+                await pi._pi_tick()
+
+        assert abs(pi._pi_integral - integral_before) < 0.5, (
+            f"Integral should freeze when HP has no cooling output, got {pi._pi_integral}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_cooling_setpoint_below_room_integrates(self):
+        """Cooling with setpoint < room → HP active → normal integration."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 24.0
+        pi._hp_setpoint = 22  # below room temp in cooling → actively cooling
+        entity._attr_hvac_mode = HVACMode.COOL
+        entity._attr_current_temperature = 25.0  # room above setpoint
+        pi._pi_integral = 0.0
+
+        integral_before = pi._pi_integral
+        await pi._pi_tick()
+
+        # HP setpoint (22) < room (25) → HP is cooling → integration proceeds
+        assert pi._pi_integral != integral_before, (
+            f"Should integrate when HP is cooling, got {pi._pi_integral}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_long_no_output_integral_bounded(self):
+        """48 ticks (~12h) of HP-no-output should not wind integral."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 17  # below room
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 24.0  # room well above setpoint
+        pi._pi_integral = -7.8  # pre-overshoot value
+
+        integral_start = pi._pi_integral
+        for i in range(48):
+            pi._pi_last_tick_time = float(i * 900)
+            with patch("time.monotonic", return_value=float((i + 1) * 900)):
+                await pi._pi_tick()
+
+        # Integral should stay near its starting value (leaky decay is
+        # 0.9999^48 ≈ 0.9952, so at most ~0.04 change from decay).
+        assert abs(pi._pi_integral - integral_start) < 1.0, (
+            f"Integral should be bounded during HP-no-output, "
+            f"start={integral_start}, end={pi._pi_integral}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_integration_resumes_when_hp_active(self):
+        """After HP-no-output freeze, integration resumes when setpoint > room.
+
+        Uses a fresh controller for Phase 2 to avoid sensor filter lag
+        from Phase 1's high room temperature.
+        """
+        # Phase 1: confirm freeze
+        config = make_pi_config()
+        entity1 = FakePIEntity(config)
+        pi1 = entity1._pi
+        pi1._desired_temp = 21.0
+        entity1._attr_hvac_mode = HVACMode.HEAT
+        pi1._hp_setpoint = 17
+        entity1._attr_current_temperature = 24.0
+        pi1._pi_integral = -7.0
+        await pi1._pi_tick()
+        assert pi1._integration_frozen is True
+
+        # Phase 2: HP active (fresh controller, no filter lag)
+        entity2 = FakePIEntity(config)
+        pi2 = entity2._pi
+        pi2._desired_temp = 21.0
+        entity2._attr_hvac_mode = HVACMode.HEAT
+        pi2._hp_setpoint = 23  # above room → HP active
+        entity2._attr_current_temperature = 20.0  # error = +1.0
+        pi2._pi_integral = -7.0
+        pi2._integration_frozen = True  # was frozen
+
+        integral_before = pi2._pi_integral
+        await pi2._pi_tick()
+
+        assert pi2._integration_frozen is False, "Should unfreeze when HP is active"
+        assert pi2._pi_integral > integral_before, (
+            f"Integration should resume when HP is active, got {pi2._pi_integral}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_observation_clamped_when_no_output(self):
+        """Observation should have clamped=True when HP has no output."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 17  # below room
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 24.0
+        pi._pi_integral = -5.0
+
+        await pi._pi_tick()
+
+        obs = pi._observation_buffer_heat.get_all()
+        assert len(obs) > 0
+        assert obs[-1].clamped is True, (
+            "Observation should be clamped when HP has no output"
+        )
+
+    @pytest.mark.asyncio
+    async def test_observation_unclamped_when_hp_active(self):
+        """Observation should have clamped=False when HP is active."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 23  # above room
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 20.0
+        pi._pi_integral = 0.0
+
+        await pi._pi_tick()
+
+        obs = pi._observation_buffer_heat.get_all()
+        assert len(obs) > 0
+        assert obs[-1].clamped is False, (
+            "Observation should be unclamped when HP is active"
+        )
+
+    @pytest.mark.asyncio
+    async def test_heating_hp_active_but_overshooting_integrates(self):
+        """Zone 2: HP setpoint > room but room > target → HP is causing overshoot.
+
+        The HP IS actively heating (compressor on), but producing too much
+        heat.  On the first tick, integration proceeds and the negative
+        error drives the integral down.  This pulls the raw setpoint lower.
+        Once the setpoint drops below room temp, hp_no_output activates
+        and correctly freezes further integration — the HP is now off.
+
+        This is the full overshoot response: integrate → reduce setpoint →
+        HP turns off → freeze.
+        """
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 23  # above room → HP is heating
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 22.0  # room above target, error = -1.0
+        pi._pi_integral = 0.0
+
+        # First tick: HP active (23 > 22), integration proceeds
+        await pi._pi_tick()
+        assert pi._pi_integral < 0, (
+            f"First tick should integrate negative error, got {pi._pi_integral}"
+        )
+
+        # After a few ticks, setpoint drops below room → hp_no_output → freeze.
+        # This is correct: the controller reduced the setpoint, HP turned off.
+        for i in range(1, 4):
+            pi._pi_last_tick_time = float(i * 900)
+            with patch("time.monotonic", return_value=float((i + 1) * 900)):
+                await pi._pi_tick()
+
+        # Integral went negative (correction applied), then froze
+        assert pi._pi_integral < 0, (
+            f"Integral should be negative from overshoot correction, "
+            f"got {pi._pi_integral}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_cooling_hp_active_but_overcooling_integrates(self):
+        """Cooling Zone 2: HP setpoint < room but room < target → HP overcooling.
+
+        On first tick, integration proceeds (positive error, drives integral
+        up, raising setpoint).  Once setpoint rises above room, HP turns off
+        and hp_no_output freezes correctly.
+        """
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 24.0
+        pi._hp_setpoint = 22  # below room → HP IS cooling
+        entity._attr_hvac_mode = HVACMode.COOL
+        entity._attr_current_temperature = 23.0  # room below target, error = +1.0
+        pi._pi_integral = 0.0
+
+        # First tick: HP active (22 < 23 in cooling), integration proceeds
+        await pi._pi_tick()
+        assert pi._pi_integral > 0, (
+            f"First tick should integrate positive error, got {pi._pi_integral}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_freeze_log_says_hp_no_output(self, caplog):
+        """Freeze log should say 'HP no output' not 'at min limit'."""
+        import logging
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 18  # above min (16), but below room
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 22.0  # 18 < 22 → hp_no_output
+        pi._pi_integral = -3.0
+        pi._integration_frozen = False
+
+        with caplog.at_level(logging.DEBUG):
+            await pi._pi_tick()
+
+        freeze_msgs = [r for r in caplog.records if "HP no output" in r.message]
+        assert len(freeze_msgs) >= 1, (
+            "Should log 'HP no output' when setpoint < room (not 'at min limit')"
         )
 
 
@@ -3992,7 +4298,7 @@ class TestConditionalIntegrationLogging:
         pi._desired_temp = 21.0
         pi._hp_setpoint = 22.0  # NOT at min
         entity._attr_hvac_mode = HVACMode.HEAT
-        entity._attr_current_temperature = 24.0
+        entity._attr_current_temperature = 20.0  # HP setpoint (22) > room (20) → active
         pi._pi_integral = -2.0
         pi._integration_frozen = True  # was frozen
 
@@ -4012,7 +4318,7 @@ class TestConditionalIntegrationLogging:
         pi._desired_temp = 21.0
         pi._hp_setpoint = 22.0  # NOT at min
         entity._attr_hvac_mode = HVACMode.HEAT
-        entity._attr_current_temperature = 24.0
+        entity._attr_current_temperature = 20.0  # HP setpoint (22) > room (20) → active
         pi._pi_integral = -2.0
         pi._integration_frozen = False  # already not frozen
 
