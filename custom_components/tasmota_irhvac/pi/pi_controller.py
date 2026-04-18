@@ -1078,7 +1078,7 @@ class PIController:
         coeff_names = self._coeff_names()
         heat_dict = self._rls_heat.get_coefficients()
         cool_dict = self._rls_cool.get_coefficients()
-        return {
+        dump: dict[str, Any] = {
             "observation_buffer_heat": self._observation_buffer_heat.as_list(),
             "observation_buffer_cool": self._observation_buffer_cool.as_list(),
             "buffer_size_heat": len(self._observation_buffer_heat),
@@ -1105,6 +1105,28 @@ class PIController:
                 "tau_estimate": round(self._tau_estimator.tau, 1) if self._tau_estimator.enabled else None,
             },
         }
+        # Multicollinearity per buffer
+        for label, buf in [("heat", self._observation_buffer_heat), ("cool", self._observation_buffer_cool)]:
+            cond = buf.compute_condition_number()
+            if not math.isinf(cond):
+                dump[f"condition_number_{label}"] = round(cond, 1)
+            corr = buf.get_pairwise_correlations(coeff_names)
+            if corr:
+                dump[f"correlated_pairs_{label}"] = [
+                    {"a": a, "b": b, "r": round(r, 3)} for a, b, r in corr
+                ]
+        # Residual patterns
+        if self._last_residual_patterns:
+            dump["residual_patterns"] = [
+                {
+                    "start_hour": p.start_hour,
+                    "end_hour": p.end_hour,
+                    "mean_residual": round(p.mean_residual, 3),
+                    "n_observations": p.n_observations,
+                }
+                for p in self._last_residual_patterns
+            ]
+        return dump
 
     def get_full_diagnostics(self) -> dict[str, Any]:
         """Return complete PI state for HA diagnostics platform.
@@ -1241,10 +1263,35 @@ class PIController:
                 )
             if feature_active:
                 stats["feature_active_counts"] = feature_active
+            # Multicollinearity diagnostics
+            cond = buf.compute_condition_number()
+            if not math.isinf(cond):
+                stats["condition_number"] = round(cond, 1)
+                if cond > 30:
+                    stats["condition_rating"] = "severe" if cond > 100 else "moderate"
+                else:
+                    stats["condition_rating"] = "weak"
+            corr = buf.get_pairwise_correlations(coeff_names)
+            if corr:
+                stats["correlated_pairs"] = [
+                    {"a": a, "b": b, "r": round(r, 3)} for a, b, r in corr
+                ]
             return stats
 
         result["observation_buffer_heat"] = _buf_stats(self._observation_buffer_heat)
         result["observation_buffer_cool"] = _buf_stats(self._observation_buffer_cool)
+
+        # Residual time-of-day patterns
+        if self._last_residual_patterns:
+            result["residual_patterns"] = [
+                {
+                    "start_hour": p.start_hour,
+                    "end_hour": p.end_hour,
+                    "mean_residual": round(p.mean_residual, 3),
+                    "n_observations": p.n_observations,
+                }
+                for p in self._last_residual_patterns
+            ]
 
         return result
 
