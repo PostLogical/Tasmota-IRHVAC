@@ -526,7 +526,15 @@
     },
     "save_seeds": {
       "title": "Model has converged — review and save learned coefficients",
-      "description": "The feedforward model has stabilized. Saving updates the anchor values that the system pulls coefficients toward. Review the learned values below and confirm they make physical sense before saving. Coefficients marked 'uncertain' have high variance and may not be well-determined — saving them anchors the system to a noisy estimate.\n\n{coefficient_summary}"
+      "description": "The feedforward model has stabilized. Saving updates the anchor values that the system pulls coefficients toward. Review the learned values below and confirm they make physical sense before saving. Coefficients marked 'uncertain' have high variance and may not be well-determined — saving them anchors the system to a noisy estimate.\n\n{coefficient_summary}",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Save learned coefficients",
+            "description": "This will update your configured seeds to match the current learned values:\n\n{coefficient_summary}\n\nThe integration will use these as starting points on next restart."
+          }
+        }
+      }
     },
     "covariance_collapse": {
       "title": "Coefficient {coeff_name} stuck at clamp",

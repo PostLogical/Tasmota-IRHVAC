@@ -1500,11 +1500,12 @@ class PIController:
         label = mode or "heat+cool"
         _LOGGER.info("Observation buffer (%s) flushed — batch learning will restart from scratch", label)
 
-    def _check_tuning_health(self) -> list[tuple[str, str, str, dict[str, str], bool]]:
+    def _check_tuning_health(self) -> list[tuple[str, str, str, dict[str, str], bool, bool, dict[str, Any] | None]]:
         """Evaluate tuning health and return issues for HA Repairs.
 
         Returns list of (issue_id, severity, translation_key, placeholders,
-        should_create) tuples.  Called after each batch cycle and on startup.
+        should_create, is_fixable, data) tuples.  Called after each batch
+        cycle and on startup.
         """
         from .health_checks import (
             check_batch_online_disagreement_repair,
@@ -1520,7 +1521,7 @@ class PIController:
         )
 
         entry_id = getattr(self._entity, "_config_entry_id", "unknown")
-        issues: list[tuple[str, str, str, dict[str, str], bool]] = []
+        issues: list[tuple[str, str, str, dict[str, str], bool, bool, dict[str, Any] | None]] = []
 
         if not self._pi_enabled:
             return issues
@@ -1561,6 +1562,7 @@ class PIController:
                     key,
                     placeholders,
                     should_create,
+                    False, None,
                 ))
 
         # ── Save seeds ──────────────────────────────────────────────
@@ -1599,12 +1601,19 @@ class PIController:
             elif not should_create and seeds_match:
                 # Seeds were saved — allow re-notification after next significant change
                 self._tuning_alert_counters["save_seeds_notified"] = 0
+            fix_data = {
+                "repair_type": "save_seeds",
+                "entry_id": entry_id,
+                "coefficient_summary": coeff_summary,
+            } if should_create else None
             issues.append((
                 f"{key}_{entry_id}",
                 "warning",
                 key,
                 placeholders,
                 should_create,
+                should_create,  # is_fixable only when creating
+                fix_data,
             ))
 
         # ── High integral (diagnosed) ───────────────────────────────
@@ -1645,6 +1654,7 @@ class PIController:
                 key,
                 placeholders,
                 should_create,
+                False, None,
             ))
 
         # ── Covariance collapse at clamp ────────────────────────────
@@ -1680,6 +1690,7 @@ class PIController:
                         key,
                         placeholders,
                         should_create,
+                        False, None,
                     ))
 
         # ── Model drift with maturity gate ──────────────────────────
@@ -1695,6 +1706,7 @@ class PIController:
                 key,
                 placeholders,
                 should_create,
+                False, None,
             ))
 
         # ── Intercept absorbing coefficient ─────────────────────────
@@ -1736,6 +1748,7 @@ class PIController:
                     key,
                     placeholders,
                     should_create,
+                    False, None,
                 ))
 
         # ── Batch-online disagreement ───────────────────────────────
@@ -1778,6 +1791,7 @@ class PIController:
                         key,
                         placeholders,
                         should_create,
+                        False, None,
                     ))
 
         # ── Residual time-of-day patterns ──────────────────────────
@@ -1803,6 +1817,7 @@ class PIController:
                     key,
                     placeholders,
                     should_create,
+                    False, None,
                 ))
 
         # ── Multicollinearity / condition number ───────────────────
@@ -1834,6 +1849,7 @@ class PIController:
                     key,
                     placeholders,
                     should_create,
+                    False, None,
                 ))
 
         # ── Freeze impact (RMS degradation) ────────────────────────
@@ -1877,6 +1893,7 @@ class PIController:
                             key,
                             placeholders,
                             should_create,
+                            False, None,
                         ))
 
         return issues

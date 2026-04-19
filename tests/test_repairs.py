@@ -1,7 +1,7 @@
-"""Tests for the repairs integration (config issue checks)."""
+"""Tests for the repairs integration (config issue checks and fix flows)."""
 
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, AsyncMock
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
@@ -10,6 +10,11 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.tasmota_irhvac.const import DOMAIN
 from custom_components.tasmota_irhvac.__init__ import _check_config_issues
+from custom_components.tasmota_irhvac.repairs import (
+    async_create_fix_flow,
+    SaveSeedsRepairFlow,
+    UnknownRepairFlow,
+)
 
 from .conftest import make_pi_config, make_config
 
@@ -102,3 +107,202 @@ class TestCheckConfigIssues:
         with patch.object(ir, "async_create_issue") as mock_create:
             _check_config_issues(hass, entry)
             mock_create.assert_not_called()
+
+
+# ── Repair flow factory ──────────────────────────────────────────────
+
+
+class TestRepairFlowFactory:
+    """Tests for async_create_fix_flow routing."""
+
+    @pytest.mark.asyncio
+    async def test_routes_save_seeds(self, hass):
+        """save_seeds repair_type routes to SaveSeedsRepairFlow."""
+        flow = await async_create_fix_flow(
+            hass, "save_seeds_test123",
+            {"repair_type": "save_seeds", "entry_id": "test123"},
+        )
+        assert isinstance(flow, SaveSeedsRepairFlow)
+
+    @pytest.mark.asyncio
+    async def test_unknown_type_returns_fallback(self, hass):
+        """Unrecognized repair_type returns UnknownRepairFlow."""
+        flow = await async_create_fix_flow(hass, "unknown_issue", {"repair_type": "bogus"})
+        assert isinstance(flow, UnknownRepairFlow)
+
+    @pytest.mark.asyncio
+    async def test_none_data_returns_fallback(self, hass):
+        """None data returns UnknownRepairFlow."""
+        flow = await async_create_fix_flow(hass, "no_data_issue", None)
+        assert isinstance(flow, UnknownRepairFlow)
+
+    @pytest.mark.asyncio
+    async def test_empty_data_returns_fallback(self, hass):
+        """Empty dict returns UnknownRepairFlow."""
+        flow = await async_create_fix_flow(hass, "empty_data", {})
+        assert isinstance(flow, UnknownRepairFlow)
+
+
+# ── SaveSeedsRepairFlow ──────────────────────────────────────────────
+
+
+class TestSaveSeedsRepairFlow:
+    """Tests for the save seeds fix flow."""
+
+    @pytest.mark.asyncio
+    async def test_confirm_shows_form(self, hass):
+        """Init step shows confirmation form."""
+        flow = SaveSeedsRepairFlow({
+            "entry_id": "test123",
+            "coefficient_summary": "outdoor_delta: 0.30 → 0.42",
+        })
+        flow.hass = hass
+
+        result = await flow.async_step_init()
+        assert result["type"] == "form"
+        assert result["step_id"] == "confirm"
+        assert "coefficient_summary" in result["description_placeholders"]
+
+    @pytest.mark.asyncio
+    async def test_confirm_aborts_missing_entry(self, hass):
+        """Aborts if config entry no longer exists."""
+        flow = SaveSeedsRepairFlow({"entry_id": "nonexistent"})
+        flow.hass = hass
+
+        result = await flow.async_step_confirm(user_input={})
+        assert result["type"] == "abort"
+        assert result["reason"] == "entry_not_found"
+
+    @pytest.mark.asyncio
+    async def test_confirm_applies_seeds(self, hass, setup_pi_integration):
+        """Confirm step applies learned seeds to config entry."""
+        from .conftest import get_climate_entity
+
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        # Simulate learned coefficients different from seeds
+        pi._rls_heat.beta[1] = 0.42 * pi._rls_heat.feature_scales[1]
+        pi._rls_heat.observation_count = 100
+
+        flow = SaveSeedsRepairFlow({
+            "entry_id": entry.entry_id,
+            "coefficient_summary": "test",
+        })
+        flow.hass = hass
+
+        result = await flow.async_step_confirm(user_input={})
+        assert result["type"] == "create_entry"
+
+        # Verify config was updated
+        updated_entry = hass.config_entries.async_get_entry(entry.entry_id)
+        assert updated_entry is not None
+        from custom_components.tasmota_irhvac.const import CONF_PI_FF_HEAT_SLOPE
+        # The learned slope should now be in config
+        assert CONF_PI_FF_HEAT_SLOPE in updated_entry.options
+
+    @pytest.mark.asyncio
+    async def test_confirm_aborts_no_pi(self, hass):
+        """Aborts if climate entity has no PI controller."""
+        from custom_components.tasmota_irhvac.const import DATA_KEY
+
+        entry = MockConfigEntry(domain=DOMAIN, data=make_config(), title="Test")
+        entry.add_to_hass(hass)
+
+        # Simulate entity without PI
+        mock_climate = MagicMock()
+        mock_climate._pi = None
+        hass.data.setdefault(DATA_KEY, {})[entry.entry_id] = mock_climate
+
+        flow = SaveSeedsRepairFlow({"entry_id": entry.entry_id})
+        flow.hass = hass
+
+        result = await flow.async_step_confirm(user_input={})
+        assert result["type"] == "abort"
+        assert result["reason"] == "pi_not_available"
+
+
+# ── 7-tuple plumbing ─────────────────────────────────────────────────
+
+
+class TestTuningHealthFixableIssues:
+    """Test that _check_tuning_health returns fixable flag for save_seeds."""
+
+    @pytest.mark.asyncio
+    async def test_save_seeds_issue_is_fixable(self, hass, setup_pi_integration):
+        """save_seeds issue should have is_fixable=True and data dict."""
+        from .conftest import get_climate_entity
+
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        # Simulate converged model with seeds not matching
+        pi._metrics.integral_convergence = 1.0
+        pi._rls_heat.observation_count = 100
+        pi._rls_heat.beta[1] = 0.5 * pi._rls_heat.feature_scales[1]
+
+        issues = pi._check_tuning_health()
+        save_issues = [i for i in issues if "save_seeds" in i[0]]
+        assert len(save_issues) == 1
+
+        issue = save_issues[0]
+        # 7-tuple: (id, severity, key, placeholders, should_create, is_fixable, data)
+        assert len(issue) == 7
+        assert issue[4] is True   # should_create
+        assert issue[5] is True   # is_fixable
+        assert issue[6] is not None  # data
+        assert issue[6]["repair_type"] == "save_seeds"
+        assert issue[6]["entry_id"] is not None
+
+    @pytest.mark.asyncio
+    async def test_non_fixable_issues_have_false(self, hass, setup_pi_integration):
+        """Non-fixable issues should have is_fixable=False and data=None."""
+        from .conftest import get_climate_entity
+
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        # Simulate high integral (non-fixable in Phase 1)
+        pi._metrics.integral_convergence = 20.0
+        pi._rls_heat.observation_count = 100
+        pi._tuning_alert_counters["high_integral"] = 5
+
+        issues = pi._check_tuning_health()
+        integral_issues = [i for i in issues if "high_integral" in i[0]]
+        assert len(integral_issues) == 1
+
+        issue = integral_issues[0]
+        assert len(issue) == 7
+        assert issue[5] is False  # is_fixable
+        assert issue[6] is None   # data
+
+    @pytest.mark.asyncio
+    async def test_issue_creation_passes_fixable_flag(self, hass, setup_pi_integration):
+        """_check_tuning_health_issues passes is_fixable to ir.async_create_issue."""
+        from custom_components.tasmota_irhvac.__init__ import _check_tuning_health_issues
+        from .conftest import get_climate_entity
+
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        # Trigger save_seeds
+        pi._metrics.integral_convergence = 1.0
+        pi._rls_heat.observation_count = 100
+        pi._rls_heat.beta[1] = 0.5 * pi._rls_heat.feature_scales[1]
+
+        with patch.object(ir, "async_create_issue") as mock_create:
+            _check_tuning_health_issues(hass, entry)
+            # Find the save_seeds call
+            save_calls = [
+                c for c in mock_create.call_args_list
+                if c.kwargs.get("translation_key") == "save_seeds"
+            ]
+            assert len(save_calls) == 1
+            call_kwargs = save_calls[0].kwargs
+            assert call_kwargs["is_fixable"] is True
+            assert "data" in call_kwargs
+            assert call_kwargs["data"]["repair_type"] == "save_seeds"

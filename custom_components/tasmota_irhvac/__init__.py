@@ -217,16 +217,19 @@ def _check_tuning_health_issues(hass: HomeAssistant, entry: ConfigEntry) -> None
         return
 
     issues = pi._check_tuning_health()
-    for issue_id, severity, translation_key, placeholders, should_create in issues:
+    for issue_id, severity, translation_key, placeholders, should_create, is_fixable, data in issues:
         if should_create:
-            ir.async_create_issue(
-                hass, DOMAIN, issue_id, is_fixable=False,
-                severity=ir.IssueSeverity.WARNING if severity == "warning"
-                else ir.IssueSeverity.CRITICAL if severity == "critical"
-                else ir.IssueSeverity.WARNING,
+            kwargs: dict[str, Any] = dict(
+                is_fixable=is_fixable,
+                severity=(ir.IssueSeverity.WARNING if severity == "warning"
+                          else ir.IssueSeverity.CRITICAL if severity == "critical"
+                          else ir.IssueSeverity.WARNING),
                 translation_key=translation_key,
                 translation_placeholders=placeholders,
             )
+            if data is not None:
+                kwargs["data"] = data
+            ir.async_create_issue(hass, DOMAIN, issue_id, **kwargs)
         else:
             ir.async_delete_issue(hass, DOMAIN, issue_id)
 
