@@ -2,8 +2,6 @@
 
 import math
 
-import pytest
-
 from custom_components.tasmota_irhvac.pi.model_input_manager import ModelInputManager
 
 
@@ -290,92 +288,6 @@ class TestDeltaFromRoom:
         )
         assert mgr.values[0] == 1.0  # Stove: binary, unaffected
         assert abs(mgr.values[1] - 3.0) < 0.01  # Delta: 23 - 20
-
-
-class TestAutoScale:
-    """Tests for auto-compute feature scale tracking."""
-
-    def test_not_ready_before_min_ticks(self):
-        """Auto-scale is not ready before enough outdoor_delta samples."""
-        mgr = ModelInputManager(model_inputs=[STOVE_INPUT], outdoor_temp_sensor=None)
-        for _ in range(49):
-            mgr.accumulate_scales(10.0)
-        assert mgr.auto_scales_ready() is False
-
-    def test_ready_at_min_ticks(self):
-        """Auto-scale is ready after 50 outdoor_delta samples."""
-        mgr = ModelInputManager(model_inputs=[STOVE_INPUT], outdoor_temp_sensor=None)
-        for _ in range(50):
-            mgr.accumulate_scales(10.0)
-        assert mgr.auto_scales_ready() is True
-
-    def test_outdoor_delta_mean(self):
-        """Outdoor delta scale is mean of abs(outdoor_delta) values."""
-        mgr = ModelInputManager(model_inputs=[], outdoor_temp_sensor=None)
-        for _ in range(25):
-            mgr.accumulate_scales(8.0)
-        for _ in range(25):
-            mgr.accumulate_scales(12.0)
-        scales = mgr.get_auto_scales()
-        assert scales[0] == 1.0  # intercept
-        assert scales[1] == pytest.approx(10.0)  # mean of 8 and 12
-
-    def test_model_input_mean(self):
-        """Model input scale is mean of abs(filtered) values."""
-        mgr = ModelInputManager(model_inputs=[STOVE_INPUT], outdoor_temp_sensor=None)
-        # Need ≥50 non-zero samples for auto-compute
-        for tick in range(100):
-            mgr.filtered[0] = 1.0 if tick % 2 == 0 else 0.5
-            mgr.accumulate_scales(10.0)
-        scales = mgr.get_auto_scales()
-        # 50 ticks at 1.0, 50 ticks at 0.5 → mean = 0.75
-        assert scales[2] == pytest.approx(0.75)
-
-    def test_sparse_input_falls_back_to_typical_value(self):
-        """Input with too few samples falls back to configured typical_value."""
-        m_input = {**STOVE_INPUT, "typical_value": 0.75}
-        mgr = ModelInputManager(model_inputs=[m_input], outdoor_temp_sensor=None)
-        # Only accumulate outdoor_delta, not the model input
-        for _ in range(50):
-            mgr.accumulate_scales(10.0)
-        scales = mgr.get_auto_scales()
-        assert scales[2] == pytest.approx(0.75)  # fallback
-
-    def test_zero_values_skipped(self):
-        """Zero values don't count toward the mean."""
-        mgr = ModelInputManager(model_inputs=[STOVE_INPUT], outdoor_temp_sensor=None)
-        for _ in range(50):
-            mgr.filtered[0] = 0.0  # Always zero
-            mgr.accumulate_scales(10.0)
-        # Model input had zero samples → falls back
-        assert mgr._scale_count[1] == 0
-
-    def test_commit_stops_accumulation(self):
-        """After commit, accumulate_scales is a no-op."""
-        mgr = ModelInputManager(model_inputs=[STOVE_INPUT], outdoor_temp_sensor=None)
-        for _ in range(50):
-            mgr.accumulate_scales(10.0)
-        mgr.commit_auto_scales()
-
-        old_count = mgr._scale_count[0]
-        mgr.accumulate_scales(20.0)
-        assert mgr._scale_count[0] == old_count  # Unchanged
-
-    def test_committed_not_ready(self):
-        """After commit, auto_scales_ready returns False."""
-        mgr = ModelInputManager(model_inputs=[], outdoor_temp_sensor=None)
-        for _ in range(50):
-            mgr.accumulate_scales(10.0)
-        mgr.commit_auto_scales()
-        assert mgr.auto_scales_ready() is False
-
-    def test_intercept_always_one(self):
-        """Intercept scale is always 1.0."""
-        mgr = ModelInputManager(model_inputs=[], outdoor_temp_sensor=None)
-        for _ in range(50):
-            mgr.accumulate_scales(5.0)
-        scales = mgr.get_auto_scales()
-        assert scales[0] == 1.0
 
 
 class TestPersistence:

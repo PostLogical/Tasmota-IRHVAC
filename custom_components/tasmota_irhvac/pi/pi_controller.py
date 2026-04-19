@@ -2464,15 +2464,6 @@ class PIController:
 
         # Build feature vector and predict FF offset via RLS model
         x = self._inputs.build_feature_vector(outdoor_delta)
-
-        # Auto-compute feature scales from observed data.
-        new_scales = self._inputs.maybe_update_scales(
-            outdoor_delta, self._feature_scales,
-            [self._rls_heat, self._rls_cool], self._log_prefix,
-        )
-        if new_scales is not None:
-            self._feature_scales = new_scales
-
         rls = self._rls_heat if is_heating else self._rls_cool
         seeds = self._heat_seeds if is_heating else self._cool_seeds
 

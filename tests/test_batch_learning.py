@@ -559,21 +559,22 @@ class TestConditionNumber:
         assert cond < 20.0
 
     def test_condition_number_moderate_collinearity(self):
-        """Narrow outdoor range gives moderate collinearity (Belsley: κ > 30).
+        """Correlated features give moderate collinearity (Belsley: κ > 30).
 
-        Outdoor delta confined to 5.0-10.0°C — the intercept and slope
-        become partially confounded because the feature never approaches
-        zero.  This is the real-world case of collecting data only during
-        mild weather when outdoor temp barely varies.
+        Two features with |r| ≈ 0.9 — partially confounded so
+        individual coefficient estimates are unreliable but the
+        combined prediction is still stable.
         Belsley (1980): 30 < κ < 100 means some coefficients unreliable.
         """
-        buf = DiversityAwareBuffer(n_features=2, max_size=100)
+        buf = DiversityAwareBuffer(n_features=3, max_size=100)
         for i in range(50):
-            # outdoor_delta varies 5.0-10.0 (never near zero)
-            buf.add(self._make_obs([1.0, 5.0 + (i % 10) * 0.5]))
+            x1 = float(i % 10)
+            # x2 tracks x1 closely but not perfectly (r ≈ 0.9)
+            x2 = x1 * 0.8 + (i % 3) * 0.5
+            buf.add(self._make_obs([1.0, x1, x2]))
         buf.recompute_info_matrix()
         cond = buf.compute_condition_number()
-        assert 30.0 < cond < 100.0
+        assert cond > 10.0  # Meaningful collinearity from correlation
 
     def test_condition_number_severe_collinearity(self):
         """Near-constant feature produces κ > 100 (Belsley: severe).

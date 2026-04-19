@@ -267,18 +267,21 @@ class DiversityAwareBuffer:
         self._updates_since_recompute = 0
 
     def compute_condition_number(self) -> float:
-        """Compute the spectral condition number of the information matrix.
+        """Compute the spectral condition number of the column-normalized X'X.
 
-        κ = √(λ_max / λ_min) where λ are eigenvalues of X^T X + λI.
+        Column-normalizes X'X by dividing each entry (i,j) by
+        √(diag[i]) · √(diag[j]), converting it to a correlation matrix.
+        This removes scale-induced conditioning and reports only true
+        multicollinearity.
+
+        κ = √(λ_max / λ_min) where λ are eigenvalues of the correlation
+        matrix + λI regularization.
 
         Thresholds (Belsley, Kuh & Welsch, "Regression Diagnostics", 1980):
         - κ > 30: moderate multicollinearity, coefficients becoming unreliable
         - κ > 100: severe multicollinearity, coefficient estimates numerically unstable
 
-        Uses power iteration for λ_max and inverse iteration (via the
-        already-computed inverse) for λ_min.  Converges in <20 iterations
-        for the small matrices used here (n=3-8).
-
+        Uses power iteration for λ_max and inverse iteration for λ_min.
         Returns inf if the forward matrix hasn't been computed yet.
         """
         if self._xtx_matrix is None:
@@ -287,31 +290,44 @@ class DiversityAwareBuffer:
         if n < 2:
             return 1.0
 
-        # Power iteration for λ_max of xtx
+        # Column-normalize X'X → correlation matrix.
+        # corr[i][j] = xtx[i][j] / (√xtx[i][i] · √xtx[j][j])
+        diag_sqrt = [
+            math.sqrt(self._xtx_matrix[i][i])
+            if self._xtx_matrix[i][i] > 1e-15 else 1.0
+            for i in range(n)
+        ]
+        corr = [
+            [self._xtx_matrix[i][j] / (diag_sqrt[i] * diag_sqrt[j])
+             for j in range(n)]
+            for i in range(n)
+        ]
+
+        # Power iteration for λ_max of correlation matrix
         v = [1.0 / math.sqrt(n)] * n
         lambda_max = 0.0
         for _ in range(50):
-            # w = A @ v
-            w = [sum(self._xtx_matrix[i][j] * v[j] for j in range(n)) for i in range(n)]
-            # Rayleigh quotient
+            w = [sum(corr[i][j] * v[j] for j in range(n)) for i in range(n)]
             lambda_max = sum(v[i] * w[i] for i in range(n))
-            # Normalize
             norm = math.sqrt(sum(wi * wi for wi in w))
             if norm < 1e-15:
                 return float('inf')
             v = [wi / norm for wi in w]
 
-        # Inverse iteration for λ_min: power iteration on A^{-1} gives
-        # 1/λ_min.  We already have _info_inv = (X^T X + λI)^{-1}.
+        # Inverse iteration for λ_min: need inverse of corr matrix
+        corr_copy = [row[:] for row in corr]
+        corr_inv = self._invert_matrix(corr_copy, n)
+        if corr_inv is None:
+            return float('inf')
+
         v = [1.0 / math.sqrt(n)] * n
-        # Perturb to avoid starting on the dominant eigenvector
         v[0] += 0.1
         norm = math.sqrt(sum(vi * vi for vi in v))
         v = [vi / norm for vi in v]
 
         inv_lambda_min = 0.0
         for _ in range(50):
-            w = [sum(self._info_inv[i][j] * v[j] for j in range(n)) for i in range(n)]
+            w = [sum(corr_inv[i][j] * v[j] for j in range(n)) for i in range(n)]
             inv_lambda_min = sum(v[i] * w[i] for i in range(n))
             norm = math.sqrt(sum(wi * wi for wi in w))
             if norm < 1e-15:
@@ -576,6 +592,21 @@ def weighted_least_squares(
             xj = X[k][j] if j < len(X[k]) else 0.0
             y_adj[k] -= bj * xj
 
+    # ── Column-normalize active features for numerical conditioning ───
+    # Divide each column by its std so X'WX has balanced diagonal entries.
+    # Intercept (always 1.0) gets scale=1.0.  Coefficients are solved in
+    # normalized space and converted back to physical units afterward.
+    col_scales: list[float] = []
+    for ii, j in enumerate(active):
+        if j == 0:  # intercept
+            col_scales.append(1.0)
+        else:
+            col = [X[k][j] if j < len(X[k]) else 0.0 for k in range(m)]
+            mean_j = sum(col) / m
+            var_j = sum((c - mean_j) ** 2 for c in col) / m
+            std_j = math.sqrt(var_j) if var_j > 1e-12 else 1.0
+            col_scales.append(std_j)
+
     # ── Build reduced system: X_a'W X_a β_a = X_a'W y_adj ───────────
     na = len(active)
     XtWX = [[0.0] * na for _ in range(na)]
@@ -583,26 +614,26 @@ def weighted_least_squares(
 
     for k in range(m):
         for ii, i in enumerate(active):
-            xi = X[k][i] if i < len(X[k]) else 0.0
+            xi = (X[k][i] if i < len(X[k]) else 0.0) / col_scales[ii]
             XtWy[ii] += xi * w[k] * y_adj[k]
             for jj, j in enumerate(active):
-                xj = X[k][j] if j < len(X[k]) else 0.0
+                xj = (X[k][j] if j < len(X[k]) else 0.0) / col_scales[jj]
                 XtWX[ii][jj] += xi * w[k] * xj
 
     ridge = 1e-6
     for ii in range(na):
         XtWX[ii][ii] += ridge
 
-    beta_active = _solve_symmetric(XtWX, XtWy, na)
-    if beta_active is None:
+    beta_active_norm = _solve_symmetric(XtWX, XtWy, na)
+    if beta_active_norm is None:
         return None
 
-    # ── Reassemble full beta vector ──────────────────────────────────
+    # ── Denormalize and reassemble full beta vector ──────────────────
     beta = [0.0] * n
     for j in held:
         beta[j] = fallback[j] if j < len(fallback) else 0.0
     for ii, j in enumerate(active):
-        beta[j] = beta_active[ii]
+        beta[j] = beta_active_norm[ii] / col_scales[ii]
 
     # Compute residuals for outlier detection
     residuals = []
