@@ -1980,6 +1980,17 @@ class PIController:
         # Clear surfaced events — they're now in the issue registry
         self._anomaly_events.clear()
 
+        # ── Frequent exclusions escalation ─────────────────────────
+        if self._exclusion_count >= 3:
+            issues.append((
+                f"frequent_exclusions_{entry_id}",
+                "warning",
+                "frequent_exclusions",
+                {"count": str(self._exclusion_count)},
+                True,
+                False, None,
+            ))
+
         return issues
 
     def get_health_status(self) -> dict[str, Any]:

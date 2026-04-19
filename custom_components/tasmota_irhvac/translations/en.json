@@ -614,6 +614,10 @@
       "title": "Frozen coefficient {coeff_name} is degrading model fit",
       "description": "Since freezing {coeff_name} ({mode} mode), batch residual RMS has increased from {rms_at_freeze} to {current_rms} (+{increase_pct}%). The model may need this coefficient to track a real change. Consider unfreezing it, or updating its value with the set_coefficient service and saving seeds."
     },
+    "frequent_exclusions": {
+      "title": "Consider adding a model input or using suppress_learning",
+      "description": "You have excluded observations {count} times. If a recurring event causes these anomalies, consider:\n\n1. Adding a model input with a gate entity (e.g., a door/window binary sensor) to teach the model this pattern\n2. Using the suppress_learning entity before the event occurs\n3. Setting up a timer-based automation: suppress learning for N hours when the event starts"
+    },
     "anomalous_observation": {
       "title": "Unusual temperature deviation ({time_range})",
       "description": "Detected {direction} (mean residual: {mean_residual}°C, severity: {peak_cusum}). This could indicate an unmodeled heat source or sink such as open windows, cooking, or a space heater.\n\nExcluding these observations prevents them from biasing the model. Dismissing keeps them in the learning buffer.",

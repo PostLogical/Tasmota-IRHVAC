@@ -746,3 +746,43 @@ class TestAnomalyCauseHints:
         issues = pi._check_tuning_health()
         anomaly_issues = [i for i in issues if "anomalous_observation" in i[0]]
         assert "heat loss" in anomaly_issues[0][3]["direction"]
+
+
+# ── Frequent exclusions escalation ───────────────────────────────────
+
+
+class TestFrequentExclusionsEscalation:
+    """Test frequent_exclusions issue surfaces after 3+ exclusions."""
+
+    @pytest.mark.asyncio
+    async def test_surfaces_at_threshold(self, hass, setup_pi_integration):
+        """frequent_exclusions surfaces when exclusion_count >= 3."""
+        from .conftest import get_climate_entity
+
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        pi._exclusion_count = 3
+
+        issues = pi._check_tuning_health()
+        freq_issues = [i for i in issues if "frequent_exclusions" in i[0]]
+        assert len(freq_issues) == 1
+        assert freq_issues[0][4] is True   # should_create
+        assert freq_issues[0][5] is False  # not fixable
+        assert freq_issues[0][3]["count"] == "3"
+
+    @pytest.mark.asyncio
+    async def test_not_surfaced_below_threshold(self, hass, setup_pi_integration):
+        """frequent_exclusions NOT surfaced when exclusion_count < 3."""
+        from .conftest import get_climate_entity
+
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        pi._exclusion_count = 2
+
+        issues = pi._check_tuning_health()
+        freq_issues = [i for i in issues if "frequent_exclusions" in i[0]]
+        assert len(freq_issues) == 0
