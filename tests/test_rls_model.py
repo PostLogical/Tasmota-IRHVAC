@@ -434,3 +434,131 @@ class TestRLSFeatureScalesPadding:
         assert model.P[0 * 3 + 0] == pytest.approx(10.0)
         assert model.P[1 * 3 + 1] == pytest.approx(10.0)
         assert model.P[2 * 3 + 2] == pytest.approx(10.0)
+
+
+class TestFeatureScaleRescaling:
+    """Tests for rescale_features similarity transform and from_dict scale migration."""
+
+    def test_rescale_preserves_physical_prediction(self):
+        """Rescaling should not change predictions in physical units."""
+        old_scales = [1.0, 10.0, 0.5]
+        model = RLSModel(
+            n_inputs=2,
+            seed_coefficients=[1.0, 0.3, -4.0],
+            feature_scales=list(old_scales),
+        )
+        # Train a bit
+        for _ in range(10):
+            model.update([1.0, 8.0, 0.6], 3.0)
+
+        x = [1.0, 12.0, 0.4]
+        pred_before = model.predict(x)
+
+        # Change scales and rescale
+        new_scales = [1.0, 5.0, 2.0]
+        model.feature_scales = new_scales
+        model.rescale_features(old_scales)
+
+        pred_after = model.predict(x)
+        assert pred_after == pytest.approx(pred_before, abs=1e-10)
+
+    def test_rescale_preserves_physical_coefficients(self):
+        """Physical coefficients should be unchanged after rescaling."""
+        old_scales = [1.0, 10.0, 0.5]
+        model = RLSModel(
+            n_inputs=2,
+            seed_coefficients=[1.0, 0.3, -4.0],
+            feature_scales=list(old_scales),
+        )
+        for _ in range(10):
+            model.update([1.0, 8.0, 0.6], 3.0)
+
+        coeffs_before = model.get_coefficients()
+
+        new_scales = [1.0, 5.0, 2.0]
+        model.feature_scales = new_scales
+        model.rescale_features(old_scales)
+
+        coeffs_after = model.get_coefficients()
+        for i in coeffs_before:
+            assert coeffs_after[i] == pytest.approx(coeffs_before[i], abs=1e-10)
+
+    def test_rescale_no_change_is_noop(self):
+        """Rescaling with identical scales should not change anything."""
+        scales = [1.0, 10.0, 0.5]
+        model = RLSModel(
+            n_inputs=2,
+            seed_coefficients=[1.0, 0.3, -4.0],
+            feature_scales=list(scales),
+        )
+        beta_before = list(model.beta)
+        P_before = list(model.P)
+
+        model.rescale_features(list(scales))
+
+        assert model.beta == pytest.approx(beta_before, abs=1e-15)
+        assert model.P == pytest.approx(P_before, abs=1e-15)
+
+    def test_from_dict_applies_scale_transform(self):
+        """from_dict should detect scale changes and apply similarity transform."""
+        old_scales = [1.0, 10.0, 0.5]
+        model = RLSModel(
+            n_inputs=2,
+            seed_coefficients=[1.0, 0.3, -4.0],
+            feature_scales=list(old_scales),
+        )
+        for _ in range(10):
+            model.update([1.0, 8.0, 0.6], 3.0)
+
+        x = [1.0, 12.0, 0.4]
+        pred_original = model.predict(x)
+        data = model.as_dict()
+
+        # Restore with different scales
+        new_scales = [1.0, 5.0, 2.0]
+        restored = RLSModel.from_dict(
+            data, n_inputs=2,
+            seed_coefficients=[1.0, 0.3, -4.0],
+            feature_scales=new_scales,
+        )
+
+        pred_restored = restored.predict(x)
+        assert pred_restored == pytest.approx(pred_original, abs=1e-10)
+
+    def test_from_dict_no_stored_scales_skips_transform(self):
+        """Legacy data without feature_scales should restore without transform."""
+        model = RLSModel(
+            n_inputs=1,
+            seed_coefficients=[0.0, 0.35],
+            feature_scales=[1.0, 10.0],
+        )
+        data = model.as_dict()
+        del data["feature_scales"]  # Simulate legacy data
+
+        restored = RLSModel.from_dict(
+            data, n_inputs=1,
+            seed_coefficients=[0.0, 0.35],
+            feature_scales=[1.0, 5.0],  # Different scales
+        )
+        # No transform applied — beta restored as-is
+        assert restored.beta == pytest.approx(model.beta, abs=1e-10)
+
+    def test_from_dict_same_scales_no_transform(self):
+        """Same scales should not trigger transform."""
+        scales = [1.0, 10.0, 0.5]
+        model = RLSModel(
+            n_inputs=2,
+            seed_coefficients=[1.0, 0.3, -4.0],
+            feature_scales=list(scales),
+        )
+        for _ in range(5):
+            model.update([1.0, 8.0, 0.6], 3.0)
+
+        data = model.as_dict()
+        restored = RLSModel.from_dict(
+            data, n_inputs=2,
+            seed_coefficients=[1.0, 0.3, -4.0],
+            feature_scales=list(scales),
+        )
+        assert restored.beta == pytest.approx(model.beta, abs=1e-10)
+        assert restored.P == pytest.approx(model.P, abs=1e-10)

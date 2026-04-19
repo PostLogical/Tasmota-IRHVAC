@@ -217,12 +217,37 @@ class RLSModel:
         """Return diagonal of P (uncertainty per coefficient)."""
         return [self.P[i * self.n + i] for i in range(self.n)]
 
+    def rescale_features(self, old_scales: list[float]) -> None:
+        """Apply similarity transform when feature scales change.
+
+        Adjusts beta and P so that physical predictions and learning
+        dynamics are preserved after a scale change.  Call after
+        constructing with new scales but before any new updates.
+
+        Math:
+            beta_norm_new[i] = beta_norm_old[i] * (new_scale[i] / old_scale[i])
+            P_new[i,j] = P_old[i,j] * (new_s[i]/old_s[i]) * (new_s[j]/old_s[j])
+        """
+        n = self.n
+        for i in range(min(len(old_scales), n)):
+            ratio = self.feature_scales[i] / old_scales[i] if old_scales[i] != 0 else 1.0
+            if abs(ratio - 1.0) < 1e-12:
+                continue
+            self.beta[i] *= ratio
+            self.beta_seed[i] *= ratio
+            for j in range(n):
+                ratio_j = self.feature_scales[j] / old_scales[j] if old_scales[j] != 0 else 1.0
+                self.P[i * n + j] *= ratio * ratio_j
+                if i != j:
+                    self.P[j * n + i] *= ratio * ratio_j
+
     def as_dict(self) -> dict[str, Any]:
         """Serialize model state to dict (beta in normalized space)."""
         result: dict[str, Any] = {
             "beta": list(self.beta),
             "P": list(self.P),
             "observation_count": self.observation_count,
+            "feature_scales": list(self.feature_scales),
         }
         if any(self.frozen):
             result["frozen"] = list(self.frozen)
@@ -233,7 +258,8 @@ class RLSModel:
         """Restore model from serialized dict.
 
         Beta and P are stored in normalized space. Handles length mismatches
-        when model inputs are added/removed.
+        when model inputs are added/removed, and feature scale changes
+        (e.g. user edited typical_value between restarts).
         """
         model = cls(n_inputs, **kwargs)
         if "beta" in data:
@@ -262,4 +288,17 @@ class RLSModel:
             frozen = data["frozen"]
             for i in range(min(len(frozen), model.n)):
                 model.frozen[i] = bool(frozen[i])
+        # Detect feature scale changes and apply similarity transform so
+        # beta and P remain consistent with the new normalization.
+        old_scales = data.get("feature_scales")
+        if old_scales and len(old_scales) == model.n:
+            scales_changed = any(
+                abs(old_scales[i] - model.feature_scales[i]) > 1e-12
+                for i in range(model.n)
+            )
+            if scales_changed:
+                _LOGGER.info(
+                    "RLS restore: feature scales changed, applying similarity transform"
+                )
+                model.rescale_features(old_scales)
         return model
