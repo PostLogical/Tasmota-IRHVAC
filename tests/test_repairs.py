@@ -12,6 +12,7 @@ from custom_components.tasmota_irhvac.const import DOMAIN
 from custom_components.tasmota_irhvac.__init__ import _check_config_issues
 from custom_components.tasmota_irhvac.repairs import (
     async_create_fix_flow,
+    HighIntegralTuningRepairFlow,
     SaveSeedsRepairFlow,
     SlopeDivergenceRepairFlow,
     UnknownRepairFlow,
@@ -133,6 +134,15 @@ class TestRepairFlowFactory:
             {"repair_type": "slope_divergence", "entry_id": "test123", "mode": "heat"},
         )
         assert isinstance(flow, SlopeDivergenceRepairFlow)
+
+    @pytest.mark.asyncio
+    async def test_routes_high_integral_tuning(self, hass):
+        """high_integral_tuning repair_type routes to HighIntegralTuningRepairFlow."""
+        flow = await async_create_fix_flow(
+            hass, "high_integral_test123",
+            {"repair_type": "high_integral_tuning", "entry_id": "test123"},
+        )
+        assert isinstance(flow, HighIntegralTuningRepairFlow)
 
     @pytest.mark.asyncio
     async def test_unknown_type_returns_fallback(self, hass):
@@ -420,3 +430,116 @@ class TestSlopeDivergenceRepairFlow:
         assert issue[6]["repair_type"] == "slope_divergence"
         assert issue[6]["mode"] == "heat"
         assert "learned_slope" in issue[6]
+
+
+# ── HighIntegralTuningRepairFlow ─────────────────────────────────────
+
+
+class TestHighIntegralTuningRepairFlow:
+    """Tests for the high integral tuning fix flow."""
+
+    @pytest.mark.asyncio
+    async def test_confirm_shows_form(self, hass):
+        """Init step shows form with Ki values."""
+        flow = HighIntegralTuningRepairFlow({
+            "entry_id": "test123",
+            "current_ki": 0.15,
+            "suggested_ki": 0.05,
+        })
+        flow.hass = hass
+
+        result = await flow.async_step_init()
+        assert result["type"] == "form"
+        assert result["step_id"] == "confirm"
+        assert result["description_placeholders"]["current_ki"] == "0.150"
+        assert result["description_placeholders"]["suggested_ki"] == "0.050"
+
+    @pytest.mark.asyncio
+    async def test_confirm_updates_ki(self, hass, setup_pi_integration):
+        """Confirm updates pi_ki in config entry."""
+        entry = await setup_pi_integration()
+
+        flow = HighIntegralTuningRepairFlow({
+            "entry_id": entry.entry_id,
+            "current_ki": 0.15,
+            "suggested_ki": 0.05,
+        })
+        flow.hass = hass
+
+        result = await flow.async_step_confirm(user_input={})
+        assert result["type"] == "create_entry"
+
+        updated = hass.config_entries.async_get_entry(entry.entry_id)
+        from custom_components.tasmota_irhvac.const import CONF_PI_KI
+        assert updated.options[CONF_PI_KI] == 0.05
+
+    @pytest.mark.asyncio
+    async def test_confirm_aborts_missing_entry(self, hass):
+        """Aborts if config entry doesn't exist."""
+        flow = HighIntegralTuningRepairFlow({
+            "entry_id": "nonexistent",
+            "current_ki": 0.15,
+            "suggested_ki": 0.05,
+        })
+        flow.hass = hass
+
+        result = await flow.async_step_confirm(user_input={})
+        assert result["type"] == "abort"
+
+    @pytest.mark.asyncio
+    async def test_high_integral_tuning_is_fixable(self, hass, setup_pi_integration):
+        """high_integral_tuning sub-case should be fixable."""
+        from .conftest import get_climate_entity
+
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        # Trigger high_integral sub-case 4 (tuning):
+        # Need high ki_correction, matured model, no slope gap, low uncontrollable
+        from homeassistant.components.climate import HVACMode
+        entity._attr_hvac_mode = HVACMode.HEAT  # ensure heat path
+        pi._metrics.integral_convergence = 20.0
+        pi._rls_heat.observation_count = 100
+        pi._tuning_alert_counters["high_integral"] = 5
+        pi._metrics.uncontrollable_cvh = 0.0
+        pi._metrics.comfort_violation_hours = 1.0
+        # Align learned slope to configured to avoid sub-case 2 (slope_gap)
+        pi._rls_heat.beta[1] = pi._ff_heat_slope * pi._rls_heat.feature_scales[1]
+
+        issues = pi._check_tuning_health()
+        integral_issues = [i for i in issues if "high_integral" in i[0]]
+        assert len(integral_issues) == 1
+
+        issue = integral_issues[0]
+        # Sub-case 4 returns key "high_integral_tuning"
+        assert issue[2] == "high_integral_tuning"
+        assert issue[5] is True  # is_fixable
+        assert issue[6] is not None
+        assert issue[6]["repair_type"] == "high_integral_tuning"
+        assert "suggested_ki" in issue[6]
+
+    @pytest.mark.asyncio
+    async def test_high_integral_immature_not_fixable(self, hass, setup_pi_integration):
+        """high_integral_immature sub-case should NOT be fixable."""
+        from .conftest import get_climate_entity
+
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        # Trigger sub-case 1 (immature): high correction, low obs count
+        from homeassistant.components.climate import HVACMode
+        entity._attr_hvac_mode = HVACMode.HEAT
+        pi._metrics.integral_convergence = 20.0
+        pi._rls_heat.observation_count = 10  # < maturity_obs (50)
+        pi._tuning_alert_counters["high_integral"] = 5
+
+        issues = pi._check_tuning_health()
+        integral_issues = [i for i in issues if "high_integral" in i[0]]
+        assert len(integral_issues) == 1
+
+        issue = integral_issues[0]
+        assert issue[2] == "high_integral_immature"
+        assert issue[5] is False  # not fixable
+        assert issue[6] is None

@@ -30,6 +30,8 @@ async def async_create_fix_flow(
         return SaveSeedsRepairFlow(data)
     if repair_type == "slope_divergence":
         return SlopeDivergenceRepairFlow(data)
+    if repair_type == "high_integral_tuning":
+        return HighIntegralTuningRepairFlow(data)
 
     return UnknownRepairFlow()
 
@@ -153,6 +155,52 @@ class SlopeDivergenceRepairFlow(RepairsFlow):
                 "mode": self._mode,
                 "configured": f"{self._configured:.4f}",
                 "learned": f"{self._learned:.4f}",
+            },
+        )
+
+
+class HighIntegralTuningRepairFlow(RepairsFlow):
+    """Update Ki to suggested value."""
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        """Initialize with issue data."""
+        super().__init__()
+        self._entry_id: str = data.get("entry_id", "")
+        self._current_ki: float = float(data.get("current_ki", 0.0))
+        self._suggested_ki: float = float(data.get("suggested_ki", 0.0))
+
+    async def async_step_init(
+        self, user_input: dict[str, str] | None = None
+    ) -> data_entry_flow.FlowResult:
+        """Handle init step — delegate to confirm."""
+        return await self.async_step_confirm()
+
+    async def async_step_confirm(
+        self, user_input: dict[str, str] | None = None
+    ) -> data_entry_flow.FlowResult:
+        """Confirm and update Ki."""
+        if user_input is not None:
+            entry = self.hass.config_entries.async_get_entry(self._entry_id)
+            if entry is None:
+                return self.async_abort(reason="entry_not_found")
+
+            from .const import CONF_PI_KI
+
+            new_options = {**entry.options, CONF_PI_KI: round(self._suggested_ki, 3)}
+            self.hass.config_entries.async_update_entry(entry, options=new_options)
+
+            _LOGGER.info(
+                "Repair flow: updated Ki from %.3f to %.3f for %s",
+                self._current_ki, self._suggested_ki, self._entry_id,
+            )
+            return self.async_create_entry(title="", data={})
+
+        return self.async_show_form(
+            step_id="confirm",
+            data_schema=vol.Schema({}),
+            description_placeholders={
+                "current_ki": f"{self._current_ki:.3f}",
+                "suggested_ki": f"{self._suggested_ki:.3f}",
             },
         )
 

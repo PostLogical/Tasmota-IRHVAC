@@ -580,7 +580,15 @@
     },
     "high_integral_tuning": {
       "title": "High integral correction (tuning needed)",
-      "description": "Integral correction averages {correction}°C. Consider reducing Ki from {current_ki} to {suggested_ki} in PI Settings."
+      "description": "Integral correction averages {correction}°C. Consider reducing Ki from {current_ki} to {suggested_ki} in PI Settings.",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Adjust integral gain (Ki)",
+            "description": "Reduce Ki from {current_ki} to {suggested_ki}.\n\nThe current Ki is causing excessive integral correction. Reducing it will make the controller less aggressive but more stable."
+          }
+        }
+      }
     },
     "model_drift": {
       "title": "Persistent model drift on {coeff_name}",

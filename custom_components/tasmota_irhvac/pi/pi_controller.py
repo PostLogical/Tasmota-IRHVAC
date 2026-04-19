@@ -1655,13 +1655,21 @@ class PIController:
         )
         if result is not None:
             key, placeholders, should_create = result
+            # Only sub-case 4 (tuning) is fixable — others are diagnostic
+            is_fixable = should_create and key == "high_integral_tuning"
+            fix_data = {
+                "repair_type": "high_integral_tuning",
+                "entry_id": entry_id,
+                "current_ki": self._pi_ki,
+                "suggested_ki": float(placeholders.get("suggested_ki", self._pi_ki)),
+            } if is_fixable else None
             issues.append((
                 f"high_integral_{entry_id}",
                 "warning",
                 key,
                 placeholders,
                 should_create,
-                False, None,
+                is_fixable, fix_data,
             ))
 
         # ── Covariance collapse at clamp ────────────────────────────
