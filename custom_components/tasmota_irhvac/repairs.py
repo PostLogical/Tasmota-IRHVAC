@@ -32,6 +32,8 @@ async def async_create_fix_flow(
         return SlopeDivergenceRepairFlow(data)
     if repair_type == "high_integral_tuning":
         return HighIntegralTuningRepairFlow(data)
+    if repair_type == "anomalous_observation":
+        return AnomalousObservationRepairFlow(data)
 
     return UnknownRepairFlow()
 
@@ -201,6 +203,61 @@ class HighIntegralTuningRepairFlow(RepairsFlow):
             description_placeholders={
                 "current_ki": f"{self._current_ki:.3f}",
                 "suggested_ki": f"{self._suggested_ki:.3f}",
+            },
+        )
+
+
+class AnomalousObservationRepairFlow(RepairsFlow):
+    """Exclude or dismiss anomalous observations."""
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        """Initialize with issue data."""
+        super().__init__()
+        self._entry_id: str = data.get("entry_id", "")
+        self._start_mono: float = float(data.get("start_mono", 0.0))
+        self._end_mono: float = float(data.get("end_mono", 0.0))
+        self._time_range: str = data.get("time_range", "")
+        self._direction: str = data.get("direction", "")
+        self._mean_residual: str = data.get("mean_residual", "")
+
+    async def async_step_init(
+        self, user_input: dict[str, str] | None = None
+    ) -> data_entry_flow.FlowResult:
+        """Handle init step — delegate to confirm."""
+        return await self.async_step_confirm()
+
+    async def async_step_confirm(
+        self, user_input: dict[str, str] | None = None
+    ) -> data_entry_flow.FlowResult:
+        """Show exclude/dismiss choice and apply."""
+        if user_input is not None:
+            action = user_input.get("action", "dismiss")
+            if action == "exclude":
+                climate = self.hass.data.get(DATA_KEY, {}).get(self._entry_id)
+                if climate is not None and hasattr(climate, "_pi") and climate._pi is not None:
+                    pi = climate._pi
+                    if hasattr(pi, "exclude_observations_by_time"):
+                        removed = pi.exclude_observations_by_time(
+                            self._start_mono, self._end_mono,
+                        )
+                        _LOGGER.info(
+                            "Repair flow: excluded %d observations for %s",
+                            removed, self._entry_id,
+                        )
+            return self.async_create_entry(title="", data={})
+
+        return self.async_show_form(
+            step_id="confirm",
+            data_schema=vol.Schema({
+                vol.Required("action", default="exclude"): vol.In({
+                    "exclude": "Exclude these observations from learning",
+                    "dismiss": "Dismiss (keep observations)",
+                }),
+            }),
+            description_placeholders={
+                "time_range": self._time_range,
+                "direction": self._direction,
+                "mean_residual": self._mean_residual,
             },
         )
 

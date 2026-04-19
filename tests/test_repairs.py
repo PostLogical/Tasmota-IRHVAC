@@ -11,6 +11,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.tasmota_irhvac.const import DOMAIN
 from custom_components.tasmota_irhvac.__init__ import _check_config_issues
 from custom_components.tasmota_irhvac.repairs import (
+    AnomalousObservationRepairFlow,
     async_create_fix_flow,
     HighIntegralTuningRepairFlow,
     SaveSeedsRepairFlow,
@@ -143,6 +144,15 @@ class TestRepairFlowFactory:
             {"repair_type": "high_integral_tuning", "entry_id": "test123"},
         )
         assert isinstance(flow, HighIntegralTuningRepairFlow)
+
+    @pytest.mark.asyncio
+    async def test_routes_anomalous_observation(self, hass):
+        """anomalous_observation routes to AnomalousObservationRepairFlow."""
+        flow = await async_create_fix_flow(
+            hass, "anomalous_test",
+            {"repair_type": "anomalous_observation", "entry_id": "test123"},
+        )
+        assert isinstance(flow, AnomalousObservationRepairFlow)
 
     @pytest.mark.asyncio
     async def test_unknown_type_returns_fallback(self, hass):
@@ -543,3 +553,196 @@ class TestHighIntegralTuningRepairFlow:
         assert issue[2] == "high_integral_immature"
         assert issue[5] is False  # not fixable
         assert issue[6] is None
+
+
+# ── AnomalousObservationRepairFlow ───────────────────────────────────
+
+
+class TestAnomalousObservationRepairFlow:
+    """Tests for the anomalous observation fix flow."""
+
+    @pytest.mark.asyncio
+    async def test_confirm_shows_form_with_choices(self, hass):
+        """Init step shows form with exclude/dismiss options."""
+        flow = AnomalousObservationRepairFlow({
+            "entry_id": "test123",
+            "start_mono": 1000.0,
+            "end_mono": 2000.0,
+            "time_range": "14:00 — 14:30",
+            "direction": "unexpected heat loss",
+            "mean_residual": "-0.80",
+        })
+        flow.hass = hass
+
+        result = await flow.async_step_init()
+        assert result["type"] == "form"
+        assert result["step_id"] == "confirm"
+        assert "time_range" in result["description_placeholders"]
+
+    @pytest.mark.asyncio
+    async def test_exclude_calls_pi(self, hass, setup_pi_integration):
+        """Exclude action calls exclude_observations_by_time."""
+        from .conftest import get_climate_entity
+        from custom_components.tasmota_irhvac.pi.batch_learning import Observation
+
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        # Add observations to buffer
+        for i in range(10):
+            pi._observation_buffer_heat.add(Observation(
+                timestamp=1000.0 + i * 60,
+                features=[1.0, float(i)],
+                hp_setpoint=22.0,
+                current_c=21.0,
+                desired_c=21.0,
+                room_rate=0.0,
+                clamped=False,
+            ))
+
+        flow = AnomalousObservationRepairFlow({
+            "entry_id": entry.entry_id,
+            "start_mono": 1300.0,
+            "end_mono": 1600.0,
+        })
+        flow.hass = hass
+
+        before = len(pi._observation_buffer_heat)
+        result = await flow.async_step_confirm(user_input={"action": "exclude"})
+        assert result["type"] == "create_entry"
+        assert len(pi._observation_buffer_heat) < before
+        assert pi._exclusion_count == 1
+
+    @pytest.mark.asyncio
+    async def test_dismiss_keeps_buffer(self, hass, setup_pi_integration):
+        """Dismiss action does not modify buffer."""
+        from .conftest import get_climate_entity
+        from custom_components.tasmota_irhvac.pi.batch_learning import Observation
+
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        for i in range(5):
+            pi._observation_buffer_heat.add(Observation(
+                timestamp=1000.0 + i * 60,
+                features=[1.0, float(i)],
+                hp_setpoint=22.0,
+                current_c=21.0,
+                desired_c=21.0,
+                room_rate=0.0,
+                clamped=False,
+            ))
+
+        flow = AnomalousObservationRepairFlow({
+            "entry_id": entry.entry_id,
+            "start_mono": 1000.0,
+            "end_mono": 2000.0,
+        })
+        flow.hass = hass
+
+        result = await flow.async_step_confirm(user_input={"action": "dismiss"})
+        assert result["type"] == "create_entry"
+        assert len(pi._observation_buffer_heat) == 5
+        assert pi._exclusion_count == 0
+
+
+# ── Anomaly event cause hints ────────────────────────────────────────
+
+
+class TestAnomalyCauseHints:
+    """Test mode-aware cause hint generation in _check_tuning_health."""
+
+    @pytest.mark.asyncio
+    async def test_heat_positive_residual(self, hass, setup_pi_integration):
+        """Heating + positive residual → 'unexpected heat loss'."""
+        from .conftest import get_climate_entity
+        from datetime import datetime
+        from custom_components.tasmota_irhvac.pi.health_checks import AnomalyEvent
+
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        now = datetime.now()
+        pi._anomaly_events.append(AnomalyEvent(
+            start_time=now, start_mono=1000.0,
+            end_time=now, end_mono=1000.0,
+            tick_count=1, mean_residual=0.5,
+            peak_cusum=12.0, mode="heat",
+        ))
+
+        issues = pi._check_tuning_health()
+        anomaly_issues = [i for i in issues if "anomalous_observation" in i[0]]
+        assert len(anomaly_issues) == 1
+        assert "heat loss" in anomaly_issues[0][3]["direction"]
+
+    @pytest.mark.asyncio
+    async def test_heat_negative_residual(self, hass, setup_pi_integration):
+        """Heating + negative residual → 'unexpected heat gain'."""
+        from .conftest import get_climate_entity
+        from datetime import datetime
+        from custom_components.tasmota_irhvac.pi.health_checks import AnomalyEvent
+
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        now = datetime.now()
+        pi._anomaly_events.append(AnomalyEvent(
+            start_time=now, start_mono=1000.0,
+            end_time=now, end_mono=1000.0,
+            tick_count=1, mean_residual=-0.5,
+            peak_cusum=12.0, mode="heat",
+        ))
+
+        issues = pi._check_tuning_health()
+        anomaly_issues = [i for i in issues if "anomalous_observation" in i[0]]
+        assert "heat gain" in anomaly_issues[0][3]["direction"]
+
+    @pytest.mark.asyncio
+    async def test_cool_positive_residual(self, hass, setup_pi_integration):
+        """Cooling + positive residual → 'unexpected heat gain'."""
+        from .conftest import get_climate_entity
+        from datetime import datetime
+        from custom_components.tasmota_irhvac.pi.health_checks import AnomalyEvent
+
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        now = datetime.now()
+        pi._anomaly_events.append(AnomalyEvent(
+            start_time=now, start_mono=1000.0,
+            end_time=now, end_mono=1000.0,
+            tick_count=1, mean_residual=0.5,
+            peak_cusum=12.0, mode="cool",
+        ))
+
+        issues = pi._check_tuning_health()
+        anomaly_issues = [i for i in issues if "anomalous_observation" in i[0]]
+        assert "heat gain" in anomaly_issues[0][3]["direction"]
+
+    @pytest.mark.asyncio
+    async def test_cool_negative_residual(self, hass, setup_pi_integration):
+        """Cooling + negative residual → 'unexpected heat loss'."""
+        from .conftest import get_climate_entity
+        from datetime import datetime
+        from custom_components.tasmota_irhvac.pi.health_checks import AnomalyEvent
+
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        now = datetime.now()
+        pi._anomaly_events.append(AnomalyEvent(
+            start_time=now, start_mono=1000.0,
+            end_time=now, end_mono=1000.0,
+            tick_count=1, mean_residual=-0.5,
+            peak_cusum=12.0, mode="cool",
+        ))
+
+        issues = pi._check_tuning_health()
+        anomaly_issues = [i for i in issues if "anomalous_observation" in i[0]]
+        assert "heat loss" in anomaly_issues[0][3]["direction"]

@@ -613,6 +613,18 @@
     "freeze_impact": {
       "title": "Frozen coefficient {coeff_name} is degrading model fit",
       "description": "Since freezing {coeff_name} ({mode} mode), batch residual RMS has increased from {rms_at_freeze} to {current_rms} (+{increase_pct}%). The model may need this coefficient to track a real change. Consider unfreezing it, or updating its value with the set_coefficient service and saving seeds."
+    },
+    "anomalous_observation": {
+      "title": "Unusual temperature deviation ({time_range})",
+      "description": "Detected {direction} (mean residual: {mean_residual}°C, severity: {peak_cusum}). This could indicate an unmodeled heat source or sink such as open windows, cooking, or a space heater.\n\nExcluding these observations prevents them from biasing the model. Dismissing keeps them in the learning buffer.",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Handle anomalous observations",
+            "description": "Detected {direction} at {time_range} (mean residual: {mean_residual}°C).\n\nChoose an action:"
+          }
+        }
+      }
     }
   },
   "config_subentries": {

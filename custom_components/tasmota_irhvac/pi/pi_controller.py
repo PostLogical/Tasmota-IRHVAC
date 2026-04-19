@@ -1945,6 +1945,41 @@ class PIController:
                             False, None,
                         ))
 
+        # ── Anomalous observations (CUSUM) ─────────────────────────
+        for event in self._anomaly_events:
+            # Cause hint based on mode and residual direction
+            if event.mode == "heat":
+                direction = "unexpected heat loss" if event.mean_residual > 0 else "unexpected heat gain"
+            else:
+                direction = "unexpected heat gain" if event.mean_residual > 0 else "unexpected heat loss"
+
+            time_range = f"{event.start_time.strftime('%H:%M')} — {event.end_time.strftime('%H:%M')}"
+            issue_key = f"anomalous_observation_{entry_id}_{event.start_time.strftime('%Y%m%d_%H%M')}"
+            issues.append((
+                issue_key,
+                "warning",
+                "anomalous_observation",
+                {
+                    "time_range": time_range,
+                    "mean_residual": f"{event.mean_residual:+.2f}",
+                    "direction": direction,
+                    "peak_cusum": f"{event.peak_cusum:.1f}",
+                },
+                True,
+                True,
+                {
+                    "repair_type": "anomalous_observation",
+                    "entry_id": entry_id,
+                    "start_mono": event.start_mono,
+                    "end_mono": event.end_mono,
+                    "time_range": time_range,
+                    "direction": direction,
+                    "mean_residual": f"{event.mean_residual:+.2f}",
+                },
+            ))
+        # Clear surfaced events — they're now in the issue registry
+        self._anomaly_events.clear()
+
         return issues
 
     def get_health_status(self) -> dict[str, Any]:
