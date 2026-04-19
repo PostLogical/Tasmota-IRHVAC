@@ -13,6 +13,7 @@ from custom_components.tasmota_irhvac.__init__ import _check_config_issues
 from custom_components.tasmota_irhvac.repairs import (
     async_create_fix_flow,
     SaveSeedsRepairFlow,
+    SlopeDivergenceRepairFlow,
     UnknownRepairFlow,
 )
 
@@ -123,6 +124,15 @@ class TestRepairFlowFactory:
             {"repair_type": "save_seeds", "entry_id": "test123"},
         )
         assert isinstance(flow, SaveSeedsRepairFlow)
+
+    @pytest.mark.asyncio
+    async def test_routes_slope_divergence(self, hass):
+        """slope_divergence repair_type routes to SlopeDivergenceRepairFlow."""
+        flow = await async_create_fix_flow(
+            hass, "slope_divergence_test123_heat",
+            {"repair_type": "slope_divergence", "entry_id": "test123", "mode": "heat"},
+        )
+        assert isinstance(flow, SlopeDivergenceRepairFlow)
 
     @pytest.mark.asyncio
     async def test_unknown_type_returns_fallback(self, hass):
@@ -306,3 +316,107 @@ class TestTuningHealthFixableIssues:
             assert call_kwargs["is_fixable"] is True
             assert "data" in call_kwargs
             assert call_kwargs["data"]["repair_type"] == "save_seeds"
+
+
+# ── SlopeDivergenceRepairFlow ────────────────────────────────────────
+
+
+class TestSlopeDivergenceRepairFlow:
+    """Tests for the slope divergence fix flow."""
+
+    @pytest.mark.asyncio
+    async def test_confirm_shows_form_with_values(self, hass):
+        """Init step shows form with slope values."""
+        flow = SlopeDivergenceRepairFlow({
+            "entry_id": "test123",
+            "mode": "heat",
+            "learned_slope": 0.42,
+            "configured_slope": 0.30,
+        })
+        flow.hass = hass
+
+        result = await flow.async_step_init()
+        assert result["type"] == "form"
+        assert result["step_id"] == "confirm"
+        assert result["description_placeholders"]["mode"] == "heat"
+        assert result["description_placeholders"]["learned"] == "0.4200"
+        assert result["description_placeholders"]["configured"] == "0.3000"
+
+    @pytest.mark.asyncio
+    async def test_confirm_updates_heat_slope(self, hass, setup_pi_integration):
+        """Confirm updates pi_ff_heat_slope in config entry."""
+        entry = await setup_pi_integration()
+
+        flow = SlopeDivergenceRepairFlow({
+            "entry_id": entry.entry_id,
+            "mode": "heat",
+            "learned_slope": 0.42,
+            "configured_slope": 0.30,
+        })
+        flow.hass = hass
+
+        result = await flow.async_step_confirm(user_input={})
+        assert result["type"] == "create_entry"
+
+        updated = hass.config_entries.async_get_entry(entry.entry_id)
+        from custom_components.tasmota_irhvac.const import CONF_PI_FF_HEAT_SLOPE
+        assert updated.options[CONF_PI_FF_HEAT_SLOPE] == 0.42
+
+    @pytest.mark.asyncio
+    async def test_confirm_updates_cool_slope(self, hass, setup_pi_integration):
+        """Confirm updates pi_ff_cool_slope for cool mode."""
+        entry = await setup_pi_integration()
+
+        flow = SlopeDivergenceRepairFlow({
+            "entry_id": entry.entry_id,
+            "mode": "cool",
+            "learned_slope": 0.25,
+            "configured_slope": 0.20,
+        })
+        flow.hass = hass
+
+        result = await flow.async_step_confirm(user_input={})
+        assert result["type"] == "create_entry"
+
+        updated = hass.config_entries.async_get_entry(entry.entry_id)
+        from custom_components.tasmota_irhvac.const import CONF_PI_FF_COOL_SLOPE
+        assert updated.options[CONF_PI_FF_COOL_SLOPE] == 0.25
+
+    @pytest.mark.asyncio
+    async def test_confirm_aborts_missing_entry(self, hass):
+        """Aborts if config entry doesn't exist."""
+        flow = SlopeDivergenceRepairFlow({
+            "entry_id": "nonexistent",
+            "mode": "heat",
+            "learned_slope": 0.42,
+            "configured_slope": 0.30,
+        })
+        flow.hass = hass
+
+        result = await flow.async_step_confirm(user_input={})
+        assert result["type"] == "abort"
+
+    @pytest.mark.asyncio
+    async def test_slope_divergence_issue_is_fixable(self, hass, setup_pi_integration):
+        """Slope divergence issues should be fixable with data."""
+        from .conftest import get_climate_entity
+
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        # Trigger slope divergence: 67% drift, sustained
+        pi._rls_heat.beta[1] = 0.5 * pi._rls_heat.feature_scales[1]
+        pi._rls_heat.observation_count = 100
+        pi._tuning_alert_counters["slope_div_heat"] = 5
+
+        issues = pi._check_tuning_health()
+        slope_issues = [i for i in issues if "slope_divergence" in i[0]]
+        assert len(slope_issues) >= 1
+
+        issue = slope_issues[0]
+        assert issue[5] is True  # is_fixable
+        assert issue[6] is not None
+        assert issue[6]["repair_type"] == "slope_divergence"
+        assert issue[6]["mode"] == "heat"
+        assert "learned_slope" in issue[6]

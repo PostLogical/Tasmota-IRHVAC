@@ -522,7 +522,15 @@
     },
     "slope_divergence": {
       "title": "Feedforward slope has drifted ({mode})",
-      "description": "Learned {mode} slope: {learned}, configured: {configured} ({drift_pct}% difference). Update your configured slope in Settings → Devices → Configure → PI Controller → {mode_cap} Slope, or press the Save Learned Seeds button to checkpoint all current values."
+      "description": "Learned {mode} slope: {learned}, configured: {configured} ({drift_pct}% difference). Update your configured slope in Settings → Devices → Configure → PI Controller → {mode_cap} Slope, or press the Save Learned Seeds button to checkpoint all current values.",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Update {mode} feedforward slope",
+            "description": "Update configured {mode} slope from {configured} to {learned}.\n\nThis aligns the feedforward baseline with what the model has learned from your system's behavior."
+          }
+        }
+      }
     },
     "save_seeds": {
       "title": "Model has converged — review and save learned coefficients",

@@ -1556,13 +1556,20 @@ class PIController:
             )
             if result is not None:
                 key, placeholders, should_create = result
+                fix_data = {
+                    "repair_type": "slope_divergence",
+                    "entry_id": entry_id,
+                    "mode": mode,
+                    "learned_slope": learned,
+                    "configured_slope": configured,
+                } if should_create else None
                 issues.append((
                     f"{key}_{entry_id}_{mode}",
                     "warning",
                     key,
                     placeholders,
                     should_create,
-                    False, None,
+                    should_create, fix_data,
                 ))
 
         # ── Save seeds ──────────────────────────────────────────────

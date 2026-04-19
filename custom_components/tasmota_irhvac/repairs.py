@@ -28,6 +28,8 @@ async def async_create_fix_flow(
 
     if repair_type == "save_seeds":
         return SaveSeedsRepairFlow(data)
+    if repair_type == "slope_divergence":
+        return SlopeDivergenceRepairFlow(data)
 
     return UnknownRepairFlow()
 
@@ -99,6 +101,58 @@ class SaveSeedsRepairFlow(RepairsFlow):
             data_schema=vol.Schema({}),
             description_placeholders={
                 "coefficient_summary": self._coefficient_summary,
+            },
+        )
+
+
+class SlopeDivergenceRepairFlow(RepairsFlow):
+    """Update configured FF slope to match learned value."""
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        """Initialize with issue data."""
+        super().__init__()
+        self._entry_id: str = data.get("entry_id", "")
+        self._mode: str = data.get("mode", "heat")
+        self._learned: float = float(data.get("learned_slope", 0.0))
+        self._configured: float = float(data.get("configured_slope", 0.0))
+
+    async def async_step_init(
+        self, user_input: dict[str, str] | None = None
+    ) -> data_entry_flow.FlowResult:
+        """Handle init step — delegate to confirm."""
+        return await self.async_step_confirm()
+
+    async def async_step_confirm(
+        self, user_input: dict[str, str] | None = None
+    ) -> data_entry_flow.FlowResult:
+        """Confirm and update slope."""
+        if user_input is not None:
+            entry = self.hass.config_entries.async_get_entry(self._entry_id)
+            if entry is None:
+                return self.async_abort(reason="entry_not_found")
+
+            from .const import CONF_PI_FF_COOL_SLOPE, CONF_PI_FF_HEAT_SLOPE
+
+            conf_key = (
+                CONF_PI_FF_HEAT_SLOPE if self._mode == "heat"
+                else CONF_PI_FF_COOL_SLOPE
+            )
+            new_options = {**entry.options, conf_key: round(self._learned, 4)}
+            self.hass.config_entries.async_update_entry(entry, options=new_options)
+
+            _LOGGER.info(
+                "Repair flow: updated %s slope from %.4f to %.4f for %s",
+                self._mode, self._configured, self._learned, self._entry_id,
+            )
+            return self.async_create_entry(title="", data={})
+
+        return self.async_show_form(
+            step_id="confirm",
+            data_schema=vol.Schema({}),
+            description_placeholders={
+                "mode": self._mode,
+                "configured": f"{self._configured:.4f}",
+                "learned": f"{self._learned:.4f}",
             },
         )
 
