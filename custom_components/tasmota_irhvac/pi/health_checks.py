@@ -10,7 +10,64 @@ Tuning-repair functions (check_slope_divergence_repair, etc.) return
 
 from __future__ import annotations
 
+from collections import deque
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
+
+
+# ── CUSUM anomaly detection constants ────────────────────────────────
+# Basseville & Nikiforov (1993), Detection of Abrupt Changes
+CUSUM_K: float = 1.0       # reference value — dead zone for shifts < 2σ
+CUSUM_H: float = 10.0      # threshold — ARL₀ ≈ 50,000 ticks
+MIN_RESIDUALS_FOR_DETECTION: int = 10  # minimum history for reliable MAD
+MIN_SIGMA_FLOOR: float = 0.05         # absolute σ floor (°C)
+MIN_EVENT_DURATION_SEC: float = 600.0  # 10 minutes wall-clock minimum
+CUSUM_COOLDOWN_SEC: float = 1800.0     # 30 minutes wall-clock cooldown
+
+
+@dataclass
+class AnomalyEvent:
+    """A completed anomalous period detected by CUSUM."""
+
+    start_time: datetime
+    start_mono: float
+    end_time: datetime
+    end_mono: float
+    tick_count: int
+    mean_residual: float      # signed, physical units (°C)
+    peak_cusum: float         # max(S⁺, S⁻) — severity measure
+    mode: str                 # "heat" or "cool" at detection time
+
+
+def compute_mad_sigma(residuals: deque[float] | list[float]) -> float:
+    """Compute robust scale estimate using Median Absolute Deviation.
+
+    σ̂ = 1.4826 × median(|rᵢ - median(r)|)
+
+    The 1.4826 factor makes MAD consistent with σ for Gaussian data,
+    while remaining robust to up to 50% contamination (Huber, 1981).
+
+    Returns MIN_SIGMA_FLOOR if MAD is zero (all residuals identical).
+    """
+    n = len(residuals)
+    if n == 0:
+        return MIN_SIGMA_FLOOR
+
+    sorted_r = sorted(residuals)
+    if n % 2 == 1:
+        median_r = sorted_r[n // 2]
+    else:
+        median_r = (sorted_r[n // 2 - 1] + sorted_r[n // 2]) / 2.0
+
+    abs_devs = sorted(abs(r - median_r) for r in residuals)
+    if n % 2 == 1:
+        mad = abs_devs[n // 2]
+    else:
+        mad = (abs_devs[n // 2 - 1] + abs_devs[n // 2]) / 2.0
+
+    sigma = 1.4826 * mad
+    return max(sigma, MIN_SIGMA_FLOOR)
 
 
 def check_comfort(

@@ -14,7 +14,8 @@ from __future__ import annotations
 import dataclasses
 import logging
 import time
-from datetime import datetime
+from collections import deque
+from datetime import datetime, timedelta
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -38,6 +39,7 @@ from homeassistant.util.unit_conversion import TemperatureConverter
 import math
 
 from .batch_learning import BatchResult, DiversityAwareBuffer, HourlyResidualPattern, Observation, analyze_residuals_by_hour, weighted_least_squares, compare_and_report, compute_blended_update
+from .health_checks import AnomalyEvent, compute_mad_sigma, CUSUM_K, CUSUM_H, MIN_RESIDUALS_FOR_DETECTION, MIN_SIGMA_FLOOR, MIN_EVENT_DURATION_SEC, CUSUM_COOLDOWN_SEC
 
 from ..const import (
     ATTR_DESIRED_TEMP,
@@ -406,6 +408,14 @@ class PIController:
         self._last_residual_patterns: list[HourlyResidualPattern] = []
         self._has_had_stable_batch: bool = False
         self._tuning_alert_counters: dict[str, int] = {}
+
+        # ── CUSUM anomaly detection state ───────────────────────────
+        self._residual_history: deque[float] = deque(maxlen=60)
+        self._cusum_pos: float = 0.0
+        self._cusum_neg: float = 0.0
+        self._anomaly_events: list[AnomalyEvent] = []
+        self._exclusion_count: int = 0
+        self._cusum_cooldown_until: datetime | None = None
 
         # Room temperature rate of change tracking (°C/min)
         self._room_temp_history: list[tuple[float, float]] = []  # [(monotonic_time, temp_c), ...]
@@ -2186,6 +2196,76 @@ class PIController:
             and not self._supplemental.assist_active
         )
 
+    def _update_cusum(
+        self,
+        residual: float,
+        now_mono: float,
+        is_heating: bool,
+        _now: datetime | None = None,
+    ) -> None:
+        """Feed one residual to the two-sided CUSUM anomaly detector.
+
+        Runs on every buffer observation (every PI tick where clamped=False).
+        Uses MAD-based robust scale estimation (Huber, 1981) and the
+        CUSUM algorithm (Page, 1954; Basseville & Nikiforov, 1993).
+        """
+        self._residual_history.append(residual)
+
+        now = _now or datetime.now()
+
+        # Cooldown: suppress detection after a recent alarm
+        if self._cusum_cooldown_until is not None:
+            if now < self._cusum_cooldown_until:
+                return
+            self._cusum_cooldown_until = None
+
+        # Need enough history for reliable MAD
+        if len(self._residual_history) < MIN_RESIDUALS_FOR_DETECTION:
+            return
+
+        # Robust scale estimate
+        sigma = compute_mad_sigma(self._residual_history)
+        if self._metrics.batch_model_rms is not None:
+            sigma = max(sigma, 0.5 * self._metrics.batch_model_rms)
+
+        # Standardize
+        z = residual / sigma
+
+        # Two-sided CUSUM update
+        self._cusum_pos = max(0.0, self._cusum_pos + z - CUSUM_K)
+        self._cusum_neg = max(0.0, self._cusum_neg - z - CUSUM_K)
+
+        alarm_triggered = self._cusum_pos > CUSUM_H or self._cusum_neg > CUSUM_H
+
+        if alarm_triggered:
+            # CUSUM crossed threshold — record event and reset.
+            # "Fast initial response" (Lucas & Crosier, 1982): reset
+            # accumulators after detection to avoid massive accumulation
+            # during prolonged anomalies.
+            peak = max(self._cusum_pos, self._cusum_neg)
+            event = AnomalyEvent(
+                start_time=now,
+                start_mono=now_mono,
+                end_time=now,
+                end_mono=now_mono,
+                tick_count=1,
+                mean_residual=residual,
+                peak_cusum=peak,
+                mode="heat" if is_heating else "cool",
+            )
+            self._anomaly_events.append(event)
+            _LOGGER.info(
+                "Anomaly detected: %s, residual=%.3f°C, peak_cusum=%.1f, σ̂=%.4f",
+                now.strftime("%H:%M"),
+                residual,
+                peak,
+                sigma,
+            )
+            # Reset and enter cooldown
+            self._cusum_pos = 0.0
+            self._cusum_neg = 0.0
+            self._cusum_cooldown_until = now + timedelta(seconds=CUSUM_COOLDOWN_SEC)
+
     def _rls_learn_observation(
         self,
         rls: RLSModel,
@@ -2882,6 +2962,11 @@ class PIController:
                 self._pi_integral += (q_error / self._pi_ki) * 0.4
 
         # Record observation for batch learning (every tick, regardless of gate)
+        obs_clamped = (
+            self._hp_setpoint <= self._min_temp_c
+            or self._hp_setpoint >= self._max_temp_c
+            or hp_no_output
+        )
         active_buffer = self._observation_buffer_heat if is_heating else self._observation_buffer_cool
         active_buffer.add(Observation(
             timestamp=now_mono,
@@ -2890,17 +2975,18 @@ class PIController:
             current_c=current_c,
             desired_c=desired_c,
             room_rate=self._room_temp_rate,
-            clamped=(
-                self._hp_setpoint <= self._min_temp_c
-                or self._hp_setpoint >= self._max_temp_c
-                or hp_no_output
-            ),
+            clamped=obs_clamped,
             pi_integral=self._pi_integral,
             ff_offset=self._ff_offset,
             ff_confidence=self._ff_confidence,
             raw_c=raw_c,
             wall_hour=datetime.now().hour,
         ))
+
+        # CUSUM anomaly detection — runs on every unclamped observation
+        if not obs_clamped:
+            cusum_residual = (float(self._hp_setpoint) - desired_c) - rls.predict(x)
+            self._update_cusum(cusum_residual, now_mono, is_heating)
 
         # Midpoint-crossing hysteresis
         new_setpoint = self._hp_setpoint
