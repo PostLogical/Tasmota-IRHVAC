@@ -515,10 +515,11 @@ def _weighted_variance(values: list[float], weights: list[float]) -> float:
     return sum(w * (v - mean) ** 2 for v, w in zip(values, weights)) / w_sum
 
 
-# Minimum weighted variance for a feature to be considered identifiable.
-# Binary features (0/1) that toggled in ~10% of observations have variance
-# ~0.09; this threshold is well below that.
-MIN_FEATURE_VARIANCE = 1e-4
+# Minimum weighted variance for a feature to be included in the regression.
+# Only blocks structurally unidentifiable features (constant columns that
+# are collinear with the intercept).  Column normalization + ridge
+# regularization handle low-variance-but-varying features numerically.
+MIN_FEATURE_VARIANCE = 1e-12
 
 
 def weighted_least_squares(
