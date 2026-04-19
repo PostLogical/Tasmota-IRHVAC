@@ -95,6 +95,82 @@ class TestWeightedLeastSquares:
         assert result.beta_batch[0] < 3.0  # closer to 2.0 than 4.0
         assert result.beta_batch[0] > 2.0  # but pulled slightly by distant obs
 
+    def test_normalization_does_not_change_result(self):
+        """Column normalization must not change the physical coefficients.
+
+        True model: offset = 2.0 + 0.3 * outdoor_delta + (-2.0) * small_feature
+        outdoor_delta ranges 0-20 (large scale), small_feature ranges
+        0-1 (smaller scale).  The 20x scale difference would degrade
+        X'WX conditioning without normalization.  With normalization the
+        coefficients in physical units must match the true model.
+        """
+        obs = []
+        for i in range(40):
+            od = float(i % 20)              # 0-19, std ≈ 5.8
+            small = (i % 10) * 0.1          # 0-0.9, std ≈ 0.3
+            true_offset = 2.0 + 0.3 * od + (-2.0) * small
+            obs.append(self._make_obs(
+                features=[1.0, od, small],
+                sp=20.0 + true_offset,
+                cur=20.0,
+            ))
+        result = weighted_least_squares(obs, n_features=3, min_observations=20)
+        assert result is not None
+        # Physical coefficients must recover the true model
+        assert abs(result.beta_batch[0] - 2.0) < 0.1   # intercept
+        assert abs(result.beta_batch[1] - 0.3) < 0.01   # outdoor_delta
+        assert abs(result.beta_batch[2] - (-2.0)) < 0.1  # small_feature
+
+    def test_normalization_predictions_match_raw(self):
+        """Predictions from normalized WLS must match raw data exactly.
+
+        Use the returned beta (physical units) to predict y for each
+        observation and verify residuals are near-zero.  This confirms
+        the denormalization is correct end-to-end.
+        """
+        obs = []
+        for i in range(30):
+            od = 5.0 + float(i % 10)   # 5-14
+            rate = 0.001 * (i % 5)      # 0-0.004
+            true_offset = 1.5 + 0.4 * od - 3.0 * rate
+            obs.append(self._make_obs(
+                features=[1.0, od, rate],
+                sp=20.0 + true_offset,
+                cur=20.0,
+            ))
+        result = weighted_least_squares(obs, n_features=3, min_observations=20)
+        assert result is not None
+        beta = result.beta_batch
+
+        # Verify every observation's prediction matches
+        for o in obs:
+            y = o.hp_setpoint - o.current_c
+            pred = sum(beta[j] * o.features[j] for j in range(3))
+            assert abs(y - pred) < 0.01, f"Residual {y - pred:.4f} too large"
+
+    def test_normalization_with_vastly_different_scales(self):
+        """Extreme scale mismatch (1000x) still recovers coefficients.
+
+        Feature A ranges 0-100, feature B ranges 0-0.1 — independent
+        variation so WLS can separate them.  The 1000x scale difference
+        would degrade X'WX conditioning without normalization.
+        """
+        obs = []
+        for i in range(40):
+            big = float(i % 20) * 5.0      # 0-95, std ≈ 29
+            small = (i % 7) * 0.015         # 0-0.09, std ≈ 0.03
+            true_offset = 1.0 + 0.05 * big + 10.0 * small
+            obs.append(self._make_obs(
+                features=[1.0, big, small],
+                sp=20.0 + true_offset,
+                cur=20.0,
+            ))
+        result = weighted_least_squares(obs, n_features=3, min_observations=20)
+        assert result is not None
+        assert abs(result.beta_batch[0] - 1.0) < 0.1    # intercept
+        assert abs(result.beta_batch[1] - 0.05) < 0.005  # big feature
+        assert abs(result.beta_batch[2] - 10.0) < 1.0    # small feature
+
 
 # ── Compare and Report ────────────────────────────────────────────────
 
