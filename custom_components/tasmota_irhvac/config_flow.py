@@ -1257,6 +1257,7 @@ class ModelInputSubentryFlow(ConfigSubentryFlow):
                         NumberSelectorConfig(min=0, max=7200, step=60, mode=NumberSelectorMode.BOX)
                     ),
                     vol.Optional("suppress_learning", default=False): BooleanSelector(),
+                    vol.Optional("delta_from_room", default=False): BooleanSelector(),
                     vol.Optional("typical_value", default=0.5): NumberSelector(
                         NumberSelectorConfig(min=0.01, max=100, step=0.01, mode=NumberSelectorMode.BOX)
                     ),
@@ -1304,6 +1305,7 @@ class ModelInputSubentryFlow(ConfigSubentryFlow):
                             NumberSelectorConfig(min=0, max=7200, step=60, mode=NumberSelectorMode.BOX)
                         ),
                         vol.Optional("suppress_learning", default=False): BooleanSelector(),
+                        vol.Optional("delta_from_room", default=False): BooleanSelector(),
                         vol.Optional("typical_value", default=0.5): NumberSelector(
                             NumberSelectorConfig(min=0.01, max=100, step=0.01, mode=NumberSelectorMode.BOX)
                         ),

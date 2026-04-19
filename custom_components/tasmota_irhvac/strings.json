@@ -267,7 +267,8 @@
           "model_input_clamp_min": "Min Coefficient Clamp",
           "model_input_clamp_max": "Max Coefficient Clamp",
           "model_input_lag_tau": "Lag Filter (minutes)",
-          "model_input_suppress_learning": "Suppress Learning When Active"
+          "model_input_suppress_learning": "Suppress Learning When Active",
+          "model_input_delta_from_room": "Delta From Room Temperature"
         },
         "data_description": {
           "model_input_name": "Display name (e.g., 'Solar Proxy', 'Pellet Stove', 'Bunkroom Door').",
@@ -277,7 +278,8 @@
           "model_input_clamp_min": "Minimum allowed coefficient value. Prevents nonsensical learning. Leave empty for no minimum.",
           "model_input_clamp_max": "Maximum allowed coefficient value. Leave empty for no maximum.",
           "model_input_lag_tau": "Exponential lag filter time constant in minutes. Use for thermal sources with ramp-up/down (e.g., pellet stove: 30 min). 0 = no filter.",
-          "model_input_suppress_learning": "Block FF coefficient learning while this input is active. Use for heat sources that dominate the HP (e.g., pellet stove in living room) to prevent coefficient contamination."
+          "model_input_suppress_learning": "Block FF coefficient learning while this input is active. Use for heat sources that dominate the HP (e.g., pellet stove in living room) to prevent coefficient contamination.",
+          "model_input_delta_from_room": "Compute input as (entity temperature − room temperature). Use for inter-zone heat transfer where the temperature difference between rooms drives heat flow."
         }
       },
       "model_inputs_edit": {
@@ -298,7 +300,8 @@
           "model_input_clamp_min": "Min Coefficient Clamp",
           "model_input_clamp_max": "Max Coefficient Clamp",
           "model_input_lag_tau": "Lag Filter (minutes)",
-          "model_input_suppress_learning": "Suppress Learning When Active"
+          "model_input_suppress_learning": "Suppress Learning When Active",
+          "model_input_delta_from_room": "Delta From Room Temperature"
         },
         "data_description": {
           "model_input_name": "Display name (e.g., 'Solar Proxy', 'Pellet Stove', 'Bunkroom Door').",
@@ -308,7 +311,8 @@
           "model_input_clamp_min": "Minimum allowed coefficient value. Prevents nonsensical learning. Leave empty for no minimum.",
           "model_input_clamp_max": "Maximum allowed coefficient value. Leave empty for no maximum.",
           "model_input_lag_tau": "Exponential lag filter time constant in minutes. Use for thermal sources with ramp-up/down (e.g., pellet stove: 30 min). 0 = no filter.",
-          "model_input_suppress_learning": "Block FF coefficient learning while this input is active. Use for heat sources that dominate the HP (e.g., pellet stove in living room) to prevent coefficient contamination."
+          "model_input_suppress_learning": "Block FF coefficient learning while this input is active. Use for heat sources that dominate the HP (e.g., pellet stove in living room) to prevent coefficient contamination.",
+          "model_input_delta_from_room": "Compute input as (entity temperature − room temperature). Use for inter-zone heat transfer where the temperature difference between rooms drives heat flow."
         }
       },
       "model_inputs_remove": {
@@ -584,6 +588,7 @@
             "clamp_max": "Coefficient Max Clamp",
             "lag_tau": "Lag Filter (seconds)",
             "suppress_learning": "Suppress Learning",
+            "delta_from_room": "Delta From Room Temperature",
             "typical_value": "Typical Active Magnitude"
           },
           "data_description": {
@@ -595,6 +600,7 @@
             "clamp_max": "Maximum allowed coefficient value (physical bound).",
             "lag_tau": "Exponential smoothing time constant in seconds. 0 = no filtering.",
             "suppress_learning": "Prevent RLS from updating this coefficient (use seed only).",
+            "delta_from_room": "Compute input as (entity temperature − room temperature). Use for inter-zone heat transfer where the temperature difference between rooms drives heat flow.",
             "typical_value": "Expected value when this input is active. Balances learning rates across inputs with different scales. Examples: 1.0 for binary (on/off), 0.5 for solar proxy (0–0.8 range), 1.0 for outdoor temp rate in °C/hr, 2.0 in °F/hr."
           }
         },
@@ -610,6 +616,7 @@
             "clamp_max": "Coefficient Max Clamp",
             "lag_tau": "Lag Filter (seconds)",
             "suppress_learning": "Suppress Learning",
+            "delta_from_room": "Delta From Room Temperature",
             "typical_value": "Typical Active Magnitude"
           }
         }

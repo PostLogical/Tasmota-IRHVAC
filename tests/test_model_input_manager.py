@@ -155,6 +155,141 @@ class TestOutdoorTemp:
         assert mgr.outdoor_temp == 5.0  # Unchanged on parse failure
 
 
+DELTA_INPUT = {
+    "name": "LR Delta",
+    "entity_id": "sensor.living_room_temp",
+    "seed_heat": -1.0,
+    "seed_cool": 0.0,
+    "lag_tau": 0,
+    "delta_from_room": True,
+}
+
+
+class TestDeltaFromRoom:
+    """Tests for delta_from_room temperature delta computation."""
+
+    def test_delta_celsius(self):
+        """delta_from_room computes (entity_c − room_c) when unit is °C."""
+        mgr = ModelInputManager(model_inputs=[DELTA_INPUT], outdoor_temp_sensor=None)
+        mgr.set_temp_unit(0, "°C")
+
+        mgr.read_values(
+            {"sensor.living_room_temp": ("22.0", True)},
+            room_temp_c=20.0,
+        )
+        assert abs(mgr.values[0] - 2.0) < 0.01
+
+    def test_delta_fahrenheit(self):
+        """delta_from_room converts °F entity to °C before subtracting."""
+        mgr = ModelInputManager(model_inputs=[DELTA_INPUT], outdoor_temp_sensor=None)
+        mgr.set_temp_unit(0, "°F")
+
+        # 71.6°F = 22°C, room = 20°C → delta = 2°C
+        mgr.read_values(
+            {"sensor.living_room_temp": ("71.6", True)},
+            room_temp_c=20.0,
+        )
+        assert abs(mgr.values[0] - 2.0) < 0.1
+
+    def test_delta_no_room_temp_skips(self):
+        """When room_temp_c is None, delta_from_room keeps raw value."""
+        mgr = ModelInputManager(model_inputs=[DELTA_INPUT], outdoor_temp_sensor=None)
+        mgr.set_temp_unit(0, "°C")
+
+        mgr.read_values(
+            {"sensor.living_room_temp": ("22.0", True)},
+            room_temp_c=None,
+        )
+        # Raw value stored, no delta
+        assert mgr.values[0] == 22.0
+
+    def test_delta_default_unit_celsius(self):
+        """When no unit cached, defaults to °C."""
+        mgr = ModelInputManager(model_inputs=[DELTA_INPUT], outdoor_temp_sensor=None)
+        # Don't call set_temp_unit — _temp_units[0] is None
+
+        mgr.read_values(
+            {"sensor.living_room_temp": ("22.0", True)},
+            room_temp_c=20.0,
+        )
+        assert abs(mgr.values[0] - 2.0) < 0.01
+
+    def test_non_delta_input_ignores_room_temp(self):
+        """Normal inputs are unaffected by room_temp_c parameter."""
+        mgr = ModelInputManager(model_inputs=[STOVE_INPUT], outdoor_temp_sensor=None)
+
+        mgr.read_values(
+            {"input_boolean.stove": ("on", True)},
+            room_temp_c=20.0,
+        )
+        assert mgr.values[0] == 1.0
+
+    def test_delta_negative_when_room_warmer(self):
+        """Delta is negative when room is warmer than adjacent zone."""
+        mgr = ModelInputManager(model_inputs=[DELTA_INPUT], outdoor_temp_sensor=None)
+        mgr.set_temp_unit(0, "°C")
+
+        mgr.read_values(
+            {"sensor.living_room_temp": ("18.0", True)},
+            room_temp_c=20.0,
+        )
+        assert abs(mgr.values[0] - (-2.0)) < 0.01
+
+    def test_delta_unavailable_keeps_last(self):
+        """Unavailable delta input keeps its last computed delta."""
+        mgr = ModelInputManager(model_inputs=[DELTA_INPUT], outdoor_temp_sensor=None)
+        mgr.set_temp_unit(0, "°C")
+
+        # First read: compute delta
+        mgr.read_values(
+            {"sensor.living_room_temp": ("22.0", True)},
+            room_temp_c=20.0,
+        )
+        assert abs(mgr.values[0] - 2.0) < 0.01
+
+        # Second read: unavailable
+        mgr.read_values(
+            {"sensor.living_room_temp": ("", False)},
+            room_temp_c=19.0,
+        )
+        # Should keep 2.0, not recompute
+        assert abs(mgr.values[0] - 2.0) < 0.01
+
+    def test_set_temp_unit(self):
+        """set_temp_unit caches unit at correct index."""
+        mgr = ModelInputManager(
+            model_inputs=[STOVE_INPUT, DELTA_INPUT],
+            outdoor_temp_sensor=None,
+        )
+        mgr.set_temp_unit(1, "°F")
+        assert mgr._temp_units[0] is None
+        assert mgr._temp_units[1] == "°F"
+
+    def test_set_temp_unit_out_of_range(self):
+        """set_temp_unit with invalid index is a no-op."""
+        mgr = ModelInputManager(model_inputs=[DELTA_INPUT], outdoor_temp_sensor=None)
+        mgr.set_temp_unit(5, "°F")  # Should not raise
+        assert mgr._temp_units[0] is None
+
+    def test_mixed_inputs(self):
+        """Delta and non-delta inputs coexist correctly."""
+        mgr = ModelInputManager(
+            model_inputs=[STOVE_INPUT, DELTA_INPUT],
+            outdoor_temp_sensor=None,
+        )
+        mgr.set_temp_unit(1, "°C")
+
+        mgr.read_values(
+            {
+                "input_boolean.stove": ("on", True),
+                "sensor.living_room_temp": ("23.0", True),
+            },
+            room_temp_c=20.0,
+        )
+        assert mgr.values[0] == 1.0  # Stove: binary, unaffected
+        assert abs(mgr.values[1] - 3.0) < 0.01  # Delta: 23 - 20
+
+
 class TestPersistence:
     """Tests for lag state save/restore."""
 

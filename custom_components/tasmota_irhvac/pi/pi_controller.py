@@ -502,6 +502,15 @@ class PIController:
                 model_entity_ids,
                 self._async_model_input_changed,
             )
+        # Cache temperature units for delta_from_room inputs.
+        for i, m_input in enumerate(self._model_inputs):
+            if m_input.get("delta_from_room"):
+                state = self._hass.states.get(m_input.get("entity_id", ""))
+                if state is not None:
+                    unit = state.attributes.get(
+                        "unit_of_measurement", UnitOfTemperature.CELSIUS
+                    )
+                    self._inputs.set_temp_unit(i, unit)
         # Read initial model input values
         self._read_model_input_values()
 
@@ -2211,9 +2220,9 @@ class PIController:
                 states[entity_id] = (state.state, True)
         return states
 
-    def _read_model_input_values(self) -> None:
+    def _read_model_input_values(self, room_temp_c: float | None = None) -> None:
         """Resolve HA entity states and update model input manager."""
-        self._inputs.read_values(self._resolve_model_input_states())
+        self._inputs.read_values(self._resolve_model_input_states(), room_temp_c)
 
     def _any_model_input_unavailable(self) -> bool:
         """Check if any model input entity is currently unavailable in HA."""
@@ -2441,7 +2450,7 @@ class PIController:
             return False
 
         # Read model input values and update lag filters
-        self._read_model_input_values()
+        self._read_model_input_values(current_c)
         self._inputs.update_lag_filters(dt_seconds)
 
         # Compute outdoor delta (always first model input)

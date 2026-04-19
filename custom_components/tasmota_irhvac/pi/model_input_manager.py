@@ -37,6 +37,8 @@ class ModelInputManager:
         self.values: list[float] = [0.0] * len(model_inputs)
         self.filtered: list[float] = [0.0] * len(model_inputs)
         self.outdoor_temp: float | None = None
+        # Cached temperature units for delta_from_room inputs (resolved at init).
+        self._temp_units: list[str | None] = [None] * len(model_inputs)
 
     @property
     def model_inputs(self) -> list[dict[str, Any]]:
@@ -52,6 +54,11 @@ class ModelInputManager:
         """Total feature count: 1 (outdoor_delta) + len(model_inputs)."""
         return 1 + len(self._model_inputs)
 
+    def set_temp_unit(self, index: int, unit: str) -> None:
+        """Cache the temperature unit for a delta_from_room input."""
+        if 0 <= index < len(self._temp_units):
+            self._temp_units[index] = unit
+
     def update_outdoor_temp(self, state_value: str, unit: str) -> None:
         """Update outdoor temperature from a sensor reading, converting to °C."""
         try:
@@ -65,12 +72,16 @@ class ModelInputManager:
     def read_values(
         self,
         entity_states: dict[str, tuple[str, bool]],
+        room_temp_c: float | None = None,
     ) -> None:
         """Update model input values from resolved entity states.
 
         Args:
             entity_states: Map of entity_id → (state_string, is_available).
                 PIController resolves these from hass.states before calling.
+            room_temp_c: Current room temperature in °C.  Required for
+                delta_from_room inputs — the stored value becomes
+                (entity_temp_c − room_temp_c).
         """
         for i, m_input in enumerate(self._model_inputs):
             entity_id = m_input.get("entity_id", "")
@@ -87,6 +98,14 @@ class ModelInputManager:
                 self.values[i] = float(state_str)
             except (ValueError, TypeError):
                 self.values[i] = 1.0 if state_str in _ACTIVE_STATES else 0.0
+
+            # Delta-from-room: convert entity temp to °C and subtract room temp.
+            if m_input.get("delta_from_room") and room_temp_c is not None:
+                unit = self._temp_units[i] or UnitOfTemperature.CELSIUS
+                entity_temp_c = TemperatureConverter.convert(
+                    self.values[i], unit, UnitOfTemperature.CELSIUS
+                )
+                self.values[i] = entity_temp_c - room_temp_c
 
     def any_unavailable(
         self,

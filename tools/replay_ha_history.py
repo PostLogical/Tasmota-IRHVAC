@@ -207,6 +207,15 @@ def replay_with_params(climate_ts, outdoor_ts, model_input_ts_list,
             if i < len(pi._inputs.values):
                 val = interpolate_at(mi_ts, current_epoch)
                 if val is not None:
+                    # delta_from_room: convert raw entity temp to delta
+                    m_input = pi._inputs.model_inputs[i] if i < len(pi._inputs.model_inputs) else {}
+                    if m_input.get("delta_from_room") and room_temp_c is not None:
+                        from homeassistant.util.unit_conversion import TemperatureConverter
+                        from homeassistant.const import UnitOfTemperature
+                        unit = pi._inputs._temp_units[i] or UnitOfTemperature.CELSIUS
+                        val = TemperatureConverter.convert(
+                            val, unit, UnitOfTemperature.CELSIUS
+                        ) - room_temp_c
                     pi._inputs.values[i] = val
 
         # Set timing for PI tick
