@@ -49,6 +49,7 @@ class PIExtraStoredData(ExtraStoredData):
     obs_buffer_purged_v2: bool = False
     hp_deadband_estimate_heat: float = 0.5
     hp_deadband_estimate_cool: float = 0.5
+    exclusion_count: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize to JSON-compatible dict."""
@@ -80,6 +81,7 @@ class PIExtraStoredData(ExtraStoredData):
             "obs_buffer_purged_v2": self.obs_buffer_purged_v2,
             "hp_deadband_estimate_heat": self.hp_deadband_estimate_heat,
             "hp_deadband_estimate_cool": self.hp_deadband_estimate_cool,
+            "exclusion_count": self.exclusion_count,
         }
 
     @classmethod
@@ -119,6 +121,7 @@ class PIExtraStoredData(ExtraStoredData):
                 obs_buffer_purged_v2=restored.get("obs_buffer_purged_v2", False),
                 hp_deadband_estimate_heat=float(restored.get("hp_deadband_estimate_heat", 0.5)),
                 hp_deadband_estimate_cool=float(restored.get("hp_deadband_estimate_cool", 0.5)),
+                exclusion_count=int(restored.get("exclusion_count", 0)),
             )
         except (KeyError, ValueError, TypeError, AttributeError):
             return None

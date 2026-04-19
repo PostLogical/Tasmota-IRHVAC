@@ -831,6 +831,7 @@ class PIController:
             obs_buffer_purged_v2=getattr(self, "_obs_buffer_purge_v2_done", False),
             hp_deadband_estimate_heat=self._hp_deadband_estimate_heat,
             hp_deadband_estimate_cool=self._hp_deadband_estimate_cool,
+            exclusion_count=self._exclusion_count,
         )
 
     def restore_extra_stored_data(self, data: PIExtraStoredData) -> None:
@@ -918,6 +919,9 @@ class PIController:
                 self._hp_deadband_estimate_heat,
                 self._hp_deadband_estimate_cool,
             )
+
+        # Restore anomaly exclusion count
+        self._exclusion_count = data.exclusion_count
 
         # Restore drift detection history
         if data.drift_correction_signs:
@@ -1407,6 +1411,26 @@ class PIController:
         for i in range(min(len(cool_beta), len(self._cool_seeds), self._rls_cool.n)):
             self._cool_seeds[i] = round(cool_beta[i], 4)
             self._rls_cool.beta_seed[i] = round(cool_beta[i], 4)
+
+    def exclude_observations_by_time(self, start: float, end: float) -> int:
+        """Exclude observations from both buffers by monotonic timestamp range.
+
+        Called by the anomaly repair flow when the user chooses to exclude
+        contaminated observations. Removes from both heat and cool buffers
+        since the anomaly affects the zone regardless of mode.
+
+        Returns total number of observations removed.
+        """
+        removed = 0
+        removed += self._observation_buffer_heat.exclude_time_range(start, end)
+        removed += self._observation_buffer_cool.exclude_time_range(start, end)
+        if removed:
+            self._exclusion_count += 1
+            _LOGGER.info(
+                "Excluded %d observations in time range [%.0f, %.0f]",
+                removed, start, end,
+            )
+        return removed
 
     @property
     def coeff_names(self) -> list[str]:

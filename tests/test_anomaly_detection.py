@@ -385,6 +385,182 @@ class TestCusumDetectionLatency:
         assert len(ctrl._anomaly_events) == 0
 
 
+# ── Buffer exclusion ─────────────────────────────────────────────────
+
+
+class TestBufferExclusion:
+    """Tests for DiversityAwareBuffer.exclude_time_range."""
+
+    def test_exclude_removes_matching_observations(self):
+        """Observations in time range are removed."""
+        from custom_components.tasmota_irhvac.pi.batch_learning import (
+            DiversityAwareBuffer, Observation,
+        )
+        buf = DiversityAwareBuffer(n_features=2, max_size=50)
+        for i in range(20):
+            buf.add(Observation(
+                timestamp=1000.0 + i * 60,
+                features=[1.0, float(i)],
+                hp_setpoint=22.0,
+                current_c=21.0,
+                desired_c=21.0,
+                room_rate=0.0,
+                clamped=False,
+            ))
+        assert len(buf) == 20
+
+        # Exclude observations 5-14 (timestamps 1300-1840)
+        removed = buf.exclude_time_range(1300.0, 1840.0)
+        assert removed == 10
+        assert len(buf) == 10
+
+        # Verify remaining timestamps are outside the range
+        for o in buf._buffer:
+            assert o.timestamp < 1300.0 or o.timestamp > 1840.0
+
+    def test_exclude_no_match(self):
+        """No-op when range doesn't match any observations."""
+        from custom_components.tasmota_irhvac.pi.batch_learning import (
+            DiversityAwareBuffer, Observation,
+        )
+        buf = DiversityAwareBuffer(n_features=2, max_size=50)
+        for i in range(10):
+            buf.add(Observation(
+                timestamp=1000.0 + i * 60,
+                features=[1.0, float(i)],
+                hp_setpoint=22.0,
+                current_c=21.0,
+                desired_c=21.0,
+                room_rate=0.0,
+                clamped=False,
+            ))
+
+        removed = buf.exclude_time_range(5000.0, 6000.0)
+        assert removed == 0
+        assert len(buf) == 10
+
+    def test_exclude_all_observations(self):
+        """Excluding all observations empties the buffer."""
+        from custom_components.tasmota_irhvac.pi.batch_learning import (
+            DiversityAwareBuffer, Observation,
+        )
+        buf = DiversityAwareBuffer(n_features=2, max_size=50)
+        for i in range(5):
+            buf.add(Observation(
+                timestamp=1000.0 + i * 60,
+                features=[1.0, float(i)],
+                hp_setpoint=22.0,
+                current_c=21.0,
+                desired_c=21.0,
+                room_rate=0.0,
+                clamped=False,
+            ))
+
+        removed = buf.exclude_time_range(0.0, 99999.0)
+        assert removed == 5
+        assert len(buf) == 0
+
+    def test_exclude_recomputes_info_matrix(self):
+        """Info matrix is recomputed after exclusion."""
+        from custom_components.tasmota_irhvac.pi.batch_learning import (
+            DiversityAwareBuffer, Observation,
+        )
+        buf = DiversityAwareBuffer(n_features=2, max_size=50)
+        for i in range(10):
+            buf.add(Observation(
+                timestamp=1000.0 + i * 60,
+                features=[1.0, float(i) * 0.5],
+                hp_setpoint=22.0,
+                current_c=21.0,
+                desired_c=21.0,
+                room_rate=0.0,
+                clamped=False,
+            ))
+
+        # Record info matrix state before
+        info_before = [row[:] for row in buf._info_inv]
+
+        buf.exclude_time_range(1300.0, 1600.0)
+
+        # Info matrix should have changed
+        info_after = buf._info_inv
+        assert info_before != info_after
+
+
+class TestPIControllerExclusion:
+    """Tests for PIController.exclude_observations_by_time."""
+
+    @pytest.mark.asyncio
+    async def test_exclude_increments_count(self, hass, setup_pi_integration):
+        """Exclusion increments _exclusion_count."""
+        from .conftest import get_climate_entity
+        from custom_components.tasmota_irhvac.pi.batch_learning import Observation
+
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        # Add observations to heat buffer
+        for i in range(10):
+            pi._observation_buffer_heat.add(Observation(
+                timestamp=1000.0 + i * 60,
+                features=[1.0, float(i)],
+                hp_setpoint=22.0,
+                current_c=21.0,
+                desired_c=21.0,
+                room_rate=0.0,
+                clamped=False,
+            ))
+
+        assert pi._exclusion_count == 0
+        removed = pi.exclude_observations_by_time(1300.0, 1600.0)
+        assert removed > 0
+        assert pi._exclusion_count == 1
+
+    @pytest.mark.asyncio
+    async def test_exclude_no_match_no_increment(self, hass, setup_pi_integration):
+        """No-op exclusion does not increment count."""
+        from .conftest import get_climate_entity
+
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        removed = pi.exclude_observations_by_time(99999.0, 99999.9)
+        assert removed == 0
+        assert pi._exclusion_count == 0
+
+
+class TestExclusionPersistence:
+    """Tests for exclusion_count persistence in PIStoredData."""
+
+    def test_exclusion_count_round_trip(self):
+        """exclusion_count survives serialize/deserialize."""
+        from custom_components.tasmota_irhvac.pi.pi_stored_data import PIExtraStoredData
+
+        data = PIExtraStoredData(
+            pi_integral=0.0,
+            desired_temp=21.0,
+            hp_setpoint=22.0,
+            exclusion_count=5,
+        )
+        d = data.as_dict()
+        assert d["exclusion_count"] == 5
+
+        restored = PIExtraStoredData.from_dict(d)
+        assert restored is not None
+        assert restored.exclusion_count == 5
+
+    def test_exclusion_count_defaults_to_zero(self):
+        """Missing exclusion_count in stored data defaults to 0."""
+        from custom_components.tasmota_irhvac.pi.pi_stored_data import PIExtraStoredData
+
+        d = {"pi_integral": 0.0, "desired_temp": 21.0, "hp_setpoint": 22.0}
+        restored = PIExtraStoredData.from_dict(d)
+        assert restored is not None
+        assert restored.exclusion_count == 0
+
+
 class TestAnomalyEventDataclass:
     """Basic AnomalyEvent tests."""
 

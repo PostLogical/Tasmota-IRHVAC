@@ -163,6 +163,24 @@ class DiversityAwareBuffer:
             self.recompute_info_matrix()
         return removed
 
+    def exclude_time_range(self, start: float, end: float) -> int:
+        """Remove observations within a monotonic timestamp range.
+
+        Used by anomaly detection to purge contaminated observations.
+        Same pattern as filter_inactive(): filter + recompute info matrix.
+
+        Returns number of observations removed.
+        """
+        before = len(self._buffer)
+        self._buffer = [
+            o for o in self._buffer
+            if o.timestamp < start or o.timestamp > end
+        ]
+        removed = before - len(self._buffer)
+        if removed:
+            self.recompute_info_matrix()
+        return removed
+
     def add(self, obs: Observation) -> None:
         """Add an observation, using leverage-scored eviction when full."""
         x = self._get_feature_vector(obs)
