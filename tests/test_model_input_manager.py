@@ -290,6 +290,179 @@ class TestDeltaFromRoom:
         assert abs(mgr.values[1] - 3.0) < 0.01  # Delta: 23 - 20
 
 
+GATED_INPUT = {
+    "name": "Hallway Convective",
+    "entity_id": "sensor.hallway_temp",
+    "seed_heat": 1.0,
+    "seed_cool": 0.0,
+    "lag_tau": 300,
+    "delta_from_room": True,
+    "gate_entity": "binary_sensor.bunkroom_door",
+    "gate_invert": False,
+}
+
+
+class TestGateEntity:
+    """Tests for gate_entity gating model input values."""
+
+    def test_gate_on_passes_value(self):
+        """When gate entity is on (active), value passes through."""
+        mgr = ModelInputManager(model_inputs=[GATED_INPUT], outdoor_temp_sensor=None)
+        mgr.set_temp_unit(0, "°C")
+
+        mgr.read_values(
+            {
+                "sensor.hallway_temp": ("22.0", True),
+                "binary_sensor.bunkroom_door": ("on", True),
+            },
+            room_temp_c=20.0,
+        )
+        # delta_from_room: 22 - 20 = 2.0, gate is on → value passes
+        assert abs(mgr.values[0] - 2.0) < 0.01
+
+    def test_gate_off_zeros_value(self):
+        """When gate entity is off (inactive), value forced to zero."""
+        mgr = ModelInputManager(model_inputs=[GATED_INPUT], outdoor_temp_sensor=None)
+        mgr.set_temp_unit(0, "°C")
+
+        mgr.read_values(
+            {
+                "sensor.hallway_temp": ("22.0", True),
+                "binary_sensor.bunkroom_door": ("off", True),
+            },
+            room_temp_c=20.0,
+        )
+        assert mgr.values[0] == 0.0
+
+    def test_gate_invert_on_zeros_value(self):
+        """With gate_invert=True, gate ON forces value to zero."""
+        m_input = {**GATED_INPUT, "gate_invert": True}
+        mgr = ModelInputManager(model_inputs=[m_input], outdoor_temp_sensor=None)
+        mgr.set_temp_unit(0, "°C")
+
+        mgr.read_values(
+            {
+                "sensor.hallway_temp": ("22.0", True),
+                "binary_sensor.bunkroom_door": ("on", True),
+            },
+            room_temp_c=20.0,
+        )
+        assert mgr.values[0] == 0.0
+
+    def test_gate_invert_off_passes_value(self):
+        """With gate_invert=True, gate OFF passes value through."""
+        m_input = {**GATED_INPUT, "gate_invert": True}
+        mgr = ModelInputManager(model_inputs=[m_input], outdoor_temp_sensor=None)
+        mgr.set_temp_unit(0, "°C")
+
+        mgr.read_values(
+            {
+                "sensor.hallway_temp": ("22.0", True),
+                "binary_sensor.bunkroom_door": ("off", True),
+            },
+            room_temp_c=20.0,
+        )
+        assert abs(mgr.values[0] - 2.0) < 0.01
+
+    def test_gate_unavailable_keeps_last_value(self):
+        """Unavailable gate entity keeps last value (doesn't zero)."""
+        mgr = ModelInputManager(model_inputs=[GATED_INPUT], outdoor_temp_sensor=None)
+        mgr.set_temp_unit(0, "°C")
+
+        # First read: gate on, value set
+        mgr.read_values(
+            {
+                "sensor.hallway_temp": ("22.0", True),
+                "binary_sensor.bunkroom_door": ("on", True),
+            },
+            room_temp_c=20.0,
+        )
+        assert abs(mgr.values[0] - 2.0) < 0.01
+
+        # Second read: gate unavailable, keeps 2.0
+        mgr.read_values(
+            {
+                "sensor.hallway_temp": ("22.0", True),
+                "binary_sensor.bunkroom_door": ("", False),
+            },
+            room_temp_c=20.0,
+        )
+        assert abs(mgr.values[0] - 2.0) < 0.01
+
+    def test_gate_missing_from_states_keeps_last_value(self):
+        """Gate entity not in states dict keeps last value."""
+        mgr = ModelInputManager(model_inputs=[GATED_INPUT], outdoor_temp_sensor=None)
+        mgr.values[0] = 1.5
+
+        mgr.read_values(
+            {"sensor.hallway_temp": ("22.0", True)},
+            room_temp_c=20.0,
+        )
+        # Gate entity missing → keeps value (delta was recomputed but gate
+        # unavailable path preserves it)
+        # Actually the value gets recomputed from delta, but gate missing
+        # means we keep whatever was computed — let's check the actual behavior
+        # The delta is computed (22-20=2), then gate is missing → keep value
+        assert abs(mgr.values[0] - 2.0) < 0.01
+
+    def test_no_gate_entity_passes_value(self):
+        """Input without gate_entity is unaffected."""
+        mgr = ModelInputManager(model_inputs=[STOVE_INPUT], outdoor_temp_sensor=None)
+        mgr.read_values({"input_boolean.stove": ("on", True)})
+        assert mgr.values[0] == 1.0
+
+    def test_gate_with_numeric_input_no_delta(self):
+        """Gate works on numeric (non-delta) inputs too."""
+        m_input = {
+            "name": "Solar Gated",
+            "entity_id": "sensor.solar_proxy",
+            "seed_heat": -2.0,
+            "seed_cool": 0.0,
+            "lag_tau": 0,
+            "gate_entity": "input_boolean.solar_gate",
+            "gate_invert": False,
+        }
+        mgr = ModelInputManager(model_inputs=[m_input], outdoor_temp_sensor=None)
+
+        # Gate off → zero
+        mgr.read_values(
+            {
+                "sensor.solar_proxy": ("0.7", True),
+                "input_boolean.solar_gate": ("off", True),
+            },
+        )
+        assert mgr.values[0] == 0.0
+
+        # Gate on → passes
+        mgr.read_values(
+            {
+                "sensor.solar_proxy": ("0.7", True),
+                "input_boolean.solar_gate": ("on", True),
+            },
+        )
+        assert mgr.values[0] == 0.7
+
+    def test_mixed_gated_and_ungated(self):
+        """Gated and ungated inputs coexist correctly."""
+        ungated = {**STOVE_INPUT}
+        gated = {**GATED_INPUT}
+        mgr = ModelInputManager(
+            model_inputs=[ungated, gated], outdoor_temp_sensor=None
+        )
+        mgr.set_temp_unit(1, "°C")
+
+        mgr.read_values(
+            {
+                "input_boolean.stove": ("on", True),
+                "sensor.hallway_temp": ("22.0", True),
+                "binary_sensor.bunkroom_door": ("off", True),
+            },
+            room_temp_c=20.0,
+        )
+        assert mgr.values[0] == 1.0  # Ungated stove: on
+        assert mgr.values[1] == 0.0  # Gated door closed: zeroed
+
+
 class TestPersistence:
     """Tests for lag state save/restore."""
 

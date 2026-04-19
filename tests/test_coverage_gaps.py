@@ -3397,6 +3397,84 @@ class TestModelInputSubentryDuplicate:
         assert result["type"] == FlowResultType.ABORT
         assert result["reason"] == "already_configured"
 
+    @pytest.mark.asyncio
+    async def test_same_entity_different_gate_allowed(self, hass, setup_integration):
+        """Same entity_id with different gate_entity should be allowed."""
+        entry = await setup_integration()
+
+        # Add first model input (ungated)
+        result = await hass.config_entries.subentries.async_init(
+            (entry.entry_id, "model_input"),
+            context={"source": "user"},
+        )
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            user_input={
+                "name": "Hallway Conductive",
+                "entity_id": "sensor.hallway_temp",
+                "seed_heat": 0.5,
+                "seed_cool": 0.0,
+            },
+        )
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+
+        # Add second with same entity_id but different gate
+        result = await hass.config_entries.subentries.async_init(
+            (entry.entry_id, "model_input"),
+            context={"source": "user"},
+        )
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            user_input={
+                "name": "Hallway Convective",
+                "entity_id": "sensor.hallway_temp",
+                "seed_heat": 2.0,
+                "seed_cool": 0.0,
+                "gate_entity": "binary_sensor.bunkroom_door",
+            },
+        )
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+
+    @pytest.mark.asyncio
+    async def test_same_entity_same_gate_blocked(self, hass, setup_integration):
+        """Same entity_id AND same gate_entity should still be blocked."""
+        entry = await setup_integration()
+
+        # Add first model input with gate
+        result = await hass.config_entries.subentries.async_init(
+            (entry.entry_id, "model_input"),
+            context={"source": "user"},
+        )
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            user_input={
+                "name": "Hallway Convective",
+                "entity_id": "sensor.hallway_temp",
+                "seed_heat": 2.0,
+                "seed_cool": 0.0,
+                "gate_entity": "binary_sensor.bunkroom_door",
+            },
+        )
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+
+        # Try duplicate with same entity_id AND same gate
+        result = await hass.config_entries.subentries.async_init(
+            (entry.entry_id, "model_input"),
+            context={"source": "user"},
+        )
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            user_input={
+                "name": "Hallway Convective Again",
+                "entity_id": "sensor.hallway_temp",
+                "seed_heat": 1.0,
+                "seed_cool": 0.0,
+                "gate_entity": "binary_sensor.bunkroom_door",
+            },
+        )
+        assert result["type"] == FlowResultType.ABORT
+        assert result["reason"] == "already_configured"
+
 
 # ── config_flow.py: model input reconfigure (lines 1195-1206) ────────
 

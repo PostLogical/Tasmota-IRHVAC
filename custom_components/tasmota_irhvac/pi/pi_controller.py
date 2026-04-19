@@ -492,14 +492,19 @@ class PIController:
                 unit = outdoor_state.attributes.get("unit_of_measurement", UnitOfTemperature.CELSIUS)
                 self._inputs.update_outdoor_temp(outdoor_state.state, unit)
 
-        # Register model input entities
+        # Register model input entities (including gate entities)
         model_entity_ids = [
             m["entity_id"] for m in self._model_inputs if m.get("entity_id")
         ]
-        if model_entity_ids:
+        gate_entity_ids = [
+            m["gate_entity"] for m in self._model_inputs
+            if m.get("gate_entity") and m["gate_entity"] not in model_entity_ids
+        ]
+        track_ids = model_entity_ids + gate_entity_ids
+        if track_ids:
             async_track_state_change_event(
                 self._hass,
-                model_entity_ids,
+                track_ids,
                 self._async_model_input_changed,
             )
         # Cache temperature units for delta_from_room inputs.
@@ -2218,17 +2223,18 @@ class PIController:
     # ── PI Internals ──────────────────────────────────────────────────
 
     def _resolve_model_input_states(self) -> dict[str, tuple[str, bool]]:
-        """Resolve all model input entity states from HA for ModelInputManager."""
+        """Resolve all model input and gate entity states from HA."""
         states: dict[str, tuple[str, bool]] = {}
         for m_input in self._model_inputs:
-            entity_id = m_input.get("entity_id", "")
-            if not entity_id:
-                continue
-            state = self._hass.states.get(entity_id)
-            if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
-                states[entity_id] = ("", False)
-            else:
-                states[entity_id] = (state.state, True)
+            for key in ("entity_id", "gate_entity"):
+                eid = m_input.get(key, "")
+                if not eid or eid in states:
+                    continue
+                state = self._hass.states.get(eid)
+                if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+                    states[eid] = ("", False)
+                else:
+                    states[eid] = (state.state, True)
         return states
 
     def _read_model_input_values(self, room_temp_c: float | None = None) -> None:

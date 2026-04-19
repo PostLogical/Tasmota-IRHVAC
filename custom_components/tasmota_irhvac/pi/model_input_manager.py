@@ -80,6 +80,7 @@ class ModelInputManager:
         Args:
             entity_states: Map of entity_id → (state_string, is_available).
                 PIController resolves these from hass.states before calling.
+                Also includes gate entity states when gate_entity is configured.
             room_temp_c: Current room temperature in °C.  Required for
                 delta_from_room inputs — the stored value becomes
                 (entity_temp_c − room_temp_c).
@@ -107,6 +108,25 @@ class ModelInputManager:
                     self.values[i], unit, UnitOfTemperature.CELSIUS
                 )
                 self.values[i] = entity_temp_c - room_temp_c
+
+            # Gate: force value to zero when gate entity is inactive (or
+            # active if inverted).  Gate check runs after delta_from_room so
+            # the computed delta is what gets zeroed, not the raw temperature.
+            gate_id = m_input.get("gate_entity", "")
+            if gate_id:
+                if gate_id not in entity_states or not entity_states[gate_id][1]:
+                    # Gate entity unavailable — keep last value (don't zero).
+                    _LOGGER.debug(
+                        "Gate entity '%s' for input '%s' unavailable, keeping value",
+                        gate_id, m_input.get("name", "?"),
+                    )
+                else:
+                    gate_state = entity_states[gate_id][0]
+                    gate_active = gate_state in _ACTIVE_STATES
+                    gate_invert = m_input.get("gate_invert", False)
+                    gate_open = gate_active != gate_invert
+                    if not gate_open:
+                        self.values[i] = 0.0
 
     def any_unavailable(
         self,

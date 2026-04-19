@@ -1219,18 +1219,22 @@ class ModelInputSubentryFlow(ConfigSubentryFlow):
         """Add a new model input."""
         if user_input is not None:
             entity_id = user_input.get("entity_id", "")
-            # Check for duplicate entity_id across model input subentries
+            gate_entity = user_input.get("gate_entity", "")
+            # Unique ID includes gate_entity so the same sensor can have
+            # multiple model inputs with different gates (e.g., conductive
+            # vs convective paths from same temp sensor).
+            unique_id = f"{entity_id}|{gate_entity}" if gate_entity else entity_id
             entry = self._get_entry()
             for sub in entry.subentries.values():
                 if (sub.subentry_type == SUBENTRY_MODEL_INPUT
-                        and sub.unique_id == entity_id):
+                        and sub.unique_id == unique_id):
                     return self.async_abort(reason="already_configured")
             # Seeds and clamps are always in °C — no conversion needed.
             # They represent HP setpoint adjustments, not temperatures.
             return self.async_create_entry(
                 title=user_input.get("name", "Model Input"),
                 data=user_input,
-                unique_id=entity_id,
+                unique_id=unique_id,
             )
 
         return self.async_show_form(
@@ -1261,6 +1265,10 @@ class ModelInputSubentryFlow(ConfigSubentryFlow):
                     vol.Optional("typical_value", default=0.5): NumberSelector(
                         NumberSelectorConfig(min=0.01, max=100, step=0.01, mode=NumberSelectorMode.BOX)
                     ),
+                    vol.Optional("gate_entity"): EntitySelector(
+                        EntitySelectorConfig(domain=["binary_sensor", "input_boolean", "switch"])
+                    ),
+                    vol.Optional("gate_invert", default=False): BooleanSelector(),
                 }
             ),
         )
@@ -1309,6 +1317,10 @@ class ModelInputSubentryFlow(ConfigSubentryFlow):
                         vol.Optional("typical_value", default=0.5): NumberSelector(
                             NumberSelectorConfig(min=0.01, max=100, step=0.01, mode=NumberSelectorMode.BOX)
                         ),
+                        vol.Optional("gate_entity"): EntitySelector(
+                            EntitySelectorConfig(domain=["binary_sensor", "input_boolean", "switch"])
+                        ),
+                        vol.Optional("gate_invert", default=False): BooleanSelector(),
                     }
                 ),
                 dict(subentry.data),
