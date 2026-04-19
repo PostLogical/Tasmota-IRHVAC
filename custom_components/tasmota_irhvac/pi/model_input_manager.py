@@ -206,6 +206,50 @@ class ModelInputManager:
         """Mark auto-scales as committed (one-shot)."""
         self._scale_committed = True
 
+    def maybe_update_scales(
+        self,
+        outdoor_delta: float,
+        current_scales: list[float],
+        rls_models: list[Any],
+        log_prefix: str = "",
+    ) -> list[float] | None:
+        """Accumulate scale data, and if ready, compute and apply new scales.
+
+        Encapsulates the full auto-scale lifecycle: accumulate → check
+        readiness → compute → apply similarity transform → commit.
+
+        Args:
+            outdoor_delta: Current outdoor delta value.
+            current_scales: The current feature_scales list.
+            rls_models: List of RLSModel instances to rescale (heat, cool).
+            log_prefix: Logging prefix for the zone.
+
+        Returns:
+            New scales list if scales were updated, None otherwise.
+        """
+        self.accumulate_scales(outdoor_delta)
+        if not self.auto_scales_ready():
+            return None
+
+        new_scales = self.get_auto_scales()
+        old_scales = list(current_scales)
+        changed = any(
+            abs(new_scales[i] - old_scales[i]) > 1e-6
+            for i in range(len(new_scales))
+        )
+        if changed:
+            _LOGGER.info(
+                "%sAuto-computed feature scales: %s → %s",
+                log_prefix,
+                [f"{s:.2f}" for s in old_scales],
+                [f"{s:.2f}" for s in new_scales],
+            )
+            for rls in rls_models:
+                rls.feature_scales = list(new_scales)
+                rls.rescale_features(old_scales)
+        self.commit_auto_scales()
+        return new_scales if changed else None
+
     def get_lag_states(self) -> dict[str, float]:
         """Get current lag filter states for persistence."""
         return {
