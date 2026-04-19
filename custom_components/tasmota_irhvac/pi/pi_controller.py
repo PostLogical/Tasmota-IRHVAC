@@ -370,6 +370,16 @@ class PIController:
         # Conditional integration freeze: track state for edge-triggered logging.
         self._integration_frozen: bool = False
 
+        # HP thermostat deadband learning: the HP's internal thermostat has
+        # its own hysteresis, so the compressor may still cycle even when
+        # hp_setpoint is slightly below room temp (heating) or above (cooling).
+        # We learn the effective deadband width from rate-based observations
+        # and use it as a fast-path margin for integration freeze decisions.
+        # Separate estimates per mode — asymmetric compressor cycling logic.
+        self._hp_deadband_estimate_heat: float = 0.5
+        self._hp_deadband_estimate_cool: float = 0.5
+        self._hp_no_output_ticks: int = 0
+
         # Drift detection: per-coefficient history of batch correction signs.
         # Each entry is +1 (batch pushed up), -1 (batch pushed down), or 0.
         # Tracked across batch cycles to detect persistent same-direction
@@ -795,6 +805,8 @@ class PIController:
                 "had_stable_batch": self._has_had_stable_batch,
             },
             obs_buffer_purged_v2=getattr(self, "_obs_buffer_purge_v2_done", False),
+            hp_deadband_estimate_heat=self._hp_deadband_estimate_heat,
+            hp_deadband_estimate_cool=self._hp_deadband_estimate_cool,
         )
 
     def restore_extra_stored_data(self, data: PIExtraStoredData) -> None:
@@ -871,6 +883,17 @@ class PIController:
                     self._log_prefix, n_heat, n_cool,
                 )
             self._obs_buffer_purge_v2_done = True
+
+        # Restore learned HP thermostat deadband estimates
+        self._hp_deadband_estimate_heat = data.hp_deadband_estimate_heat
+        self._hp_deadband_estimate_cool = data.hp_deadband_estimate_cool
+        if self._hp_deadband_estimate_heat > 0 or self._hp_deadband_estimate_cool > 0:
+            _LOGGER.debug(
+                "%sRestored HP deadband estimates: heat=%.2f°C, cool=%.2f°C",
+                self._log_prefix,
+                self._hp_deadband_estimate_heat,
+                self._hp_deadband_estimate_cool,
+            )
 
         # Restore drift detection history
         if data.drift_correction_signs:
@@ -1404,11 +1427,26 @@ class PIController:
         return rls.frozen[index]
 
     def set_frozen(self, mode: str, index: int, frozen: bool) -> None:
-        """Set freeze state for a coefficient."""
+        """Set freeze state for a coefficient.
+
+        When freezing, snapshots the current batch residual RMS so
+        check_freeze_impact_repair can detect degradation.
+        """
         rls = self._rls_for_mode(mode)
         if index >= rls.n:
             return
         rls.frozen[index] = frozen
+        snapshot_key = f"freeze_rms_{mode}_{index}"
+        counter_key = f"freeze_impact_{mode}_{index}"
+        if frozen:
+            # Snapshot current batch RMS for later comparison
+            current_rms = self._metrics.batch_model_rms
+            if current_rms is not None:
+                self._tuning_alert_counters[snapshot_key] = current_rms
+        else:
+            # Clear snapshot and sustained counter on unfreeze
+            self._tuning_alert_counters.pop(snapshot_key, None)
+            self._tuning_alert_counters.pop(counter_key, None)
         name = self._coeff_names()[index] if index < len(self._coeff_names()) else f"β{index}"
         _LOGGER.info(
             "Coefficient %s[%d] %s (%s mode)",
@@ -1457,6 +1495,7 @@ class PIController:
         from .health_checks import (
             check_batch_online_disagreement_repair,
             check_covariance_collapse_repair,
+            check_freeze_impact_repair,
             check_high_integral_repair,
             check_intercept_absorbing_repair,
             check_model_drift_repair,
@@ -1771,6 +1810,49 @@ class PIController:
                     placeholders,
                     should_create,
                 ))
+
+        # ── Freeze impact (RMS degradation) ────────────────────────
+        current_rms = self._metrics.batch_model_rms
+        if current_rms is not None:
+            coeff_names = self._coeff_names()
+            for mode_label, rls_model in [
+                ("heat", self._rls_heat),
+                ("cool", self._rls_cool),
+            ]:
+                if rls_model.observation_count == 0:
+                    continue
+                for i in range(rls_model.n):
+                    if not rls_model.frozen[i]:
+                        continue
+                    snapshot_key = f"freeze_rms_{mode_label}_{i}"
+                    rms_at_freeze = self._tuning_alert_counters.get(snapshot_key)
+                    if rms_at_freeze is None or not isinstance(rms_at_freeze, (int, float)):
+                        continue
+                    counter_key = f"freeze_impact_{mode_label}_{i}"
+                    increase_pct = ((current_rms - rms_at_freeze) / rms_at_freeze) * 100.0 if rms_at_freeze > 0 else 0.0
+                    if increase_pct > 20.0:
+                        self._tuning_alert_counters[counter_key] = self._tuning_alert_counters.get(counter_key, 0) + 1
+                    elif increase_pct < 5.0:
+                        self._tuning_alert_counters[counter_key] = 0
+                    # else: hysteresis band, don't change counter
+
+                    name = coeff_names[i] if i < len(coeff_names) else f"coeff_{i}"
+                    result = check_freeze_impact_repair(
+                        coeff_name=name,
+                        mode=mode_label,
+                        rms_at_freeze=float(rms_at_freeze),
+                        current_rms=current_rms,
+                        sustained_cycles=self._tuning_alert_counters.get(counter_key, 0),
+                    )
+                    if result is not None:
+                        key, placeholders, should_create = result
+                        issues.append((
+                            f"{key}_{entry_id}_{mode_label}_{name}",
+                            "warning",
+                            key,
+                            placeholders,
+                            should_create,
+                        ))
 
         return issues
 
@@ -2457,10 +2539,105 @@ class PIController:
             (is_heating and self._hp_setpoint < current_c)
             or (is_cooling and self._hp_setpoint > current_c)
         )
+
+        # HP thermostat deadband override: the HP's internal thermostat
+        # has its own hysteresis, so the compressor may still cycle even
+        # when hp_setpoint is slightly below room temp (heating).  We use
+        # a learned deadband estimate as a fast-path margin, plus a rate-
+        # based fallback to detect cycling beyond the learned range.
+        #
+        # hp_no_output stays strict for learning/batch gates — only
+        # skip_integration gets the override.
+        if hp_no_output:
+            self._hp_no_output_ticks += 1
+        else:
+            self._hp_no_output_ticks = 0
+
+        deadband_margin = (
+            self._hp_deadband_estimate_heat if is_heating
+            else self._hp_deadband_estimate_cool
+        )
+        delta = abs(current_c - self._hp_setpoint)
+
+        # Fast path: delta within learned deadband — HP likely still cycling.
+        override_learned = hp_no_output and delta <= deadband_margin
+
+        # Slow path: rate-based inference.  After 10 ticks (~10 min) of
+        # hp_no_output, if the room isn't cooling (heating) or warming
+        # (cooling), the HP must still be producing output despite our
+        # prediction.  Updates the learned estimate.
+        _OVERRIDE_TICKS = 10
+        override_rate = (
+            hp_no_output
+            and not override_learned
+            and self._hp_no_output_ticks >= _OVERRIDE_TICKS
+            and (
+                (is_heating and self._room_temp_rate >= 0.0)
+                or (is_cooling and self._room_temp_rate <= 0.0)
+            )
+        )
+        # Downward learning: HP confirmed off at this delta (room moving
+        # in the expected passive direction).  If delta < current estimate,
+        # the estimate was too generous — shrink it.  This fires even when
+        # delta is within the learned deadband (override_learned=True),
+        # because room cooling within the estimate is evidence the estimate
+        # is too high (sensor miscalibration, unit serviced, etc.).
+        confirmed_off = (
+            hp_no_output
+            and self._hp_no_output_ticks >= _OVERRIDE_TICKS
+            and (
+                (is_heating and self._room_temp_rate < 0.0)
+                or (is_cooling and self._room_temp_rate > 0.0)
+            )
+        )
+        if confirmed_off and delta < deadband_margin:
+            if is_heating:
+                _LOGGER.info(
+                    "%sHP deadband narrowed (heat): %.2f°C → %.2f°C "
+                    "(setpoint=%d°C, room=%.1f°C, rate=%.4f)",
+                    self._log_prefix,
+                    self._hp_deadband_estimate_heat, delta,
+                    self._hp_setpoint, current_c, self._room_temp_rate,
+                )
+                self._hp_deadband_estimate_heat = delta
+            else:
+                _LOGGER.info(
+                    "%sHP deadband narrowed (cool): %.2f°C → %.2f°C "
+                    "(setpoint=%d°C, room=%.1f°C, rate=%.4f)",
+                    self._log_prefix,
+                    self._hp_deadband_estimate_cool, delta,
+                    self._hp_setpoint, current_c, self._room_temp_rate,
+                )
+                self._hp_deadband_estimate_cool = delta
+
+        if override_rate:
+            # Learn: HP is cycling at this delta — grow estimate.
+            if is_heating:
+                if delta > self._hp_deadband_estimate_heat:
+                    _LOGGER.info(
+                        "%sHP deadband widened (heat): %.2f°C → %.2f°C "
+                        "(setpoint=%d°C, room=%.1f°C, rate=%.4f)",
+                        self._log_prefix,
+                        self._hp_deadband_estimate_heat, delta,
+                        self._hp_setpoint, current_c, self._room_temp_rate,
+                    )
+                    self._hp_deadband_estimate_heat = delta
+            elif delta > self._hp_deadband_estimate_cool:
+                _LOGGER.info(
+                    "%sHP deadband widened (cool): %.2f°C → %.2f°C "
+                    "(setpoint=%d°C, room=%.1f°C, rate=%.4f)",
+                    self._log_prefix,
+                    self._hp_deadband_estimate_cool, delta,
+                    self._hp_setpoint, current_c, self._room_temp_rate,
+                )
+                self._hp_deadband_estimate_cool = delta
+
+        override_freeze = override_learned or override_rate
+
         skip_integration = (
             (is_heating and self._hp_setpoint <= self._min_temp_c and error < 0)
             or (is_cooling and self._hp_setpoint >= self._max_temp_c and error > 0)
-            or hp_no_output
+            or (hp_no_output and not override_freeze)
         )
 
         # Log transitions into/out of conditional integration freeze.
@@ -2468,8 +2645,10 @@ class PIController:
             if hp_no_output:
                 _LOGGER.debug(
                     "%sIntegration frozen: HP no output "
-                    "(setpoint=%d°C, room=%.1f°C), error=%.2f°C",
-                    self._log_prefix, self._hp_setpoint, current_c, error,
+                    "(setpoint=%d°C, room=%.1f°C, delta=%.2f°C, "
+                    "deadband_est=%.2f°C), error=%.2f°C",
+                    self._log_prefix, self._hp_setpoint, current_c,
+                    delta, deadband_margin, error,
                 )
             else:
                 _LOGGER.debug(
@@ -2480,10 +2659,20 @@ class PIController:
                     error,
                 )
         elif not skip_integration and self._integration_frozen:
-            _LOGGER.debug(
-                "%sIntegration unfrozen: error=%.2f°C, setpoint=%.1f°C",
-                self._log_prefix, error, self._hp_setpoint,
-            )
+            if override_freeze:
+                _LOGGER.debug(
+                    "%sIntegration unfrozen: HP deadband override "
+                    "(%s, delta=%.2f°C, est=%.2f°C, ticks=%d, rate=%.4f)",
+                    self._log_prefix,
+                    "learned" if override_learned else "rate",
+                    delta, deadband_margin,
+                    self._hp_no_output_ticks, self._room_temp_rate,
+                )
+            else:
+                _LOGGER.debug(
+                    "%sIntegration unfrozen: error=%.2f°C, setpoint=%.1f°C",
+                    self._log_prefix, error, self._hp_setpoint,
+                )
         self._integration_frozen = skip_integration
 
         if in_deadband:

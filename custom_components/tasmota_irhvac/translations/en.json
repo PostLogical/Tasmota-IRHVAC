@@ -573,6 +573,10 @@
     "multicollinearity": {
       "title": "Highly correlated model inputs",
       "description": "The information matrix condition number is {condition_number}, indicating multicollinearity. Correlated features: {pairs}. The system cannot reliably separate their effects, which may cause unstable coefficient estimates. Consider removing one of the correlated inputs, or wait for conditions where they vary independently."
+    },
+    "freeze_impact": {
+      "title": "Frozen coefficient {coeff_name} is degrading model fit",
+      "description": "Since freezing {coeff_name} ({mode} mode), batch residual RMS has increased from {rms_at_freeze} to {current_rms} (+{increase_pct}%). The model may need this coefficient to track a real change. Consider unfreezing it, or updating its value with the set_coefficient service and saving seeds."
     }
   },
   "config_subentries": {

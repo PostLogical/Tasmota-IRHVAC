@@ -47,6 +47,8 @@ class PIExtraStoredData(ExtraStoredData):
     last_batch_result: dict | None = None
     tuning_alert_counters: dict = dataclasses.field(default_factory=dict)
     obs_buffer_purged_v2: bool = False
+    hp_deadband_estimate_heat: float = 0.5
+    hp_deadband_estimate_cool: float = 0.5
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize to JSON-compatible dict."""
@@ -76,6 +78,8 @@ class PIExtraStoredData(ExtraStoredData):
             "last_batch_result": self.last_batch_result,
             "tuning_alert_counters": self.tuning_alert_counters,
             "obs_buffer_purged_v2": self.obs_buffer_purged_v2,
+            "hp_deadband_estimate_heat": self.hp_deadband_estimate_heat,
+            "hp_deadband_estimate_cool": self.hp_deadband_estimate_cool,
         }
 
     @classmethod
@@ -113,6 +117,8 @@ class PIExtraStoredData(ExtraStoredData):
                 last_batch_result=restored.get("last_batch_result"),
                 tuning_alert_counters=restored.get("tuning_alert_counters", {}),
                 obs_buffer_purged_v2=restored.get("obs_buffer_purged_v2", False),
+                hp_deadband_estimate_heat=float(restored.get("hp_deadband_estimate_heat", 0.5)),
+                hp_deadband_estimate_cool=float(restored.get("hp_deadband_estimate_cool", 0.5)),
             )
         except (KeyError, ValueError, TypeError, AttributeError):
             return None

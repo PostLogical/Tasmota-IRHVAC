@@ -3039,7 +3039,11 @@ class TestOneSidedAntiWindup:
 
     @pytest.mark.asyncio
     async def test_heat_mode_negative_error_hp_no_output_freezes(self, pi_entity):
-        """In heat mode with room above HP setpoint → hp_no_output → integral frozen."""
+        """In heat mode with room above HP setpoint → hp_no_output → integral frozen.
+
+        Room temp declines slowly (HP truly off, passive cooling) so the
+        rate-based deadband override does not fire.
+        """
         pi_entity._attr_hvac_mode = HVACMode.HEAT
         pi_entity._attr_current_temperature = 24.0  # °C, well above target AND setpoint
         pi_entity._pi._desired_temp = 22.0  # error = -2.0°C
@@ -3047,6 +3051,8 @@ class TestOneSidedAntiWindup:
         pi_entity._pi._pi_integral = 0.0
 
         for i in range(10):
+            # Room cools slowly — HP is truly off.
+            pi_entity._attr_current_temperature = 24.0 - i * 0.02
             pi_entity._pi._pi_last_tick_time = float(i * 900)
             with patch("time.monotonic", return_value=float((i + 1) * 900)):
                 await pi_entity._pi._pi_tick()
@@ -3097,7 +3103,11 @@ class TestOneSidedAntiWindup:
 
     @pytest.mark.asyncio
     async def test_cool_mode_positive_error_hp_no_output_freezes(self, pi_entity):
-        """In cool mode with setpoint > room → hp_no_output → integral frozen."""
+        """In cool mode with setpoint > room → hp_no_output → integral frozen.
+
+        Room temp rises slowly (HP cooling truly off, passive warming) so
+        the rate-based deadband override does not fire.
+        """
         pi_entity._attr_hvac_mode = HVACMode.COOL
         pi_entity._attr_current_temperature = 20.0  # °C, below target AND setpoint
         pi_entity._pi._desired_temp = 22.0  # error = +2.0°C
@@ -3105,6 +3115,8 @@ class TestOneSidedAntiWindup:
         pi_entity._pi._pi_integral = 0.0
 
         for i in range(10):
+            # Room warms slowly — HP cooling is truly off.
+            pi_entity._attr_current_temperature = 20.0 + i * 0.02
             pi_entity._pi._pi_last_tick_time = float(i * 900)
             with patch("time.monotonic", return_value=float((i + 1) * 900)):
                 await pi_entity._pi._pi_tick()
@@ -3499,7 +3511,11 @@ class TestHPNoOutput:
 
     @pytest.mark.asyncio
     async def test_long_no_output_integral_bounded(self):
-        """48 ticks (~12h) of HP-no-output should not wind integral."""
+        """48 ticks (~12h) of HP-no-output should not wind integral.
+
+        Room temp declines slowly (HP truly off, passive cooling) so the
+        rate-based deadband override does not fire.
+        """
         config = make_pi_config()
         entity = FakePIEntity(config)
         pi = entity._pi
@@ -3511,6 +3527,8 @@ class TestHPNoOutput:
 
         integral_start = pi._pi_integral
         for i in range(48):
+            # Room cools slowly — HP is truly off.
+            entity._attr_current_temperature = 24.0 - i * 0.02
             pi._pi_last_tick_time = float(i * 900)
             with patch("time.monotonic", return_value=float((i + 1) * 900)):
                 await pi._pi_tick()
@@ -3683,6 +3701,457 @@ class TestHPNoOutput:
         freeze_msgs = [r for r in caplog.records if "HP no output" in r.message]
         assert len(freeze_msgs) >= 1, (
             "Should log 'HP no output' when setpoint < room (not 'at min limit')"
+        )
+
+
+class TestHPDeadbandLearning:
+    """Tests for HP thermostat deadband learning and integration override.
+
+    The HP's internal thermostat has its own hysteresis, so the compressor
+    may still cycle even when hp_setpoint is slightly below room temp
+    (heating).  The controller learns this deadband bidirectionally:
+
+    - Default estimate starts at 0.5°C (reasonable for most mini-splits).
+    - Grows when rate-based override confirms HP cycling at a wider delta.
+    - Shrinks when rate confirms HP truly off at a narrower delta.
+
+    Separate estimates per mode (heat/cool).  hp_no_output stays strict
+    for RLS/batch gating — only integration freeze gets the override.
+    """
+
+    # ── Default estimate ──────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_default_estimate_is_half_degree(self):
+        """Fresh controller should start with 0.5°C deadband estimate."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        assert pi._hp_deadband_estimate_heat == 0.5
+        assert pi._hp_deadband_estimate_cool == 0.5
+
+    @pytest.mark.asyncio
+    async def test_default_provides_immediate_override_within_half_degree(self):
+        """Delta 0.3°C < default 0.5°C → integration unfreezes on first tick."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 21  # delta = 0.3°C below room
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 21.3
+        pi._pi_integral = -1.0
+
+        await pi._pi_tick()
+
+        assert pi._integration_frozen is False, (
+            "Default 0.5°C estimate should provide immediate override at 0.3°C delta"
+        )
+
+    # ── Upward learning (HP cycling at wider delta than estimate) ─────
+
+    @pytest.mark.asyncio
+    async def test_rate_override_fires_when_room_not_cooling(self):
+        """After 10 ticks of hp_no_output with room_rate >= 0, override unfreezes."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 21  # 0.7°C below room → hp_no_output
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 21.7
+        pi._pi_integral = -1.4
+
+        # Run 15 ticks with stable room temp (HP still cycling).
+        for i in range(15):
+            pi._pi_last_tick_time = float(i * 60)
+            with patch("time.monotonic", return_value=float((i + 1) * 60)):
+                await pi._pi_tick()
+
+        # After 10+ ticks with rate ≈ 0, override should have fired.
+        assert pi._integration_frozen is False, (
+            "Integration should be unfrozen by rate-based override"
+        )
+        # Integral should have wound (negative error: 21.0 - 21.7 = -0.7).
+        assert pi._pi_integral < -1.4, (
+            f"Integral should wind during override, got {pi._pi_integral}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_rate_override_grows_estimate(self):
+        """Rate override at wider delta should increase the estimate."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 21  # delta ≈ 0.7°C, above default 0.5
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 21.7
+        pi._pi_integral = -1.0
+
+        est_before = pi._hp_deadband_estimate_heat
+        assert est_before == 0.5
+
+        for i in range(12):
+            pi._pi_last_tick_time = float(i * 60)
+            with patch("time.monotonic", return_value=float((i + 1) * 60)):
+                await pi._pi_tick()
+
+        assert pi._hp_deadband_estimate_heat > est_before, (
+            f"Estimate should grow from rate override, "
+            f"was {est_before}, now {pi._hp_deadband_estimate_heat}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_learned_deadband_provides_fast_path(self):
+        """Once grown, integration unfreezes immediately at the wider delta."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 21
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 21.7  # delta = 0.7°C
+        pi._pi_integral = -1.0
+        # Pre-learned: HP cycles up to 0.8°C above setpoint.
+        pi._hp_deadband_estimate_heat = 0.8
+
+        await pi._pi_tick()
+
+        # Delta 0.7 < learned 0.8 → immediate override, no waiting.
+        assert pi._integration_frozen is False, (
+            "Learned deadband should provide immediate override"
+        )
+
+    # ── Downward learning (HP truly off at narrower delta) ────────────
+
+    @pytest.mark.asyncio
+    async def test_confirmed_off_shrinks_estimate(self):
+        """Room cooling at delta < estimate → HP truly off → estimate shrinks.
+
+        Start with estimate 1.0°C.  HP setpoint 0.4°C below room, room
+        clearly cooling.  After enough ticks, controller should learn that
+        the HP is off at 0.4°C and reduce the estimate.
+        """
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 21
+        entity._attr_hvac_mode = HVACMode.HEAT
+        pi._pi_integral = -1.0
+        pi._hp_deadband_estimate_heat = 1.0  # overestimate
+
+        # Room cooling at 0.4°C delta — HP is truly off here.
+        for i in range(15):
+            entity._attr_current_temperature = 21.4 - i * 0.03
+            pi._pi_last_tick_time = float(i * 60)
+            with patch("time.monotonic", return_value=float((i + 1) * 60)):
+                await pi._pi_tick()
+
+        assert pi._hp_deadband_estimate_heat < 1.0, (
+            f"Estimate should shrink when HP confirmed off at smaller delta, "
+            f"got {pi._hp_deadband_estimate_heat}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_confirmed_off_does_not_grow_estimate(self):
+        """Room cooling at delta > estimate should NOT grow the estimate.
+
+        The HP is off at a wide delta — that's consistent with the current
+        estimate, not evidence that it's too small.
+        """
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 18  # delta ≈ 5°C, well above estimate
+        entity._attr_hvac_mode = HVACMode.HEAT
+        pi._pi_integral = -5.0
+
+        est_before = pi._hp_deadband_estimate_heat
+
+        for i in range(15):
+            entity._attr_current_temperature = 23.0 - i * 0.05
+            pi._pi_last_tick_time = float(i * 60)
+            with patch("time.monotonic", return_value=float((i + 1) * 60)):
+                await pi._pi_tick()
+
+        assert pi._hp_deadband_estimate_heat == est_before, (
+            f"Confirmed-off at wide delta should not change estimate, "
+            f"was {est_before}, now {pi._hp_deadband_estimate_heat}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_sensor_miscalibration_corrects_downward(self):
+        """Sensor reads 0.5°C warm → HP actually off at apparent 0.3°C delta.
+
+        Real room is 20.7°C, sensor reads 21.2°C.  HP setpoint 21°C.
+        HP internal thermostat sees real temp ≈ setpoint → compressor off.
+        Room cools (real temp dropping), sensor shows decline.
+        Estimate should shrink from default 0.5 toward the observed off-point.
+        """
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        entity._attr_hvac_mode = HVACMode.HEAT
+        pi._pi_integral = -1.0
+        # Default estimate is 0.5°C
+
+        # Sensor reads 21.3 (delta=0.3, within 0.5 estimate).
+        # HP thermostat sees real temp ≈ setpoint → off → room cools.
+        # Hold hp_setpoint fixed each tick to prevent PI from stepping it
+        # away and widening the delta.
+        for i in range(15):
+            entity._attr_current_temperature = 21.3 - i * 0.02
+            pi._hp_setpoint = 21
+            pi._pi_last_tick_time = float(i * 60)
+            with patch("time.monotonic", return_value=float((i + 1) * 60)):
+                await pi._pi_tick()
+
+        # Delta ≈ 0.3°C.  HP is off, room cooling.  Estimate should
+        # shrink below 0.5 since HP is confirmed off within the default
+        # estimate range.
+        assert pi._hp_deadband_estimate_heat < 0.5, (
+            f"Estimate should shrink for miscalibrated sensor, "
+            f"got {pi._hp_deadband_estimate_heat}"
+        )
+
+    # ── Bidirectional convergence ─────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_estimate_converges_from_both_sides(self):
+        """Estimate should converge toward true deadband from both directions.
+
+        Episode 1: HP cycling at 0.8°C delta → estimate grows above 0.5.
+        Episode 2: HP off at 0.3°C delta → estimate shrinks toward 0.3.
+        Episode 3: HP cycling at 0.6°C delta → estimate grows back above 0.3.
+        """
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        entity._attr_hvac_mode = HVACMode.HEAT
+        pi._pi_integral = -1.0
+        t = 0
+
+        # Episode 1: HP cycling at 0.8°C delta (room stable).
+        pi._hp_setpoint = 21
+        entity._attr_current_temperature = 21.8
+        for i in range(12):
+            pi._pi_last_tick_time = float(t * 60)
+            t += 1
+            with patch("time.monotonic", return_value=float(t * 60)):
+                await pi._pi_tick()
+        est_after_grow = pi._hp_deadband_estimate_heat
+        assert est_after_grow > 0.5, f"Should grow from cycling, got {est_after_grow}"
+
+        # Episode 2: HP off at 0.3°C delta (room cooling).
+        pi._hp_setpoint = 21
+        pi._hp_no_output_ticks = 0
+        for i in range(15):
+            entity._attr_current_temperature = 21.3 - i * 0.03
+            pi._pi_last_tick_time = float(t * 60)
+            t += 1
+            with patch("time.monotonic", return_value=float(t * 60)):
+                await pi._pi_tick()
+        est_after_shrink = pi._hp_deadband_estimate_heat
+        assert est_after_shrink < est_after_grow, (
+            f"Should shrink from confirmed off, {est_after_grow} → {est_after_shrink}"
+        )
+
+        # Episode 3: HP cycling at 0.6°C delta (room stable).
+        pi._hp_setpoint = 21
+        entity._attr_current_temperature = 21.6
+        pi._hp_no_output_ticks = 0
+        for i in range(12):
+            pi._pi_last_tick_time = float(t * 60)
+            t += 1
+            with patch("time.monotonic", return_value=float(t * 60)):
+                await pi._pi_tick()
+        est_final = pi._hp_deadband_estimate_heat
+        assert est_final > est_after_shrink, (
+            f"Should grow back from cycling, {est_after_shrink} → {est_final}"
+        )
+
+    # ── HP truly off (original protection preserved) ──────────────────
+
+    @pytest.mark.asyncio
+    async def test_hp_truly_off_stays_frozen(self):
+        """Room cooling (HP truly off, wide delta) → integration stays frozen."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 18  # well below room, delta > estimate
+        entity._attr_hvac_mode = HVACMode.HEAT
+        pi._pi_integral = -5.0
+
+        integral_start = pi._pi_integral
+        for i in range(20):
+            # Room cooling: HP is truly off.
+            entity._attr_current_temperature = 23.0 - i * 0.05
+            pi._pi_last_tick_time = float(i * 60)
+            with patch("time.monotonic", return_value=float((i + 1) * 60)):
+                await pi._pi_tick()
+
+        assert pi._integration_frozen is True, (
+            "Integration should stay frozen when room is cooling (HP truly off)"
+        )
+        assert abs(pi._pi_integral - integral_start) < 0.5, (
+            f"Integral should not wind when HP is truly off, "
+            f"start={integral_start}, end={pi._pi_integral}"
+        )
+
+    # ── Mode separation ───────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_cool_mode_learns_separately(self):
+        """Cooling mode should learn its own deadband estimate."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 24.0
+        pi._hp_setpoint = 24  # 0.8°C above room → hp_no_output in cooling
+        entity._attr_hvac_mode = HVACMode.COOL
+        entity._attr_current_temperature = 23.2
+        pi._pi_integral = 1.0
+
+        est_heat_before = pi._hp_deadband_estimate_heat
+
+        for i in range(12):
+            pi._pi_last_tick_time = float(i * 60)
+            with patch("time.monotonic", return_value=float((i + 1) * 60)):
+                await pi._pi_tick()
+
+        assert pi._hp_deadband_estimate_cool > 0.5, (
+            f"Should learn wider cooling deadband, got {pi._hp_deadband_estimate_cool}"
+        )
+        assert pi._hp_deadband_estimate_heat == est_heat_before, (
+            "Heating deadband should remain untouched"
+        )
+
+    # ── Learning gates preserved ──────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_hp_no_output_still_gates_learning(self):
+        """Even with override unfreezing integration, RLS learning stays gated."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 21
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 21.3  # within default estimate
+        pi._pi_integral = -1.0
+
+        rls_count_before = pi._rls_heat.observation_count
+
+        for i in range(5):
+            pi._pi_last_tick_time = float(i * 60)
+            with patch("time.monotonic", return_value=float((i + 1) * 60)):
+                await pi._pi_tick()
+
+        # Integration should be unfrozen (override) but RLS should NOT learn.
+        assert pi._integration_frozen is False
+        assert pi._rls_heat.observation_count == rls_count_before, (
+            "RLS should not learn during hp_no_output (even with integration override)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_observation_still_clamped_with_override(self):
+        """Batch observations marked clamped even when integration override is active."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 21
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 21.3
+        pi._pi_integral = -1.0
+
+        await pi._pi_tick()
+
+        obs = pi._observation_buffer_heat.get_all()
+        assert len(obs) > 0
+        assert obs[-1].clamped is True, (
+            "Observation should be clamped during hp_no_output even with override"
+        )
+
+    # ── Persistence ───────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_deadband_estimate_persisted(self):
+        """Deadband estimates survive save/restore cycle."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._hp_deadband_estimate_heat = 0.8
+        pi._hp_deadband_estimate_cool = 1.2
+
+        stored = pi.get_extra_stored_data()
+        assert stored is not None
+        d = stored.as_dict()
+        assert d["hp_deadband_estimate_heat"] == 0.8
+        assert d["hp_deadband_estimate_cool"] == 1.2
+
+        # Restore into a fresh controller.
+        from custom_components.tasmota_irhvac.pi.pi_stored_data import PIExtraStoredData
+        restored = PIExtraStoredData.from_dict(d)
+        assert restored is not None
+
+        entity2 = FakePIEntity(config)
+        pi2 = entity2._pi
+        pi2.restore_extra_stored_data(restored)
+        assert pi2._hp_deadband_estimate_heat == 0.8
+        assert pi2._hp_deadband_estimate_cool == 1.2
+
+    @pytest.mark.asyncio
+    async def test_fresh_install_no_persisted_data_gets_default(self):
+        """Restoring old data without deadband fields uses 0.5°C default."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        from custom_components.tasmota_irhvac.pi.pi_stored_data import PIExtraStoredData
+        # Simulate old stored data without the new fields.
+        old_data = {"pi_integral": 0.0}
+        restored = PIExtraStoredData.from_dict(old_data)
+        assert restored is not None
+        assert restored.hp_deadband_estimate_heat == 0.5
+        assert restored.hp_deadband_estimate_cool == 0.5
+
+    # ── Tick counter ──────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_tick_counter_resets_when_hp_active(self):
+        """hp_no_output_ticks resets to 0 when setpoint goes above room."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 21
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 21.5
+        pi._pi_integral = -1.0
+
+        # Accumulate some ticks.
+        for i in range(5):
+            pi._pi_last_tick_time = float(i * 60)
+            with patch("time.monotonic", return_value=float((i + 1) * 60)):
+                await pi._pi_tick()
+        assert pi._hp_no_output_ticks == 5
+
+        # HP becomes active (setpoint above room).
+        pi._hp_setpoint = 23
+        entity._attr_current_temperature = 20.0
+        pi._pi_last_tick_time = 5 * 60.0
+        with patch("time.monotonic", return_value=6 * 60.0):
+            await pi._pi_tick()
+
+        assert pi._hp_no_output_ticks == 0, (
+            "Tick counter should reset when HP is active"
         )
 
 

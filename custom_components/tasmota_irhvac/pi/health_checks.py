@@ -554,3 +554,53 @@ def check_multicollinearity_repair(
         },
         True,
     )
+
+
+def check_freeze_impact_repair(
+    coeff_name: str,
+    mode: str,
+    rms_at_freeze: float,
+    current_rms: float,
+    sustained_cycles: int,
+    rms_increase_pct: float = 20.0,
+    clear_pct: float = 5.0,
+    min_sustained_cycles: int = 3,
+) -> tuple[str, dict[str, str], bool] | None:
+    """Check if a frozen coefficient is degrading model fit.
+
+    Compares current batch residual RMS to the RMS recorded when the
+    coefficient was frozen.  A sustained increase suggests the freeze
+    is preventing the model from tracking a real change.
+
+    Args:
+        coeff_name: human-readable coefficient name.
+        mode: "heat" or "cool".
+        rms_at_freeze: batch residual RMS when the coefficient was frozen.
+        current_rms: latest batch residual RMS.
+        sustained_cycles: consecutive batch cycles with RMS above threshold.
+        rms_increase_pct: % increase in RMS to trigger issue (default 20%).
+        clear_pct: % increase below which to clear the issue.
+        min_sustained_cycles: minimum sustained cycles before creating.
+    """
+    if rms_at_freeze <= 0:
+        return None
+
+    increase_pct = ((current_rms - rms_at_freeze) / rms_at_freeze) * 100.0
+
+    if increase_pct < clear_pct:
+        return ("freeze_impact", {}, False)
+
+    if increase_pct < rms_increase_pct or sustained_cycles < min_sustained_cycles:
+        return None  # hysteresis band
+
+    return (
+        "freeze_impact",
+        {
+            "coeff_name": coeff_name,
+            "mode": mode,
+            "rms_at_freeze": f"{rms_at_freeze:.3f}",
+            "current_rms": f"{current_rms:.3f}",
+            "increase_pct": f"{increase_pct:.0f}",
+        },
+        True,
+    )

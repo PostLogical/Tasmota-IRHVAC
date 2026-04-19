@@ -6,6 +6,7 @@ from homeassistant.components.climate import HVACMode
 from custom_components.tasmota_irhvac.pi.health_checks import (
     check_batch_online_disagreement_repair,
     check_covariance_collapse_repair,
+    check_freeze_impact_repair,
     check_high_integral_repair,
     check_intercept_absorbing_repair,
     check_model_drift_repair,
@@ -885,3 +886,145 @@ class TestResidualPatternRepair:
         )
         assert result is not None
         assert result[1]["time_range"] == "14:00–14:59"
+
+
+# ── check_freeze_impact_repair ────────────────────────────────────
+
+
+class TestFreezeImpactRepair:
+    """Tests for frozen coefficient degradation detection."""
+
+    def test_no_issue_rms_stable(self):
+        """No issue when RMS hasn't increased."""
+        result = check_freeze_impact_repair(
+            coeff_name="Solar Proxy", mode="heat",
+            rms_at_freeze=1.5, current_rms=1.5,
+            sustained_cycles=10,
+        )
+        assert result is not None
+        assert result[2] is False  # should clear
+
+    def test_creates_issue_rms_increased(self):
+        """Issue created when RMS increased >20% and sustained."""
+        result = check_freeze_impact_repair(
+            coeff_name="Solar Proxy", mode="heat",
+            rms_at_freeze=1.5, current_rms=2.0,
+            sustained_cycles=3,
+        )
+        assert result is not None
+        key, placeholders, should_create = result
+        assert should_create is True
+        assert key == "freeze_impact"
+        assert placeholders["coeff_name"] == "Solar Proxy"
+        assert placeholders["mode"] == "heat"
+        assert placeholders["rms_at_freeze"] == "1.500"
+        assert placeholders["current_rms"] == "2.000"
+        assert placeholders["increase_pct"] == "33"
+
+    def test_hysteresis_band(self):
+        """No change when increase is between 5-20%."""
+        result = check_freeze_impact_repair(
+            coeff_name="Solar Proxy", mode="heat",
+            rms_at_freeze=1.5, current_rms=1.65,  # 10% increase
+            sustained_cycles=10,
+        )
+        assert result is None
+
+    def test_not_created_before_sustained(self):
+        """Issue not created before min sustained cycles."""
+        result = check_freeze_impact_repair(
+            coeff_name="Solar Proxy", mode="heat",
+            rms_at_freeze=1.5, current_rms=2.5,
+            sustained_cycles=1,
+        )
+        assert result is None
+
+    def test_clears_when_rms_drops(self):
+        """Issue cleared when RMS increase drops below 5%."""
+        result = check_freeze_impact_repair(
+            coeff_name="outdoor_delta", mode="cool",
+            rms_at_freeze=1.5, current_rms=1.55,  # 3.3% increase
+            sustained_cycles=5,
+        )
+        assert result is not None
+        assert result[2] is False
+
+    def test_zero_rms_at_freeze_returns_none(self):
+        """Returns None when snapshot RMS is zero (avoid division)."""
+        result = check_freeze_impact_repair(
+            coeff_name="Solar Proxy", mode="heat",
+            rms_at_freeze=0.0, current_rms=1.5,
+            sustained_cycles=5,
+        )
+        assert result is None
+
+    def test_rms_decreased_clears(self):
+        """Clears issue when current RMS is lower than at freeze time."""
+        result = check_freeze_impact_repair(
+            coeff_name="Solar Proxy", mode="heat",
+            rms_at_freeze=2.0, current_rms=1.5,
+            sustained_cycles=5,
+        )
+        assert result is not None
+        assert result[2] is False
+
+
+class TestFreezeImpactOrchestration:
+    """Test freeze impact wired into _check_tuning_health()."""
+
+    @pytest.mark.asyncio
+    async def test_freeze_impact_detected(self, hass, setup_pi_integration):
+        """Freeze impact is detected when frozen coeff degrades model fit."""
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        # Freeze outdoor_delta with RMS snapshot
+        pi._metrics.batch_model_rms = 1.0
+        pi.set_frozen("heat", 1, True)
+        assert pi._tuning_alert_counters.get("freeze_rms_heat_1") == 1.0
+
+        # Simulate RMS increasing over batch cycles
+        pi._metrics.batch_model_rms = 1.5  # 50% increase
+        pi._rls_heat.observation_count = 100
+
+        # Run 3 cycles to build sustained counter
+        for _ in range(3):
+            pi._check_tuning_health()
+
+        issues = pi._check_tuning_health()
+        freeze_issues = [i for i in issues if "freeze_impact" in i[0]]
+        assert len(freeze_issues) >= 1
+        assert freeze_issues[0][4] is True
+
+    @pytest.mark.asyncio
+    async def test_freeze_impact_clears_on_unfreeze(self, hass, setup_pi_integration):
+        """Freeze impact counters are cleared when coefficient is unfrozen."""
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        pi._metrics.batch_model_rms = 1.0
+        pi.set_frozen("heat", 1, True)
+        pi._tuning_alert_counters["freeze_impact_heat_1"] = 5
+
+        pi.set_frozen("heat", 1, False)
+        assert "freeze_rms_heat_1" not in pi._tuning_alert_counters
+        assert "freeze_impact_heat_1" not in pi._tuning_alert_counters
+
+    @pytest.mark.asyncio
+    async def test_no_freeze_impact_when_rms_stable(self, hass, setup_pi_integration):
+        """No freeze impact issue when RMS is stable after freeze."""
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        pi._metrics.batch_model_rms = 1.0
+        pi.set_frozen("heat", 1, True)
+        pi._rls_heat.observation_count = 100
+
+        # RMS stays the same
+        issues = pi._check_tuning_health()
+        freeze_issues = [i for i in issues if "freeze_impact" in i[0]]
+        # Either no issue or should_create=False (clearing)
+        assert all(not i[4] for i in freeze_issues)
