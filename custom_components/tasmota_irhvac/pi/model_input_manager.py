@@ -24,6 +24,10 @@ _ACTIVE_STATES = frozenset({
 })
 
 
+# Minimum ticks before auto-computed scale is considered stable.
+_AUTO_SCALE_MIN_TICKS = 50
+
+
 class ModelInputManager:
     """Manages model input sensor values, lag filtering, and feature vector building."""
 
@@ -39,6 +43,12 @@ class ModelInputManager:
         self.outdoor_temp: float | None = None
         # Cached temperature units for delta_from_room inputs (resolved at init).
         self._temp_units: list[str | None] = [None] * len(model_inputs)
+        # Auto-scale tracking: running sum/count of abs(filtered) per input
+        # plus outdoor_delta (index 0 = outdoor_delta, 1..N = model inputs).
+        n_features = 1 + len(model_inputs)
+        self._scale_sum: list[float] = [0.0] * n_features
+        self._scale_count: list[int] = [0] * n_features
+        self._scale_committed: bool = False
 
     @property
     def model_inputs(self) -> list[dict[str, Any]]:
@@ -137,6 +147,64 @@ class ModelInputManager:
         for i in range(len(self._model_inputs)):
             x.append(self.filtered[i])
         return x
+
+    # ── Auto-scale tracking ──────────────────────────────────────────────
+
+    def accumulate_scales(self, outdoor_delta: float) -> None:
+        """Record abs(feature value) for auto-scale computation.
+
+        Called once per tick after lag filters and feature vector are built.
+        Only accumulates non-zero values (zero = inactive, shouldn't pull
+        the mean down).
+        """
+        if self._scale_committed:
+            return
+        # outdoor_delta (feature index 1 in the vector, but index 0 here)
+        if abs(outdoor_delta) > 1e-6:
+            self._scale_sum[0] += abs(outdoor_delta)
+            self._scale_count[0] += 1
+        # model inputs
+        for i in range(len(self._model_inputs)):
+            val = self.filtered[i]
+            if abs(val) > 1e-6:
+                self._scale_sum[1 + i] += abs(val)
+                self._scale_count[1 + i] += 1
+
+    def auto_scales_ready(self) -> bool:
+        """Check if enough data to commit auto-computed scales."""
+        if self._scale_committed:
+            return False
+        # Need at least _AUTO_SCALE_MIN_TICKS non-zero samples for
+        # outdoor_delta.  Model inputs may be sparse (e.g. door sensor
+        # rarely active), so we don't require them all to have enough data.
+        return self._scale_count[0] >= _AUTO_SCALE_MIN_TICKS
+
+    def get_auto_scales(self) -> list[float]:
+        """Compute feature scales from observed data.
+
+        Returns [intercept=1.0, outdoor_delta_scale, input_1_scale, ...].
+        For inputs with too few samples, falls back to the configured
+        typical_value.
+        """
+        scales: list[float] = [1.0]  # intercept always 1.0
+        # outdoor_delta
+        if self._scale_count[0] >= _AUTO_SCALE_MIN_TICKS:
+            scales.append(self._scale_sum[0] / self._scale_count[0])
+        else:
+            scales.append(10.0)  # default
+        # model inputs
+        for i, m_input in enumerate(self._model_inputs):
+            idx = 1 + i
+            if self._scale_count[idx] >= _AUTO_SCALE_MIN_TICKS:
+                scales.append(self._scale_sum[idx] / self._scale_count[idx])
+            else:
+                # Fall back to configured typical_value
+                scales.append(float(m_input.get("typical_value", 0.5)))
+        return scales
+
+    def commit_auto_scales(self) -> None:
+        """Mark auto-scales as committed (one-shot)."""
+        self._scale_committed = True
 
     def get_lag_states(self) -> dict[str, float]:
         """Get current lag filter states for persistence."""
