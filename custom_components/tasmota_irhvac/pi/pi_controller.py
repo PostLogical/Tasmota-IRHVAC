@@ -1570,11 +1570,22 @@ class PIController:
         heat_coeffs = self._rls_heat.get_coefficients()
         outdoor_delta_heat = heat_coeffs.get(1, self._ff_heat_slope)
 
+        from .health_checks import build_coefficient_summary
+        coeff_names = self._coeff_names()
+        coeff_summary = build_coefficient_summary(
+            coeff_names=coeff_names,
+            coefficients=heat_coeffs,
+            seeds=self._heat_seeds,
+            uncertainties=self._rls_heat.get_covariance_diagonal(),
+            feature_scales=self._rls_heat.feature_scales,
+        )
+
         result = check_save_seeds_repair(
             integral_convergence=self._metrics.integral_convergence,
             seeds_match_learned=seeds_match,
             already_notified=bool(self._tuning_alert_counters.get("save_seeds_notified")),
             outdoor_delta_heat=outdoor_delta_heat,
+            coefficient_summary=coeff_summary,
         )
         if result is not None:
             key, placeholders, should_create = result

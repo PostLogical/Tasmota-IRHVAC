@@ -404,6 +404,88 @@ class TestRLSBayesianRidge:
         assert restored.beta_seed == [0.0, 0.35]
 
 
+class TestSeedShrinkage:
+    """Tests for Bayesian seed shrinkage in RLS update."""
+
+    def test_shrinkage_pulls_toward_seed(self):
+        """Coefficient drifted from seed should be pulled back over updates."""
+        model = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.5])
+        # Manually push beta away from seed
+        model.beta[1] = 2.0  # seed is 0.5
+
+        # Feed data consistent with beta=0.5 (so RLS also wants to go back)
+        # but even with ambiguous data, shrinkage should pull toward seed
+        drift_before = abs(model.beta[1] - model.beta_seed[1])
+        for _ in range(100):
+            model.update([1.0, 5.0], 2.5)  # y=2.5 is ambiguous
+        drift_after = abs(model.beta[1] - model.beta_seed[1])
+        assert drift_after < drift_before
+
+    def test_shrinkage_does_not_prevent_learning(self):
+        """With clear data, RLS should still converge despite shrinkage pull."""
+        # Seed says 0.5, true value is 2.0
+        model = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.5])
+
+        # Strong, consistent signal: y = 2.0 * x
+        for i in range(200):
+            x = float(1 + i % 10)
+            model.update([1.0, x], 2.0 * x)
+
+        learned = model.beta[1] / model.feature_scales[1]
+        # Should learn close to 2.0 despite seed=0.5 pulling back
+        assert abs(learned - 2.0) < 0.3
+
+    def test_frozen_coefficients_not_shrunk(self):
+        """Frozen coefficients should not be affected by shrinkage."""
+        model = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.5])
+        model.beta[1] = 2.0
+        model.frozen[1] = True
+
+        for _ in range(50):
+            model.update([1.0, 5.0], 3.0)
+
+        # Beta should not have moved at all (frozen)
+        assert model.beta[1] == 2.0
+
+    def test_shrinkage_symmetric_around_seed(self):
+        """Shrinkage pulls equally whether above or below seed."""
+        model_above = RLSModel(n_inputs=1, seed_coefficients=[0.0, 1.0])
+        model_below = RLSModel(n_inputs=1, seed_coefficients=[0.0, 1.0])
+
+        model_above.beta[1] = 2.0   # 1.0 above seed
+        model_below.beta[1] = 0.0   # 1.0 below seed
+
+        # Same neutral data
+        for _ in range(50):
+            model_above.update([1.0, 5.0], 5.0)
+            model_below.update([1.0, 5.0], 5.0)
+
+        drift_above = abs(model_above.beta[1] - model_above.beta_seed[1])
+        drift_below = abs(model_below.beta[1] - model_below.beta_seed[1])
+        # Both should have been pulled back roughly equally
+        assert abs(drift_above - drift_below) < 0.2
+
+    def test_zero_seed_shrinks_toward_zero(self):
+        """Feature seeded at 0 shrinks toward 0 when active."""
+        model = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.0])
+        model.beta[1] = 1.0  # drifted from seed=0
+
+        for _ in range(100):
+            model.update([1.0, 5.0], 0.0)  # feature active
+        # Should pull back toward 0
+        assert abs(model.beta[1]) < 1.0
+
+    def test_dormant_feature_not_shrunk(self):
+        """Inactive feature retains its learned coefficient (no data, no shrinkage)."""
+        model = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.0])
+        model.beta[1] = 1.0  # learned value
+
+        for _ in range(100):
+            model.update([1.0, 0.0], 0.0)  # feature inactive
+        # Should NOT be pulled back — dormant features keep their learning
+        assert model.beta[1] == 1.0
+
+
 class TestRLSFeatureScalesPadding:
     """Tests for feature_scales padding when fewer scales than dimensions (line 83)."""
 

@@ -195,6 +195,7 @@ def check_save_seeds_repair(
     already_notified: bool,
     convergence_threshold: float = 2.0,
     outdoor_delta_heat: float = 0.0,
+    coefficient_summary: str = "",
 ) -> tuple[str, dict[str, str], bool] | None:
     """Check if model has converged and seeds should be saved.
 
@@ -210,10 +211,64 @@ def check_save_seeds_repair(
     if integral_convergence < convergence_threshold:
         return (
             "save_seeds",
-            {"outdoor_delta": f"{outdoor_delta_heat:.4f}"},
+            {
+                "outdoor_delta": f"{outdoor_delta_heat:.4f}",
+                "coefficient_summary": coefficient_summary,
+            },
             True,
         )
     return None
+
+
+def build_coefficient_summary(
+    coeff_names: list[str],
+    coefficients: dict[int, float],
+    seeds: list[float],
+    uncertainties: list[float],
+    feature_scales: list[float],
+    uncertainty_ratio_threshold: float = 1.0,
+) -> str:
+    """Build human-readable coefficient summary with uncertainty flags.
+
+    Flags coefficients where uncertainty (√P_ii / scale) exceeds the
+    coefficient magnitude — meaning the estimate is not well-determined
+    and saving it as a seed would anchor the system to a noisy value.
+
+    Args:
+        coeff_names: Feature names [intercept, outdoor_delta, ...].
+        coefficients: Physical-unit coefficients {index: value}.
+        seeds: Current seed values (physical units).
+        uncertainties: P diagonal values (normalized space).
+        feature_scales: Feature scale factors.
+        uncertainty_ratio_threshold: Flag when uncertainty/|coeff| > this.
+
+    Returns:
+        Multi-line string like:
+          outdoor_delta: 0.35 → 0.42
+          Solar Proxy: -4.00 → -3.12 ⚠ uncertain
+    """
+    lines = []
+    for i in range(1, len(coeff_names)):  # skip intercept
+        name = coeff_names[i] if i < len(coeff_names) else f"coeff_{i}"
+        value = coefficients.get(i, 0.0)
+        seed = seeds[i] if i < len(seeds) else 0.0
+        scale = feature_scales[i] if i < len(feature_scales) else 1.0
+
+        # Uncertainty in physical units: √P_ii / scale
+        p_ii = uncertainties[i] if i < len(uncertainties) else 0.0
+        uncertainty_phys = (p_ii ** 0.5) / scale if scale != 0 else 0.0
+
+        # Flag if uncertainty exceeds coefficient magnitude
+        uncertain = (
+            abs(value) > 1e-6
+            and uncertainty_phys / abs(value) > uncertainty_ratio_threshold
+        )
+
+        line = f"{name}: {seed:.3f} → {value:.3f}"
+        if uncertain:
+            line += " (uncertain)"
+        lines.append(line)
+    return "; ".join(lines)
 
 
 def check_high_integral_repair(

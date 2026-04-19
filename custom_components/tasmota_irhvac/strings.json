@@ -517,8 +517,8 @@
       "description": "Learned {mode} slope: {learned}, configured: {configured} ({drift_pct}% difference). Update your configured slope in Settings → Devices → Configure → PI Controller → {mode_cap} Slope, or press the Save Learned Seeds button to checkpoint all current values."
     },
     "save_seeds": {
-      "title": "Model has converged — save learned seeds",
-      "description": "Your model has been stable and is performing well. Press the Save Learned Seeds button to protect these values against data loss. Current learned outdoor delta: {outdoor_delta}."
+      "title": "Model has converged — review and save learned coefficients",
+      "description": "The feedforward model has stabilized. Saving updates the anchor values that the system pulls coefficients toward. Review the learned values below and confirm they make physical sense before saving. Coefficients marked 'uncertain' have high variance and may not be well-determined — saving them anchors the system to a noisy estimate.\n\n{coefficient_summary}"
     },
     "covariance_collapse": {
       "title": "Coefficient {coeff_name} stuck at clamp",

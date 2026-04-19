@@ -172,11 +172,22 @@ class RLSModel:
             if self.frozen[i]:
                 K[i] = 0.0
 
-        # Update coefficients: standard RLS (no ad-hoc beta penalty).
-        # Seed anchoring comes from initial conditions and the delta*I
-        # term in the P update, which prevents covariance collapse.
+        # Update coefficients with Bayesian seed shrinkage.
+        # After the standard RLS update, pull each coefficient toward its
+        # seed (prior) proportionally to delta.  This prevents correlated
+        # features from drifting apart during multicollinearity — each
+        # coefficient is anchored to its physically-grounded seed value.
+        # When data clearly supports a different value, the Kalman gain
+        # overwhelms the pull; when data is ambiguous, the prior wins.
+        #
+        # Only shrink when the feature has non-zero input — dormant
+        # features (e.g. pellet stove off in summer) retain their learned
+        # coefficient until they're active again and new data can confirm
+        # or revise the estimate.
         for i in range(n):
             self.beta[i] += K[i] * residual
+            if not self.frozen[i] and abs(x_norm[i]) > 1e-6:
+                self.beta[i] += self.delta * (self.beta_seed[i] - self.beta[i])
 
         # Apply coefficient clamps with P projection.
         # When a coefficient hits a boundary, zero its row/col in P
