@@ -157,23 +157,24 @@ custom_components/tasmota_irhvac/
 ├── config_model.py       (211 lines)  — Typed, frozen config dataclass (parsed once)
 ├── climate.py           (1899 lines)  — Base climate entity: MQTT, state, IR commands
 ├── config_flow.py       (1399 lines)  — Setup wizard + options flow UI
+├── repairs.py            (268 lines)  — HA Repairs fix flows (fixable repairs)
 ├── sensor.py             (378 lines)  — 18 PI diagnostic sensors + health sensor
 ├── binary_sensor.py      (194 lines)  — FF learning suppression status
 ├── button.py             (281 lines)  — Vane buttons + user-defined IR action buttons
 ├── diagnostics.py         (59 lines)  — HA diagnostics dump
 ├── pi/                                — PI + feedforward controller subpackage
 │   ├── __init__.py                    — Public API: PIController, NullController, BatchResult
-│   ├── pi_controller.py (2661 lines)  — Core PI tick, anti-windup, learning gates
-│   ├── pi_stored_data.py  (106 lines) — ExtraStoredData for cross-restart persistence
+│   ├── pi_controller.py (2900+ lines) — Core PI tick, anti-windup, learning, CUSUM
+│   ├── pi_stored_data.py  (126 lines) — ExtraStoredData for cross-restart persistence
 │   ├── controller_protocol.py (196)   — Protocol class + NullController stub
 │   ├── rls_model.py       (249 lines) — Recursive Least Squares with forgetting + ridge
-│   ├── batch_learning.py (1053 lines) — Diversity-aware buffer, WLS, residual analysis
+│   ├── batch_learning.py (1070 lines) — Diversity-aware buffer, WLS, residual analysis
 │   ├── smith_predictor.py (113 lines) — FOPDT Smith predictor (delay compensation)
 │   ├── tau_estimator.py   (231 lines) — Online τ estimation + IMC gain scheduling
 │   ├── model_input_manager.py (134)   — External HA entity feature management
 │   ├── supplemental_controller.py (136) — Supplemental heat source coordination
 │   ├── performance_metrics.py (135)   — ITAE, CVH, FF load fraction accumulators
-│   └── health_checks.py  (556 lines)  — Health checks + 9 HA Repairs diagnostics
+│   └── health_checks.py  (620 lines)  — Health checks, repairs, CUSUM anomaly detection
 ├── vendors/                           — Vendor handler registry (composition, not inheritance)
 │   ├── __init__.py       (153 lines)  — Registry: maps vendor strings to handlers
 │   ├── base.py           (168 lines)  — VendorHandler base + IRDecode/EntityState types
@@ -877,6 +878,13 @@ matrix X^TX alongside its inverse. The spectral condition number
 which feature pairs are correlated (|r| > 0.7) and warns the user via HA
 Repairs. At κ > 100, coefficient estimates are numerically unstable.
 
+**Buffer exclusion:** The user can exclude observations from a time range via the
+anomaly detection repair flow (see HA Repairs below).
+`DiversityAwareBuffer.exclude_time_range(start, end)` removes observations by
+monotonic timestamp and recomputes the information matrix. This lets the user
+purge contaminated data (open windows, cooking events) that would bias the next
+batch WLS solve.
+
 The batch result is persisted via `ExtraStoredData` for diagnostics continuity
 across restarts.
 
@@ -1114,20 +1122,60 @@ states OK / Warning / Critical / Disabled. It runs multiple checks (comfort,
 integral magnitude, FF confidence, intercept drift, slope drift, model drift,
 feature diversity) and reports the worst status with detailed attributes.
 
-**HA Repairs recommendations** (`health_checks.py`) — 9 tuning diagnostics that
-surface as actionable items in the HA Repairs panel:
+**HA Repairs recommendations** (`health_checks.py`, `repairs.py`) — tuning
+diagnostics that surface as actionable items in the HA Repairs panel. Three
+repairs are **fixable** (the user clicks "Fix" and the integration applies the
+change); the rest are informational.
+
+**Fixable repairs** (is_fixable=True, implemented in `repairs.py`):
+
+| Repair | Fix Action | Risk Level |
+|--------|-----------|------------|
+| Save seeds | Apply learned coefficients as configured seeds | Safe — same as pressing Save Seeds button |
+| Slope divergence | Update configured slope to learned value | Moderate — changes feedforward baseline |
+| High integral (tuning sub-case) | Reduce Ki to suggested value | Moderate — changes controller responsiveness |
+
+The fix flow is routed by `async_create_fix_flow()` in `repairs.py`, which HA
+auto-discovers. Each flow shows a confirmation dialog before applying. The
+`_check_tuning_health()` return tuples carry `is_fixable` and a `data` dict
+through `__init__.py` to `ir.async_create_issue()`.
+
+**Informational repairs** (is_fixable=False):
 
 | Repair | Trigger | What It Means |
 |--------|---------|--------------|
-| Slope divergence | Learned slope ≠ configured >30% for 6 cycles | Building envelope changed; update seed |
-| Save seeds | Model converged, seeds not saved | Checkpoint learned values against data loss |
-| High integral (4 sub-causes) | Ki×I > 2°C sustained | Immature model, slope gap, equipment limits, or needs Ki reduction |
+| High integral (3 diagnostic sub-cases) | Ki×I > 2°C sustained | Immature model, slope gap, or equipment limits |
 | Covariance collapse | P[i,i] ≈ δ at clamp boundary | RLS stuck, batch must correct |
 | Model drift | Same-direction batch correction ≥5 cycles | Physical change (insulation, sensor, schedule) |
 | Intercept absorbing | |intercept| > 1°C with collapsed coefficient | One coefficient stuck, intercept compensating |
 | Batch-online disagreement | Batch corrects same direction, RLS drifts back | Transient vs. structural mismatch |
 | Residual pattern | |mean residual| > 0.5°C in contiguous hours, 3 cycles | Unmodeled time-of-day disturbance (solar, occupancy) |
 | Multicollinearity | Spectral κ > 30 sustained 3 cycles (Belsley 1980) | Correlated features; RLS can't separate effects |
+| Freeze impact | Batch RMS increased >20% since coefficient was frozen | Frozen coefficient blocking needed adaptation |
+
+**Real-time anomaly detection** (CUSUM, `pi_controller.py`):
+
+A two-sided CUSUM (Page, 1954; Basseville & Nikiforov, 1993) monitors the
+prediction residual on every unclamped buffer observation — not just RLS-gated
+ticks. This catches unmodeled disturbances (open windows, cooking, space heaters)
+that would contaminate the batch WLS regression.
+
+- **Scale:** MAD-based robust estimate (Huber, 1981), σ̂ = 1.4826 × median|rᵢ - median(r)|
+- **Parameters:** k=1.0 (dead zone for shifts < 2σ), h=10.0 (ARL₀ ≈ 50,000 ticks)
+- **Reset:** Fast initial response (Lucas & Crosier, 1982) — accumulators reset to
+  zero after alarm, preventing massive accumulation during prolonged anomalies
+- **Cooldown:** 30 minutes wall-clock (not tick-based, since tick rate varies 1-15 min)
+
+When the CUSUM fires, a fixable HA Repair surfaces with two options:
+1. **Exclude** — removes the contaminated observations from the buffer
+2. **Dismiss** — keeps them
+
+Cause hints are mode-aware: positive residual means heat loss in heating mode but
+heat gain in cooling mode (the offset residual's physical meaning depends on
+direction).
+
+After 3+ exclusions, an escalation repair suggests adding a model input with a
+gate entity or using the `suppress_learning` entity proactively.
 
 **Binary sensor** (`binary_sensor.py`): `binary_sensor.{device}_ff_learning_suppressed`
 shows whether feedforward learning is currently suppressed, with attributes listing
@@ -1352,6 +1400,12 @@ topic. The integration marks the entity as unavailable when offline.
 - [Brian Douglas - Control Systems](https://www.youtube.com/playlist?list=PLUMWjy5jgHK1NC52DXXrriwihVrYZKqjk) — excellent YouTube series
 - [Practical PID tuning](https://controlguru.com/) — real-world tuning guidance
 
+### Change Detection & Fault Diagnosis
+- Basseville & Nikiforov (1993) — *Detection of Abrupt Changes* — the definitive CUSUM reference
+- Huber (1981) — *Robust Statistics* — MAD estimator, breakdown points
+- Gustafsson (2000) — *Adaptive Filtering and Change Detection* — CUSUM on adaptive filter residuals
+- Katipamula & Brambley (2005) — "Methods for fault detection, diagnostics, and prognostics for building systems," *HVAC&R Research*
+
 ### This Project's History
 - Check `git log --oneline` for the evolution of features
 - The simulation tools in `tools/` contain the thermal model used for tuning
@@ -1375,4 +1429,4 @@ topic. The integration marks the entity as unavailable when offline.
 
 ---
 
-*Updated April 2026 from the `architecture-rework` branch. ~11,432 lines of Python across 22 files.*
+*Updated April 2026 from the `architecture-rework` branch. ~12,000 lines of Python across 23 files.*
