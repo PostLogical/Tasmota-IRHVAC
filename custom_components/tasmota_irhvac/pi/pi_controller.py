@@ -2604,7 +2604,7 @@ class PIController:
                 self._room_temp_rate = (temp1 - temp0) / elapsed_min
 
         # Check ongoing τ step-response observation (raw — measures real plant)
-        tau_gain_update = self._tau_estimator.check_observation(now_mono, raw_c)
+        tau_gain_update = self._tau_estimator.check_observation(now_mono, raw_c, self._ff_offset)
         if tau_gain_update is not None:
             self._apply_gain_update(tau_gain_update)
 
@@ -3109,7 +3109,7 @@ class PIController:
                     self._last_setpoint_change_time = now_mono
                     self._metrics.record_setpoint_change()
                     # Start τ observation on significant setpoint changes
-                    self._tau_estimator.start_observation(now_mono, current_c, desired_c, float(change))
+                    self._tau_estimator.start_observation(now_mono, current_c, desired_c, float(change), self._ff_offset)
                     return True
         else:
             _LOGGER.debug(

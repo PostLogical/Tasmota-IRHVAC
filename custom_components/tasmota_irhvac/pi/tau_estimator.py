@@ -44,8 +44,16 @@ class TauEstimator:
         self._step_temp: float | None = None
         self._step_target: float | None = None
         self._step_magnitude: float = 0.0
+        self._step_ff_offset: float = 0.0  # FF offset at step start
         self._step_active: bool = False
         self._observations: int = 0
+
+        # Outlier rejection: observed τ must be within this factor of current
+        # estimate to be accepted (e.g., 3.0 means 1/3× to 3× current τ).
+        self._outlier_factor: float = 3.0
+        # Disturbance gating: reject observation if FF offset changed by more
+        # than this threshold (°C) during the observation window.
+        self._ff_change_threshold: float = 1.0
 
     # ── Properties ───────────────────────────────────────────────────
 
@@ -130,13 +138,19 @@ class TauEstimator:
     # ── Step-response observation ────────────────────────────────────
 
     def start_observation(
-        self, now_mono: float, current_c: float, desired_c: float, step_magnitude: float
+        self,
+        now_mono: float,
+        current_c: float,
+        desired_c: float,
+        step_magnitude: float,
+        ff_offset: float = 0.0,
     ) -> None:
         """Begin observing a step response for τ estimation.
 
         Called when hp_setpoint changes by ≥1°C.  Records the starting conditions
         so check_observation can detect when the room reaches 63.2% of the
-        expected response.
+        expected response.  Also records the FF offset so we can reject
+        observations contaminated by large disturbance changes.
         """
         if not self._enabled:
             return
@@ -147,18 +161,25 @@ class TauEstimator:
         self._step_temp = current_c
         self._step_target = desired_c
         self._step_magnitude = step_magnitude
+        self._step_ff_offset = ff_offset
         self._step_active = True
         _LOGGER.debug(
-            "τ observation started: step=%.1f°C, room=%.1f°C, target=%.1f°C",
-            step_magnitude, current_c, desired_c,
+            "τ observation started: step=%.1f°C, room=%.1f°C, target=%.1f°C, ff=%.2f",
+            step_magnitude, current_c, desired_c, ff_offset,
         )
 
-    def check_observation(self, now_mono: float, current_c: float) -> GainUpdate | None:
+    def check_observation(
+        self, now_mono: float, current_c: float, ff_offset: float = 0.0
+    ) -> GainUpdate | None:
         """Check if the room has reached 63.2% of the step response.
 
         τ is the time from setpoint change to 63.2% of the total expected
         temperature change (first-order system definition).  On observation,
         update the running τ estimate with an EMA.
+
+        Observations are rejected if:
+        - FF offset changed significantly (disturbance contamination)
+        - Observed τ is an outlier vs. current estimate (≥2 prior observations)
 
         Returns GainUpdate if τ changed and gains were recomputed, else None.
         """
@@ -190,11 +211,45 @@ class TauEstimator:
             # Subtract response lag — τ is the thermal time constant, not
             # including the HP's own delay to start affecting room temp.
             raw_tau = elapsed_min - self._response_lag
-            observed_tau = max(raw_tau, 5.0)  # Floor: no house has τ < 5 min
+            observed_tau = max(raw_tau, 15.0)  # Floor: no room has τ < 15 min
 
-            # EMA update: weight new observations more when we have few
+            # ── Disturbance gate ─────────────────────────────────────
+            # Reject observations where the FF offset changed significantly
+            # during the window — the step response is contaminated by
+            # concurrent disturbance changes (solar, boiler, outdoor rate).
+            ff_delta = abs(ff_offset - self._step_ff_offset)
+            if ff_delta > self._ff_change_threshold:
+                _LOGGER.info(
+                    "τ observation rejected: FF offset changed %.2f°C "
+                    "(threshold %.1f) during observation — disturbance "
+                    "contamination",
+                    ff_delta, self._ff_change_threshold,
+                )
+                self._step_active = False
+                return None
+
+            # ── Outlier rejection ────────────────────────────────────
+            # After ≥2 observations, reject values that are >3× or <1/3×
+            # the current estimate.  A single bad observation (e.g., from
+            # integral windup driving a fast apparent response) shouldn't
+            # destroy a well-established estimate.
+            if self._observations >= 2:
+                ratio = observed_tau / self._tau_estimate if self._tau_estimate > 0 else 1.0
+                if ratio > self._outlier_factor or ratio < 1.0 / self._outlier_factor:
+                    _LOGGER.info(
+                        "τ observation rejected as outlier: observed=%.1f min "
+                        "vs estimate=%.1f min (ratio=%.2f, limit=%.1f×)",
+                        observed_tau, self._tau_estimate, ratio, self._outlier_factor,
+                    )
+                    self._step_active = False
+                    return None
+
+            # ── EMA update ───────────────────────────────────────────
+            # Weight new observations more when we have few.
+            # +2 offset ensures the seed is never obliterated on a single
+            # observation (n=0 → α=0.5, n=1 → α≈0.33, converges to 0.3).
             n = self._observations
-            alpha = max(0.3, 1.0 / (1.0 + n))  # Starts at 0.5, decays to 0.3
+            alpha = max(0.3, 1.0 / (2.0 + n))  # Starts at 0.5, decays to 0.3
             old_tau = self._tau_estimate
             self._tau_estimate = (1.0 - alpha) * old_tau + alpha * observed_tau
             self._observations += 1
@@ -203,9 +258,9 @@ class TauEstimator:
             gains = self.compute_gains()
 
             _LOGGER.info(
-                "τ observed: %.1f min (raw=%.1f, lag=%.1f). "
+                "τ observed: %.1f min (raw=%.1f, lag=%.1f, ff_Δ=%.2f). "
                 "EMA τ: %.1f → %.1f min (n=%d, α=%.2f). Kp=%.3f Ki=%.4f",
-                observed_tau, elapsed_min, self._response_lag,
+                observed_tau, elapsed_min, self._response_lag, ff_delta,
                 old_tau, self._tau_estimate, self._observations, alpha,
                 gains.kp, gains.ki,
             )
