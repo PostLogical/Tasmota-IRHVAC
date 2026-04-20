@@ -39,6 +39,7 @@ class PIExtraStoredData(ExtraStoredData):
     cool_seeds_at_learn: list = dataclasses.field(default_factory=list)
     ki_at_save: float = 0.0
     tau_estimate: float = 0.0
+    tau_observations: int = 0
     observation_buffer_heat: list = dataclasses.field(default_factory=list)
     observation_buffer_cool: list = dataclasses.field(default_factory=list)
     # Legacy single-buffer field kept for migration from pre-split data.
@@ -73,6 +74,7 @@ class PIExtraStoredData(ExtraStoredData):
             "cool_seeds_at_learn": self.cool_seeds_at_learn,
             "ki_at_save": self.ki_at_save,
             "tau_estimate": self.tau_estimate,
+            "tau_observations": self.tau_observations,
             "observation_buffer_heat": self.observation_buffer_heat,
             "observation_buffer_cool": self.observation_buffer_cool,
             "drift_correction_signs": self.drift_correction_signs,
@@ -112,6 +114,7 @@ class PIExtraStoredData(ExtraStoredData):
                 cool_seeds_at_learn=restored.get("cool_seeds_at_learn", []),
                 ki_at_save=float(restored.get("ki_at_save", 0.0)),
                 tau_estimate=float(restored.get("tau_estimate", 0.0)),
+                tau_observations=int(restored.get("tau_observations", 0)),
                 observation_buffer_heat=restored.get("observation_buffer_heat", []),
                 observation_buffer_cool=restored.get("observation_buffer_cool", []),
                 observation_buffer=restored.get("observation_buffer", []),

@@ -277,10 +277,11 @@ class TauEstimator:
 
     # ── Persistence ──────────────────────────────────────────────────
 
-    def restore(self, tau_estimate: float) -> GainUpdate:
-        """Restore τ estimate and return recomputed gains.
+    def restore(self, tau_estimate: float, observations: int = 0) -> GainUpdate:
+        """Restore τ estimate (and observation count) and return recomputed gains.
 
         Caller is responsible for applying gains to PI state and Smith predictor.
         """
         self._tau_estimate = tau_estimate
+        self._observations = observations
         return self.compute_gains()

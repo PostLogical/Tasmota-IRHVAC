@@ -813,6 +813,7 @@ class PIController:
             cool_seeds_at_learn=list(self._cool_seeds),
             ki_at_save=self._pi_ki,
             tau_estimate=self._tau_estimator.tau,
+            tau_observations=self._tau_estimator.observations,
             observation_buffer_heat=self._observation_buffer_heat.as_list(),
             observation_buffer_cool=self._observation_buffer_cool.as_list(),
             drift_correction_signs=self._drift_correction_signs,
@@ -951,7 +952,7 @@ class PIController:
         # Restore τ estimate and recompute IMC gains
         if self._tau_estimator.enabled and data.tau_estimate > 0:
             old_ki = self._pi_ki
-            gains = self._tau_estimator.restore(data.tau_estimate)
+            gains = self._tau_estimator.restore(data.tau_estimate, data.tau_observations)
             self._apply_gain_update(gains)
             # Re-scale integral for the restored ki (overrides the earlier scaling
             # which used the seed-derived ki, not the restored-τ-derived ki)
