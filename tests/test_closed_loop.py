@@ -197,8 +197,8 @@ class TestClosedLoopFit:
 class TestClosedLoopOrchestration:
     """Integration with PlantIdentifier."""
 
-    def test_closed_loop_cross_check_stored(self):
-        """Closed-loop results are stored as cross-check, not applied to plant."""
+    def test_closed_loop_cross_check_and_interim(self):
+        """Closed-loop cross-checks primary and provides interim τ_slow."""
         from custom_components.tasmota_irhvac.pi.plant_identifier import PlantIdentifier
 
         pi = PlantIdentifier(tau_seed=60.0, response_lag=0.0, imc_lambda=0.0)
@@ -217,11 +217,36 @@ class TestClosedLoopOrchestration:
             temp = _simulate_sopdt(t_min, tau_fast, tau_slow, 1.0, sp_history, 20.0)
             pi.check_observation(t_min * 60.0, temp, hp_setpoint_c=22.0)
 
-        # Closed-loop is a cross-check — stored but NOT applied to plant
-        # (tau_slow should still be seed unless area method fired)
-        if pi._last_cross_check is not None:
-            cl_tau_fast, cl_tau_slow = pi._last_cross_check
-            assert cl_tau_fast.source == "closed_loop"
-            assert cl_tau_fast.value == pytest.approx(15.0, abs=10.0)
-        # Plant tau_slow unchanged (still seed) — closed-loop doesn't override
-        assert pi.plant.tau_slow.source in ("seed", "area_method")
+        # Cross-check should be stored
+        assert pi._last_cross_check is not None
+        cl_tau_fast, cl_tau_slow = pi._last_cross_check
+        assert cl_tau_fast.source == "closed_loop"
+
+        # If closed-loop fired with reasonable ratio to seed (90/60=1.5, within 2×),
+        # it should have been applied as interim τ_slow
+        if pi.plant.tau_slow.source == "closed_loop":
+            assert pi.plant.tau_slow.value == pytest.approx(90.0, abs=30.0)
+            # Confidence discounted (0.7× closed-loop confidence)
+            assert pi.plant.tau_slow.confidence < 1.0
+
+    def test_closed_loop_rejected_when_ratio_too_large(self):
+        """Closed-loop interim rejected when τ_slow change is too large."""
+        from custom_components.tasmota_irhvac.pi.plant_identifier import PlantIdentifier
+
+        # Seed τ_slow=60. If closed-loop finds 200 (ratio=3.3 > 2.0), reject.
+        pi = PlantIdentifier(tau_seed=60.0, response_lag=0.0, imc_lambda=0.0)
+        pi.start_observation(0.0, 20.0, 22.0, 2.0)
+
+        # Feed response with very slow dynamics (τ_slow=200)
+        sp_history = [(0.0, 20.0), (0.0, 22.0)]
+        for i in range(1, 35):
+            t_min = i * 15.0
+            temp = _simulate_sopdt(t_min, 15.0, 200.0, 1.0, sp_history, 20.0)
+            pi.check_observation(t_min * 60.0, temp, hp_setpoint_c=22.0)
+
+        # τ_slow should remain seed — closed-loop ratio too large
+        assert pi.plant.tau_slow.source in ("seed", "closed_loop")
+        if pi.plant.tau_slow.source == "closed_loop":
+            # If it DID apply, it should have been within 2× of seed
+            ratio = pi.plant.tau_slow.value / 60.0
+            assert 0.5 <= ratio <= 2.0

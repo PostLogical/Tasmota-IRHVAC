@@ -158,17 +158,45 @@ class PlantIdentifier:
             self._plant = dataclasses.replace(self._plant, tau_slow=tau_slow_est)
             plant_changed = True
 
-        # Option 5: closed-loop identification → cross-check only.
-        # The closed-loop provider validates primary estimates but does NOT
-        # update PlantEstimate directly.  It's a diagnostic cross-check,
-        # not a primary identification source.
+        # Option 5: closed-loop identification — cross-check + interim estimates.
         cl_results = self._closed_loop_provider.accumulate(
             now_mono, current_c, hp_setpoint_c=hp_setpoint_c, ff_offset=ff_offset,
         )
         if cl_results is not None and len(cl_results) >= 2:
             cl_tau_fast, cl_tau_slow = cl_results[0], cl_results[1]
             self._last_cross_check = (cl_tau_fast, cl_tau_slow)
-            self._log_cross_validation(cl_tau_fast, cl_tau_slow)
+
+            # (1) Cross-validate: log agreement/disagreement
+            agreement = self._cross_validate(cl_tau_fast, cl_tau_slow)
+
+            # (2) Boost/reduce confidence on primary estimates
+            self._adjust_confidence(agreement)
+
+            # (3) Interim estimate: if primary hasn't fired AND the
+            # closed-loop Kp change would be modest (< 50%), use it.
+            # This fills the gap between seed and first area method observation.
+            if self._plant.tau_slow.source == "seed" and cl_tau_slow.confidence >= 0.8:
+                ratio = cl_tau_slow.value / self._plant.tau_slow.value
+                if 0.5 <= ratio <= 2.0:  # Modest change only
+                    interim = ParameterEstimate(
+                        value=cl_tau_slow.value,
+                        confidence=cl_tau_slow.confidence * 0.7,  # Discount vs primary
+                        source="closed_loop",
+                        observations=cl_tau_slow.observations,
+                    )
+                    self._plant = dataclasses.replace(self._plant, tau_slow=interim)
+                    plant_changed = True
+                    _LOGGER.info(
+                        "Closed-loop interim τ_slow=%.0f (primary not yet available, "
+                        "ratio=%.2f from seed=%.0f)",
+                        cl_tau_slow.value, ratio, self._plant.tau_slow.value,
+                    )
+                else:
+                    _LOGGER.info(
+                        "Closed-loop τ_slow=%.0f rejected as interim: ratio=%.2f "
+                        "from seed=%.0f too large",
+                        cl_tau_slow.value, ratio, self._plant.tau_slow.value,
+                    )
 
         if plant_changed:
             gains = self.compute_gains()
@@ -189,38 +217,67 @@ class PlantIdentifier:
         self._area_provider.cancel_observation()
         self._closed_loop_provider.cancel_observation()
 
-    def _log_cross_validation(
+    def _cross_validate(
         self, cl_tau_fast: ParameterEstimate, cl_tau_slow: ParameterEstimate
-    ) -> None:
-        """Log cross-validation between closed-loop and primary estimates."""
-        primary_fast = self._plant.tau_fast
-        primary_slow = self._plant.tau_slow
+    ) -> dict[str, bool]:
+        """Cross-validate closed-loop against primary estimates.
 
-        if primary_fast.source != "seed" and primary_fast.value > 0:
-            ratio = cl_tau_fast.value / primary_fast.value
-            if 0.7 <= ratio <= 1.3:
+        Returns dict of {"tau_fast": agrees, "tau_slow": agrees}.
+        Logs agreement/disagreement with 30% tolerance.
+        """
+        agreement: dict[str, bool] = {}
+
+        for name, cl_est, primary in [
+            ("τ_fast", cl_tau_fast, self._plant.tau_fast),
+            ("τ_slow", cl_tau_slow, self._plant.tau_slow),
+        ]:
+            if primary.source == "seed" or primary.value <= 0:
+                agreement[name] = True  # No primary to compare against
+                continue
+            ratio = cl_est.value / primary.value
+            agrees = 0.7 <= ratio <= 1.3
+            agreement[name] = agrees
+            if agrees:
                 _LOGGER.info(
-                    "Cross-validation: τ_fast agrees (CL=%.0f vs %s=%.0f, ratio=%.2f)",
-                    cl_tau_fast.value, primary_fast.source, primary_fast.value, ratio,
+                    "Cross-validation: %s agrees (CL=%.0f vs %s=%.0f, ratio=%.2f)",
+                    name, cl_est.value, primary.source, primary.value, ratio,
                 )
             else:
                 _LOGGER.warning(
-                    "Cross-validation: τ_fast DISAGREES (CL=%.0f vs %s=%.0f, ratio=%.2f)",
-                    cl_tau_fast.value, primary_fast.source, primary_fast.value, ratio,
+                    "Cross-validation: %s DISAGREES (CL=%.0f vs %s=%.0f, ratio=%.2f)"
+                    " — plant model may have changed",
+                    name, cl_est.value, primary.source, primary.value, ratio,
                 )
 
-        if primary_slow.source != "seed" and primary_slow.value > 0:
-            ratio = cl_tau_slow.value / primary_slow.value
-            if 0.7 <= ratio <= 1.3:
-                _LOGGER.info(
-                    "Cross-validation: τ_slow agrees (CL=%.0f vs %s=%.0f, ratio=%.2f)",
-                    cl_tau_slow.value, primary_slow.source, primary_slow.value, ratio,
-                )
+        return agreement
+
+    def _adjust_confidence(self, agreement: dict[str, bool]) -> None:
+        """Adjust PlantEstimate confidence based on cross-validation.
+
+        Agreement boosts confidence toward 1.0. Disagreement reduces it.
+        Only adjusts parameters that have primary (non-seed) estimates.
+        """
+        for name, field in [("τ_fast", "tau_fast"), ("τ_slow", "tau_slow")]:
+            current: ParameterEstimate = getattr(self._plant, field)
+            if current.source == "seed":
+                continue
+
+            agrees = agreement.get(name, True)
+            if agrees:
+                # Boost: nudge toward 1.0
+                new_conf = min(1.0, current.confidence + 0.1)
             else:
-                _LOGGER.warning(
-                    "Cross-validation: τ_slow DISAGREES (CL=%.0f vs %s=%.0f, ratio=%.2f)",
-                    cl_tau_slow.value, primary_slow.source, primary_slow.value, ratio,
+                # Reduce: nudge toward 0.5 (don't go too low — primary is still best)
+                new_conf = max(0.5, current.confidence - 0.15)
+
+            if new_conf != current.confidence:
+                updated = ParameterEstimate(
+                    value=current.value,
+                    confidence=new_conf,
+                    source=current.source,
+                    observations=current.observations,
                 )
+                self._plant = dataclasses.replace(self._plant, **{field: updated})
 
     # ── Plant test (Layer 3: active identification) ──────────────────
 
