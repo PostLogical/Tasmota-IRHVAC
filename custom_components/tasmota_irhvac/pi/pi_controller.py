@@ -2166,6 +2166,67 @@ class PIController:
         """Zero the integral (e.g., after mode changes that invalidate it)."""
         self._pi_integral = 0.0
 
+    # ── Plant test (Layer 3: active identification) ──────────────────
+
+    def start_plant_test(
+        self,
+        amplitude_c: int = 2,
+        comfort_min_c: float | None = None,
+        comfort_max_c: float | None = None,
+        n_cycles: int = 4,
+    ) -> bool:
+        """Start an active plant identification test.
+
+        Pauses PI and hands control to the relay test provider.
+        Returns True if started, False if preconditions not met.
+        """
+        if not self._plant_id.enabled:
+            _LOGGER.warning("%sPlant test: IMC disabled (tau_seed=0), cannot start", self._log_prefix)
+            return False
+        if self._plant_id.plant_test_active:
+            _LOGGER.warning("%sPlant test: already running", self._log_prefix)
+            return False
+        if self._hp_setpoint is None:
+            return False
+
+        e = self._entity
+        if e._attr_current_temperature is None:
+            return False
+
+        raw_c = TemperatureConverter.convert(
+            e._attr_current_temperature,
+            e.temperature_unit,
+            UnitOfTemperature.CELSIUS,
+        )
+
+        # Default comfort bounds: current temp ± 2°C if not specified
+        if comfort_min_c is None:
+            comfort_min_c = raw_c - 2.0
+        if comfort_max_c is None:
+            comfort_max_c = raw_c + 2.0
+
+        self._pi_paused = True
+        self._plant_id.start_plant_test(
+            baseline_setpoint_c=self._hp_setpoint,
+            amplitude_c=amplitude_c,
+            current_c=raw_c,
+            comfort_min_c=comfort_min_c,
+            comfort_max_c=comfort_max_c,
+            n_cycles=n_cycles,
+        )
+        _LOGGER.info(
+            "%sPlant test started: amplitude=±%d°C, comfort=[%.1f, %.1f]°C, %d cycles",
+            self._log_prefix, amplitude_c, comfort_min_c, comfort_max_c, n_cycles,
+        )
+        return True
+
+    def abort_plant_test(self) -> None:
+        """Abort any active plant test and resume PI."""
+        if self._plant_id.plant_test_active:
+            self._plant_id.abort_plant_test()
+            self._pi_paused = False
+            _LOGGER.info("%sPlant test aborted, PI resumed", self._log_prefix)
+
     async def async_suppress_ff_learning(self, reason: str = "") -> None:
         """Manually suppress FF learning (service call handler)."""
         self._manual_ff_suppress = True
@@ -2574,6 +2635,25 @@ class PIController:
             self._sensor_recovery_pending = True
             self._recovery_check_needed = True
             return False
+        # Plant test (Layer 3): runs instead of normal PI when active.
+        # Checked before _pi_paused because the test itself sets paused=True.
+        if self._plant_id.plant_test_active:
+            now_mono = time.monotonic()
+            raw_c = TemperatureConverter.convert(
+                e._attr_current_temperature,
+                e.temperature_unit,
+                UnitOfTemperature.CELSIUS,
+            )
+            cmd = self._plant_id.tick_plant_test(now_mono, raw_c)
+            if cmd.phase in ("complete", "aborted"):
+                self._pi_paused = False
+                if cmd.phase == "complete":
+                    gains = self._plant_id.compute_gains()
+                    self._apply_gain_update(gains)
+                return True  # send IR to restore normal setpoint
+            self._hp_setpoint = cmd.setpoint_c
+            return True  # send IR with test setpoint
+
         if self._pi_paused:
             _LOGGER.debug("%sPI tick: skipping, paused by vendor", self._log_prefix)
             return False

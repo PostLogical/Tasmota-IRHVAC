@@ -491,6 +491,23 @@ SERVICE_TO_METHOD = {
             vol.Required("frozen"): cv.boolean,
         }),
     },
+    "identify_plant": {
+        "method": "async_identify_plant",
+        "schema": IRHVAC_SERVICE_SCHEMA.extend({
+            vol.Optional("amplitude", default=2): vol.All(
+                vol.Coerce(int), vol.Range(min=1, max=14),
+            ),
+            vol.Optional("n_cycles", default=4): vol.All(
+                vol.Coerce(int), vol.Range(min=2, max=8),
+            ),
+            vol.Optional("comfort_min"): vol.Coerce(float),
+            vol.Optional("comfort_max"): vol.Coerce(float),
+        }),
+    },
+    "abort_identify_plant": {
+        "method": "async_abort_identify_plant",
+        "schema": IRHVAC_SERVICE_SCHEMA,
+    },
 }
 
 
@@ -1818,6 +1835,44 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         if idx is None:
             return
         pi.set_frozen(mode, idx, frozen)
+
+    async def async_identify_plant(
+        self,
+        amplitude: int = 2,
+        n_cycles: int = 4,
+        comfort_min: float | None = None,
+        comfort_max: float | None = None,
+    ) -> None:
+        """Start active plant identification (relay test + step-hold)."""
+        pi = self._pi
+        if pi is None:
+            return
+
+        # Convert comfort bounds from user's temp unit to °C
+        comfort_min_c = None
+        comfort_max_c = None
+        if comfort_min is not None:
+            comfort_min_c = TemperatureConverter.convert(
+                comfort_min, self.temperature_unit, UnitOfTemperature.CELSIUS,
+            )
+        if comfort_max is not None:
+            comfort_max_c = TemperatureConverter.convert(
+                comfort_max, self.temperature_unit, UnitOfTemperature.CELSIUS,
+            )
+
+        pi.start_plant_test(
+            amplitude_c=amplitude,
+            comfort_min_c=comfort_min_c,
+            comfort_max_c=comfort_max_c,
+            n_cycles=n_cycles,
+        )
+
+    async def async_abort_identify_plant(self) -> None:
+        """Abort an active plant identification test."""
+        pi = self._pi
+        if pi is None:
+            return
+        pi.abort_plant_test()
 
     def _resolve_coeff_index(self, name: str) -> int | None:
         """Resolve a coefficient name to its index."""

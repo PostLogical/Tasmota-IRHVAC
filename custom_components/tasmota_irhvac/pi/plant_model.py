@@ -102,6 +102,18 @@ class ObservationContext:
 
 
 @dataclasses.dataclass(frozen=True)
+class PlantTestCommand:
+    """Command from the plant test provider to the PI controller.
+
+    Each tick during an active plant test, the provider returns a command
+    telling the controller what HP setpoint to send.
+    """
+
+    setpoint_c: int  # integer °C HP setpoint to send
+    phase: str  # "relay_high" | "relay_low" | "step_hold" | "complete" | "aborted"
+
+
+@dataclasses.dataclass(frozen=True)
 class GainUpdate:
     """Result of a gain recomputation.
 

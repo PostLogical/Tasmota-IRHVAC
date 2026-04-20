@@ -19,8 +19,10 @@ from .plant_model import (
     ObservationContext,
     ParameterEstimate,
     PlantEstimate,
+    PlantTestCommand,
 )
 from .providers.area_method import AreaMethodProvider
+from .providers.plant_test import PlantTestProvider
 from .providers.step_response import StepResponseProvider
 
 _LOGGER = logging.getLogger(__name__)
@@ -53,6 +55,7 @@ class PlantIdentifier:
         # Providers
         self._step_provider = StepResponseProvider(response_lag=response_lag)
         self._area_provider = AreaMethodProvider(response_lag=response_lag)
+        self._plant_test: PlantTestProvider | None = None
 
     # ── Properties ───────────────────────────────────────────────────
 
@@ -79,7 +82,11 @@ class PlantIdentifier:
     @property
     def active(self) -> bool:
         """Whether any provider has an active observation."""
-        return self._step_provider.active or self._area_provider.active
+        return (
+            self._step_provider.active
+            or self._area_provider.active
+            or self.plant_test_active
+        )
 
     @property
     def response_lag(self) -> float:
@@ -160,6 +167,96 @@ class PlantIdentifier:
         """Cancel all in-progress observations."""
         self._step_provider.cancel_observation()
         self._area_provider.cancel_observation()
+
+    # ── Plant test (Layer 3: active identification) ──────────────────
+
+    def start_plant_test(
+        self,
+        baseline_setpoint_c: int,
+        amplitude_c: int,
+        current_c: float,
+        comfort_min_c: float,
+        comfort_max_c: float,
+        n_cycles: int = 4,
+    ) -> None:
+        """Start an active plant identification test."""
+        if not self._enabled:
+            return
+        # Cancel any passive observations
+        self.cancel_observation()
+
+        self._plant_test = PlantTestProvider()
+        self._plant_test.start(
+            baseline_setpoint_c=baseline_setpoint_c,
+            amplitude_c=amplitude_c,
+            current_c=current_c,
+            comfort_min_c=comfort_min_c,
+            comfort_max_c=comfort_max_c,
+            n_cycles=n_cycles,
+            response_lag=self._response_lag,
+        )
+
+    def tick_plant_test(
+        self, now_mono: float, current_c: float
+    ) -> PlantTestCommand:
+        """Advance the plant test by one tick.
+
+        Returns PlantTestCommand with the setpoint to send.
+        When the test transitions to step_hold, starts the passive
+        providers to capture τ_fast and τ_slow from the hold phase.
+        """
+        if self._plant_test is None:
+            return PlantTestCommand(setpoint_c=0, phase="aborted")
+
+        cmd = self._plant_test.tick(now_mono, current_c)
+
+        # When step-hold starts, feed the step to passive providers
+        if cmd.phase == "step_hold" and self._plant_test._step_hold_ctx is not None:
+            ctx = self._plant_test._step_hold_ctx
+            if not self._step_provider.active:
+                self._step_provider.start_observation(ctx)
+            if not self._area_provider.active:
+                self._area_provider.start_observation(ctx)
+            self._plant_test._step_hold_ctx = None  # Only start once
+
+        # During step-hold, accumulate data in passive providers
+        if cmd.phase == "step_hold":
+            tau_fast_est = self._step_provider.check_observation(now_mono, current_c)
+            if tau_fast_est is not None:
+                self._plant = dataclasses.replace(self._plant, tau_fast=tau_fast_est)
+            tau_slow_est = self._area_provider.accumulate(
+                now_mono, current_c, tau_fast=self._plant.tau_fast.value,
+            )
+            if tau_slow_est is not None:
+                self._plant = dataclasses.replace(self._plant, tau_slow=tau_slow_est)
+
+        # On completion, extract relay results
+        if cmd.phase in ("complete", "aborted"):
+            if cmd.phase == "complete":
+                results = self._plant_test.get_results()
+                if results:
+                    _LOGGER.info(
+                        "Plant test complete: K_u=%.2f, T_u=%.1f min, a=%.3f°C",
+                        results["k_u"].value,
+                        results["period"].value,
+                        results["amplitude"].value,
+                    )
+            self._plant_test = None
+
+        return cmd
+
+    def abort_plant_test(self) -> None:
+        """Abort any active plant test."""
+        if self._plant_test is not None:
+            self._plant_test.abort()
+            self._plant_test = None
+        # Also cancel any passive observations started during step-hold
+        self.cancel_observation()
+
+    @property
+    def plant_test_active(self) -> bool:
+        """Whether an active plant test is running."""
+        return self._plant_test is not None and self._plant_test.active
 
     # ── Gain computation ─────────────────────────────────────────────
 
