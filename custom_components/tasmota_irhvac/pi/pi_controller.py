@@ -113,7 +113,8 @@ from .health_checks import (
 from .performance_metrics import PerformanceMetrics
 from .smith_predictor import SmithPredictor
 from .supplemental_controller import SupplementalController
-from .tau_estimator import GainUpdate, TauEstimator
+from .plant_identifier import PlantIdentifier
+from .plant_model import GainUpdate
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -184,8 +185,8 @@ class PIController:
         )
         self._pi_min_interval: float = config.get(CONF_PI_MIN_INTERVAL, DEFAULT_PI_MIN_INTERVAL)
 
-        # IMC gain scheduling + τ estimation
-        self._tau_estimator = TauEstimator(
+        # Plant identification + IMC gain scheduling
+        self._plant_id = PlantIdentifier(
             tau_seed=config.get(CONF_PI_TAU_ESTIMATE, DEFAULT_PI_TAU_ESTIMATE),
             response_lag=config.get(CONF_PI_RESPONSE_LAG, DEFAULT_PI_RESPONSE_LAG),
             imc_lambda=config.get(CONF_PI_IMC_LAMBDA, DEFAULT_PI_IMC_LAMBDA),
@@ -194,16 +195,17 @@ class PIController:
         # Smith predictor for dead-time compensation.
         # Requires IMC (tau > 0) AND pi_smith_enabled=true.
         self._smith: SmithPredictor | None = None
-        if self._tau_estimator.enabled and self._smith_enabled:
+        if self._plant_id.enabled and self._smith_enabled:
             self._smith = SmithPredictor(
-                tau=self._tau_estimator.tau, lag=self._tau_estimator.response_lag
+                tau=self._plant_id.plant.tau_fast.value,
+                lag=self._plant_id.response_lag,
             )
 
         # Derive effective Kp/Ki: IMC formula or manual config
         self._pi_kp: float = 0.0
         self._pi_ki: float = 0.0
-        if self._tau_estimator.enabled:
-            gains = self._tau_estimator.compute_gains()
+        if self._plant_id.enabled:
+            gains = self._plant_id.compute_gains()
             self._pi_kp = gains.kp
             self._pi_ki = gains.ki
         else:
@@ -812,8 +814,9 @@ class PIController:
             heat_seeds_at_learn=list(self._heat_seeds),
             cool_seeds_at_learn=list(self._cool_seeds),
             ki_at_save=self._pi_ki,
-            tau_estimate=self._tau_estimator.tau,
-            tau_observations=self._tau_estimator.observations,
+            tau_estimate=self._plant_id.tau,  # backward compat
+            tau_observations=self._plant_id.observations,  # backward compat
+            plant_identifier_state=self._plant_id.as_dict(),
             observation_buffer_heat=self._observation_buffer_heat.as_list(),
             observation_buffer_cool=self._observation_buffer_cool.as_list(),
             drift_correction_signs=self._drift_correction_signs,
@@ -949,20 +952,29 @@ class PIController:
         # Restore lag filter states
         if data.lag_filter_states:
             self._inputs.restore_lag_states(data.lag_filter_states)
-        # Restore τ estimate and recompute IMC gains
-        if self._tau_estimator.enabled and data.tau_estimate > 0:
-            old_ki = self._pi_ki
-            gains = self._tau_estimator.restore(data.tau_estimate, data.tau_observations)
-            self._apply_gain_update(gains)
-            # Re-scale integral for the restored ki (overrides the earlier scaling
-            # which used the seed-derived ki, not the restored-τ-derived ki)
-            if old_ki > 0 and old_ki != self._pi_ki:
-                rescale = old_ki / self._pi_ki
-                self._pi_integral *= rescale
-                _LOGGER.debug(
-                    "PI: re-scaled integral for restored τ (ki %.4f → %.4f, scale %.2f)",
-                    old_ki, self._pi_ki, rescale,
-                )
+        # Restore plant estimate and recompute IMC gains
+        if self._plant_id.enabled:
+            restore_data = data.plant_identifier_state or {}
+            # Migration: if no plant_identifier_state, use old single-tau fields
+            if not restore_data and data.tau_estimate > 0:
+                restore_data = {
+                    "tau_estimate": data.tau_estimate,
+                    "tau_observations": data.tau_observations,
+                }
+            if restore_data:
+                old_ki = self._pi_ki
+                gains = self._plant_id.restore(restore_data)
+                self._apply_gain_update(gains)
+                # Re-scale integral for the restored ki (overrides the earlier
+                # scaling which used the seed-derived ki, not the restored ki)
+                if old_ki > 0 and old_ki != self._pi_ki:
+                    rescale = old_ki / self._pi_ki
+                    self._pi_integral *= rescale
+                    _LOGGER.debug(
+                        "PI: re-scaled integral for restored plant "
+                        "(ki %.4f → %.4f, scale %.2f)",
+                        old_ki, self._pi_ki, rescale,
+                    )
 
     def _apply_seed_changes(
         self, old_seeds: list[float], new_seeds: list[float], rls_model: RLSModel
@@ -999,7 +1011,7 @@ class PIController:
             await e.set_mode(hvac_mode)
         old_desired = self._desired_temp
         self._desired_temp = temperature
-        self._tau_estimator.cancel_observation()
+        self._plant_id.cancel_observation()
         # Bumpless transfer (Åström & Hägglund): keep output continuous
         if old_desired is not None:
             old_c = TemperatureConverter.convert(
@@ -1106,8 +1118,12 @@ class PIController:
             "room_temp_rate": round(self._room_temp_rate, 4),  # °C/min
             "effective_kp": round(self._pi_kp, 3),
             "effective_ki": round(self._pi_ki, 4),
-            "tau_estimate": round(self._tau_estimator.tau, 1) if self._tau_estimator.enabled else None,
-            "tau_observations": self._tau_estimator.observations if self._tau_estimator.enabled else None,
+            "tau_estimate": round(self._plant_id.tau, 1) if self._plant_id.enabled else None,  # backward compat
+            "tau_fast": round(self._plant_id.plant.tau_fast.value, 1) if self._plant_id.enabled else None,
+            "tau_slow": round(self._plant_id.plant.tau_slow.value, 1) if self._plant_id.enabled else None,
+            "tau_observations": self._plant_id.observations if self._plant_id.enabled else None,  # backward compat
+            "tau_fast_observations": self._plant_id.plant.tau_fast.observations if self._plant_id.enabled else None,
+            "tau_slow_observations": self._plant_id.plant.tau_slow.observations if self._plant_id.enabled else None,
             "smith_correction": (
                 round(self._smith.correction, 3) if self._smith is not None else None
             ),
@@ -1154,7 +1170,9 @@ class PIController:
                 "outdoor_temp": self._inputs.outdoor_temp,
                 "room_temp_rate": round(self._room_temp_rate, 6),
                 "integral_convergence": round(self._metrics.integral_convergence, 4),
-                "tau_estimate": round(self._tau_estimator.tau, 1) if self._tau_estimator.enabled else None,
+                "tau_estimate": round(self._plant_id.tau, 1) if self._plant_id.enabled else None,  # backward compat
+            "tau_fast": round(self._plant_id.plant.tau_fast.value, 1) if self._plant_id.enabled else None,
+            "tau_slow": round(self._plant_id.plant.tau_slow.value, 1) if self._plant_id.enabled else None,
             },
         }
         # Multicollinearity per buffer — gate on sufficient data
@@ -1207,7 +1225,9 @@ class PIController:
             "sensor_unavailable": self._sensor_unavailable,
             "sensor_recovery_pending": self._sensor_recovery_pending,
             "room_temp_rate": round(self._room_temp_rate, 4),
-            "tau_estimate": round(self._tau_estimator.tau, 1) if self._tau_estimator.enabled else None,
+            "tau_estimate": round(self._plant_id.tau, 1) if self._plant_id.enabled else None,  # backward compat
+            "tau_fast": round(self._plant_id.plant.tau_fast.value, 1) if self._plant_id.enabled else None,
+            "tau_slow": round(self._plant_id.plant.tau_slow.value, 1) if self._plant_id.enabled else None,
             "config": {
                 "kp": self._pi_kp,
                 "ki": self._pi_ki,
@@ -2106,7 +2126,9 @@ class PIController:
             "rls_obs_count": rls.observation_count,
             "ff_confidence": round(self._ff_confidence, 3),
             "integral_convergence": round(self._metrics.integral_convergence, 2),
-            "tau_estimate": round(self._tau_estimator.tau, 1) if self._tau_estimator.enabled else None,
+            "tau_estimate": round(self._plant_id.tau, 1) if self._plant_id.enabled else None,  # backward compat
+            "tau_fast": round(self._plant_id.plant.tau_fast.value, 1) if self._plant_id.enabled else None,
+            "tau_slow": round(self._plant_id.plant.tau_slow.value, 1) if self._plant_id.enabled else None,
             "smith_correction": (
                 round(self._smith.correction, 3) if self._smith is not None else None
             ),
@@ -2389,18 +2411,18 @@ class PIController:
         if reasons:
             _LOGGER.debug("RLS learning blocked: %s", ", ".join(reasons))
 
-    # ── IMC Gain Scheduling (delegated to TauEstimator) ──────────────
+    # ── IMC Gain Scheduling (delegated to PlantIdentifier) ────────────
 
     def _apply_gain_update(self, gains: GainUpdate) -> None:
-        """Apply a GainUpdate from TauEstimator to PI state and Smith predictor."""
+        """Apply a GainUpdate from PlantIdentifier to PI state and Smith predictor."""
         self._pi_kp = gains.kp
         self._pi_ki = gains.ki
         if self._smith is not None:
-            self._smith.update_params(tau=gains.tau, lag=gains.lag)
+            self._smith.update_params(tau=gains.tau_fast, lag=gains.lag)
 
     def _recompute_imc_gains(self) -> None:
         """Recompute IMC gains from current τ estimate and apply them."""
-        gains = self._tau_estimator.compute_gains()
+        gains = self._plant_id.compute_gains()
         self._apply_gain_update(gains)
 
     # ── PI Internals ──────────────────────────────────────────────────
@@ -2539,7 +2561,7 @@ class PIController:
         e = self._entity
         if e._attr_hvac_mode == HVACMode.OFF:
             self._pi_integral = 0.0
-            self._tau_estimator.cancel_observation()
+            self._plant_id.cancel_observation()
             if self._smith is not None:
                 self._smith._initialized = False
             return False
@@ -2605,7 +2627,7 @@ class PIController:
                 self._room_temp_rate = (temp1 - temp0) / elapsed_min
 
         # Check ongoing τ step-response observation (raw — measures real plant)
-        tau_gain_update = self._tau_estimator.check_observation(now_mono, raw_c, self._ff_offset)
+        tau_gain_update = self._plant_id.check_observation(now_mono, raw_c, self._ff_offset)
         if tau_gain_update is not None:
             self._apply_gain_update(tau_gain_update)
 
@@ -3110,7 +3132,7 @@ class PIController:
                     self._last_setpoint_change_time = now_mono
                     self._metrics.record_setpoint_change()
                     # Start τ observation on significant setpoint changes
-                    self._tau_estimator.start_observation(now_mono, current_c, desired_c, float(change), self._ff_offset)
+                    self._plant_id.start_observation(now_mono, current_c, desired_c, float(change), self._ff_offset)
                     return True
         else:
             _LOGGER.debug(

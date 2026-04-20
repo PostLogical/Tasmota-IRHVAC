@@ -4513,21 +4513,25 @@ class TestPIControllerRestoreGaps:
         entity._attr_current_temperature = 21.0
         entity.temperature_unit = UnitOfTemperature.CELSIUS
 
-        pi = PIController(entity, make_pi_config())
+        config = make_pi_config({
+            "pi_tau_estimate": 60.0,
+            "pi_response_lag": 15.0,
+            "pi_imc_lambda": 10.0,  # Non-default λ so Ki varies with τ
+        })
+        pi = PIController(entity, config)
         pi._pi_enabled = True
-        pi._tau_estimator._enabled = True
-        pi._tau_estimator._tau_seconds = 3600.0
         original_ki = pi._pi_ki
 
         data = PIExtraStoredData(
             pi_integral=2.0, hp_setpoint=22.0, desired_temp=21.0,
             heat_seeds_at_learn=[0.0, -0.03],
             cool_seeds_at_learn=[0.0, -0.03],
-            tau_estimate=7200.0,  # different τ → different ki
+            tau_estimate=120.0,  # different τ → different ki with custom λ
+            ki_at_save=original_ki,
         )
 
         pi.restore_extra_stored_data(data)
-        # If ki changed, integral should have been rescaled
+        # With custom λ=10, Ki varies with τ, so integral should be rescaled
         if pi._pi_ki != original_ki:
             assert pi._pi_integral != 2.0
 
@@ -5118,7 +5122,7 @@ class TestTauEstimatorGaps:
         })
         pi = PIController(entity, config)
         pi._pi_enabled = True
-        assert pi._tau_estimator.enabled
+        assert pi._plant_id.enabled
 
         # Simulate a prior ki (e.g., from an older IMC formula) different
         # from what the current τ restore will derive.
@@ -5427,18 +5431,23 @@ class TestTauEstimatorGaps:
 
     def test_small_expected_change_cancels_observation(self):
         """Step magnitude <0.5°C cancels the observation (insufficient excitation)."""
-        from custom_components.tasmota_irhvac.pi.tau_estimator import TauEstimator
+        from custom_components.tasmota_irhvac.pi.plant_model import ObservationContext
+        from custom_components.tasmota_irhvac.pi.providers.step_response import StepResponseProvider
 
-        est = TauEstimator(tau_seed=60.0, response_lag=5.0, imc_lambda=3.0)
-        # Start an observation with a large step (must be >=1.0 to be accepted)
-        est.start_observation(
-            now_mono=0.0, current_c=20.0, desired_c=22.0, step_magnitude=1.5,
+        provider = StepResponseProvider(response_lag=5.0)
+        ctx = ObservationContext(
+            start_time=0.0, baseline_temp=20.0, target_temp=22.0,
+            step_magnitude=1.5, ff_offset=0.0,
         )
-        assert est._step_active
+        provider.start_observation(ctx)
+        assert provider.active
 
-        # Now shrink the step_magnitude below 0.5 to hit lines 181-183
-        est._step_magnitude = 0.3
+        # Shrink step_magnitude below 0.5 to hit small-expected-change path
+        provider._ctx = ObservationContext(
+            start_time=0.0, baseline_temp=20.0, target_temp=22.0,
+            step_magnitude=0.3, ff_offset=0.0,
+        )
 
-        result = est.check_observation(now_mono=600.0, current_c=20.1)
+        result = provider.check_observation(now_mono=600.0, current_c=20.1)
         assert result is None
-        assert not est._step_active
+        assert not provider.active

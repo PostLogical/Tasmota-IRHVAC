@@ -2653,7 +2653,7 @@ class TestIMCGainScheduling:
         config = make_pi_config()
         entity = FakePIEntity(config)
         pi = entity._pi
-        assert not pi._tau_estimator.enabled
+        assert not pi._plant_id.enabled
         # Should use conftest defaults (pi_kp=1.5, pi_ki=0.15)
         assert pi._pi_kp == 1.5
         assert pi._pi_ki == 0.15
@@ -2663,7 +2663,7 @@ class TestIMCGainScheduling:
         config = make_pi_config({"pi_tau_estimate": 120.0, "pi_response_lag": 15.0})
         entity = FakePIEntity(config)
         pi = entity._pi
-        assert pi._tau_estimator.enabled
+        assert pi._plant_id.enabled
         # IMC: Kp = τ / (K_eff * (λ + L))
         # λ = L/3 = 5, L = 15, K_eff = 1.0
         # Kp = 120 / (1.0 * (5 + 15)) = 120/20 = 6.0
@@ -2712,8 +2712,8 @@ class TestIMCGainScheduling:
         entity = FakePIEntity(config)
         pi = entity._pi
         old_kp = pi._pi_kp
-        # Simulate learning a different τ
-        pi._tau_estimator.tau = 60.0
+        # Simulate learning a different τ via restore
+        pi._plant_id.restore({"tau_estimate": 60.0, "tau_observations": 1})
         pi._recompute_imc_gains()
         # λ config is 0, so auto = L/3 = 5
         # Kp = 60 / (1 * (5 + 15)) = 60/20 = 3.0
@@ -2730,8 +2730,8 @@ class TestTauGainIntegration:
         entity = FakePIEntity(config)
         pi = entity._pi
         old_kp = pi._pi_kp
-        pi._tau_estimator.start_observation(0.0, 20.0, 22.0, 2.0)
-        gain_update = pi._tau_estimator.check_observation(4800.0, 21.27)
+        pi._plant_id.start_observation(0.0, 20.0, 22.0, 2.0)
+        gain_update = pi._plant_id.check_observation(4800.0, 21.27)
         assert gain_update is not None
         pi._apply_gain_update(gain_update)
         assert pi._pi_kp != old_kp
@@ -2745,7 +2745,7 @@ class TestIMCPersistence:
         config = make_pi_config({"pi_tau_estimate": 120.0})
         entity = FakePIEntity(config)
         pi = entity._pi
-        pi._tau_estimator.tau = 85.0
+        pi._plant_id.restore({"tau_estimate": 85.0, "tau_observations": 1})
         data = pi.get_extra_stored_data()
         assert data is not None
         d = data.as_dict()
@@ -2767,7 +2767,7 @@ class TestIMCPersistence:
             tau_estimate=60.0,
         )
         pi.restore_extra_stored_data(data)
-        assert pi._tau_estimator.tau == 60.0
+        assert pi._plant_id.tau == 60.0
         assert pi._pi_kp != kp_seed  # Gains recomputed from restored τ
 
     def test_tau_zero_not_restored(self):
@@ -2784,7 +2784,7 @@ class TestIMCPersistence:
             tau_estimate=0.0,
         )
         pi.restore_extra_stored_data(data)
-        assert pi._tau_estimator.tau == 120.0  # Kept seed
+        assert pi._plant_id.tau == 120.0  # Kept seed
         assert pi._pi_kp == kp_seed
 
     def test_integral_unchanged_when_ki_invariant(self):
@@ -2834,12 +2834,13 @@ class TestIMCPersistence:
         # Actually with fixed λ=30: Ki = 3*τ/(τ*(30+15)) = 3/45 = 0.0667 for all τ.
         # Need τ-dependent λ to get Ki variation. Use a τ seed where default λ differs.
         # This test validates the rescaling mechanism works when Ki does change.
-        pi._tau_estimator.tau = 60.0
-        pi._tau_estimator._imc_lambda_config = 0.0  # Switch to auto λ=L/3
+        pi._plant_id.restore({"tau_estimate": 60.0, "tau_observations": 1})
+        pi._plant_id._imc_lambda_config = 0.0  # Switch to auto λ=L/3
+        pi._recompute_imc_gains()
         old_ki = pi._pi_ki
         pi._pi_integral = 5.0
         # Manually trigger a Ki change by using a different formula
-        pi._tau_estimator._imc_lambda_config = 10.0  # λ=10: Ki = 3*(60/25)/60 = 0.12
+        pi._plant_id._imc_lambda_config = 10.0  # λ=10: Ki = 3*(60/25)/60 = 0.12
         pi._recompute_imc_gains()
         # Ki changed, so rescaling code in restore would fire
         assert pi._pi_ki != pytest.approx(old_ki, abs=0.01)
