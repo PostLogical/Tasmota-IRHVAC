@@ -407,6 +407,7 @@ class PIController:
         self._batch_analysis_timer: CALLBACK_TYPE | None = None
         self._last_batch_result: BatchResult | None = None
         self._last_batch_timestamp: float | None = None
+        self._last_batch_wallclock: str = ""  # ISO-8601 wall-clock time
         self._last_residual_patterns: list[HourlyResidualPattern] = []
         self._has_had_stable_batch: bool = False
         self._tuning_alert_counters: dict[str, int] = {}
@@ -662,6 +663,7 @@ class PIController:
 
         self._last_batch_result = result
         self._last_batch_timestamp = time.monotonic()
+        self._last_batch_wallclock = datetime.now().isoformat(timespec="seconds")
         self._metrics.batch_model_rms = result.residual_rms
 
         # ── Residual time-of-day analysis ──
@@ -755,7 +757,7 @@ class PIController:
     def buffer_eligible(self) -> int:
         """Count of eligible (unclamped, low-rate) observations in the active buffer."""
         obs = self._active_buffer.get_all()
-        return sum(1 for o in obs if not o.clamped and abs(o.room_rate) < 0.02)
+        return sum(1 for o in obs if o.clamped_reason not in ("no_output", "clamped") and abs(o.room_rate) < 0.02)
 
     @property
     def buffer_total(self) -> int:
@@ -828,6 +830,7 @@ class PIController:
                 if self._last_batch_result is not None
                 else None
             ),
+            last_batch_wallclock=self._last_batch_wallclock,
             tuning_alert_counters={
                 **self._tuning_alert_counters,
                 "had_stable_batch": self._has_had_stable_batch,
@@ -944,6 +947,8 @@ class PIController:
                 br["held_features"] = set(br["held_features"])
             self._last_batch_result = BatchResult(**br)
             self._metrics.batch_model_rms = self._last_batch_result.residual_rms
+        if data.last_batch_wallclock:
+            self._last_batch_wallclock = data.last_batch_wallclock
         # Seed change detection: if user edited a seed since last save,
         # reset that coefficient to the new seed and increase its uncertainty.
         # Coefficients with unchanged seeds keep their learned values.
@@ -1178,7 +1183,7 @@ class PIController:
         }
         # Multicollinearity per buffer — gate on sufficient data
         for label, buf in [("heat", self._observation_buffer_heat), ("cool", self._observation_buffer_cool)]:
-            n_eligible = sum(1 for o in buf.get_all() if not o.clamped and abs(o.room_rate) < 0.02)
+            n_eligible = sum(1 for o in buf.get_all() if o.clamped_reason not in ("no_output", "clamped") and abs(o.room_rate) < 0.02)
             if n_eligible >= 2 * buf.n_features:
                 cond = buf.compute_condition_number()
                 if not math.isinf(cond):
@@ -1279,6 +1284,7 @@ class PIController:
             batch_names = coeff_names[:len(br.beta_batch)]
             batch: dict[str, Any] = {
                 "last_run_mono": self._last_batch_timestamp,
+                "last_run_wallclock": self._last_batch_wallclock or None,
                 "n_total": br.n_total,
                 "n_eligible": br.n_eligible,
                 "residual_rms": round(br.residual_rms, 4),
@@ -1317,7 +1323,7 @@ class PIController:
         def _buf_stats(buf: DiversityAwareBuffer) -> dict[str, Any]:
             obs = buf.get_all()
             n_eligible = sum(
-                1 for o in obs if not o.clamped and abs(o.room_rate) < 0.02
+                1 for o in obs if o.clamped_reason not in ("no_output", "clamped") and abs(o.room_rate) < 0.02
             )
             stats: dict[str, Any] = {"total": len(obs), "eligible": n_eligible}
             scores = buf.get_leverage_scores()
@@ -1551,6 +1557,7 @@ class PIController:
             self._observation_buffer_cool.clear()
         self._last_batch_result = None
         self._last_batch_timestamp = None
+        self._last_batch_wallclock = ""
         self._drift_correction_signs = []
         self._has_had_stable_batch = False
         self._tuning_alert_counters = {}
@@ -3140,11 +3147,18 @@ class PIController:
                 self._pi_integral += (q_error / self._pi_ki) * 0.4
 
         # Record observation for batch learning (every tick, regardless of gate)
-        obs_clamped = (
-            self._hp_setpoint <= self._min_temp_c
-            or self._hp_setpoint >= self._max_temp_c
-            or hp_no_output
-        )
+        if hp_no_output:
+            obs_clamped = True
+            obs_clamped_reason = "no_output"
+        elif self._hp_setpoint <= self._min_temp_c:
+            obs_clamped = True
+            obs_clamped_reason = "saturated_low"
+        elif self._hp_setpoint >= self._max_temp_c:
+            obs_clamped = True
+            obs_clamped_reason = "saturated_high"
+        else:
+            obs_clamped = False
+            obs_clamped_reason = ""
         active_buffer = self._observation_buffer_heat if is_heating else self._observation_buffer_cool
         active_buffer.add(Observation(
             timestamp=now_mono,
@@ -3154,6 +3168,7 @@ class PIController:
             desired_c=desired_c,
             room_rate=self._room_temp_rate,
             clamped=obs_clamped,
+            clamped_reason=obs_clamped_reason,
             pi_integral=self._pi_integral,
             ff_offset=self._ff_offset,
             ff_confidence=self._ff_confidence,
@@ -3161,7 +3176,10 @@ class PIController:
             wall_hour=datetime.now().hour,
         ))
 
-        # CUSUM anomaly detection — runs on every unclamped observation
+        # CUSUM anomaly detection — runs on every unclamped observation.
+        # TODO: Consider running on saturated observations too (obs_clamped_reason
+        # != "no_output") — currently excludes all clamped including actuator
+        # saturation, which misses anomalies during strong disturbance events.
         if not obs_clamped:
             cusum_residual = (float(self._hp_setpoint) - desired_c) - rls.predict(x)
             self._update_cusum(cusum_residual, now_mono, is_heating)

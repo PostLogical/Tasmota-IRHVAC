@@ -25,10 +25,13 @@ from custom_components.tasmota_irhvac.pi.batch_learning import (
 
 
 class TestWeightedLeastSquares:
-    def _make_obs(self, features, sp, cur, des=20.0, rate=0.005, clamped=False):
+    def _make_obs(self, features, sp, cur, des=20.0, rate=0.005, clamped=False, clamped_reason=""):
+        if clamped and not clamped_reason:
+            clamped_reason = "no_output"
         return Observation(
             timestamp=0.0, features=features, hp_setpoint=sp,
             current_c=cur, desired_c=des, room_rate=rate, clamped=clamped,
+            clamped_reason=clamped_reason,
         )
 
     def test_recovers_known_intercept(self):
@@ -242,10 +245,13 @@ class TestCompareAndReport:
 
 
 class TestPersistentExcitation:
-    def _make_obs(self, features, sp, cur, des=20.0, rate=0.005, clamped=False):
+    def _make_obs(self, features, sp, cur, des=20.0, rate=0.005, clamped=False, clamped_reason=""):
+        if clamped and not clamped_reason:
+            clamped_reason = "no_output"
         return Observation(
             timestamp=0.0, features=features, hp_setpoint=sp,
             current_c=cur, desired_c=des, room_rate=rate, clamped=clamped,
+            clamped_reason=clamped_reason,
         )
 
     def test_weighted_variance_constant(self):
@@ -608,10 +614,13 @@ class TestFilterInactive:
 
 
 class TestConditionNumber:
-    def _make_obs(self, features, sp=22.0, cur=20.0, clamped=False):
+    def _make_obs(self, features, sp=22.0, cur=20.0, clamped=False, clamped_reason=""):
+        if clamped and not clamped_reason:
+            clamped_reason = "no_output"
         return Observation(
             timestamp=0.0, features=features, hp_setpoint=sp,
             current_c=cur, desired_c=20.0, room_rate=0.005, clamped=clamped,
+            clamped_reason=clamped_reason,
         )
 
     def test_condition_number_inf_before_recompute(self):
@@ -713,11 +722,13 @@ class TestConditionNumber:
 
 
 class TestResidualsByHour:
-    def _make_obs(self, features, sp, cur, wall_hour, des=20.0, rate=0.005, clamped=False):
+    def _make_obs(self, features, sp, cur, wall_hour, des=20.0, rate=0.005, clamped=False, clamped_reason=""):
+        if clamped and not clamped_reason:
+            clamped_reason = "no_output"
         return Observation(
             timestamp=0.0, features=features, hp_setpoint=sp,
             current_c=cur, desired_c=des, room_rate=rate, clamped=clamped,
-            wall_hour=wall_hour,
+            clamped_reason=clamped_reason, wall_hour=wall_hour,
         )
 
     def test_detects_afternoon_solar_gain(self):

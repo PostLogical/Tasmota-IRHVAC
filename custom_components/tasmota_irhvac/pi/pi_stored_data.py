@@ -47,6 +47,7 @@ class PIExtraStoredData(ExtraStoredData):
     observation_buffer: list = dataclasses.field(default_factory=list)
     drift_correction_signs: list = dataclasses.field(default_factory=list)
     last_batch_result: dict | None = None
+    last_batch_wallclock: str = ""  # ISO-8601 wall-clock time of last batch run
     tuning_alert_counters: dict = dataclasses.field(default_factory=dict)
     obs_buffer_purged_v2: bool = False
     hp_deadband_estimate_heat: float = 0.5
@@ -81,6 +82,7 @@ class PIExtraStoredData(ExtraStoredData):
             "observation_buffer_cool": self.observation_buffer_cool,
             "drift_correction_signs": self.drift_correction_signs,
             "last_batch_result": self.last_batch_result,
+            "last_batch_wallclock": self.last_batch_wallclock,
             "tuning_alert_counters": self.tuning_alert_counters,
             "obs_buffer_purged_v2": self.obs_buffer_purged_v2,
             "hp_deadband_estimate_heat": self.hp_deadband_estimate_heat,
@@ -123,6 +125,7 @@ class PIExtraStoredData(ExtraStoredData):
                 observation_buffer=restored.get("observation_buffer", []),
                 drift_correction_signs=restored.get("drift_correction_signs", []),
                 last_batch_result=restored.get("last_batch_result"),
+                last_batch_wallclock=str(restored.get("last_batch_wallclock", "")),
                 tuning_alert_counters=restored.get("tuning_alert_counters", {}),
                 obs_buffer_purged_v2=restored.get("obs_buffer_purged_v2", False),
                 hp_deadband_estimate_heat=float(restored.get("hp_deadband_estimate_heat", 0.5)),

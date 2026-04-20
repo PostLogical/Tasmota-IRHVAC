@@ -33,6 +33,7 @@ class Observation:
     desired_c: float  # target temperature (°C)
     room_rate: float  # dT/dt in °C/min at observation time
     clamped: bool  # True if HP setpoint was at min or max
+    clamped_reason: str = ""  # "", "no_output", "saturated_low", "saturated_high"
     # Debug fields (not used by WLS, but needed for diagnostics)
     pi_integral: float = 0.0
     ff_offset: float = 0.0
@@ -49,6 +50,7 @@ class Observation:
             "des": self.desired_c,
             "rate": self.room_rate,
             "clamp": self.clamped,
+            "cr": self.clamped_reason,
             "integ": self.pi_integral,
             "ff": self.ff_offset,
             "ffc": self.ff_confidence,
@@ -66,6 +68,7 @@ class Observation:
             desired_c=d["des"],
             room_rate=d["rate"],
             clamped=d["clamp"],
+            clamped_reason=d.get("cr", "clamped" if d.get("clamp") else ""),
             pi_integral=d.get("integ", 0.0),
             ff_offset=d.get("ff", 0.0),
             ff_confidence=d.get("ffc", 1.0),
@@ -375,7 +378,7 @@ class DiversityAwareBuffer:
             return []
 
         names = feature_names or [f"feature_{i}" for i in range(n)]
-        unclamped = [o for o in self._buffer if not o.clamped]
+        unclamped = [o for o in self._buffer if o.clamped_reason not in ("no_output", "clamped")]
         if len(unclamped) < 20:
             return []
 
@@ -568,10 +571,16 @@ def weighted_least_squares(
 
     Returns None if insufficient eligible observations.
     """
-    # Filter to near-equilibrium, unclamped observations
+    # Filter observations:
+    # - Exclude hp_no_output (compressor off — different model, no plant info)
+    # - Exclude legacy "clamped" (pre-split data where reason is unknown)
+    # - Include actuator saturation (censored but informative)
+    # - Exclude high room_rate (transient, static model assumption)
+    _EXCLUDE_REASONS = ("no_output", "clamped")
     eligible = [
         o for o in observations
-        if not o.clamped and abs(o.room_rate) < room_rate_threshold
+        if o.clamped_reason not in _EXCLUDE_REASONS
+        and abs(o.room_rate) < room_rate_threshold
     ]
 
     if len(eligible) < min_observations:
@@ -1038,7 +1047,7 @@ def analyze_residuals_by_hour(
     hour_residuals: dict[int, list[float]] = {h: [] for h in range(24)}
 
     for o in observations:
-        if o.clamped or abs(o.room_rate) >= room_rate_threshold or o.wall_hour < 0:
+        if o.clamped_reason in ("no_output", "clamped") or abs(o.room_rate) >= room_rate_threshold or o.wall_hour < 0:
             continue
         x = o.features[:n_features]
         while len(x) < n_features:

@@ -5038,16 +5038,16 @@ class TestTauEstimatorGaps:
         pi = entity._pi
         entity._attr_hvac_mode = HVACMode.HEAT
 
-        # Add 25 observations that are ALL clamped — WLS will filter them out
+        # Add 25 observations that are ALL hp_no_output — WLS will filter them out
         for i in range(25):
             pi._observation_buffer_heat.add(Observation(
                 timestamp=float(i), features=[1.0, 5.0],
                 hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
-                room_rate=0.0, clamped=True,  # all clamped → filtered out
+                room_rate=0.0, clamped=True, clamped_reason="no_output",
             ))
 
         pi._run_batch_analysis()
-        # No result because all observations are clamped
+        # No result because all observations are no_output (compressor off)
         assert pi._last_batch_result is None
 
     @pytest.mark.asyncio
