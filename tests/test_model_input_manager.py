@@ -482,7 +482,7 @@ class TestEnabledToggle:
 
     def test_disabled_input_zeroed(self):
         """Disabled input forces value to zero."""
-        m_input = {**STOVE_INPUT, "enabled": False}
+        m_input = {**STOVE_INPUT, "input_enabled": False}
         mgr = ModelInputManager(model_inputs=[m_input], outdoor_temp_sensor=None)
         mgr.read_values(
             {"input_boolean.stove": ("on", True)},

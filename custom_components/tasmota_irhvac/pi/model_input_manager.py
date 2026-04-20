@@ -110,7 +110,7 @@ class ModelInputManager:
                 self.values[i] = entity_temp_c - room_temp_c
 
             # Enabled toggle: force value to zero when disabled.
-            if not m_input.get("enabled", True):
+            if not m_input.get("input_enabled", True):
                 self.values[i] = 0.0
 
             # Gate: force value to zero when gate entity is inactive (or
