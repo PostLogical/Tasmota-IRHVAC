@@ -661,6 +661,18 @@ class PIController:
                 self._log_prefix, "heat" if is_heating else "cool",
             )
 
+        # Record plant ID snapshot for future cross-validation.
+        plant = self._plant_id.plant
+        result.plant_snapshot = {
+            "k": plant.k.value,
+            "k_confidence": plant.k.confidence,
+            "theta": plant.theta.value,
+            "tau_fast": plant.tau_fast.value,
+            "tau_fast_confidence": plant.tau_fast.confidence,
+            "tau_slow": plant.tau_slow.value,
+            "tau_slow_confidence": plant.tau_slow.confidence,
+        }
+
         self._last_batch_result = result
         self._last_batch_timestamp = time.monotonic()
         self._last_batch_wallclock = datetime.now().isoformat(timespec="seconds")
@@ -3146,6 +3158,22 @@ class PIController:
             if 0.3 < abs(q_error) <= 0.5:
                 self._pi_integral += (q_error / self._pi_ki) * 0.4
 
+        # Compute observation metadata for batch diagnostics.
+        # integral_settled matches the IDB learning gate criteria.
+        obs_integral_change = abs(self._pi_integral - self._prev_integral_for_rls)
+        obs_output_change = obs_integral_change * self._pi_ki
+        obs_integral_settled = (
+            obs_output_change < 0.045
+            and abs(self._room_temp_rate) < 0.02
+        )
+        obs_seconds_since_sp = (
+            now_mono - self._last_setpoint_change_time
+            if self._last_setpoint_change_time > 0 else 0.0
+        )
+        obs_supplemental_active = (
+            self._supplemental.tracking_mode or self._supplemental.assist_active
+        )
+
         # Record observation for batch learning (every tick, regardless of gate)
         if hp_no_output:
             obs_clamped = True
@@ -3174,6 +3202,9 @@ class PIController:
             ff_confidence=self._ff_confidence,
             raw_c=raw_c,
             wall_hour=datetime.now().hour,
+            integral_settled=obs_integral_settled,
+            seconds_since_setpoint_change=obs_seconds_since_sp,
+            supplemental_active=obs_supplemental_active,
         ))
 
         # CUSUM anomaly detection — runs on every unclamped observation.

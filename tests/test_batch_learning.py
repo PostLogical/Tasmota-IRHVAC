@@ -82,21 +82,22 @@ class TestWeightedLeastSquares:
         result = weighted_least_squares(obs, n_features=1, min_observations=20)
         assert result is None
 
-    def test_distance_weighting(self):
-        """Observations at target should have more influence than distant ones."""
+    def test_equilibrium_weighting(self):
+        """Near-equilibrium observations should have more influence than transient ones."""
         obs = []
-        # 20 at-target observations saying offset=2.0
+        # 20 near-equilibrium observations (rate≈0) saying offset=2.0
         for _ in range(20):
-            obs.append(self._make_obs([1.0], sp=22.0, cur=20.0, des=20.0))
-        # 20 far-from-target observations saying offset=4.0
+            obs.append(self._make_obs([1.0], sp=22.0, cur=20.0, rate=0.001))
+        # 20 transient observations (rate=0.015, near threshold) saying offset=4.0
         for _ in range(20):
-            obs.append(self._make_obs([1.0], sp=27.0, cur=23.0, des=20.0))
+            obs.append(self._make_obs([1.0], sp=24.0, cur=20.0, rate=0.015))
         result = weighted_least_squares(obs, n_features=1, min_observations=20)
         assert result is not None
-        # At-target obs (weight=1.0) should dominate over distant (weight=0.25)
-        # Weighted mean: (20*1.0*2.0 + 20*0.25*4.0) / (20*1.0 + 20*0.25) = 60/25 = 2.4
-        assert result.beta_batch[0] < 3.0  # closer to 2.0 than 4.0
-        assert result.beta_batch[0] > 2.0  # but pulled slightly by distant obs
+        # Near-equilibrium obs (weight≈1.0) should dominate over transient
+        # (weight = 1/(1+(0.015/0.02)²) ≈ 0.64)
+        # Weighted mean: (20*1.0*2.0 + 20*0.64*4.0) / (20*1.0 + 20*0.64) ≈ 2.78
+        assert result.beta_batch[0] < 3.5  # closer to 2.0 than 4.0
+        assert result.beta_batch[0] > 2.0  # but pulled by transient obs
 
     def test_normalization_does_not_change_result(self):
         """Column normalization must not change the physical coefficients.
@@ -520,6 +521,65 @@ class TestComputeBlendedUpdate:
         assert diag is not None
         assert abs(diag[0] - 0.375) < 1e-9
         assert abs(diag[1] - 0.5) < 1e-9
+
+
+class TestObservationMetadata:
+    """Tests for Observation metadata fields and round-trip serialization."""
+
+    def test_metadata_round_trip(self):
+        """New metadata fields survive as_dict → from_dict round-trip."""
+        obs = Observation(
+            timestamp=100.0,
+            features=[1.0, 5.0],
+            hp_setpoint=22.0,
+            current_c=20.0,
+            desired_c=20.0,
+            room_rate=0.005,
+            clamped=False,
+            integral_settled=True,
+            seconds_since_setpoint_change=300.0,
+            supplemental_active=True,
+        )
+        d = obs.as_dict()
+        restored = Observation.from_dict(d)
+        assert restored.integral_settled is True
+        assert restored.seconds_since_setpoint_change == 300.0
+        assert restored.supplemental_active is True
+
+    def test_metadata_defaults_from_legacy(self):
+        """Legacy observations without metadata fields get safe defaults."""
+        legacy_dict = {
+            "t": 100.0, "x": [1.0, 5.0], "sp": 22.0,
+            "cur": 20.0, "des": 20.0, "rate": 0.005, "clamp": False,
+        }
+        obs = Observation.from_dict(legacy_dict)
+        assert obs.integral_settled is False
+        assert obs.seconds_since_setpoint_change == 0.0
+        assert obs.supplemental_active is False
+
+    def test_plant_snapshot_on_batch_result(self):
+        """BatchResult.plant_snapshot round-trips through dataclasses.asdict."""
+        import dataclasses
+        result = BatchResult(
+            n_total=100,
+            n_eligible=80,
+            beta_batch=[0.0, 0.3],
+            beta_current=[0.0, 0.25],
+            residual_rms=0.5,
+            max_coeff_change_pct=20.0,
+            recommend_update=True,
+            plant_snapshot={
+                "k": 1.0, "k_confidence": 0.8,
+                "tau_fast": 15.0, "tau_fast_confidence": 0.6,
+                "tau_slow": 120.0, "tau_slow_confidence": 0.3,
+                "theta": 10.0,
+            },
+        )
+        d = dataclasses.asdict(result)
+        d["held_features"] = list(d["held_features"])
+        restored = BatchResult(**d)
+        assert restored.plant_snapshot["tau_slow"] == 120.0
+        assert restored.plant_snapshot["k_confidence"] == 0.8
 
 
 class TestFilterInactive:

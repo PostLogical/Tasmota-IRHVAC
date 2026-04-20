@@ -34,12 +34,15 @@ class Observation:
     room_rate: float  # dT/dt in °C/min at observation time
     clamped: bool  # True if HP setpoint was at min or max
     clamped_reason: str = ""  # "", "no_output", "saturated_low", "saturated_high"
-    # Debug fields (not used by WLS, but needed for diagnostics)
+    # Context fields (not used by WLS, but needed for diagnostics and future gating)
     pi_integral: float = 0.0
     ff_offset: float = 0.0
     ff_confidence: float = 1.0
     raw_c: float = 0.0  # unfiltered room temperature
     wall_hour: int = -1  # wall-clock hour (0-23) for time-of-day analysis
+    integral_settled: bool = False  # True if online RLS gate would accept
+    seconds_since_setpoint_change: float = 0.0  # seconds since last HP setpoint change
+    supplemental_active: bool = False  # supplemental source tracking or assisting
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -56,6 +59,9 @@ class Observation:
             "ffc": self.ff_confidence,
             "raw": self.raw_c,
             "wh": self.wall_hour,
+            "is": self.integral_settled,
+            "sssc": self.seconds_since_setpoint_change,
+            "sa": self.supplemental_active,
         }
 
     @classmethod
@@ -74,6 +80,9 @@ class Observation:
             ff_confidence=d.get("ffc", 1.0),
             raw_c=d.get("raw", d["cur"]),
             wall_hour=d.get("wh", -1),
+            integral_settled=d.get("is", False),
+            seconds_since_setpoint_change=d.get("sssc", 0.0),
+            supplemental_active=d.get("sa", False),
         )
 
 
@@ -525,6 +534,7 @@ class BatchResult:
     beta_std_err: list[float] = field(default_factory=list)  # per-coefficient standard error from WLS
     beta_blended: list[float] = field(default_factory=list)  # safe update after covariance-weighted blend
     blend_gains: list[float] = field(default_factory=list)  # per-coefficient Kalman gain K_i ∈ [0, 1]
+    plant_snapshot: dict[str, Any] = field(default_factory=dict)  # plant ID state at batch time
 
 
 def _weighted_variance(values: list[float], weights: list[float]) -> float:
@@ -566,8 +576,11 @@ def weighted_least_squares(
       active samples) is non-zero are exempt from outlier exclusion to avoid
       rejecting the first pellet-stove-on events as outliers.
 
-    Weights: 1.0 / (1.0 + |error_c|) — at-target observations get full
-    weight, observations further from target are downweighted.
+    Weights: 1.0 / (1.0 + (room_rate / threshold)²) — near-equilibrium
+    observations get full weight, transient observations are smoothly
+    downweighted.  This is a heteroscedastic weighting: observations with
+    high room_rate violate the static model assumption more, so their
+    effective noise variance is higher (Ljung §9.4).
 
     Returns None if insufficient eligible observations.
     """
@@ -591,7 +604,7 @@ def weighted_least_squares(
 
     y = [o.hp_setpoint - o.current_c for o in eligible]
     X = [o.features[:n] for o in eligible]
-    w = [1.0 / (1.0 + abs(o.current_c - o.desired_c)) for o in eligible]
+    w = [1.0 / (1.0 + (o.room_rate / room_rate_threshold) ** 2) for o in eligible]
 
     # ── Persistent excitation check per feature ──────────────────────
     # Feature 0 (intercept, always 1.0) is always identifiable — its
