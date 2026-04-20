@@ -22,6 +22,7 @@ from .plant_model import (
     PlantTestCommand,
 )
 from .providers.area_method import AreaMethodProvider
+from .providers.closed_loop import ClosedLoopProvider
 from .providers.plant_test import PlantTestProvider
 from .providers.step_response import StepResponseProvider
 
@@ -55,6 +56,8 @@ class PlantIdentifier:
         # Providers
         self._step_provider = StepResponseProvider(response_lag=response_lag)
         self._area_provider = AreaMethodProvider(response_lag=response_lag)
+        self._closed_loop_provider = ClosedLoopProvider(response_lag=response_lag)
+        self._last_cross_check: tuple[ParameterEstimate, ParameterEstimate] | None = None
         self._plant_test: PlantTestProvider | None = None
 
     # ── Properties ───────────────────────────────────────────────────
@@ -119,9 +122,14 @@ class PlantIdentifier:
 
         self._step_provider.start_observation(ctx)
         self._area_provider.start_observation(ctx)
+        self._closed_loop_provider.start_observation(ctx)
 
     def check_observation(
-        self, now_mono: float, current_c: float, ff_offset: float = 0.0
+        self,
+        now_mono: float,
+        current_c: float,
+        ff_offset: float = 0.0,
+        hp_setpoint_c: float | None = None,
     ) -> GainUpdate | None:
         """Check all providers for new estimates.
 
@@ -150,6 +158,18 @@ class PlantIdentifier:
             self._plant = dataclasses.replace(self._plant, tau_slow=tau_slow_est)
             plant_changed = True
 
+        # Option 5: closed-loop identification → cross-check only.
+        # The closed-loop provider validates primary estimates but does NOT
+        # update PlantEstimate directly.  It's a diagnostic cross-check,
+        # not a primary identification source.
+        cl_results = self._closed_loop_provider.accumulate(
+            now_mono, current_c, hp_setpoint_c=hp_setpoint_c, ff_offset=ff_offset,
+        )
+        if cl_results is not None and len(cl_results) >= 2:
+            cl_tau_fast, cl_tau_slow = cl_results[0], cl_results[1]
+            self._last_cross_check = (cl_tau_fast, cl_tau_slow)
+            self._log_cross_validation(cl_tau_fast, cl_tau_slow)
+
         if plant_changed:
             gains = self.compute_gains()
             _LOGGER.info(
@@ -167,6 +187,40 @@ class PlantIdentifier:
         """Cancel all in-progress observations."""
         self._step_provider.cancel_observation()
         self._area_provider.cancel_observation()
+        self._closed_loop_provider.cancel_observation()
+
+    def _log_cross_validation(
+        self, cl_tau_fast: ParameterEstimate, cl_tau_slow: ParameterEstimate
+    ) -> None:
+        """Log cross-validation between closed-loop and primary estimates."""
+        primary_fast = self._plant.tau_fast
+        primary_slow = self._plant.tau_slow
+
+        if primary_fast.source != "seed" and primary_fast.value > 0:
+            ratio = cl_tau_fast.value / primary_fast.value
+            if 0.7 <= ratio <= 1.3:
+                _LOGGER.info(
+                    "Cross-validation: τ_fast agrees (CL=%.0f vs %s=%.0f, ratio=%.2f)",
+                    cl_tau_fast.value, primary_fast.source, primary_fast.value, ratio,
+                )
+            else:
+                _LOGGER.warning(
+                    "Cross-validation: τ_fast DISAGREES (CL=%.0f vs %s=%.0f, ratio=%.2f)",
+                    cl_tau_fast.value, primary_fast.source, primary_fast.value, ratio,
+                )
+
+        if primary_slow.source != "seed" and primary_slow.value > 0:
+            ratio = cl_tau_slow.value / primary_slow.value
+            if 0.7 <= ratio <= 1.3:
+                _LOGGER.info(
+                    "Cross-validation: τ_slow agrees (CL=%.0f vs %s=%.0f, ratio=%.2f)",
+                    cl_tau_slow.value, primary_slow.source, primary_slow.value, ratio,
+                )
+            else:
+                _LOGGER.warning(
+                    "Cross-validation: τ_slow DISAGREES (CL=%.0f vs %s=%.0f, ratio=%.2f)",
+                    cl_tau_slow.value, primary_slow.source, primary_slow.value, ratio,
+                )
 
     # ── Plant test (Layer 3: active identification) ──────────────────
 

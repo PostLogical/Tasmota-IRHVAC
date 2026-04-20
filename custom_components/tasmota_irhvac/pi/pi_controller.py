@@ -2707,7 +2707,10 @@ class PIController:
                 self._room_temp_rate = (temp1 - temp0) / elapsed_min
 
         # Check ongoing τ step-response observation (raw — measures real plant)
-        tau_gain_update = self._plant_id.check_observation(now_mono, raw_c, self._ff_offset)
+        tau_gain_update = self._plant_id.check_observation(
+            now_mono, raw_c, self._ff_offset,
+            hp_setpoint_c=float(self._hp_setpoint) if self._hp_setpoint is not None else None,
+        )
         if tau_gain_update is not None:
             self._apply_gain_update(tau_gain_update)
 
