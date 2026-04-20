@@ -2706,35 +2706,37 @@ class TestIMCGainScheduling:
         assert pi._pi_ki != 99.0
         assert pi._pi_kp_config == 99.0  # Config values preserved
 
-    def test_recompute_updates_gains(self):
-        """_recompute_imc_gains updates Kp/Ki from current τ estimate."""
+    def test_recompute_uses_tau_slow_for_kp(self):
+        """Kp derives from tau_slow (seed), not tau_fast (observed)."""
         config = make_pi_config({"pi_tau_estimate": 120.0, "pi_response_lag": 15.0})
         entity = FakePIEntity(config)
         pi = entity._pi
-        old_kp = pi._pi_kp
-        # Simulate learning a different τ via restore
+        kp_from_seed = pi._pi_kp
+        # Restore a different tau_fast — Kp should NOT change (uses tau_slow=seed)
         pi._plant_id.restore({"tau_estimate": 60.0, "tau_observations": 1})
         pi._recompute_imc_gains()
-        # λ config is 0, so auto = L/3 = 5
-        # Kp = 60 / (1 * (5 + 15)) = 60/20 = 3.0
-        assert abs(pi._pi_kp - 3.0) < 0.01
-        assert pi._pi_kp != old_kp
+        # Kp still from tau_slow=120: Kp = 120/(1*(5+15)) = 6.0
+        assert pi._pi_kp == pytest.approx(kp_from_seed, abs=0.01)
 
 
 class TestTauGainIntegration:
     """Integration test: τ observation applies gains to PIController."""
 
-    def test_tau_observation_updates_gains(self):
-        """After τ observation, IMC gains are applied to PIController."""
+    def test_tau_observation_updates_smith_not_kp(self):
+        """After τ_fast observation, Smith predictor updates but Kp stays stable."""
         config = make_pi_config({"pi_tau_estimate": 120.0, "pi_response_lag": 15.0})
         entity = FakePIEntity(config)
         pi = entity._pi
-        old_kp = pi._pi_kp
+        kp_from_seed = pi._pi_kp
         pi._plant_id.start_observation(0.0, 20.0, 22.0, 2.0)
         gain_update = pi._plant_id.check_observation(4800.0, 21.27)
         assert gain_update is not None
+        # tau_fast changed but tau_slow is still seed
+        assert gain_update.tau_fast != 120.0  # Moved toward observed
+        assert gain_update.tau_slow == 120.0  # Seed unchanged
         pi._apply_gain_update(gain_update)
-        assert pi._pi_kp != old_kp
+        # Kp derived from tau_slow → unchanged
+        assert pi._pi_kp == pytest.approx(kp_from_seed, abs=0.01)
 
 
 class TestIMCPersistence:
@@ -2751,15 +2753,14 @@ class TestIMCPersistence:
         d = data.as_dict()
         assert d["tau_estimate"] == 85.0
 
-    def test_tau_restored_from_extra_stored_data(self):
-        """τ estimate is restored and gains recomputed."""
+    def test_tau_fast_restored_kp_stable(self):
+        """τ_fast restored from persistence, Kp stays at seed (tau_slow unchanged)."""
         config = make_pi_config({"pi_tau_estimate": 120.0, "pi_response_lag": 15.0})
         entity = FakePIEntity(config)
         pi = entity._pi
-        # Kp from seed τ=120
         kp_seed = pi._pi_kp
 
-        # Simulate restore with learned τ=60
+        # Simulate restore with learned τ_fast=60 (old single-tau format)
         data = PIExtraStoredData(
             pi_integral=0.0,
             desired_temp=22.0,
@@ -2767,8 +2768,9 @@ class TestIMCPersistence:
             tau_estimate=60.0,
         )
         pi.restore_extra_stored_data(data)
-        assert pi._plant_id.tau == 60.0
-        assert pi._pi_kp != kp_seed  # Gains recomputed from restored τ
+        assert pi._plant_id.tau == 60.0  # tau_fast restored
+        assert pi._plant_id.plant.tau_slow.value == 120.0  # seed unchanged
+        assert pi._pi_kp == pytest.approx(kp_seed, abs=0.01)  # Kp from tau_slow
 
     def test_tau_zero_not_restored(self):
         """τ=0 in stored data doesn't overwrite seed."""

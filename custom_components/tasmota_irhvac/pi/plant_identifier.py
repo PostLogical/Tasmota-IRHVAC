@@ -169,9 +169,10 @@ class PlantIdentifier:
         lam = self._imc_lambda_config if self._imc_lambda_config > 0 else lag / 3.0
         k_eff = max(self._plant.k.value, 0.1)
 
-        # Phase 1: use tau_fast for Kp (identical to old single-tau behavior).
-        # Phase 2 will switch to tau_slow here once area method provides it.
-        tau_for_gains = tau_fast
+        # Kp uses tau_slow (dominant dynamics — wall/mass time constant).
+        # Until tau_slow is identified (Layer 2), it stays at the seed value,
+        # giving stable Kp independent of tau_fast fluctuations.
+        tau_for_gains = tau_slow
         kp = tau_for_gains / (k_eff * (lam + lag))
         ti = tau_for_gains / 3.0
         ki = kp / ti
