@@ -934,6 +934,24 @@ class PIController:
                 data.observation_buffer_cool, n_features=_n_buf_features,
                 feature_order=self._feature_order,
             )
+        # Strip features from removed model inputs.  Compares feature names
+        # present in stored observations against the current config's
+        # feature_order.  Removed features are deleted from all observations
+        # so stale data can't be matched if a new input reuses the name.
+        current_names = set(self._feature_order)
+        for buf in (self._observation_buffer_heat, self._observation_buffer_cool):
+            stored_names: set[str] = set()
+            for obs in buf.get_all():
+                if isinstance(obs.features, dict):
+                    stored_names.update(obs.features.keys())
+            removed = stored_names - current_names
+            if removed:
+                n = buf.strip_features(removed)
+                _LOGGER.info(
+                    "%sStripped removed features %s from %d observations",
+                    self._log_prefix, removed, n,
+                )
+
         # One-time migration: purge observations where the HP had zero
         # output (setpoint wrong side of room temp).  These observations
         # were recorded before hp_no_output detection was added and carry
