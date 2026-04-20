@@ -184,12 +184,13 @@ def check_feature_diversity(
         return None
     starved: list[str] = []
     for j in range(2, n_features):  # skip intercept & outdoor_delta
+        name = feature_names[j] if j < len(feature_names) else f"feature_{j}"
         active = sum(
             1 for o in observations
-            if j < len(o.features) and abs(o.features[j]) > 1e-6
+            if abs(o.features.get(name, 0.0) if isinstance(o.features, dict)
+                   else (o.features[j] if j < len(o.features) else 0.0)) > 1e-6
         )
         if active / total_obs < min_activity_pct:
-            name = feature_names[j] if j < len(feature_names) else f"feature_{j}"
             starved.append(name)
     if starved:
         return (

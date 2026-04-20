@@ -523,6 +523,110 @@ class TestComputeBlendedUpdate:
         assert abs(diag[1] - 0.5) < 1e-9
 
 
+class TestNamedFeatures:
+    """Tests for named feature dict storage and config change resilience."""
+
+    def test_dict_features_round_trip(self):
+        """Dict features survive as_dict → from_dict round-trip."""
+        obs = Observation(
+            timestamp=100.0,
+            features={"intercept": 1.0, "outdoor_delta": 5.0, "Solar Proxy": 0.6},
+            hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+            room_rate=0.005, clamped=False,
+        )
+        d = obs.as_dict()
+        restored = Observation.from_dict(d)
+        assert restored.features == {"intercept": 1.0, "outdoor_delta": 5.0, "Solar Proxy": 0.6}
+
+    def test_legacy_list_converted_with_names(self):
+        """Legacy positional list is converted to dict when names provided."""
+        legacy = {"t": 0, "x": [1.0, 5.0, 0.6], "sp": 22, "cur": 20, "des": 20, "rate": 0.005, "clamp": False}
+        names = ["intercept", "outdoor_delta", "Solar Proxy"]
+        obs = Observation.from_dict(legacy, legacy_feature_names=names)
+        assert obs.features == {"intercept": 1.0, "outdoor_delta": 5.0, "Solar Proxy": 0.6}
+
+    def test_legacy_list_without_names_gets_generic(self):
+        """Legacy list without names gets f0, f1, ... keys."""
+        legacy = {"t": 0, "x": [1.0, 5.0], "sp": 22, "cur": 20, "des": 20, "rate": 0.005, "clamp": False}
+        obs = Observation.from_dict(legacy)
+        assert obs.features == {"f0": 1.0, "f1": 5.0}
+
+    def test_extract_feature_vector_named(self):
+        """extract_feature_vector maps by name, zero-fills missing."""
+        from custom_components.tasmota_irhvac.pi.batch_learning import extract_feature_vector
+        obs = Observation(
+            timestamp=0, features={"intercept": 1.0, "outdoor_delta": 5.0, "Old Input": 3.0},
+            hp_setpoint=22, current_c=20, desired_c=20, room_rate=0.005, clamped=False,
+        )
+        # Current config has New Input instead of Old Input
+        order = ["intercept", "outdoor_delta", "New Input"]
+        result = extract_feature_vector(obs, order)
+        assert result == [1.0, 5.0, 0.0]  # New Input zero-filled
+
+    def test_extract_feature_vector_ignores_extra(self):
+        """Extra features in observation are ignored."""
+        from custom_components.tasmota_irhvac.pi.batch_learning import extract_feature_vector
+        obs = Observation(
+            timestamp=0, features={"intercept": 1.0, "outdoor_delta": 5.0, "Removed": 99.0},
+            hp_setpoint=22, current_c=20, desired_c=20, room_rate=0.005, clamped=False,
+        )
+        order = ["intercept", "outdoor_delta"]
+        result = extract_feature_vector(obs, order)
+        assert result == [1.0, 5.0]
+
+    def test_strip_features_removes_from_buffer(self):
+        """strip_features deletes named features from all observations."""
+        buf = DiversityAwareBuffer(
+            n_features=3,
+            feature_order=["intercept", "outdoor_delta", "Solar Proxy"],
+        )
+        for i in range(5):
+            buf.add(Observation(
+                timestamp=float(i),
+                features={"intercept": 1.0, "outdoor_delta": float(i), "Solar Proxy": 0.5},
+                hp_setpoint=22, current_c=20, desired_c=20, room_rate=0.005, clamped=False,
+            ))
+        modified = buf.strip_features({"Solar Proxy"})
+        assert modified == 5
+        for obs in buf.get_all():
+            assert "Solar Proxy" not in obs.features
+
+    def test_strip_features_prevents_stale_reuse(self):
+        """After stripping, re-adding same name starts fresh (zero-filled)."""
+        from custom_components.tasmota_irhvac.pi.batch_learning import extract_feature_vector
+        obs = Observation(
+            timestamp=0,
+            features={"intercept": 1.0, "outdoor_delta": 5.0},  # Solar stripped
+            hp_setpoint=22, current_c=20, desired_c=20, room_rate=0.005, clamped=False,
+        )
+        # New config re-adds "Solar Proxy"
+        order = ["intercept", "outdoor_delta", "Solar Proxy"]
+        result = extract_feature_vector(obs, order)
+        assert result == [1.0, 5.0, 0.0]  # Old Solar data gone, zero-filled
+
+    def test_wls_with_mixed_named_observations(self):
+        """WLS handles observations with different feature sets."""
+        feature_order = ["intercept", "outdoor_delta", "Solar Proxy"]
+        obs = []
+        # Old observations without solar
+        for i in range(20):
+            obs.append(Observation(
+                timestamp=float(i), hp_setpoint=22.0 + 0.5 * i, current_c=20.0,
+                desired_c=20.0, room_rate=0.005, clamped=False,
+                features={"intercept": 1.0, "outdoor_delta": float(i)},
+            ))
+        # New observations with solar
+        for i in range(20):
+            obs.append(Observation(
+                timestamp=float(20 + i), hp_setpoint=22.0 + 0.5 * i - 0.3, current_c=20.0,
+                desired_c=20.0, room_rate=0.005, clamped=False,
+                features={"intercept": 1.0, "outdoor_delta": float(i), "Solar Proxy": 0.5},
+            ))
+        result = weighted_least_squares(obs, n_features=3, feature_order=feature_order)
+        assert result is not None
+        assert len(result.beta_batch) == 3
+
+
 class TestObservationMetadata:
     """Tests for Observation metadata fields and round-trip serialization."""
 

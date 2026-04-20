@@ -159,6 +159,24 @@ class ModelInputManager:
             x.append(self.filtered[i])
         return x
 
+    def build_feature_names(self) -> list[str]:
+        """Return ordered feature names matching build_feature_vector layout."""
+        names: list[str] = ["intercept", "outdoor_delta"]
+        for m_input in self._model_inputs:
+            names.append(m_input.get("name", f"input_{len(names) - 2}"))
+        return names
+
+    def build_named_features(self, outdoor_delta: float) -> dict[str, float]:
+        """Build feature dict {name: value} for Observation storage."""
+        features: dict[str, float] = {
+            "intercept": 1.0,
+            "outdoor_delta": outdoor_delta,
+        }
+        for i, m_input in enumerate(self._model_inputs):
+            name = m_input.get("name", f"input_{i}")
+            features[name] = self.filtered[i]
+        return features
+
     def get_lag_states(self) -> dict[str, float]:
         """Get current lag filter states for persistence."""
         return {

@@ -12,7 +12,7 @@ import pytest
 from custom_components.tasmota_irhvac.pi.greybox_observer import (
     SCIPY_AVAILABLE,
     GreyboxResult,
-    _extract_solar_index,
+    _find_solar_name,
     fit_greybox,
     log_greybox_result,
 )
@@ -24,20 +24,20 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-class TestExtractSolarIndex:
+class TestFindSolarName:
     def test_finds_solar_input(self):
         inputs = [
             {"name": "stove", "input_role": "heat_source"},
-            {"name": "solar", "input_role": "solar"},
+            {"name": "Solar Proxy", "input_role": "solar"},
         ]
-        assert _extract_solar_index(inputs) == 3  # offset by 2
+        assert _find_solar_name(inputs) == "Solar Proxy"
 
     def test_no_solar_returns_none(self):
         inputs = [{"name": "stove", "input_role": "heat_source"}]
-        assert _extract_solar_index(inputs) is None
+        assert _find_solar_name(inputs) is None
 
     def test_empty_inputs(self):
-        assert _extract_solar_index([]) is None
+        assert _find_solar_name([]) is None
 
 
 class TestFitGreybox:
@@ -91,7 +91,11 @@ class TestFitGreybox:
                 + random.gauss(0, noise_std)
             )
 
-            features = [1.0, max(0, 20.0 - t_out), solar]
+            features = {
+                "intercept": 1.0,
+                "outdoor_delta": max(0, 20.0 - t_out),
+                "Solar Proxy": solar,
+            }
             obs.append(Observation(
                 timestamp=float(i * 60),
                 features=features,
@@ -108,7 +112,7 @@ class TestFitGreybox:
     def test_recovers_known_parameters(self):
         """Fit should recover ua_c, k_c, α_c from clean synthetic data."""
         obs = self._generate_observations(n=500, noise_std=0.0005)
-        model_inputs = [{"name": "solar", "input_role": "solar"}]
+        model_inputs = [{"name": "Solar Proxy", "input_role": "solar"}]
 
         result = fit_greybox(obs, model_inputs)
         assert result is not None
@@ -122,7 +126,7 @@ class TestFitGreybox:
     def test_uses_hp_off_data(self):
         """HP-off observations should contribute to ua_c and α_c estimation."""
         obs = self._generate_observations(n=500, include_hp_off=True)
-        model_inputs = [{"name": "solar", "input_role": "solar"}]
+        model_inputs = [{"name": "Solar Proxy", "input_role": "solar"}]
         result = fit_greybox(obs, model_inputs)
         assert result is not None
         assert result.n_hp_off > 0
@@ -133,7 +137,7 @@ class TestFitGreybox:
         obs = self._generate_observations(n=300, noise_std=0.001)
         # Remove solar from features
         for o in obs:
-            o.features[:] = o.features[:2]
+            o.features.pop("Solar Proxy", None)
 
         result = fit_greybox(obs, model_inputs=[])
         assert result is not None
@@ -156,7 +160,7 @@ class TestFitGreybox:
     def test_plant_id_cross_check(self):
         """τ_eff should be compared against plant ID τ_slow."""
         obs = self._generate_observations(n=500, noise_std=0.001)
-        model_inputs = [{"name": "solar", "input_role": "solar"}]
+        model_inputs = [{"name": "Solar Proxy", "input_role": "solar"}]
         # True τ = 1/0.006 ≈ 167 min
         result = fit_greybox(
             obs, model_inputs,

@@ -398,12 +398,15 @@ class PIController:
         # learn independently — outdoor_delta sign differs — so observations
         # must not be mixed.  Records regardless of learning gate.
         # n_features = intercept + outdoor_delta + model_inputs
-        _n_buf_features = 2 + len(self._model_inputs)
+        self._feature_order: list[str] = self._inputs.build_feature_names()
+        _n_buf_features = len(self._feature_order)
         self._observation_buffer_heat = DiversityAwareBuffer(
             n_features=_n_buf_features,
+            feature_order=self._feature_order,
         )
         self._observation_buffer_cool = DiversityAwareBuffer(
             n_features=_n_buf_features,
+            feature_order=self._feature_order,
         )
         self._batch_analysis_timer: CALLBACK_TYPE | None = None
         self._last_batch_result: BatchResult | None = None
@@ -602,6 +605,7 @@ class PIController:
         result = weighted_least_squares(
             observations, n_features=rls.n, current_beta=current_phys,
             room_rate_threshold=0.02, min_observations=20,
+            feature_order=self._feature_order,
         )
         if result is None:
             _LOGGER.debug(
@@ -685,6 +689,7 @@ class PIController:
         beta_for_residuals = result.beta_blended if result.beta_blended else result.beta_batch
         self._last_residual_patterns = analyze_residuals_by_hour(
             observations, beta_for_residuals, n_features=rls.n,
+            feature_order=self._feature_order,
         )
         if self._last_residual_patterns:
             for p in self._last_residual_patterns:
@@ -912,19 +917,22 @@ class PIController:
         # Restore per-mode observation buffers for batch learning.
         # Migration: legacy single observation_buffer → heat buffer
         # (heating-dominant assumption — no production user has cool data).
-        _n_buf_features = 2 + len(self._model_inputs)
+        _n_buf_features = len(self._feature_order)
         if data.observation_buffer_heat:
             self._observation_buffer_heat = DiversityAwareBuffer.from_list(
                 data.observation_buffer_heat, n_features=_n_buf_features,
+                feature_order=self._feature_order,
             )
         elif data.observation_buffer:
             # Legacy single-buffer migration
             self._observation_buffer_heat = DiversityAwareBuffer.from_list(
                 data.observation_buffer, n_features=_n_buf_features,
+                feature_order=self._feature_order,
             )
         if data.observation_buffer_cool:
             self._observation_buffer_cool = DiversityAwareBuffer.from_list(
                 data.observation_buffer_cool, n_features=_n_buf_features,
+                feature_order=self._feature_order,
             )
         # One-time migration: purge observations where the HP had zero
         # output (setpoint wrong side of room temp).  These observations
@@ -1393,7 +1401,9 @@ class PIController:
             for j in range(2, n_features):
                 name = coeff_names[j] if j < len(coeff_names) else f"feature_{j}"
                 feature_active[name] = sum(
-                    1 for o in obs if j < len(o.features) and abs(o.features[j]) > 1e-6
+                    1 for o in obs
+                    if abs(o.features.get(name, 0.0) if isinstance(o.features, dict)
+                           else (o.features[j] if j < len(o.features) else 0.0)) > 1e-6
                 )
             if feature_active:
                 stats["feature_active_counts"] = feature_active
@@ -3230,7 +3240,7 @@ class PIController:
         active_buffer = self._observation_buffer_heat if is_heating else self._observation_buffer_cool
         active_buffer.add(Observation(
             timestamp=now_mono,
-            features=list(x),
+            features=self._inputs.build_named_features(outdoor_delta),
             hp_setpoint=float(self._hp_setpoint),
             current_c=current_c,
             desired_c=desired_c,

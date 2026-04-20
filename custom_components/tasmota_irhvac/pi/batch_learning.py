@@ -24,10 +24,20 @@ _LOGGER = logging.getLogger(__name__)
 
 @dataclass
 class Observation:
-    """A single observation for batch learning and debug analysis."""
+    """A single observation for batch learning and debug analysis.
+
+    Features are stored as a dict mapping feature name → value.  This
+    allows model inputs to be added or removed without invalidating
+    existing buffer observations: removed features are stripped, new
+    features are zero-filled at solve time.
+
+    Legacy observations (pre-named) store features as a positional list
+    and are converted on load via ``from_dict()`` when ``feature_names``
+    are available from the buffer context.
+    """
 
     timestamp: float  # monotonic time
-    features: list[float]  # [1, outdoor_delta, model_input_1, ...]
+    features: dict[str, float]  # {"intercept": 1.0, "outdoor_delta": 5.2, ...}
     hp_setpoint: float  # integer HP setpoint (°C)
     current_c: float  # filtered room temperature (°C)
     desired_c: float  # target temperature (°C)
@@ -48,7 +58,7 @@ class Observation:
     def as_dict(self) -> dict[str, Any]:
         return {
             "t": self.timestamp,
-            "x": self.features,
+            "x": self.features,  # dict now; legacy was list
             "sp": self.hp_setpoint,
             "cur": self.current_c,
             "des": self.desired_c,
@@ -67,10 +77,34 @@ class Observation:
         }
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> Observation:
+    def from_dict(
+        cls,
+        d: dict[str, Any],
+        legacy_feature_names: list[str] | None = None,
+    ) -> Observation:
+        """Restore an Observation from a serialized dict.
+
+        If ``d["x"]`` is a list (legacy positional format) and
+        ``legacy_feature_names`` is provided, converts the positional
+        list to a named dict.  If names aren't available, uses generic
+        positional names (``f0``, ``f1``, ...) so the dict contract holds.
+        """
+        raw_x = d["x"]
+        if isinstance(raw_x, dict):
+            features = raw_x
+        elif isinstance(raw_x, list):
+            if legacy_feature_names is not None:
+                features = {
+                    name: raw_x[i] if i < len(raw_x) else 0.0
+                    for i, name in enumerate(legacy_feature_names)
+                }
+            else:
+                features = {f"f{i}": v for i, v in enumerate(raw_x)}
+        else:
+            features = {}
         return cls(
             timestamp=d["t"],
-            features=d["x"],
+            features=features,
             hp_setpoint=d["sp"],
             current_c=d["cur"],
             desired_c=d["des"],
@@ -98,6 +132,27 @@ DEFAULT_DIVERSITY_BUFFER_SIZE = 2000
 INFO_MATRIX_REGULARIZATION = 1e-4
 
 
+def extract_feature_vector(
+    obs: Observation,
+    feature_order: list[str],
+) -> list[float]:
+    """Extract an ordered feature vector from an observation.
+
+    Returns a list aligned to ``feature_order``, zero-filling any features
+    not present in the observation.  Extra features on the observation are
+    ignored.  Handles both dict features (named) and legacy list features
+    (positional fallback).
+    """
+    if isinstance(obs.features, dict):
+        return [obs.features.get(name, 0.0) for name in feature_order]
+    # Legacy list fallback: positional mapping
+    n = len(feature_order)
+    x = list(obs.features[:n])
+    while len(x) < n:
+        x.append(0.0)
+    return x
+
+
 class DiversityAwareBuffer:
     """Leverage-scored observation buffer for long-term diverse data retention.
 
@@ -118,10 +173,16 @@ class DiversityAwareBuffer:
     - Atkinson & Donev, "Optimum Experimental Designs" — D-optimal sequential design
     """
 
-    def __init__(self, n_features: int, max_size: int = DEFAULT_DIVERSITY_BUFFER_SIZE) -> None:
+    def __init__(
+        self,
+        n_features: int,
+        max_size: int = DEFAULT_DIVERSITY_BUFFER_SIZE,
+        feature_order: list[str] | None = None,
+    ) -> None:
         self._buffer: list[Observation] = []
         self._max_size = max_size
         self._n_features = n_features
+        self._feature_order: list[str] | None = feature_order
         # (X^T X + λI)^{-1} — the inverse information matrix, n×n.
         # Initialized to (1/λ) * I (no data yet).
         n = n_features
@@ -149,6 +210,35 @@ class DiversityAwareBuffer:
             for i in range(n)
         ]
         self._updates_since_recompute = 0
+
+    def strip_features(self, names_to_remove: set[str]) -> int:
+        """Remove named features from all stored observations.
+
+        Call when model inputs are removed from the config.  Prevents
+        stale feature values from being matched if a new input with the
+        same name is added later.  Recomputes the info matrix afterward.
+
+        Returns the number of observations modified.
+        """
+        if not names_to_remove:
+            return 0
+        modified = 0
+        for obs in self._buffer:
+            if isinstance(obs.features, dict):
+                before = len(obs.features)
+                for name in names_to_remove:
+                    obs.features.pop(name, None)
+                if len(obs.features) < before:
+                    modified += 1
+        if modified:
+            self.recompute_info_matrix()
+        return modified
+
+    def update_feature_order(self, feature_order: list[str]) -> None:
+        """Update the canonical feature order after config changes."""
+        self._feature_order = feature_order
+        self._n_features = len(feature_order)
+        self.recompute_info_matrix()
 
     def filter_inactive(self, mode: str) -> int:
         """Remove observations where the HP had zero output.
@@ -238,13 +328,20 @@ class DiversityAwareBuffer:
         data: list[dict[str, Any]],
         n_features: int,
         max_size: int = DEFAULT_DIVERSITY_BUFFER_SIZE,
+        feature_order: list[str] | None = None,
     ) -> DiversityAwareBuffer:
-        """Deserialize from stored dicts, recomputing the info matrix."""
-        buf = cls(n_features, max_size)
+        """Deserialize from stored dicts, recomputing the info matrix.
+
+        If ``feature_order`` is provided, legacy observations with
+        positional feature lists are converted to named dicts.
+        """
+        buf = cls(n_features, max_size, feature_order=feature_order)
         observations: list[Observation] = []
         for d in data:
             try:
-                observations.append(Observation.from_dict(d))
+                observations.append(
+                    Observation.from_dict(d, legacy_feature_names=feature_order)
+                )
             except (KeyError, TypeError, ValueError):
                 continue
         # If more observations than max_size, keep only the most recent
@@ -257,8 +354,15 @@ class DiversityAwareBuffer:
         return buf
 
     def _get_feature_vector(self, obs: Observation) -> list[float]:
-        """Extract and pad feature vector to match expected dimensions."""
-        x = obs.features[:self._n_features]
+        """Extract ordered feature vector for linear algebra operations."""
+        if self._feature_order is not None:
+            return extract_feature_vector(obs, self._feature_order)
+        # Legacy fallback: positional list (only for tests without feature_order)
+        if isinstance(obs.features, dict):
+            vals = list(obs.features.values())
+        else:
+            vals = list(obs.features)
+        x = vals[:self._n_features]
         while len(x) < self._n_features:
             x.append(0.0)
         return x
@@ -398,10 +502,11 @@ class DiversityAwareBuffer:
         # Extract columns (skip intercept at index 0)
         cols: list[list[float]] = []
         for j in range(1, n):
-            cols.append([
-                unclamped[k].features[j] if j < len(unclamped[k].features) else 0.0
-                for k in range(m)
-            ])
+            col: list[float] = []
+            for k in range(m):
+                x = self._get_feature_vector(unclamped[k])
+                col.append(x[j] if j < len(x) else 0.0)
+            cols.append(col)
 
         results: list[tuple[str, str, float]] = []
         nc = len(cols)
@@ -565,6 +670,7 @@ def weighted_least_squares(
     min_feature_variance: float = MIN_FEATURE_VARIANCE,
     outlier_sigma: float = 3.0,
     min_feature_representation: int = 10,
+    feature_order: list[str] | None = None,
 ) -> BatchResult | None:
     """Run weighted least squares on filtered observations.
 
@@ -606,7 +712,15 @@ def weighted_least_squares(
     m = len(eligible)
 
     y = [o.hp_setpoint - o.current_c for o in eligible]
-    X = [o.features[:n] for o in eligible]
+    if feature_order is not None:
+        X = [extract_feature_vector(o, feature_order) for o in eligible]
+    else:
+        # Legacy fallback for tests without feature_order
+        X = [
+            list(o.features.values())[:n] if isinstance(o.features, dict)
+            else o.features[:n]
+            for o in eligible
+        ]
     w = [1.0 / (1.0 + (o.room_rate / room_rate_threshold) ** 2) for o in eligible]
 
     # ── Persistent excitation check per feature ──────────────────────
@@ -1038,6 +1152,7 @@ def analyze_residuals_by_hour(
     room_rate_threshold: float = 0.02,
     min_obs_per_hour: int = 5,
     residual_threshold: float = 0.5,
+    feature_order: list[str] | None = None,
 ) -> list[HourlyResidualPattern]:
     """Detect systematic time-of-day residual patterns.
 
@@ -1065,9 +1180,16 @@ def analyze_residuals_by_hour(
     for o in observations:
         if o.clamped_reason in ("no_output", "clamped") or abs(o.room_rate) >= room_rate_threshold or o.wall_hour < 0:
             continue
-        x = o.features[:n_features]
-        while len(x) < n_features:
-            x.append(0.0)
+        if feature_order is not None:
+            x = extract_feature_vector(o, feature_order)
+        elif isinstance(o.features, dict):
+            x = list(o.features.values())[:n_features]
+            while len(x) < n_features:
+                x.append(0.0)
+        else:
+            x = o.features[:n_features]
+            while len(x) < n_features:
+                x.append(0.0)
         predicted = sum(beta[i] * x[i] for i in range(n_features))
         actual = o.hp_setpoint - o.current_c
         residual = actual - predicted

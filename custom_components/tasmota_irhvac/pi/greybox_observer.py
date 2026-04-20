@@ -121,15 +121,11 @@ class GreyboxResult:
         }
 
 
-def _extract_solar_index(model_inputs: list[dict[str, Any]]) -> int | None:
-    """Find the feature index of the solar proxy input.
-
-    Returns the index into the feature vector (offset by 2 for intercept
-    and outdoor_delta), or None if no solar input is configured.
-    """
-    for i, m in enumerate(model_inputs):
+def _find_solar_name(model_inputs: list[dict[str, Any]]) -> str | None:
+    """Find the feature name of the solar proxy input, or None."""
+    for m in model_inputs:
         if m.get("input_role") == "solar":
-            return i + 2  # features = [1, outdoor_delta, input0, input1, ...]
+            return m.get("name")
     return None
 
 
@@ -165,7 +161,7 @@ def fit_greybox(
         )
         return None
 
-    solar_idx = _extract_solar_index(model_inputs)
+    solar_name = _find_solar_name(model_inputs)
 
     # Filter to observations with valid outdoor temperature.
     eligible = [
@@ -198,17 +194,14 @@ def fit_greybox(
             hp_offset.append(o.hp_setpoint - o.current_c)
             n_hp_on += 1
 
-    # Solar proxy values (from feature vector).
+    # Solar proxy values (by feature name).
     solar: list[float]
-    if solar_idx is not None:
-        solar = [
-            o.features[solar_idx] if solar_idx < len(o.features) else 0.0
-            for o in eligible
-        ]
+    if solar_name is not None:
+        solar = [o.features.get(solar_name, 0.0) for o in eligible]
     else:
         solar = [0.0] * m
 
-    has_solar = solar_idx is not None and any(abs(s) > 1e-6 for s in solar)
+    has_solar = solar_name is not None and any(abs(s) > 1e-6 for s in solar)
 
     # Check HP offset variance -- need some HP-on data to identify k_c.
     hp_mean = sum(hp_offset) / m
