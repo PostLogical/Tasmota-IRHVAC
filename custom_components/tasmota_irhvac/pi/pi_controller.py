@@ -1229,6 +1229,27 @@ class PIController:
             }
             for p in self._last_residual_patterns
         ]
+        # Batch result
+        if self._last_batch_result is not None:
+            dump["batch_result"] = {
+                **dataclasses.asdict(self._last_batch_result),
+                "held_features": list(self._last_batch_result.held_features),
+            }
+        # Grey-box observer result
+        dump["greybox_observer"] = (
+            self._last_greybox_result.as_dict()
+            if self._last_greybox_result is not None else None
+        )
+        # Model input configs (roles, names, flags for interpreting feature vectors)
+        dump["model_input_configs"] = [
+            {
+                "name": m.get("name", ""),
+                "input_role": m.get("input_role", "other"),
+                "delta_from_room": m.get("delta_from_room", False),
+                "suppress_learning": m.get("suppress_learning", False),
+            }
+            for m in self._model_inputs
+        ]
         return dump
 
     def get_full_diagnostics(self) -> dict[str, Any]:
