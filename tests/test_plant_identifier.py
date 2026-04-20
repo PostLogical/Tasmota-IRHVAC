@@ -169,3 +169,72 @@ class TestGainUpdateFields:
         assert hasattr(gains, "tau_fast")
         assert hasattr(gains, "tau_slow")
         assert not hasattr(gains, "tau")  # Old field removed
+
+
+class TestPlantIdentifierDiagnostics:
+    """Tests for get_diagnostics() method."""
+
+    def _make(self, tau=60.0, lag=15.0):
+        return PlantIdentifier(tau_seed=tau, response_lag=lag, imc_lambda=0.0)
+
+    def test_baseline_diagnostics(self):
+        """Fresh identifier returns plant estimate and provider states."""
+        pi = self._make()
+        diag = pi.get_diagnostics()
+
+        # Full SOPDT plant estimate
+        est = diag["plant_estimate"]
+        for param in ("k", "theta", "tau_fast", "tau_slow"):
+            assert param in est
+            assert est[param]["source"] == "seed"
+
+        # All three providers present and inactive
+        providers = diag["providers"]
+        assert not providers["step_response"]["active"]
+        assert not providers["area_method"]["active"]
+        assert not providers["closed_loop"]["active"]
+
+        # No cross-check or plant test initially
+        assert "cross_check" not in diag
+        assert "plant_test" not in diag
+
+    def test_diagnostics_with_active_providers(self):
+        """Active observation shows in provider state."""
+        pi = self._make()
+        pi.start_observation(0.0, 20.0, 22.0, 2.0)
+        diag = pi.get_diagnostics()
+
+        assert diag["providers"]["step_response"]["active"]
+        assert diag["providers"]["area_method"]["active"]
+        assert diag["providers"]["closed_loop"]["active"]
+
+    def test_diagnostics_with_cross_check(self):
+        """Cross-check data appears after closed-loop fires."""
+        from custom_components.tasmota_irhvac.pi.plant_model import ParameterEstimate
+
+        pi = self._make()
+        # Manually inject cross-check data (normally set by check_observation)
+        pi._last_cross_check = (
+            ParameterEstimate(value=55.0, confidence=0.8, source="closed_loop", observations=3),
+            ParameterEstimate(value=120.0, confidence=0.7, source="closed_loop", observations=3),
+        )
+        diag = pi.get_diagnostics()
+
+        assert "cross_check" in diag
+        assert diag["cross_check"]["tau_fast"]["value"] == 55.0
+        assert diag["cross_check"]["tau_slow"]["value"] == 120.0
+        assert diag["cross_check"]["tau_slow"]["source"] == "closed_loop"
+
+    def test_diagnostics_with_plant_test(self):
+        """Active plant test state appears in diagnostics."""
+        pi = self._make()
+        pi.start_plant_test(
+            baseline_setpoint_c=22, amplitude_c=2,
+            current_c=21.5, comfort_min_c=19.0, comfort_max_c=25.0,
+        )
+        diag = pi.get_diagnostics()
+
+        assert "plant_test" in diag
+        assert diag["plant_test"]["active"] is True
+        assert diag["plant_test"]["phase"] == "relay_high"
+        assert diag["plant_test"]["cycle_count"] == 0

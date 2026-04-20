@@ -106,3 +106,42 @@ class TestDiagnosticsWithEntity:
         assert "ff_confidence" in pi_diag
         assert "room_temp_rate" in pi_diag
         assert "tau_estimate" in pi_diag
+
+    @pytest.mark.asyncio
+    async def test_diagnostics_plant_identification_disabled(self, hass, setup_pi_integration):
+        """Plant identification is None when tau_seed is 0."""
+        entry = await setup_pi_integration()
+        diag = await async_get_config_entry_diagnostics(hass, entry)
+        assert diag["pi_controller"]["plant_identification"] is None
+
+    @pytest.mark.asyncio
+    async def test_diagnostics_plant_identification_enabled(self, hass, setup_pi_integration):
+        """Plant identification section should include estimate and provider state."""
+        entry = await setup_pi_integration({"pi_tau_estimate": 60})
+        diag = await async_get_config_entry_diagnostics(hass, entry)
+
+        pi_diag = diag["pi_controller"]
+        plant_id = pi_diag["plant_identification"]
+        assert plant_id is not None
+
+        # Full plant estimate with all 4 SOPDT parameters
+        est = plant_id["plant_estimate"]
+        for param in ("k", "theta", "tau_fast", "tau_slow"):
+            assert param in est
+            assert "value" in est[param]
+            assert "confidence" in est[param]
+            assert "source" in est[param]
+            assert "observations" in est[param]
+
+        # Provider active states
+        providers = plant_id["providers"]
+        assert "step_response" in providers
+        assert "area_method" in providers
+        assert "closed_loop" in providers
+        for p in providers.values():
+            assert "active" in p
+
+        # Cross-check absent when no closed-loop observation has fired
+        assert "cross_check" not in plant_id
+        # Plant test absent when not running
+        assert "plant_test" not in plant_id

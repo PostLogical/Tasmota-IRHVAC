@@ -461,6 +461,40 @@ class PlantIdentifier:
 
         return self.compute_gains()
 
+    def get_diagnostics(self) -> dict[str, Any]:
+        """Return diagnostic data for the debug bundle."""
+        diag: dict[str, Any] = {
+            "plant_estimate": self._plant.as_dict(),
+            "providers": {
+                "step_response": {"active": self._step_provider.active},
+                "area_method": {"active": self._area_provider.active},
+                "closed_loop": {"active": self._closed_loop_provider.active},
+            },
+        }
+
+        if self._last_cross_check is not None:
+            cl_fast, cl_slow = self._last_cross_check
+            diag["cross_check"] = {
+                "tau_fast": cl_fast.as_dict(),
+                "tau_slow": cl_slow.as_dict(),
+            }
+
+        if self._plant_test is not None:
+            test_diag: dict[str, Any] = {
+                "active": self._plant_test.active,
+                "phase": self._plant_test.phase,
+                "cycle_count": self._plant_test.cycle_count,
+            }
+            if not self._plant_test.active:
+                results = self._plant_test.get_results()
+                if results:
+                    test_diag["results"] = {
+                        k: v.as_dict() for k, v in results.items()
+                    }
+            diag["plant_test"] = test_diag
+
+        return diag
+
     def as_dict(self) -> dict[str, Any]:
         """Serialize for persistence."""
         return {

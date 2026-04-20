@@ -1228,6 +1228,7 @@ class PIController:
             "tau_estimate": round(self._plant_id.tau, 1) if self._plant_id.enabled else None,  # backward compat
             "tau_fast": round(self._plant_id.plant.tau_fast.value, 1) if self._plant_id.enabled else None,
             "tau_slow": round(self._plant_id.plant.tau_slow.value, 1) if self._plant_id.enabled else None,
+            "plant_identification": self._plant_id.get_diagnostics() if self._plant_id.enabled else None,
             "config": {
                 "kp": self._pi_kp,
                 "ki": self._pi_ki,
