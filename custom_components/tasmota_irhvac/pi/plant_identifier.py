@@ -20,6 +20,7 @@ from .plant_model import (
     ParameterEstimate,
     PlantEstimate,
 )
+from .providers.area_method import AreaMethodProvider
 from .providers.step_response import StepResponseProvider
 
 _LOGGER = logging.getLogger(__name__)
@@ -51,6 +52,7 @@ class PlantIdentifier:
 
         # Providers
         self._step_provider = StepResponseProvider(response_lag=response_lag)
+        self._area_provider = AreaMethodProvider(response_lag=response_lag)
 
     # ── Properties ───────────────────────────────────────────────────
 
@@ -77,7 +79,7 @@ class PlantIdentifier:
     @property
     def active(self) -> bool:
         """Whether any provider has an active observation."""
-        return self._step_provider.active
+        return self._step_provider.active or self._area_provider.active
 
     @property
     def response_lag(self) -> float:
@@ -109,6 +111,7 @@ class PlantIdentifier:
         )
 
         self._step_provider.start_observation(ctx)
+        self._area_provider.start_observation(ctx)
 
     def check_observation(
         self, now_mono: float, current_c: float, ff_offset: float = 0.0
@@ -131,6 +134,15 @@ class PlantIdentifier:
             self._plant = dataclasses.replace(self._plant, tau_fast=tau_fast_est)
             plant_changed = True
 
+        # Layer 2: area method → τ_slow (continues after step response fires)
+        tau_slow_est = self._area_provider.accumulate(
+            now_mono, current_c, ff_offset,
+            tau_fast=self._plant.tau_fast.value,
+        )
+        if tau_slow_est is not None:
+            self._plant = dataclasses.replace(self._plant, tau_slow=tau_slow_est)
+            plant_changed = True
+
         if plant_changed:
             gains = self.compute_gains()
             _LOGGER.info(
@@ -147,6 +159,7 @@ class PlantIdentifier:
     def cancel_observation(self) -> None:
         """Cancel all in-progress observations."""
         self._step_provider.cancel_observation()
+        self._area_provider.cancel_observation()
 
     # ── Gain computation ─────────────────────────────────────────────
 
@@ -166,7 +179,7 @@ class PlantIdentifier:
         tau_fast = max(self._plant.tau_fast.value, 1.0)
         tau_slow = max(self._plant.tau_slow.value, 1.0)
         lag = self._response_lag
-        lam = self._imc_lambda_config if self._imc_lambda_config > 0 else lag / 3.0
+        lam = self._imc_lambda_config if self._imc_lambda_config > 0 else max(lag / 3.0, 1.0)
         k_eff = max(self._plant.k.value, 0.1)
 
         # Kp uses tau_slow (dominant dynamics — wall/mass time constant).
@@ -229,6 +242,15 @@ class PlantIdentifier:
                 "observations": self._plant.tau_fast.observations,
             })
 
+        area_state = data.get("area_provider")
+        if area_state:
+            self._area_provider.restore(area_state)
+        elif self._plant.tau_slow.observations > 0 and self._plant.tau_slow.source != "seed":
+            self._area_provider.restore({
+                "tau_slow": self._plant.tau_slow.value,
+                "observations": self._plant.tau_slow.observations,
+            })
+
         return self.compute_gains()
 
     def as_dict(self) -> dict[str, Any]:
@@ -236,6 +258,7 @@ class PlantIdentifier:
         return {
             "plant_estimate": self._plant.as_dict(),
             "step_provider": self._step_provider.as_dict(),
+            "area_provider": self._area_provider.as_dict(),
             # Backward compat — old code reads these
             "tau_estimate": self._plant.tau_fast.value,
             "tau_observations": self._plant.tau_fast.observations,
