@@ -39,6 +39,7 @@ from homeassistant.util.unit_conversion import TemperatureConverter
 import math
 
 from .batch_learning import BatchResult, DiversityAwareBuffer, HourlyResidualPattern, Observation, analyze_residuals_by_hour, weighted_least_squares, compare_and_report, compute_blended_update
+from .greybox_observer import GreyboxResult, fit_greybox, log_greybox_result
 from .health_checks import AnomalyEvent, compute_mad_sigma, CUSUM_K, CUSUM_H, MIN_RESIDUALS_FOR_DETECTION, MIN_SIGMA_FLOOR, MIN_EVENT_DURATION_SEC, CUSUM_COOLDOWN_SEC
 
 from ..const import (
@@ -406,6 +407,7 @@ class PIController:
         )
         self._batch_analysis_timer: CALLBACK_TYPE | None = None
         self._last_batch_result: BatchResult | None = None
+        self._last_greybox_result: GreyboxResult | None = None
         self._last_batch_timestamp: float | None = None
         self._last_batch_wallclock: str = ""  # ISO-8601 wall-clock time
         self._last_residual_patterns: list[HourlyResidualPattern] = []
@@ -691,6 +693,17 @@ class PIController:
                     self._log_prefix, p.start_hour, p.end_hour,
                     p.mean_residual, p.n_observations,
                 )
+
+        # ── Grey-box 1R1C energy balance (observation mode) ──
+        greybox = fit_greybox(
+            observations,
+            model_inputs=self._model_inputs,
+            plant_tau_slow=plant.tau_slow.value if plant.tau_slow.confidence > 0 else None,
+            plant_tau_slow_confidence=plant.tau_slow.confidence,
+        )
+        if greybox is not None:
+            log_greybox_result(greybox, log_prefix=self._log_prefix)
+            self._last_greybox_result = greybox
 
         # ── Drift detection: track per-coefficient correction direction ──
         if result.beta_blended and result.beta_current:
@@ -1330,6 +1343,12 @@ class PIController:
             result["batch_learning"] = batch
         else:
             result["batch_learning"] = None
+
+        # Grey-box observer
+        result["greybox_observer"] = (
+            self._last_greybox_result.as_dict()
+            if self._last_greybox_result is not None else None
+        )
 
         # Observation buffer stats (per-mode)
         def _buf_stats(buf: DiversityAwareBuffer) -> dict[str, Any]:
