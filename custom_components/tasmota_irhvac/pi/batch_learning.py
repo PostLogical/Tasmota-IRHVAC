@@ -40,6 +40,7 @@ class Observation:
     ff_confidence: float = 1.0
     raw_c: float = 0.0  # unfiltered room temperature
     wall_hour: int = -1  # wall-clock hour (0-23) for time-of-day analysis
+    outdoor_temp_c: float | None = None  # absolute outdoor temperature (°C)
     integral_settled: bool = False  # True if online RLS gate would accept
     seconds_since_setpoint_change: float = 0.0  # seconds since last HP setpoint change
     supplemental_active: bool = False  # supplemental source tracking or assisting
@@ -59,6 +60,7 @@ class Observation:
             "ffc": self.ff_confidence,
             "raw": self.raw_c,
             "wh": self.wall_hour,
+            "ot": self.outdoor_temp_c,
             "is": self.integral_settled,
             "sssc": self.seconds_since_setpoint_change,
             "sa": self.supplemental_active,
@@ -80,6 +82,7 @@ class Observation:
             ff_confidence=d.get("ffc", 1.0),
             raw_c=d.get("raw", d["cur"]),
             wall_hour=d.get("wh", -1),
+            outdoor_temp_c=d.get("ot"),
             integral_settled=d.get("is", False),
             seconds_since_setpoint_change=d.get("sssc", 0.0),
             supplemental_active=d.get("sa", False),

@@ -2122,6 +2122,30 @@ class TestConfigFlowEmptyRedirects:
         assert model_subs[-1].title == "Test Solar"
 
     @pytest.mark.asyncio
+    async def test_model_input_subentry_with_input_role(self, hass, setup_integration):
+        """Model input stores input_role from config flow."""
+        entry = await setup_integration()
+        result = await hass.config_entries.subentries.async_init(
+            (entry.entry_id, "model_input"),
+            context={"source": "user"},
+        )
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            user_input={
+                "name": "Solar Proxy",
+                "entity_id": "sensor.solar_proxy",
+                "seed_heat": -4.0,
+                "input_role": "solar",
+            },
+        )
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+        model_subs = [
+            s for s in entry.subentries.values()
+            if s.subentry_type == "model_input"
+        ]
+        assert model_subs[-1].data["input_role"] == "solar"
+
+    @pytest.mark.asyncio
     async def test_ir_actions_remove_empty_redirects(self, hass, setup_integration):
         """IR actions remove with no actions should redirect."""
         entry = await setup_integration()

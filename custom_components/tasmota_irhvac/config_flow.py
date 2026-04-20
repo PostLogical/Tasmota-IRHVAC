@@ -1269,6 +1269,17 @@ class ModelInputSubentryFlow(ConfigSubentryFlow):
                         EntitySelectorConfig(domain=["binary_sensor", "input_boolean", "switch"])
                     ),
                     vol.Optional("gate_invert", default=False): BooleanSelector(),
+                    vol.Optional("input_role", default="other"): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value="solar", label="Solar Proxy"),
+                                SelectOptionDict(value="heat_source", label="Heat Source"),
+                                SelectOptionDict(value="adjacent_zone", label="Adjacent Zone"),
+                                SelectOptionDict(value="other", label="Other"),
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
                 }
             ),
         )
@@ -1321,6 +1332,17 @@ class ModelInputSubentryFlow(ConfigSubentryFlow):
                             EntitySelectorConfig(domain=["binary_sensor", "input_boolean", "switch"])
                         ),
                         vol.Optional("gate_invert", default=False): BooleanSelector(),
+                        vol.Optional("input_role", default="other"): SelectSelector(
+                            SelectSelectorConfig(
+                                options=[
+                                    SelectOptionDict(value="solar", label="Solar Proxy"),
+                                    SelectOptionDict(value="heat_source", label="Heat Source"),
+                                    SelectOptionDict(value="adjacent_zone", label="Adjacent Zone"),
+                                    SelectOptionDict(value="other", label="Other"),
+                                ],
+                                mode=SelectSelectorMode.DROPDOWN,
+                            )
+                        ),
                     }
                 ),
                 dict(subentry.data),

@@ -536,12 +536,14 @@ class TestObservationMetadata:
             desired_c=20.0,
             room_rate=0.005,
             clamped=False,
+            outdoor_temp_c=-5.0,
             integral_settled=True,
             seconds_since_setpoint_change=300.0,
             supplemental_active=True,
         )
         d = obs.as_dict()
         restored = Observation.from_dict(d)
+        assert restored.outdoor_temp_c == -5.0
         assert restored.integral_settled is True
         assert restored.seconds_since_setpoint_change == 300.0
         assert restored.supplemental_active is True
@@ -553,6 +555,7 @@ class TestObservationMetadata:
             "cur": 20.0, "des": 20.0, "rate": 0.005, "clamp": False,
         }
         obs = Observation.from_dict(legacy_dict)
+        assert obs.outdoor_temp_c is None
         assert obs.integral_settled is False
         assert obs.seconds_since_setpoint_change == 0.0
         assert obs.supplemental_active is False

@@ -3202,6 +3202,7 @@ class PIController:
             ff_confidence=self._ff_confidence,
             raw_c=raw_c,
             wall_hour=datetime.now().hour,
+            outdoor_temp_c=self._inputs.outdoor_temp,
             integral_settled=obs_integral_settled,
             seconds_since_setpoint_change=obs_seconds_since_sp,
             supplemental_active=obs_supplemental_active,
