@@ -1280,6 +1280,7 @@ class ModelInputSubentryFlow(ConfigSubentryFlow):
                             mode=SelectSelectorMode.DROPDOWN,
                         )
                     ),
+                    vol.Optional("enabled", default=True): BooleanSelector(),
                 }
             ),
         )
@@ -1343,6 +1344,7 @@ class ModelInputSubentryFlow(ConfigSubentryFlow):
                                 mode=SelectSelectorMode.DROPDOWN,
                             )
                         ),
+                        vol.Optional("enabled", default=True): BooleanSelector(),
                     }
                 ),
                 dict(subentry.data),
@@ -1405,6 +1407,7 @@ class SupplementalSourceSubentryFlow(ConfigSubentryFlow):
                     vol.Optional(
                         CONF_SUPPLEMENTAL_AUTO_MODEL_INPUT, default=True
                     ): BooleanSelector(),
+                    vol.Optional("enabled", default=True): BooleanSelector(),
                 }
             ),
         )
@@ -1460,6 +1463,7 @@ class SupplementalSourceSubentryFlow(ConfigSubentryFlow):
                         vol.Optional(
                             CONF_SUPPLEMENTAL_AUTO_MODEL_INPUT, default=True
                         ): BooleanSelector(),
+                        vol.Optional("enabled", default=True): BooleanSelector(),
                     }
                 ),
                 dict(subentry.data),

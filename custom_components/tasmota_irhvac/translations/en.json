@@ -289,7 +289,8 @@
           "model_input_delta_from_room": "Delta From Room Temperature",
           "model_input_gate_entity": "Gate Entity",
           "model_input_gate_invert": "Invert Gate",
-          "model_input_input_role": "Physical Role"
+          "model_input_input_role": "Physical Role",
+          "model_input_enabled": "Enabled"
         },
         "data_description": {
           "model_input_name": "Display name (e.g., 'Solar Proxy', 'Pellet Stove', 'Bunkroom Door').",
@@ -303,7 +304,8 @@
           "model_input_delta_from_room": "Compute input as (entity temperature − room temperature). Use for inter-zone heat transfer where the temperature difference between rooms drives heat flow.",
           "model_input_gate_entity": "Binary sensor or switch that gates this input. When the gate is off (or on if inverted), the input value is forced to zero. Use for mode-switching phenomena like door-gated convective heat transfer.",
           "model_input_gate_invert": "Invert the gate logic: force input to zero when the gate entity is on instead of off.",
-          "model_input_input_role": "How this input enters the building energy balance. Solar Proxy: radiative gain on building envelope. Heat Source: direct heat input (pellet stove, space heater). Adjacent Zone: heat transfer from neighboring room. Other: generic disturbance."
+          "model_input_input_role": "How this input enters the building energy balance. Solar Proxy: radiative gain on building envelope. Heat Source: direct heat input (pellet stove, space heater). Adjacent Zone: heat transfer from neighboring room. Other: generic disturbance.",
+          "model_input_enabled": "When disabled, the input value is forced to zero but the configuration (seeds, clamps, lag) is preserved."
         }
       },
       "model_inputs_edit": {
@@ -328,7 +330,8 @@
           "model_input_delta_from_room": "Delta From Room Temperature",
           "model_input_gate_entity": "Gate Entity",
           "model_input_gate_invert": "Invert Gate",
-          "model_input_input_role": "Physical Role"
+          "model_input_input_role": "Physical Role",
+          "model_input_enabled": "Enabled"
         },
         "data_description": {
           "model_input_name": "Display name (e.g., 'Solar Proxy', 'Pellet Stove', 'Bunkroom Door').",
@@ -342,7 +345,8 @@
           "model_input_delta_from_room": "Compute input as (entity temperature − room temperature). Use for inter-zone heat transfer where the temperature difference between rooms drives heat flow.",
           "model_input_gate_entity": "Binary sensor or switch that gates this input. When the gate is off (or on if inverted), the input value is forced to zero. Use for mode-switching phenomena like door-gated convective heat transfer.",
           "model_input_gate_invert": "Invert the gate logic: force input to zero when the gate entity is on instead of off.",
-          "model_input_input_role": "How this input enters the building energy balance. Solar Proxy: radiative gain on building envelope. Heat Source: direct heat input (pellet stove, space heater). Adjacent Zone: heat transfer from neighboring room. Other: generic disturbance."
+          "model_input_input_role": "How this input enters the building energy balance. Solar Proxy: radiative gain on building envelope. Heat Source: direct heat input (pellet stove, space heater). Adjacent Zone: heat transfer from neighboring room. Other: generic disturbance.",
+          "model_input_enabled": "When disabled, the input value is forced to zero but the configuration (seeds, clamps, lag) is preserved."
         }
       },
       "model_inputs_remove": {
@@ -662,7 +666,8 @@
             "typical_value": "Typical Active Magnitude",
             "gate_entity": "Gate Entity",
             "gate_invert": "Invert Gate",
-            "input_role": "Physical Role"
+            "input_role": "Physical Role",
+            "enabled": "Enabled"
           },
           "data_description": {
             "name": "Display name for this input.",
@@ -677,7 +682,8 @@
             "typical_value": "Expected value when this input is active. Balances learning rates across inputs with different scales. Examples: 1.0 for binary (on/off), 0.5 for solar proxy (0–0.8 range), 1.0 for outdoor temp rate in °C/hr, 2.0 in °F/hr.",
             "gate_entity": "Binary sensor or switch that gates this input. When the gate is off (or on if inverted), the input value is forced to zero. Use for mode-switching phenomena like door-gated convective heat transfer.",
             "gate_invert": "Invert the gate logic: force input to zero when the gate entity is on instead of off.",
-            "input_role": "How this input enters the building energy balance. Solar Proxy: radiative gain on building envelope. Heat Source: direct heat input (pellet stove, space heater). Adjacent Zone: heat transfer from neighboring room. Other: generic disturbance."
+            "input_role": "How this input enters the building energy balance. Solar Proxy: radiative gain on building envelope. Heat Source: direct heat input (pellet stove, space heater). Adjacent Zone: heat transfer from neighboring room. Other: generic disturbance.",
+            "enabled": "When disabled, the input value is forced to zero but the configuration (seeds, clamps, lag) is preserved. Use to temporarily remove an input without losing its settings."
           }
         },
         "reconfigure": {
@@ -721,7 +727,8 @@
             "seed_cool": "Cool Mode Seed Coefficient",
             "failure_threshold": "Failure Threshold (seconds)",
             "recovery_margin": "Recovery Margin (°C)",
-            "auto_model_input": "Include in Feedforward Model"
+            "auto_model_input": "Include in Feedforward Model",
+            "enabled": "Enabled"
           },
           "data_description": {
             "name": "Display name (e.g., 'Pellet Stove', 'Oil Boiler Zone 1').",
@@ -730,7 +737,8 @@
             "seed_cool": "Estimated HP setpoint reduction in cooling mode when this source is active.",
             "failure_threshold": "Seconds the room must stay below HP desired before the HP assists. Default 900 (15 minutes).",
             "recovery_margin": "Degrees above desired before HP defers again after assisting. Prevents oscillation.",
-            "auto_model_input": "Use this source as an input to the feedforward model. The HP will account for this source's thermal contribution when predicting the needed setpoint."
+            "auto_model_input": "Use this source as an input to the feedforward model. The HP will account for this source's thermal contribution when predicting the needed setpoint.",
+            "enabled": "When disabled, this supplemental source is ignored and its auto-model-input (if any) is not created. Configuration is preserved for re-enabling."
           }
         },
         "reconfigure": {
@@ -743,7 +751,8 @@
             "seed_cool": "Cool Mode Seed Coefficient",
             "failure_threshold": "Failure Threshold (seconds)",
             "recovery_margin": "Recovery Margin (°C)",
-            "auto_model_input": "Include in Feedforward Model"
+            "auto_model_input": "Include in Feedforward Model",
+            "enabled": "Enabled"
           }
         }
       }

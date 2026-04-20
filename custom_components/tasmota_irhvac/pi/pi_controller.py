@@ -280,6 +280,8 @@ class PIController:
         # These use the supplemental's climate entity as a binary signal (heat/cool=1, else=0).
         # The PI controller reads the entity state each tick to update the value.
         for source in supplemental_sources:
+            if not source.get("enabled", True):
+                continue
             if not source.get("auto_model_input", True):
                 continue
             entity_id = source.get("entity_id", "")
@@ -2386,6 +2388,8 @@ class PIController:
         """Resolve which supplemental sources are currently active from HA state."""
         active: list[str] = []
         for source in self._supplemental.source_configs:
+            if not source.get("enabled", True):
+                continue
             entity_id = source.get("entity_id", "")
             if not entity_id:
                 continue

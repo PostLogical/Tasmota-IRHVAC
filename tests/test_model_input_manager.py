@@ -475,3 +475,53 @@ class TestPersistence:
         mgr2 = ModelInputManager(model_inputs=[STOVE_INPUT], outdoor_temp_sensor=None)
         mgr2.restore_lag_states(states)
         assert mgr2.filtered[0] == 0.75
+
+
+class TestEnabledToggle:
+    """Tests for the enabled/disabled toggle on model inputs."""
+
+    def test_disabled_input_zeroed(self):
+        """Disabled input forces value to zero."""
+        m_input = {**STOVE_INPUT, "enabled": False}
+        mgr = ModelInputManager(model_inputs=[m_input], outdoor_temp_sensor=None)
+        mgr.read_values(
+            {"input_boolean.stove": ("on", True)},
+        )
+        assert mgr.values[0] == 0.0
+
+    def test_enabled_input_reads_normally(self):
+        """Enabled input (default) reads the entity value."""
+        mgr = ModelInputManager(model_inputs=[STOVE_INPUT], outdoor_temp_sensor=None)
+        mgr.read_values(
+            {"input_boolean.stove": ("on", True)},
+        )
+        assert mgr.values[0] == 1.0
+
+    def test_enabled_default_true(self):
+        """Missing 'enabled' key defaults to True."""
+        mgr = ModelInputManager(model_inputs=[STOVE_INPUT], outdoor_temp_sensor=None)
+        mgr.read_values(
+            {"input_boolean.stove": ("on", True)},
+        )
+        assert mgr.values[0] == 1.0  # not zeroed
+
+
+class TestNamedFeatures:
+    """Tests for build_feature_names and build_named_features."""
+
+    def test_build_feature_names(self):
+        mgr = ModelInputManager(
+            model_inputs=[STOVE_INPUT, DELTA_INPUT],
+            outdoor_temp_sensor=None,
+        )
+        names = mgr.build_feature_names()
+        assert names == ["intercept", "outdoor_delta", "Stove", "LR Delta"]
+
+    def test_build_named_features(self):
+        mgr = ModelInputManager(
+            model_inputs=[STOVE_INPUT],
+            outdoor_temp_sensor=None,
+        )
+        mgr.filtered[0] = 0.75
+        features = mgr.build_named_features(10.0)
+        assert features == {"intercept": 1.0, "outdoor_delta": 10.0, "Stove": 0.75}
