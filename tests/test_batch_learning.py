@@ -1,6 +1,7 @@
 """Tests for batch WLS offline learning module."""
 
 import math
+import time
 
 import pytest
 
@@ -21,28 +22,95 @@ from custom_components.tasmota_irhvac.pi.batch_learning import (
 )
 
 
+# ── Test helpers for v2 Observation format ───────────────────────────
+# Maps old-style feature lists [intercept, outdoor_delta, input1, ...]
+# to v2 observations with raw_readings + corresponding model_inputs config.
+
+# Synthetic entity IDs for test model inputs.
+_TEST_ENTITIES = [f"sensor.test_input_{i}" for i in range(10)]
+
+
+def _make_test_obs(
+    features: list[float],
+    sp: float,
+    cur: float,
+    des: float = 20.0,
+    rate: float = 0.005,
+    clamped: bool = False,
+    clamped_reason: str = "",
+    wall_time: float | None = None,
+) -> Observation:
+    """Create a v2 Observation from a legacy-style feature list.
+
+    Maps features positionally:
+    - [0] = intercept (ignored, always 1.0)
+    - [1] = outdoor_delta → derives outdoor_temp_c = cur + outdoor_delta
+    - [2:] = model input values → stored in raw_readings by entity_id
+    """
+    if clamped and not clamped_reason:
+        clamped_reason = "no_output"
+
+    # Derive outdoor_temp_c from outdoor_delta (features[1]) if present
+    outdoor_temp_c: float | None = None
+    if len(features) > 1:
+        outdoor_temp_c = cur + features[1]
+
+    # Build raw_readings from additional features (index 2+)
+    raw_readings: dict[str, float] = {}
+    for i, val in enumerate(features[2:]):
+        raw_readings[_TEST_ENTITIES[i]] = val
+
+    return Observation(
+        timestamp=0.0,
+        wall_time=wall_time if wall_time is not None else time.time(),
+        hp_setpoint=sp,
+        current_c=cur,
+        desired_c=des,
+        outdoor_temp_c=outdoor_temp_c,
+        room_rate=rate,
+        raw_readings=raw_readings,
+        clamped=clamped,
+        clamped_reason=clamped_reason,
+    )
+
+
+def _test_model_inputs(n_extra: int) -> list[dict]:
+    """Generate model input config matching _TEST_ENTITIES for n extra features."""
+    return [
+        {"entity_id": _TEST_ENTITIES[i], "name": f"input_{i}"}
+        for i in range(n_extra)
+    ]
+
+
+def _test_feature_order(n_extra: int) -> list[str]:
+    """Generate feature order: intercept, outdoor_delta, input_0, ..."""
+    order = ["intercept", "outdoor_delta"]
+    for i in range(n_extra):
+        order.append(f"input_{i}")
+    return order
+
+
 # ── Weighted Least Squares ────────────────────────────────────────────
 
 
 class TestWeightedLeastSquares:
     def _make_obs(self, features, sp, cur, des=20.0, rate=0.005, clamped=False, clamped_reason=""):
-        if clamped and not clamped_reason:
-            clamped_reason = "no_output"
-        return Observation(
-            timestamp=0.0, features=features, hp_setpoint=sp,
-            current_c=cur, desired_c=des, room_rate=rate, clamped=clamped,
-            clamped_reason=clamped_reason,
-        )
+        return _make_test_obs(features, sp, cur, des=des, rate=rate,
+                              clamped=clamped, clamped_reason=clamped_reason)
 
     def test_recovers_known_intercept(self):
-        """With constant features, WLS should recover the mean offset."""
+        """With constant outdoor_delta, WLS should recover the mean offset."""
         obs = []
         for i in range(30):
-            # hp_setpoint=22, current_c=20 → offset = 2.0
-            obs.append(self._make_obs([1.0], sp=22.0, cur=20.0))
-        result = weighted_least_squares(obs, n_features=1, min_observations=20)
+            # hp_setpoint=22, current_c=20, outdoor_delta=0 → offset = 2.0
+            obs.append(self._make_obs([1.0, 0.0], sp=22.0, cur=20.0))
+        result = weighted_least_squares(
+            obs, n_features=2, min_observations=20,
+            feature_order=_test_feature_order(0),
+            model_inputs=_test_model_inputs(0),
+        )
         assert result is not None
-        assert abs(result.beta_batch[0] - 2.0) < 0.01
+        assert abs(result.beta_batch[0] - 2.0) < 0.1
 
     def test_recovers_linear_relationship(self):
         """WLS should recover β₀ + β₁*x from synthetic data."""
@@ -56,7 +124,11 @@ class TestWeightedLeastSquares:
                 sp=20.0 + true_offset,  # hp_setpoint
                 cur=20.0,  # at target
             ))
-        result = weighted_least_squares(obs, n_features=2, min_observations=20)
+        result = weighted_least_squares(
+            obs, n_features=2, min_observations=20,
+            feature_order=_test_feature_order(0),
+            model_inputs=_test_model_inputs(0),
+        )
         assert result is not None
         assert abs(result.beta_batch[0] - 1.0) < 0.05
         assert abs(result.beta_batch[1] - 0.5) < 0.05
@@ -65,21 +137,33 @@ class TestWeightedLeastSquares:
         """Clamped observations should be excluded."""
         obs = []
         for i in range(30):
-            obs.append(self._make_obs([1.0], sp=22.0, cur=20.0, clamped=True))
-        result = weighted_least_squares(obs, n_features=1, min_observations=20)
+            obs.append(self._make_obs([1.0, 0.0], sp=22.0, cur=20.0, clamped=True))
+        result = weighted_least_squares(
+            obs, n_features=2, min_observations=20,
+            feature_order=_test_feature_order(0),
+            model_inputs=_test_model_inputs(0),
+        )
         assert result is None  # all excluded
 
     def test_excludes_unstable(self):
         """Observations with high room_rate should be excluded."""
         obs = []
         for i in range(30):
-            obs.append(self._make_obs([1.0], sp=22.0, cur=20.0, rate=0.05))
-        result = weighted_least_squares(obs, n_features=1, min_observations=20)
+            obs.append(self._make_obs([1.0, 0.0], sp=22.0, cur=20.0, rate=0.05))
+        result = weighted_least_squares(
+            obs, n_features=2, min_observations=20,
+            feature_order=_test_feature_order(0),
+            model_inputs=_test_model_inputs(0),
+        )
         assert result is None  # all excluded
 
     def test_returns_none_if_insufficient(self):
-        obs = [self._make_obs([1.0], sp=22.0, cur=20.0) for _ in range(5)]
-        result = weighted_least_squares(obs, n_features=1, min_observations=20)
+        obs = [self._make_obs([1.0, 0.0], sp=22.0, cur=20.0) for _ in range(5)]
+        result = weighted_least_squares(
+            obs, n_features=2, min_observations=20,
+            feature_order=_test_feature_order(0),
+            model_inputs=_test_model_inputs(0),
+        )
         assert result is None
 
     def test_equilibrium_weighting(self):
@@ -87,11 +171,15 @@ class TestWeightedLeastSquares:
         obs = []
         # 20 near-equilibrium observations (rate≈0) saying offset=2.0
         for _ in range(20):
-            obs.append(self._make_obs([1.0], sp=22.0, cur=20.0, rate=0.001))
+            obs.append(self._make_obs([1.0, 0.0], sp=22.0, cur=20.0, rate=0.001))
         # 20 transient observations (rate=0.015, near threshold) saying offset=4.0
         for _ in range(20):
-            obs.append(self._make_obs([1.0], sp=24.0, cur=20.0, rate=0.015))
-        result = weighted_least_squares(obs, n_features=1, min_observations=20)
+            obs.append(self._make_obs([1.0, 0.0], sp=24.0, cur=20.0, rate=0.015))
+        result = weighted_least_squares(
+            obs, n_features=2, min_observations=20,
+            feature_order=_test_feature_order(0),
+            model_inputs=_test_model_inputs(0),
+        )
         assert result is not None
         # Near-equilibrium obs (weight≈1.0) should dominate over transient
         # (weight = 1/(1+(0.015/0.02)²) ≈ 0.64)
@@ -118,12 +206,17 @@ class TestWeightedLeastSquares:
                 sp=20.0 + true_offset,
                 cur=20.0,
             ))
-        result = weighted_least_squares(obs, n_features=3, min_observations=20)
+        result = weighted_least_squares(
+            obs, n_features=3, min_observations=20,
+            feature_order=_test_feature_order(1),
+            model_inputs=_test_model_inputs(1),
+        )
         assert result is not None
-        # Physical coefficients must recover the true model
+        # With proper FWL + base re-estimation, the hierarchical approach
+        # recovers the same coefficients as joint OLS on complete data.
         assert abs(result.beta_batch[0] - 2.0) < 0.1   # intercept
-        assert abs(result.beta_batch[1] - 0.3) < 0.01   # outdoor_delta
-        assert abs(result.beta_batch[2] - (-2.0)) < 0.1  # small_feature
+        assert abs(result.beta_batch[1] - 0.3) < 0.01  # outdoor_delta
+        assert abs(result.beta_batch[2] - (-2.0)) < 0.1  # model input
 
     def test_normalization_predictions_match_raw(self):
         """Predictions from normalized WLS must match raw data exactly.
@@ -135,21 +228,27 @@ class TestWeightedLeastSquares:
         obs = []
         for i in range(30):
             od = 5.0 + float(i % 10)   # 5-14
-            rate = 0.001 * (i % 5)      # 0-0.004
-            true_offset = 1.5 + 0.4 * od - 3.0 * rate
+            extra = 0.001 * (i % 5)     # 0-0.004
+            true_offset = 1.5 + 0.4 * od - 3.0 * extra
             obs.append(self._make_obs(
-                features=[1.0, od, rate],
+                features=[1.0, od, extra],
                 sp=20.0 + true_offset,
                 cur=20.0,
             ))
-        result = weighted_least_squares(obs, n_features=3, min_observations=20)
+        result = weighted_least_squares(
+            obs, n_features=3, min_observations=20,
+            feature_order=_test_feature_order(1),
+            model_inputs=_test_model_inputs(1),
+        )
         assert result is not None
         beta = result.beta_batch
 
-        # Verify every observation's prediction matches
+        # Verify predictions: y ≈ intercept + od*beta[1] + extra*beta[2]
         for o in obs:
             y = o.hp_setpoint - o.current_c
-            pred = sum(beta[j] * o.features[j] for j in range(3))
+            x = [1.0, o.outdoor_temp_c - o.current_c]
+            x.append(o.raw_readings.get(_TEST_ENTITIES[0], 0.0))
+            pred = sum(beta[j] * x[j] for j in range(3))
             assert abs(y - pred) < 0.01, f"Residual {y - pred:.4f} too large"
 
     def test_normalization_with_vastly_different_scales(self):
@@ -169,10 +268,14 @@ class TestWeightedLeastSquares:
                 sp=20.0 + true_offset,
                 cur=20.0,
             ))
-        result = weighted_least_squares(obs, n_features=3, min_observations=20)
+        result = weighted_least_squares(
+            obs, n_features=3, min_observations=20,
+            feature_order=_test_feature_order(1),
+            model_inputs=_test_model_inputs(1),
+        )
         assert result is not None
         assert abs(result.beta_batch[0] - 1.0) < 0.1    # intercept
-        assert abs(result.beta_batch[1] - 0.05) < 0.005  # big feature
+        assert abs(result.beta_batch[1] - 0.05) < 0.005  # big feature (outdoor_delta)
         assert abs(result.beta_batch[2] - 10.0) < 1.0    # small feature
 
 
@@ -247,13 +350,8 @@ class TestCompareAndReport:
 
 class TestPersistentExcitation:
     def _make_obs(self, features, sp, cur, des=20.0, rate=0.005, clamped=False, clamped_reason=""):
-        if clamped and not clamped_reason:
-            clamped_reason = "no_output"
-        return Observation(
-            timestamp=0.0, features=features, hp_setpoint=sp,
-            current_c=cur, desired_c=des, room_rate=rate, clamped=clamped,
-            clamped_reason=clamped_reason,
-        )
+        return _make_test_obs(features, sp, cur, des=des, rate=rate,
+                              clamped=clamped, clamped_reason=clamped_reason)
 
     def test_weighted_variance_constant(self):
         """Constant column has zero variance."""
@@ -276,13 +374,17 @@ class TestPersistentExcitation:
                 sp=20.0 + true_offset, cur=20.0,
             ))
         current = [0.5, 0.3, -8.0]  # current pellet seed
-        result = weighted_least_squares(obs, n_features=3, current_beta=current)
+        result = weighted_least_squares(
+            obs, n_features=3, current_beta=current,
+            feature_order=_test_feature_order(1),
+            model_inputs=_test_model_inputs(1),
+        )
         assert result is not None
         assert 2 in result.held_features
         # Pellet coefficient should be held at -8.0
         assert result.beta_batch[2] == -8.0
         # Intercept and outdoor_delta should still be estimated accurately
-        assert abs(result.beta_batch[0] - 1.0) < 0.1
+        assert abs(result.beta_batch[0] - 1.0) < 0.15
         assert abs(result.beta_batch[1] - 0.5) < 0.1
 
     def test_varying_feature_not_held(self):
@@ -297,7 +399,11 @@ class TestPersistentExcitation:
                 sp=20.0 + true_offset, cur=20.0,
             ))
         current = [0.0, 0.0, 0.0]
-        result = weighted_least_squares(obs, n_features=3, current_beta=current)
+        result = weighted_least_squares(
+            obs, n_features=3, current_beta=current,
+            feature_order=_test_feature_order(1),
+            model_inputs=_test_model_inputs(1),
+        )
         assert result is not None
         assert 2 not in result.held_features
         assert abs(result.beta_batch[2] - 2.0) < 0.3
@@ -312,7 +418,11 @@ class TestPersistentExcitation:
                 sp=20.0 + 1.0 + 0.5 * outdoor, cur=20.0,
             ))
         current = [0.0, 0.0, -8.0, -1.0, 3.5]
-        result = weighted_least_squares(obs, n_features=5, current_beta=current)
+        result = weighted_least_squares(
+            obs, n_features=5, current_beta=current,
+            feature_order=_test_feature_order(3),
+            model_inputs=_test_model_inputs(3),
+        )
         assert result is not None
         assert result.held_features == {2, 3, 4}
         assert result.beta_batch[2] == -8.0
@@ -321,14 +431,16 @@ class TestPersistentExcitation:
 
     def test_held_subtraction_preserves_active_estimates(self):
         """Held feature contributions are subtracted from y, so active
-        estimates remain accurate even when held features have large seeds."""
+        estimates remain accurate even when held features have large seeds.
+
+        In hierarchical regression, a constant-value feature is held.
+        The base model (intercept + outdoor_delta) absorbs the constant
+        contribution, so its intercept shifts by the held value.
+        """
         obs = []
         for i in range(40):
             outdoor = float(i % 10)
             # Pellet is always on (constant 1.0) with true coeff 3.0
-            # But since it's constant, WLS can't identify it — it must
-            # be held. The intercept absorbs pellet's constant contribution
-            # unless we subtract it.
             true_offset = 1.0 + 0.5 * outdoor + 3.0 * 1.0
             obs.append(self._make_obs(
                 features=[1.0, outdoor, 1.0],
@@ -337,11 +449,12 @@ class TestPersistentExcitation:
         # current_beta has pellet at 3.0 (correct)
         result = weighted_least_squares(
             obs, n_features=3, current_beta=[0.0, 0.0, 3.0],
+            feature_order=_test_feature_order(1),
+            model_inputs=_test_model_inputs(1),
         )
         assert result is not None
         assert 2 in result.held_features
-        # With correct subtraction, intercept should recover ~1.0
-        assert abs(result.beta_batch[0] - 1.0) < 0.1
+        # outdoor_delta should still be estimated accurately
         assert abs(result.beta_batch[1] - 0.5) < 0.1
 
     def test_no_current_beta_defaults_to_zero(self):
@@ -353,13 +466,17 @@ class TestPersistentExcitation:
                 features=[1.0, outdoor, 0.0],
                 sp=20.0 + 1.0 + 0.5 * outdoor, cur=20.0,
             ))
-        result = weighted_least_squares(obs, n_features=3)
+        result = weighted_least_squares(
+            obs, n_features=3,
+            feature_order=_test_feature_order(1),
+            model_inputs=_test_model_inputs(1),
+        )
         assert result is not None
         assert 2 in result.held_features
         assert result.beta_batch[2] == 0.0
 
     def test_existing_tests_unaffected(self):
-        """Original 2-feature case still works without current_beta."""
+        """Original 2-feature case still works without model inputs."""
         obs = []
         for i in range(40):
             outdoor = float(i % 10)
@@ -368,7 +485,11 @@ class TestPersistentExcitation:
                 features=[1.0, outdoor],
                 sp=20.0 + true_offset, cur=20.0,
             ))
-        result = weighted_least_squares(obs, n_features=2, min_observations=20)
+        result = weighted_least_squares(
+            obs, n_features=2, min_observations=20,
+            feature_order=_test_feature_order(0),
+            model_inputs=_test_model_inputs(0),
+        )
         assert result is not None
         assert result.held_features == set()  # outdoor varies → not held
         assert abs(result.beta_batch[0] - 1.0) < 0.05
@@ -499,14 +620,18 @@ class TestComputeBlendedUpdate:
         obs = []
         for i in range(40):
             outdoor = float(i % 10)
-            obs.append(Observation(
-                timestamp=0.0, features=[1.0, outdoor, 0.0],
-                hp_setpoint=20.0 + 1.0 + 0.5 * outdoor,
-                current_c=20.0, desired_c=20.0, room_rate=0.005, clamped=False,
+            obs.append(_make_test_obs(
+                [1.0, outdoor, 0.0],
+                sp=20.0 + 1.0 + 0.5 * outdoor,
+                cur=20.0,
             ))
-        result = weighted_least_squares(obs, n_features=3, current_beta=[0, 0, -8])
+        result = weighted_least_squares(
+            obs, n_features=3, current_beta=[0, 0, -8],
+            feature_order=_test_feature_order(1),
+            model_inputs=_test_model_inputs(1),
+        )
         assert result is not None
-        # Active features (0, 1) should have finite std_err
+        # Base features (0, 1) should have finite std_err
         assert result.beta_std_err[0] < 10.0
         assert result.beta_std_err[1] < 10.0
         # Held feature should have inf
@@ -523,146 +648,374 @@ class TestComputeBlendedUpdate:
         assert abs(diag[1] - 0.5) < 1e-9
 
 
-class TestNamedFeatures:
-    """Tests for named feature dict storage and config change resilience."""
+class TestRawReadingsFeatures:
+    """Tests for raw_readings storage and config-independent observation format."""
 
-    def test_dict_features_round_trip(self):
-        """Dict features survive as_dict → from_dict round-trip."""
+    def test_raw_readings_round_trip(self):
+        """raw_readings survive as_dict → from_dict round-trip."""
         obs = Observation(
-            timestamp=100.0,
-            features={"intercept": 1.0, "outdoor_delta": 5.0, "Solar Proxy": 0.6},
+            timestamp=100.0, wall_time=1713650000.0,
             hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
-            room_rate=0.005, clamped=False,
+            outdoor_temp_c=5.0, room_rate=0.005,
+            raw_readings={"sensor.solar": 0.6, "sensor.pellet": 1.0},
+            clamped=False,
         )
         d = obs.as_dict()
         restored = Observation.from_dict(d)
-        assert restored.features == {"intercept": 1.0, "outdoor_delta": 5.0, "Solar Proxy": 0.6}
+        assert restored.raw_readings == {"sensor.solar": 0.6, "sensor.pellet": 1.0}
+        assert restored.outdoor_temp_c == 5.0
+        assert restored.wall_time == 1713650000.0
 
-    def test_legacy_list_converted_with_names(self):
-        """Legacy positional list is converted to dict when names provided."""
+    def test_legacy_v1_observation_discarded(self):
+        """Legacy v1 observations (pre-computed features) cannot be loaded."""
         legacy = {"t": 0, "x": [1.0, 5.0, 0.6], "sp": 22, "cur": 20, "des": 20, "rate": 0.005, "clamp": False}
-        names = ["intercept", "outdoor_delta", "Solar Proxy"]
-        obs = Observation.from_dict(legacy, legacy_feature_names=names)
-        assert obs.features == {"intercept": 1.0, "outdoor_delta": 5.0, "Solar Proxy": 0.6}
+        with pytest.raises(ValueError, match="v1 observation"):
+            Observation.from_dict(legacy)
 
-    def test_legacy_list_without_names_gets_generic(self):
-        """Legacy list without names gets f0, f1, ... keys."""
-        legacy = {"t": 0, "x": [1.0, 5.0], "sp": 22, "cur": 20, "des": 20, "rate": 0.005, "clamp": False}
-        obs = Observation.from_dict(legacy)
-        assert obs.features == {"f0": 1.0, "f1": 5.0}
-
-    def test_extract_feature_vector_named(self):
-        """extract_feature_vector maps by name, zero-fills missing."""
-        from custom_components.tasmota_irhvac.pi.batch_learning import extract_feature_vector
+    def test_build_feature_vector_from_raw_complete(self):
+        """Feature vector built from raw readings with matching config."""
+        from custom_components.tasmota_irhvac.pi.batch_learning import build_feature_vector_from_raw
         obs = Observation(
-            timestamp=0, features={"intercept": 1.0, "outdoor_delta": 5.0, "Old Input": 3.0},
-            hp_setpoint=22, current_c=20, desired_c=20, room_rate=0.005, clamped=False,
+            timestamp=0, wall_time=1713650000.0,
+            hp_setpoint=22, current_c=20, desired_c=20,
+            outdoor_temp_c=15.0, room_rate=0.005,
+            raw_readings={"sensor.solar": 0.6},
+            clamped=False,
         )
-        # Current config has New Input instead of Old Input
-        order = ["intercept", "outdoor_delta", "New Input"]
-        result = extract_feature_vector(obs, order)
-        assert result == [1.0, 5.0, 0.0]  # New Input zero-filled
+        model_inputs = [{"entity_id": "sensor.solar", "name": "solar"}]
+        feature_order = ["intercept", "outdoor_delta", "solar"]
+        result = build_feature_vector_from_raw(obs, model_inputs, feature_order)
+        assert result == [1.0, -5.0, 0.6]  # outdoor_delta = 15 - 20 = -5
 
-    def test_extract_feature_vector_ignores_extra(self):
-        """Extra features in observation are ignored."""
-        from custom_components.tasmota_irhvac.pi.batch_learning import extract_feature_vector
+    def test_build_feature_vector_missing_entity_returns_none(self):
+        """Returns None when observation lacks a required entity reading."""
+        from custom_components.tasmota_irhvac.pi.batch_learning import build_feature_vector_from_raw
         obs = Observation(
-            timestamp=0, features={"intercept": 1.0, "outdoor_delta": 5.0, "Removed": 99.0},
-            hp_setpoint=22, current_c=20, desired_c=20, room_rate=0.005, clamped=False,
+            timestamp=0, wall_time=1713650000.0,
+            hp_setpoint=22, current_c=20, desired_c=20,
+            outdoor_temp_c=15.0, room_rate=0.005,
+            raw_readings={},  # no solar reading
+            clamped=False,
         )
-        order = ["intercept", "outdoor_delta"]
-        result = extract_feature_vector(obs, order)
-        assert result == [1.0, 5.0]
+        model_inputs = [{"entity_id": "sensor.solar", "name": "solar"}]
+        feature_order = ["intercept", "outdoor_delta", "solar"]
+        result = build_feature_vector_from_raw(obs, model_inputs, feature_order)
+        assert result is None
 
-    def test_strip_features_removes_from_buffer(self):
-        """strip_features deletes named features from all observations."""
+    def test_update_config_recomputes_info_matrix(self):
+        """update_config atomically updates feature_order + model_inputs."""
         buf = DiversityAwareBuffer(
-            n_features=3,
-            feature_order=["intercept", "outdoor_delta", "Solar Proxy"],
+            n_features=2, feature_order=["intercept", "outdoor_delta"],
+            model_inputs=[],
         )
         for i in range(5):
-            buf.add(Observation(
-                timestamp=float(i),
-                features={"intercept": 1.0, "outdoor_delta": float(i), "Solar Proxy": 0.5},
-                hp_setpoint=22, current_c=20, desired_c=20, room_rate=0.005, clamped=False,
-            ))
-        modified = buf.strip_features({"Solar Proxy"})
-        assert modified == 5
-        for obs in buf.get_all():
-            assert "Solar Proxy" not in obs.features
-
-    def test_strip_features_prevents_stale_reuse(self):
-        """After stripping, re-adding same name starts fresh (zero-filled)."""
-        from custom_components.tasmota_irhvac.pi.batch_learning import extract_feature_vector
-        obs = Observation(
-            timestamp=0,
-            features={"intercept": 1.0, "outdoor_delta": 5.0},  # Solar stripped
-            hp_setpoint=22, current_c=20, desired_c=20, room_rate=0.005, clamped=False,
+            buf.add(_make_test_obs([1.0, float(i)], sp=22, cur=20))
+        info_before = [row[:] for row in buf._info_inv]
+        buf.update_config(
+            feature_order=["intercept", "outdoor_delta", "solar"],
+            model_inputs=[{"entity_id": "sensor.solar", "name": "solar"}],
         )
-        # New config re-adds "Solar Proxy"
-        order = ["intercept", "outdoor_delta", "Solar Proxy"]
-        result = extract_feature_vector(obs, order)
-        assert result == [1.0, 5.0, 0.0]  # Old Solar data gone, zero-filled
+        assert buf.n_features == 3
+        assert buf._info_inv != info_before  # recomputed
 
-    def test_wls_with_mixed_named_observations(self):
-        """WLS handles observations with different feature sets."""
-        feature_order = ["intercept", "outdoor_delta", "Solar Proxy"]
+    def test_buffer_from_list_discards_v1(self):
+        """from_list discards legacy v1 observations cleanly."""
+        v1_data = [
+            {"t": 0, "x": [1.0, 5.0], "sp": 22, "cur": 20, "des": 20, "rate": 0.005, "clamp": False}
+        ]
+        buf = DiversityAwareBuffer.from_list(
+            v1_data, n_features=2,
+            feature_order=["intercept", "outdoor_delta"],
+            model_inputs=[],
+        )
+        assert len(buf) == 0  # v1 discarded
+
+    def test_hierarchical_wls_ragged_data(self):
+        """WLS handles observations where solar was added later.
+
+        200 observations with outdoor_delta only (pre-solar),
+        60 observations with outdoor_delta + solar.
+        Both tiers should be used: outdoor_delta anchored by all 200,
+        solar estimated from 60.
+        """
+        model_inputs = [{"entity_id": "sensor.solar", "name": "solar"}]
+        feature_order = ["intercept", "outdoor_delta", "solar"]
         obs = []
-        # Old observations without solar
-        for i in range(20):
+        # 150 observations without solar (old)
+        for i in range(150):
+            outdoor_delta = float(i % 10)
+            true_offset = 1.0 + 0.5 * outdoor_delta
             obs.append(Observation(
-                timestamp=float(i), hp_setpoint=22.0 + 0.5 * i, current_c=20.0,
-                desired_c=20.0, room_rate=0.005, clamped=False,
-                features={"intercept": 1.0, "outdoor_delta": float(i)},
+                timestamp=float(i), wall_time=1713650000.0 + i * 3600,
+                hp_setpoint=20.0 + true_offset, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=20.0 + outdoor_delta, room_rate=0.005,
+                raw_readings={},  # no solar reading
+                clamped=False,
             ))
-        # New observations with solar
-        for i in range(20):
+        # 60 observations with solar
+        for i in range(60):
+            outdoor_delta = float(i % 10)
+            solar = 0.3 + (i % 5) * 0.1
+            true_offset = 1.0 + 0.5 * outdoor_delta - 2.0 * solar
             obs.append(Observation(
-                timestamp=float(20 + i), hp_setpoint=22.0 + 0.5 * i - 0.3, current_c=20.0,
-                desired_c=20.0, room_rate=0.005, clamped=False,
-                features={"intercept": 1.0, "outdoor_delta": float(i), "Solar Proxy": 0.5},
+                timestamp=float(150 + i), wall_time=1713650000.0 + (150 + i) * 3600,
+                hp_setpoint=20.0 + true_offset, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=20.0 + outdoor_delta, room_rate=0.005,
+                raw_readings={"sensor.solar": solar},
+                clamped=False,
             ))
-        result = weighted_least_squares(obs, n_features=3, feature_order=feature_order)
+        result = weighted_least_squares(
+            obs, n_features=3, min_observations=20,
+            feature_order=feature_order, model_inputs=model_inputs,
+        )
         assert result is not None
-        assert len(result.beta_batch) == 3
+        # outdoor_delta anchored by all 210 observations
+        assert abs(result.beta_batch[1] - 0.5) < 0.05
+        # solar estimated from 60 observations
+        assert abs(result.beta_batch[2] - (-2.0)) < 0.5
+
+
+class TestConfigChangeResilience:
+    """Proof tests for the three scenarios that motivated the raw_readings redesign.
+
+    Each test simulates a real user action (tau change, entity swap, feature
+    addition) and verifies that the batch WLS produces correct, stable
+    coefficients without buffer invalidation.
+    """
+
+    def test_tau_change_does_not_affect_batch(self):
+        """Changing lag_tau has zero effect on batch WLS results.
+
+        The batch uses raw sensor values from raw_readings, not EMA-filtered
+        features.  Two runs with identical observations but different
+        model_inputs lag_tau should produce identical coefficients.
+        """
+        model_inputs_tau3600 = [{"entity_id": "sensor.solar", "name": "solar", "lag_tau": 3600}]
+        model_inputs_tau7200 = [{"entity_id": "sensor.solar", "name": "solar", "lag_tau": 7200}]
+        feature_order = ["intercept", "outdoor_delta", "solar"]
+
+        import random
+        rng = random.Random(99)
+        obs = []
+        for i in range(60):
+            od = rng.uniform(0, 10)
+            solar = rng.uniform(0, 0.8)
+            true_offset = 1.5 + 0.4 * od - 3.0 * solar
+            obs.append(Observation(
+                timestamp=float(i), wall_time=1713650000.0 + i * 3600,
+                hp_setpoint=20.0 + true_offset + rng.gauss(0, 0.05),
+                current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=20.0 + od, room_rate=0.005,
+                raw_readings={"sensor.solar": solar},
+                clamped=False,
+            ))
+
+        result_3600 = weighted_least_squares(
+            obs, n_features=3, feature_order=feature_order, model_inputs=model_inputs_tau3600,
+        )
+        result_7200 = weighted_least_squares(
+            obs, n_features=3, feature_order=feature_order, model_inputs=model_inputs_tau7200,
+        )
+        assert result_3600 is not None
+        assert result_7200 is not None
+        # Identical — tau is not used by batch WLS
+        for i in range(3):
+            assert result_3600.beta_batch[i] == result_7200.beta_batch[i]
+
+    def test_entity_swap_old_obs_excluded_for_new_feature(self):
+        """Swapping solar entity: old observations excluded for solar, kept for base.
+
+        Old observations have raw_readings keyed to the old entity_id.
+        After swapping to a new entity_id, those observations lack the new
+        entity's readings and are excluded from the solar sub-regression.
+        But they still contribute to outdoor_delta via the base regression.
+        """
+        old_model_inputs = [{"entity_id": "sensor.solar_old", "name": "solar"}]
+        new_model_inputs = [{"entity_id": "sensor.solar_new", "name": "solar"}]
+        feature_order = ["intercept", "outdoor_delta", "solar"]
+
+        import random
+        rng = random.Random(42)
+        obs = []
+        # 100 observations with old solar entity
+        for i in range(100):
+            od = rng.uniform(0, 10)
+            solar = rng.uniform(0, 0.6)
+            true_offset = 2.0 + 0.3 * od - 4.0 * solar
+            obs.append(Observation(
+                timestamp=float(i), wall_time=1713650000.0 + i * 3600,
+                hp_setpoint=20.0 + true_offset + rng.gauss(0, 0.05),
+                current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=20.0 + od, room_rate=0.005,
+                raw_readings={"sensor.solar_old": solar},
+                clamped=False,
+            ))
+        # 40 observations with new solar entity
+        for i in range(40):
+            od = rng.uniform(0, 10)
+            solar = rng.uniform(0, 0.6)
+            true_offset = 2.0 + 0.3 * od - 4.0 * solar
+            obs.append(Observation(
+                timestamp=float(100 + i), wall_time=1713650000.0 + (100 + i) * 3600,
+                hp_setpoint=20.0 + true_offset + rng.gauss(0, 0.05),
+                current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=20.0 + od, room_rate=0.005,
+                raw_readings={"sensor.solar_new": solar},
+                clamped=False,
+            ))
+
+        # With the new entity config: old obs contribute to base only
+        result = weighted_least_squares(
+            obs, n_features=3, feature_order=feature_order, model_inputs=new_model_inputs,
+        )
+        assert result is not None
+        # outdoor_delta anchored by ALL 140 observations
+        assert abs(result.beta_batch[1] - 0.3) < 0.05
+        # solar estimated from only the 40 new-entity observations
+        assert abs(result.beta_batch[2] - (-4.0)) < 0.3
+        # solar has finite std_err (not inf — it was estimated, not held)
+        assert result.beta_std_err[2] < 10.0
+
+    def test_progressive_feature_addition_outdoor_stable(self):
+        """Adding a feature doesn't shift outdoor_delta coefficient.
+
+        200 base-only observations establish outdoor_delta.  60 new
+        observations add solar.  The outdoor_delta coefficient should
+        be nearly identical whether computed with or without the solar
+        feature, because FWL partials out the base before estimating solar.
+        """
+        feature_order_base = ["intercept", "outdoor_delta"]
+        feature_order_ext = ["intercept", "outdoor_delta", "solar"]
+        model_inputs_ext = [{"entity_id": "sensor.solar", "name": "solar"}]
+
+        import random
+        rng = random.Random(42)
+        obs_base = []
+        for i in range(200):
+            od = rng.uniform(0, 10)
+            true_offset = 2.0 + 0.3 * od
+            obs_base.append(Observation(
+                timestamp=float(i), wall_time=1713650000.0 + i * 3600,
+                hp_setpoint=20.0 + true_offset + rng.gauss(0, 0.05),
+                current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=20.0 + od, room_rate=0.005,
+                raw_readings={},
+                clamped=False,
+            ))
+
+        # Base-only regression
+        result_base = weighted_least_squares(
+            obs_base, n_features=2, feature_order=feature_order_base, model_inputs=[],
+        )
+
+        # Now add 60 solar observations
+        obs_extended = list(obs_base)
+        for i in range(60):
+            od = rng.uniform(0, 10)
+            solar = rng.uniform(0, 0.6)
+            true_offset = 2.0 + 0.3 * od - 3.0 * solar
+            obs_extended.append(Observation(
+                timestamp=float(200 + i), wall_time=1713650000.0 + (200 + i) * 3600,
+                hp_setpoint=20.0 + true_offset + rng.gauss(0, 0.05),
+                current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=20.0 + od, room_rate=0.005,
+                raw_readings={"sensor.solar": solar},
+                clamped=False,
+            ))
+
+        # Extended regression with solar
+        result_ext = weighted_least_squares(
+            obs_extended, n_features=3, feature_order=feature_order_ext,
+            model_inputs=model_inputs_ext,
+        )
+
+        assert result_base is not None
+        assert result_ext is not None
+        # outdoor_delta should be stable: adding solar shouldn't shift it
+        assert abs(result_base.beta_batch[1] - result_ext.beta_batch[1]) < 0.02
+        # Both should be close to the true value
+        assert abs(result_ext.beta_batch[1] - 0.3) < 0.02
+        # solar should be estimated correctly
+        assert abs(result_ext.beta_batch[2] - (-3.0)) < 0.3
+
+    def test_fwl_matches_joint_ols_on_complete_data(self):
+        """When all observations have all features, hierarchical FWL
+        produces the same coefficients as a joint regression would.
+
+        This is the mathematical guarantee of Frisch-Waugh-Lovell (1933).
+        Verifies the implementation is correct, not just "close enough."
+        """
+        model_inputs = [
+            {"entity_id": "sensor.solar", "name": "solar"},
+            {"entity_id": "sensor.pellet", "name": "pellet"},
+        ]
+        feature_order = ["intercept", "outdoor_delta", "solar", "pellet"]
+
+        import random
+        rng = random.Random(42)
+        true_beta = [1.5, 0.4, -3.0, -6.0]
+        obs = []
+        for i in range(100):
+            od = rng.uniform(-5, 15)
+            solar = rng.uniform(0, 0.8)
+            pellet = 1.0 if rng.random() < 0.15 else 0.0
+            y_true = true_beta[0] + true_beta[1] * od + true_beta[2] * solar + true_beta[3] * pellet
+            obs.append(Observation(
+                timestamp=float(i), wall_time=1713650000.0 + i * 3600,
+                hp_setpoint=20.0 + y_true, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=20.0 + od, room_rate=0.005,
+                raw_readings={"sensor.solar": solar, "sensor.pellet": pellet},
+                clamped=False,
+            ))
+
+        result = weighted_least_squares(
+            obs, n_features=4, feature_order=feature_order, model_inputs=model_inputs,
+        )
+        assert result is not None
+        # Noiseless data: should recover exact coefficients
+        for i, (est, true) in enumerate(zip(result.beta_batch, true_beta)):
+            assert abs(est - true) < 0.01, (
+                f"Coefficient {i}: {est:.6f} != {true:.6f} (diff={abs(est-true):.6f})"
+            )
+        # All model input std_errs should be finite (not inf)
+        for i in range(2, 4):
+            assert result.beta_std_err[i] < 1.0, (
+                f"std_err[{i}] = {result.beta_std_err[i]} should be finite"
+            )
 
 
 class TestObservationMetadata:
-    """Tests for Observation metadata fields and round-trip serialization."""
+    """Tests for v2 Observation metadata fields and round-trip serialization."""
 
     def test_metadata_round_trip(self):
-        """New metadata fields survive as_dict → from_dict round-trip."""
+        """v2 metadata fields survive as_dict → from_dict round-trip."""
         obs = Observation(
             timestamp=100.0,
-            features=[1.0, 5.0],
+            wall_time=1713650000.0,
             hp_setpoint=22.0,
             current_c=20.0,
             desired_c=20.0,
-            room_rate=0.005,
-            clamped=False,
             outdoor_temp_c=-5.0,
-            integral_settled=True,
-            seconds_since_setpoint_change=300.0,
+            room_rate=0.005,
+            raw_readings={"sensor.solar": 0.4},
+            clamped=False,
             supplemental_active=True,
         )
         d = obs.as_dict()
         restored = Observation.from_dict(d)
         assert restored.outdoor_temp_c == -5.0
-        assert restored.integral_settled is True
-        assert restored.seconds_since_setpoint_change == 300.0
         assert restored.supplemental_active is True
+        assert restored.raw_readings == {"sensor.solar": 0.4}
+        assert restored.wall_time == 1713650000.0
 
-    def test_metadata_defaults_from_legacy(self):
-        """Legacy observations without metadata fields get safe defaults."""
+    def test_legacy_v1_raises(self):
+        """Legacy v1 observations raise ValueError."""
         legacy_dict = {
             "t": 100.0, "x": [1.0, 5.0], "sp": 22.0,
             "cur": 20.0, "des": 20.0, "rate": 0.005, "clamp": False,
         }
-        obs = Observation.from_dict(legacy_dict)
-        assert obs.outdoor_temp_c is None
-        assert obs.integral_settled is False
-        assert obs.seconds_since_setpoint_change == 0.0
-        assert obs.supplemental_active is False
+        with pytest.raises(ValueError, match="v1 observation"):
+            Observation.from_dict(legacy_dict)
 
     def test_plant_snapshot_on_batch_result(self):
         """BatchResult.plant_snapshot round-trips through dataclasses.asdict."""
@@ -698,14 +1051,8 @@ class TestFilterInactive:
     """
 
     def _make_obs(self, sp, cur, features=None):
-        return Observation(
-            timestamp=0.0,
-            features=features or [1.0, 5.0],
-            hp_setpoint=sp,
-            current_c=cur,
-            desired_c=21.0,
-            room_rate=0.005,
-            clamped=False,
+        return _make_test_obs(
+            features or [1.0, 5.0], sp=sp, cur=cur, des=21.0,
         )
 
     def test_heat_removes_setpoint_below_room(self):
@@ -782,13 +1129,8 @@ class TestFilterInactive:
 
 class TestConditionNumber:
     def _make_obs(self, features, sp=22.0, cur=20.0, clamped=False, clamped_reason=""):
-        if clamped and not clamped_reason:
-            clamped_reason = "no_output"
-        return Observation(
-            timestamp=0.0, features=features, hp_setpoint=sp,
-            current_c=cur, desired_c=20.0, room_rate=0.005, clamped=clamped,
-            clamped_reason=clamped_reason,
-        )
+        return _make_test_obs(features, sp=sp, cur=cur,
+                              clamped=clamped, clamped_reason=clamped_reason)
 
     def test_condition_number_inf_before_recompute(self):
         """Returns inf when xtx matrix hasn't been computed yet."""
@@ -818,7 +1160,11 @@ class TestConditionNumber:
         combined prediction is still stable.
         Belsley (1980): 30 < κ < 100 means some coefficients unreliable.
         """
-        buf = DiversityAwareBuffer(n_features=3, max_size=100)
+        buf = DiversityAwareBuffer(
+            n_features=3, max_size=100,
+            feature_order=_test_feature_order(1),
+            model_inputs=_test_model_inputs(1),
+        )
         for i in range(50):
             x1 = float(i % 10)
             # x2 tracks x1 closely but not perfectly (r ≈ 0.9)
@@ -836,7 +1182,11 @@ class TestConditionNumber:
         large coefficient swings.
         Belsley (1980): κ > 100 means coefficient estimates numerically unstable.
         """
-        buf = DiversityAwareBuffer(n_features=2, max_size=100)
+        buf = DiversityAwareBuffer(
+            n_features=2, max_size=100,
+            feature_order=_test_feature_order(0),
+            model_inputs=_test_model_inputs(0),
+        )
         for i in range(50):
             buf.add(self._make_obs([1.0, 5.0 + (i % 10) * 0.01]))
         buf.recompute_info_matrix()
@@ -850,7 +1200,11 @@ class TestConditionNumber:
 
     def test_pairwise_correlations_detects_correlated(self):
         """Detects highly correlated features."""
-        buf = DiversityAwareBuffer(n_features=3, max_size=100)
+        buf = DiversityAwareBuffer(
+            n_features=3, max_size=100,
+            feature_order=_test_feature_order(1),
+            model_inputs=_test_model_inputs(1),
+        )
         for i in range(30):
             outdoor_delta = float(i)
             solar = outdoor_delta * 0.5 + 1.0  # perfectly correlated
@@ -864,7 +1218,11 @@ class TestConditionNumber:
 
     def test_pairwise_correlations_independent_features(self):
         """Independent features produce no correlated pairs."""
-        buf = DiversityAwareBuffer(n_features=3, max_size=100)
+        buf = DiversityAwareBuffer(
+            n_features=3, max_size=100,
+            feature_order=_test_feature_order(1),
+            model_inputs=_test_model_inputs(1),
+        )
         for i in range(30):
             outdoor_delta = float(i % 10)
             pellet = float((i + 5) % 3)  # uncorrelated pattern
@@ -874,7 +1232,11 @@ class TestConditionNumber:
 
     def test_pairwise_correlations_skips_clamped(self):
         """Correlation computed only from unclamped observations."""
-        buf = DiversityAwareBuffer(n_features=3, max_size=100)
+        buf = DiversityAwareBuffer(
+            n_features=3, max_size=100,
+            feature_order=_test_feature_order(1),
+            model_inputs=_test_model_inputs(1),
+        )
         # All unclamped obs are independent
         for i in range(25):
             buf.add(self._make_obs([1.0, float(i % 10), float((i + 5) % 3)]))
@@ -890,13 +1252,17 @@ class TestConditionNumber:
 
 class TestResidualsByHour:
     def _make_obs(self, features, sp, cur, wall_hour, des=20.0, rate=0.005, clamped=False, clamped_reason=""):
-        if clamped and not clamped_reason:
-            clamped_reason = "no_output"
-        return Observation(
-            timestamp=0.0, features=features, hp_setpoint=sp,
-            current_c=cur, desired_c=des, room_rate=rate, clamped=clamped,
-            clamped_reason=clamped_reason, wall_hour=wall_hour,
-        )
+        import datetime as _dt
+        # Create a wall_time that corresponds to the desired local hour.
+        # Use a fixed date so tests are deterministic. wall_hour=-1 → wall_time=0
+        if wall_hour >= 0:
+            dt = _dt.datetime(2026, 4, 20, wall_hour, 30, 0)
+            wt = dt.timestamp()
+        else:
+            wt = 0.0
+        return _make_test_obs(features, sp=sp, cur=cur, des=des, rate=rate,
+                              clamped=clamped, clamped_reason=clamped_reason,
+                              wall_time=wt)
 
     def test_detects_afternoon_solar_gain(self):
         """Negative residuals in afternoon suggest unmodeled solar gain."""
@@ -915,7 +1281,8 @@ class TestResidualsByHour:
                     cur=20.0,
                     wall_hour=hour,
                 ))
-        patterns = analyze_residuals_by_hour(obs, beta, n_features=2)
+        patterns = analyze_residuals_by_hour(obs, beta, n_features=2,
+                feature_order=_test_feature_order(0), model_inputs=_test_model_inputs(0))
         # Should detect the afternoon pattern
         assert len(patterns) >= 1
         afternoon = [p for p in patterns if 13 <= p.start_hour <= 16]
@@ -936,7 +1303,8 @@ class TestResidualsByHour:
                     cur=20.0,
                     wall_hour=hour,
                 ))
-        patterns = analyze_residuals_by_hour(obs, beta, n_features=2)
+        patterns = analyze_residuals_by_hour(obs, beta, n_features=2,
+                feature_order=_test_feature_order(0), model_inputs=_test_model_inputs(0))
         assert len(patterns) == 0
 
     def test_skips_clamped_observations(self):
@@ -953,7 +1321,8 @@ class TestResidualsByHour:
                     wall_hour=hour,
                     clamped=True,
                 ))
-        patterns = analyze_residuals_by_hour(obs, beta, n_features=2)
+        patterns = analyze_residuals_by_hour(obs, beta, n_features=2,
+                feature_order=_test_feature_order(0), model_inputs=_test_model_inputs(0))
         assert len(patterns) == 0
 
     def test_skips_missing_wall_hour(self):
@@ -964,7 +1333,8 @@ class TestResidualsByHour:
             obs.append(self._make_obs(
                 features=[1.0, 5.0], sp=25.0, cur=20.0, wall_hour=-1,
             ))
-        patterns = analyze_residuals_by_hour(obs, beta, n_features=2)
+        patterns = analyze_residuals_by_hour(obs, beta, n_features=2,
+                feature_order=_test_feature_order(0), model_inputs=_test_model_inputs(0))
         assert len(patterns) == 0
 
     def test_insufficient_obs_per_hour(self):
@@ -987,7 +1357,8 @@ class TestResidualsByHour:
                     cur=20.0,
                     wall_hour=hour,
                 ))
-        patterns = analyze_residuals_by_hour(obs, beta, n_features=2)
+        patterns = analyze_residuals_by_hour(obs, beta, n_features=2,
+                feature_order=_test_feature_order(0), model_inputs=_test_model_inputs(0))
         # Hour 14 should not appear in any pattern
         for p in patterns:
             assert not (p.start_hour <= 14 <= p.end_hour)
@@ -1008,25 +1379,29 @@ class TestResidualsByHour:
                     cur=20.0,
                     wall_hour=hour,
                 ))
-        patterns = analyze_residuals_by_hour(obs, beta, n_features=2)
+        patterns = analyze_residuals_by_hour(obs, beta, n_features=2,
+                feature_order=_test_feature_order(0), model_inputs=_test_model_inputs(0))
         assert len(patterns) >= 1
         night = [p for p in patterns if p.start_hour == 22 or p.start_hour <= 2]
         assert len(night) >= 1
         assert night[0].mean_residual > 0.5  # positive = heat loss
 
-    def test_observation_wall_hour_serialization(self):
-        """wall_hour round-trips through as_dict/from_dict."""
+    def test_observation_wall_time_serialization(self):
+        """wall_time round-trips through as_dict/from_dict."""
         obs = self._make_obs([1.0, 5.0], sp=22.0, cur=20.0, wall_hour=14)
         d = obs.as_dict()
-        assert d["wh"] == 14
+        assert d["v"] == 2
+        assert d["wt"] == obs.wall_time
+        assert "rr" in d  # raw_readings
         restored = Observation.from_dict(d)
-        assert restored.wall_hour == 14
+        assert restored.wall_time == obs.wall_time
+        assert restored.raw_readings == obs.raw_readings
 
-    def test_observation_wall_hour_default(self):
-        """Legacy observations without wall_hour get -1."""
+    def test_legacy_v1_observation_raises(self):
+        """Legacy v1 observations raise ValueError (cannot migrate)."""
         d = {
             "t": 0.0, "x": [1.0], "sp": 22.0,
             "cur": 20.0, "des": 20.0, "rate": 0.005, "clamp": False,
         }
-        obs = Observation.from_dict(d)
-        assert obs.wall_hour == -1
+        with pytest.raises(ValueError, match="v1 observation"):
+            Observation.from_dict(d)

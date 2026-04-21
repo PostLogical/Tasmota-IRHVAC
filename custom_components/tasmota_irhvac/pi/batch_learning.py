@@ -24,101 +24,69 @@ _LOGGER = logging.getLogger(__name__)
 
 @dataclass
 class Observation:
-    """A single observation for batch learning and debug analysis.
+    """A single physical observation for batch learning.
 
-    Features are stored as a dict mapping feature name → value.  This
-    allows model inputs to be added or removed without invalidating
-    existing buffer observations: removed features are stripped, new
-    features are zero-filled at solve time.
+    Stores **what the house experienced** — raw sensor readings keyed by
+    entity_id — rather than pre-computed regression features.  Feature
+    vectors are built at WLS time from raw_readings + current config,
+    decoupling storage from model input configuration (lag_tau, entity
+    swaps, feature additions/removals).
 
-    Legacy observations (pre-named) store features as a positional list
-    and are converted on load via ``from_dict()`` when ``feature_names``
-    are available from the buffer context.
+    This means:
+    - Changing lag_tau does NOT invalidate the buffer
+    - Adding/removing model inputs does NOT corrupt old observations
+    - Old observations contribute to features they have data for and are
+      excluded from features they predate (hierarchical regression)
     """
 
-    timestamp: float  # monotonic time
-    features: dict[str, float]  # {"intercept": 1.0, "outdoor_delta": 5.2, ...}
+    timestamp: float  # monotonic time (for ordering/age)
+    wall_time: float  # UTC epoch seconds (for sun position, time-of-day)
     hp_setpoint: float  # integer HP setpoint (°C)
     current_c: float  # filtered room temperature (°C)
     desired_c: float  # target temperature (°C)
+    outdoor_temp_c: float | None  # absolute outdoor temperature (°C)
     room_rate: float  # dT/dt in °C/min at observation time
+    raw_readings: dict[str, float]  # entity_id → raw sensor value at obs time
     clamped: bool  # True if HP setpoint was at min or max
     clamped_reason: str = ""  # "", "no_output", "saturated_low", "saturated_high"
-    # Context fields (not used by WLS, but needed for diagnostics and future gating)
-    pi_integral: float = 0.0
-    ff_offset: float = 0.0
-    ff_confidence: float = 1.0
-    raw_c: float = 0.0  # unfiltered room temperature
-    wall_hour: int = -1  # wall-clock hour (0-23) for time-of-day analysis
-    outdoor_temp_c: float | None = None  # absolute outdoor temperature (°C)
-    integral_settled: bool = False  # True if online RLS gate would accept
-    seconds_since_setpoint_change: float = 0.0  # seconds since last HP setpoint change
     supplemental_active: bool = False  # supplemental source tracking or assisting
 
     def as_dict(self) -> dict[str, Any]:
         return {
+            "v": 2,  # schema version
             "t": self.timestamp,
-            "x": self.features,  # dict now; legacy was list
+            "wt": self.wall_time,
             "sp": self.hp_setpoint,
             "cur": self.current_c,
             "des": self.desired_c,
+            "ot": self.outdoor_temp_c,
             "rate": self.room_rate,
+            "rr": self.raw_readings,
             "clamp": self.clamped,
             "cr": self.clamped_reason,
-            "integ": self.pi_integral,
-            "ff": self.ff_offset,
-            "ffc": self.ff_confidence,
-            "raw": self.raw_c,
-            "wh": self.wall_hour,
-            "ot": self.outdoor_temp_c,
-            "is": self.integral_settled,
-            "sssc": self.seconds_since_setpoint_change,
             "sa": self.supplemental_active,
         }
 
     @classmethod
-    def from_dict(
-        cls,
-        d: dict[str, Any],
-        legacy_feature_names: list[str] | None = None,
-    ) -> Observation:
-        """Restore an Observation from a serialized dict.
+    def from_dict(cls, d: dict[str, Any]) -> Observation:
+        """Restore a v2 Observation from a serialized dict.
 
-        If ``d["x"]`` is a list (legacy positional format) and
-        ``legacy_feature_names`` is provided, converts the positional
-        list to a named dict.  If names aren't available, uses generic
-        positional names (``f0``, ``f1``, ...) so the dict contract holds.
+        Raises ValueError for v1 observations (pre-raw_readings format)
+        or corrupt data, so callers can skip gracefully.
         """
-        raw_x = d["x"]
-        if isinstance(raw_x, dict):
-            features = raw_x
-        elif isinstance(raw_x, list):
-            if legacy_feature_names is not None:
-                features = {
-                    name: raw_x[i] if i < len(raw_x) else 0.0
-                    for i, name in enumerate(legacy_feature_names)
-                }
-            else:
-                features = {f"f{i}": v for i, v in enumerate(raw_x)}
-        else:
-            features = {}
+        if d.get("v", 1) < 2:
+            raise ValueError("v1 observation cannot be restored")
         return cls(
             timestamp=d["t"],
-            features=features,
+            wall_time=d["wt"],
             hp_setpoint=d["sp"],
             current_c=d["cur"],
             desired_c=d["des"],
-            room_rate=d["rate"],
-            clamped=d["clamp"],
-            clamped_reason=d.get("cr", "clamped" if d.get("clamp") else ""),
-            pi_integral=d.get("integ", 0.0),
-            ff_offset=d.get("ff", 0.0),
-            ff_confidence=d.get("ffc", 1.0),
-            raw_c=d.get("raw", d["cur"]),
-            wall_hour=d.get("wh", -1),
             outdoor_temp_c=d.get("ot"),
-            integral_settled=d.get("is", False),
-            seconds_since_setpoint_change=d.get("sssc", 0.0),
+            room_rate=d["rate"],
+            raw_readings=d.get("rr", {}),
+            clamped=d["clamp"],
+            clamped_reason=d.get("cr", ""),
             supplemental_active=d.get("sa", False),
         )
 
@@ -132,25 +100,48 @@ DEFAULT_DIVERSITY_BUFFER_SIZE = 2000
 INFO_MATRIX_REGULARIZATION = 1e-4
 
 
-def extract_feature_vector(
+def build_feature_vector_from_raw(
     obs: Observation,
+    model_inputs: list[dict[str, Any]],
     feature_order: list[str],
-) -> list[float]:
-    """Extract an ordered feature vector from an observation.
+) -> list[float] | None:
+    """Build a feature vector from raw readings + current config.
 
-    Returns a list aligned to ``feature_order``, zero-filling any features
-    not present in the observation.  Extra features on the observation are
-    ignored.  Handles both dict features (named) and legacy list features
-    (positional fallback).
+    Returns an ordered list aligned to ``feature_order``, or None if the
+    observation is missing readings for any required model input entity.
+
+    Feature construction:
+    - "intercept": always 1.0
+    - "outdoor_delta": obs.outdoor_temp_c - obs.current_c (requires outdoor_temp_c)
+    - model inputs: raw_readings[entity_id], with delta_from_room adjustment
+      if configured (entity_value - current_c)
+
+    No EMA is applied — batch WLS operates on raw instantaneous values.
+    The online RLS uses EMA for tick-by-tick smoothing, but the batch
+    fits across many diverse observations where individual noise averages out.
     """
-    if isinstance(obs.features, dict):
-        return [obs.features.get(name, 0.0) for name in feature_order]
-    # Legacy list fallback: positional mapping
-    n = len(feature_order)
-    x = list(obs.features[:n])
-    while len(x) < n:
-        x.append(0.0)
-    return x
+    if obs.outdoor_temp_c is None:
+        return None
+
+    features: dict[str, float] = {
+        "intercept": 1.0,
+        "outdoor_delta": obs.outdoor_temp_c - obs.current_c,
+    }
+
+    for m_input in model_inputs:
+        entity_id = m_input.get("entity_id", "")
+        name = m_input.get("name", entity_id)
+        if not entity_id or entity_id not in obs.raw_readings:
+            return None  # incomplete — skip this observation for this feature set
+        value = obs.raw_readings[entity_id]
+        # Apply delta_from_room if configured (same transform as live path)
+        if m_input.get("delta_from_room"):
+            value = value - obs.current_c
+        features[name] = value
+
+    return [features.get(name, 0.0) for name in feature_order]
+
+
 
 
 class DiversityAwareBuffer:
@@ -168,6 +159,12 @@ class DiversityAwareBuffer:
     pellet stove events, door transitions) while shedding redundant
     steady-state observations.
 
+    Leverage scoring uses raw readings + current model config to build
+    feature vectors on the fly.  This means scoring adapts when config
+    changes — an observation that was low-leverage under the old config
+    may become high-leverage under the new one (e.g., after adding a
+    solar input, observations from sunny days become more valuable).
+
     References:
     - Chowdhary & Johnson, ACC 2011 — concurrent learning history stack
     - Atkinson & Donev, "Optimum Experimental Designs" — D-optimal sequential design
@@ -178,11 +175,13 @@ class DiversityAwareBuffer:
         n_features: int,
         max_size: int = DEFAULT_DIVERSITY_BUFFER_SIZE,
         feature_order: list[str] | None = None,
+        model_inputs: list[dict[str, Any]] | None = None,
     ) -> None:
         self._buffer: list[Observation] = []
         self._max_size = max_size
         self._n_features = n_features
         self._feature_order: list[str] | None = feature_order
+        self._model_inputs: list[dict[str, Any]] = model_inputs or []
         # (X^T X + λI)^{-1} — the inverse information matrix, n×n.
         # Initialized to (1/λ) * I (no data yet).
         n = n_features
@@ -211,33 +210,21 @@ class DiversityAwareBuffer:
         ]
         self._updates_since_recompute = 0
 
-    def strip_features(self, names_to_remove: set[str]) -> int:
-        """Remove named features from all stored observations.
+    def update_config(
+        self,
+        feature_order: list[str],
+        model_inputs: list[dict[str, Any]],
+    ) -> None:
+        """Atomically update feature order and model config.
 
-        Call when model inputs are removed from the config.  Prevents
-        stale feature values from being matched if a new input with the
-        same name is added later.  Recomputes the info matrix afterward.
-
-        Returns the number of observations modified.
+        Both must be updated together — feature_order defines which columns
+        the info matrix tracks, and model_inputs defines how to build those
+        columns from raw_readings.  Updating one without the other causes
+        silent leverage scoring corruption.
         """
-        if not names_to_remove:
-            return 0
-        modified = 0
-        for obs in self._buffer:
-            if isinstance(obs.features, dict):
-                before = len(obs.features)
-                for name in names_to_remove:
-                    obs.features.pop(name, None)
-                if len(obs.features) < before:
-                    modified += 1
-        if modified:
-            self.recompute_info_matrix()
-        return modified
-
-    def update_feature_order(self, feature_order: list[str]) -> None:
-        """Update the canonical feature order after config changes."""
         self._feature_order = feature_order
         self._n_features = len(feature_order)
+        self._model_inputs = model_inputs
         self.recompute_info_matrix()
 
     def filter_inactive(self, mode: str) -> int:
@@ -327,45 +314,56 @@ class DiversityAwareBuffer:
         cls,
         data: list[dict[str, Any]],
         n_features: int,
+        feature_order: list[str],
+        model_inputs: list[dict[str, Any]],
         max_size: int = DEFAULT_DIVERSITY_BUFFER_SIZE,
-        feature_order: list[str] | None = None,
     ) -> DiversityAwareBuffer:
         """Deserialize from stored dicts, recomputing the info matrix.
 
-        If ``feature_order`` is provided, legacy observations with
-        positional feature lists are converted to named dicts.
+        Corrupt or unreadable entries are silently skipped.
         """
-        buf = cls(n_features, max_size, feature_order=feature_order)
+        buf = cls(n_features, max_size, feature_order=feature_order,
+                  model_inputs=model_inputs)
         observations: list[Observation] = []
         for d in data:
             try:
-                observations.append(
-                    Observation.from_dict(d, legacy_feature_names=feature_order)
-                )
+                observations.append(Observation.from_dict(d))
             except (KeyError, TypeError, ValueError):
                 continue
-        # If more observations than max_size, keep only the most recent
-        # (from a prior FIFO buffer) and let them seed the diversity buffer.
+        n_skipped = len(data) - len(observations)
+        if n_skipped > 0:
+            _LOGGER.info(
+                "Skipped %d unreadable observations during buffer restore",
+                n_skipped,
+            )
         if len(observations) > max_size:
             observations = observations[-max_size:]
-        # Bulk-load without eviction scoring (all are accepted initially).
         buf._buffer = observations
         buf.recompute_info_matrix()
         return buf
 
     def _get_feature_vector(self, obs: Observation) -> list[float]:
-        """Extract ordered feature vector for linear algebra operations."""
-        if self._feature_order is not None:
-            return extract_feature_vector(obs, self._feature_order)
-        # Legacy fallback: positional list (only for tests without feature_order)
-        if isinstance(obs.features, dict):
-            vals = list(obs.features.values())
-        else:
-            vals = list(obs.features)
-        x = vals[:self._n_features]
-        while len(x) < self._n_features:
-            x.append(0.0)
-        return x
+        """Build ordered feature vector from raw readings for leverage scoring.
+
+        Returns a complete vector when all model inputs are present, or a
+        partial vector (intercept + outdoor_delta, zeros for missing inputs)
+        when the observation predates a model input.  Partial vectors get
+        low leverage on model-input dimensions and will be evicted naturally
+        as complete observations accumulate.
+        """
+        if self._feature_order is not None and self._model_inputs is not None:
+            vec = build_feature_vector_from_raw(
+                obs, self._model_inputs, self._feature_order,
+            )
+            if vec is not None:
+                return vec
+        # Partial: base features only (intercept + outdoor_delta)
+        partial = [0.0] * self._n_features
+        if self._n_features > 0:
+            partial[0] = 1.0  # intercept
+        if self._n_features > 1 and obs.outdoor_temp_c is not None:
+            partial[1] = obs.outdoor_temp_c - obs.current_c
+        return partial
 
     def recompute_info_matrix(self) -> None:
         """Recompute (X^T X + λI)^{-1} from scratch.
@@ -661,6 +659,213 @@ def _weighted_variance(values: list[float], weights: list[float]) -> float:
 MIN_FEATURE_VARIANCE = 1e-12
 
 
+@dataclass
+class _RegressionContext:
+    """Classified observation data ready for regression.
+
+    Built once by weighted_least_squares(), consumed by _solve_joint()
+    or _solve_fwl().  Separating data preparation from the solve makes
+    it easy to swap in a grey-box solver later.
+    """
+
+    n: int  # total feature count
+    n_base: int  # always 2 (intercept + outdoor_delta)
+    m_base: int  # number of base-eligible observations
+    base_eligible: list[Observation]
+    y_base: list[float]
+    w_base: list[float]
+    X_base: list[list[float]]
+    col_scales_base: list[float]
+    XtWX_base: list[list[float]]
+    beta_base: list[float]
+    ridge: float
+    # Per model-input classification
+    m_inputs: list[dict[str, Any]]
+    input_entity_ids: list[str]
+    input_values_by_obs: list[list[float | None]]
+    feature_obs_counts: dict[int, int]
+    active_input_indices: list[int]
+    held: set[int]
+    complete_indices: list[int]
+    min_feature_variance: float
+
+
+def _solve_joint(
+    ctx: _RegressionContext,
+) -> tuple[list[float], list[float]] | None:
+    """Joint OLS on observations with ALL active model inputs.
+
+    Returns (beta, std_err) or None if the joint solve fails.
+    Mathematically equivalent to standard OLS — no approximation.
+    """
+    n_active = len(ctx.active_input_indices)
+    n_joint = ctx.n_base + n_active
+    m_complete = len(ctx.complete_indices)
+
+    # Build joint feature matrix [intercept, outdoor_delta, input_0, ...]
+    joint_cols: list[list[float]] = []
+    for j in range(ctx.n_base):
+        joint_cols.append([ctx.X_base[k][j] for k in ctx.complete_indices])
+    for fi in ctx.active_input_indices:
+        joint_cols.append([ctx.input_values_by_obs[k][fi] for k in ctx.complete_indices])
+
+    # Column normalization
+    col_scales = [1.0] * n_joint
+    col_scales[1] = ctx.col_scales_base[1]
+    for jj in range(ctx.n_base, n_joint):
+        col = joint_cols[jj]
+        mean_j = sum(col) / m_complete
+        var_j = sum((c - mean_j) ** 2 for c in col) / m_complete
+        col_scales[jj] = math.sqrt(var_j) if var_j > 1e-12 else 1.0
+
+    y = [ctx.y_base[k] for k in ctx.complete_indices]
+    w = [ctx.w_base[k] for k in ctx.complete_indices]
+
+    XtWX = [[0.0] * n_joint for _ in range(n_joint)]
+    XtWy = [0.0] * n_joint
+    for idx in range(m_complete):
+        for ii in range(n_joint):
+            xi = joint_cols[ii][idx] / col_scales[ii]
+            XtWy[ii] += xi * w[idx] * y[idx]
+            for jj in range(n_joint):
+                xj = joint_cols[jj][idx] / col_scales[jj]
+                XtWX[ii][jj] += xi * w[idx] * xj
+    for ii in range(n_joint):
+        XtWX[ii][ii] += ctx.ridge
+
+    beta_norm = _solve_symmetric(XtWX, XtWy, n_joint)
+    if beta_norm is None:
+        return None
+
+    # Denormalize into full-size beta vector
+    beta = [0.0] * ctx.n
+    beta[0] = beta_norm[0] / col_scales[0]
+    beta[1] = beta_norm[1] / col_scales[1]
+    for jj, fi in enumerate(ctx.active_input_indices):
+        beta[fi + 2] = beta_norm[ctx.n_base + jj] / col_scales[ctx.n_base + jj]
+
+    # Standard errors from (X'WX)^-1
+    std_err = [float("inf")] * ctx.n
+    cov_diag = _diagonal_of_inverse(XtWX, n_joint)
+    if cov_diag is not None:
+        resid = [
+            y[idx] - sum(
+                joint_cols[jj][idx] * (beta[0], beta[1], *[beta[fi + 2] for fi in ctx.active_input_indices])[jj]
+                for jj in range(n_joint)
+            )
+            for idx in range(m_complete)
+        ]
+        rms_sq = sum(r * r for r in resid) / max(1, m_complete - n_joint)
+        for i in range(ctx.n_base):
+            var_i = rms_sq * max(0.0, cov_diag[i]) / (col_scales[i] ** 2)
+            std_err[i] = math.sqrt(var_i) if var_i > 0 else 0.0
+        for jj, fi in enumerate(ctx.active_input_indices):
+            idx_in = ctx.n_base + jj
+            var_i = rms_sq * max(0.0, cov_diag[idx_in]) / (col_scales[idx_in] ** 2)
+            std_err[fi + 2] = math.sqrt(var_i) if var_i > 0 else 0.0
+
+    return beta, std_err
+
+
+def _solve_fwl(
+    ctx: _RegressionContext,
+) -> tuple[list[float], list[float]]:
+    """Frisch-Waugh-Lovell partial regression for ragged data.
+
+    Used when the complete-data subset is too small for joint OLS but
+    individual features have enough observations in their subsets.
+    Each feature coefficient is unbiased (base regressors partialled out).
+    Base intercept and outdoor_delta are re-estimated afterward.
+    """
+    beta = [0.0] * ctx.n
+    beta[0] = ctx.beta_base[0]
+    beta[1] = ctx.beta_base[1]
+    std_err = [float("inf")] * ctx.n
+    held = ctx.held
+
+    residuals_base = [
+        ctx.y_base[k] - sum(ctx.beta_base[i] * ctx.X_base[k][i] for i in range(ctx.n_base))
+        for k in range(ctx.m_base)
+    ]
+
+    for fi in ctx.active_input_indices:
+        coeff_idx = fi + 2
+        subset_indices = [k for k in range(ctx.m_base) if ctx.input_values_by_obs[k][fi] is not None]
+        subset_values = [ctx.input_values_by_obs[k][fi] for k in subset_indices]
+        m_sub = len(subset_indices)
+        w_sub = [ctx.w_base[k] for k in subset_indices]
+        y_sub = [residuals_base[k] for k in subset_indices]
+        X_base_sub = [ctx.X_base[k] for k in subset_indices]
+
+        # Partial out base regressors: regress z on [intercept, outdoor_delta]
+        XtWX_zb = [[0.0] * ctx.n_base for _ in range(ctx.n_base)]
+        XtWy_zb = [0.0] * ctx.n_base
+        for i_sub in range(m_sub):
+            for a in range(ctx.n_base):
+                xa = X_base_sub[i_sub][a]
+                XtWy_zb[a] += xa * w_sub[i_sub] * subset_values[i_sub]
+                for b in range(ctx.n_base):
+                    XtWX_zb[a][b] += xa * w_sub[i_sub] * X_base_sub[i_sub][b]
+        for a in range(ctx.n_base):
+            XtWX_zb[a][a] += ctx.ridge
+        gamma = _solve_symmetric(XtWX_zb, XtWy_zb, ctx.n_base)
+
+        r_z = (
+            [subset_values[i] - sum(gamma[a] * X_base_sub[i][a] for a in range(ctx.n_base)) for i in range(m_sub)]
+            if gamma is not None else subset_values
+        )
+
+        if _weighted_variance(r_z, w_sub) < ctx.min_feature_variance:
+            held.add(coeff_idx)
+            continue
+
+        wrzry = sum(w_sub[i] * r_z[i] * y_sub[i] for i in range(m_sub))
+        wrzrz = sum(w_sub[i] * r_z[i] * r_z[i] for i in range(m_sub))
+        if wrzrz < 1e-15:
+            held.add(coeff_idx)
+            continue
+
+        beta[coeff_idx] = wrzry / wrzrz
+        sub_resid = [y_sub[i] - beta[coeff_idx] * r_z[i] for i in range(m_sub)]
+        sub_rms_sq = sum(r * r for r in sub_resid) / max(1, m_sub - 1)
+        std_err[coeff_idx] = math.sqrt(sub_rms_sq / wrzrz) if wrzrz > 1e-15 else float("inf")
+
+    # Re-estimate base to absorb model input contributions
+    y_adj = list(ctx.y_base)
+    for k in range(ctx.m_base):
+        for fi in ctx.active_input_indices:
+            coeff_idx = fi + 2
+            if coeff_idx not in held and ctx.input_values_by_obs[k][fi] is not None:
+                y_adj[k] -= beta[coeff_idx] * ctx.input_values_by_obs[k][fi]
+    XtWX_adj = [[0.0] * ctx.n_base for _ in range(ctx.n_base)]
+    XtWy_adj = [0.0] * ctx.n_base
+    for k in range(ctx.m_base):
+        for i in range(ctx.n_base):
+            xi = ctx.X_base[k][i] / ctx.col_scales_base[i]
+            XtWy_adj[i] += xi * ctx.w_base[k] * y_adj[k]
+            for j in range(ctx.n_base):
+                xj = ctx.X_base[k][j] / ctx.col_scales_base[j]
+                XtWX_adj[i][j] += xi * ctx.w_base[k] * xj
+    for i in range(ctx.n_base):
+        XtWX_adj[i][i] += ctx.ridge
+    beta_base_adj = _solve_symmetric(XtWX_adj, XtWy_adj, ctx.n_base)
+    if beta_base_adj is not None:
+        beta[0] = beta_base_adj[0] / ctx.col_scales_base[0]
+        beta[1] = beta_base_adj[1] / ctx.col_scales_base[1]
+
+    # Base std errors from adjusted system
+    cov_diag = _diagonal_of_inverse(XtWX_adj if beta_base_adj else ctx.XtWX_base, ctx.n_base)
+    if cov_diag is not None:
+        # Use sub-residual RMS as rough sigma estimate
+        rms_base = math.sqrt(sum(r * r for r in residuals_base) / max(1, ctx.m_base - ctx.n_base))
+        rms_sq = rms_base * rms_base if rms_base > 0 else 1e-12
+        for i in range(ctx.n_base):
+            var_i = rms_sq * max(0.0, cov_diag[i]) / (ctx.col_scales_base[i] ** 2)
+            std_err[i] = math.sqrt(var_i) if var_i > 0 else 0.0
+
+    return beta, std_err
+
+
 def weighted_least_squares(
     observations: list[Observation],
     n_features: int,
@@ -671,33 +876,20 @@ def weighted_least_squares(
     outlier_sigma: float = 3.0,
     min_feature_representation: int = 10,
     feature_order: list[str] | None = None,
+    model_inputs: list[dict[str, Any]] | None = None,
 ) -> BatchResult | None:
-    """Run weighted least squares on filtered observations.
+    """Run weighted least squares on physical observations.
 
-    Filters:
-    - Excludes clamped observations (censored data)
-    - Excludes observations with room_rate > threshold (not at equilibrium)
-    - Per-feature persistent excitation check: features with insufficient
-      weighted variance are held at their current_beta values (Ljung §13.3).
-    - Residual outlier exclusion (Huber robust regression): after initial fit,
-      observations with |residual| > outlier_sigma * σ are excluded and the
-      model is refit.  Observations where a rare feature (< min_feature_representation
-      active samples) is non-zero are exempt from outlier exclusion to avoid
-      rejecting the first pellet-stove-on events as outliers.
-
-    Weights: 1.0 / (1.0 + (room_rate / threshold)²) — near-equilibrium
-    observations get full weight, transient observations are smoothly
-    downweighted.  This is a heteroscedastic weighting: observations with
-    high room_rate violate the static model assumption more, so their
-    effective noise variance is higher (Ljung §9.4).
+    Orchestrates three phases:
+    1. **Filter & classify** — exclude ineligible observations, classify
+       features as active/held, partition data by completeness.
+    2. **Solve** — joint OLS on complete data (exact), or FWL on partial
+       data (unbiased per-feature).  Grey-box solvers plug in here.
+    3. **Package** — compute residuals, exclude outliers, return BatchResult.
 
     Returns None if insufficient eligible observations.
     """
-    # Filter observations:
-    # - Exclude hp_no_output (compressor off — different model, no plant info)
-    # - Exclude legacy "clamped" (pre-split data where reason is unknown)
-    # - Include actuator saturation (censored but informative)
-    # - Exclude high room_rate (transient, static model assumption)
+    # ── Phase 1: Filter & classify ──────────────────────────────────
     _EXCLUDE_REASONS = ("no_output", "clamped")
     eligible = [
         o for o in observations
@@ -709,195 +901,200 @@ def weighted_least_squares(
         return None
 
     n = n_features
-    m = len(eligible)
+    if n < 2:
+        return None
+    m_inputs = model_inputs or []
 
-    y = [o.hp_setpoint - o.current_c for o in eligible]
-    if feature_order is not None:
-        X = [extract_feature_vector(o, feature_order) for o in eligible]
-    else:
-        # Legacy fallback for tests without feature_order
-        X = [
-            list(o.features.values())[:n] if isinstance(o.features, dict)
-            else o.features[:n]
-            for o in eligible
-        ]
-    w = [1.0 / (1.0 + (o.room_rate / room_rate_threshold) ** 2) for o in eligible]
-
-    # ── Persistent excitation check per feature ──────────────────────
-    # Feature 0 (intercept, always 1.0) is always identifiable — its
-    # "variance" is zero but it's structurally needed for the regression.
-    held: set[int] = set()
-    for j in range(1, n):  # skip intercept
-        col = [X[k][j] if j < len(X[k]) else 0.0 for k in range(m)]
-        if _weighted_variance(col, w) < min_feature_variance:
-            held.add(j)
-
-    # Identifiable feature indices
-    active = [j for j in range(n) if j not in held]
-
-    if len(active) < 1:
+    base_eligible = [o for o in eligible if o.outdoor_temp_c is not None]
+    if len(base_eligible) < min_observations:
         return None
 
-    # ── Subtract held-feature contributions from y ───────────────────
-    # y_adj = y - Σ(held j) current_beta[j] * x[j]
-    # This lets WLS solve only for the active subset while accounting
-    # for held features' known contributions.
-    fallback = current_beta if current_beta else [0.0] * n
-    y_adj = list(y)
-    for j in held:
-        bj = fallback[j] if j < len(fallback) else 0.0
-        for k in range(m):
-            xj = X[k][j] if j < len(X[k]) else 0.0
-            y_adj[k] -= bj * xj
+    m_base = len(base_eligible)
+    y_base = [o.hp_setpoint - o.current_c for o in base_eligible]
+    w_base = [1.0 / (1.0 + (o.room_rate / room_rate_threshold) ** 2) for o in base_eligible]
+    X_base = [[1.0, o.outdoor_temp_c - o.current_c] for o in base_eligible]
 
-    # ── Column-normalize active features for numerical conditioning ───
-    # Divide each column by its std so X'WX has balanced diagonal entries.
-    # Intercept (always 1.0) gets scale=1.0.  Coefficients are solved in
-    # normalized space and converted back to physical units afterward.
-    col_scales: list[float] = []
-    for ii, j in enumerate(active):
-        if j == 0:  # intercept
-            col_scales.append(1.0)
-        else:
-            col = [X[k][j] if j < len(X[k]) else 0.0 for k in range(m)]
-            mean_j = sum(col) / m
-            var_j = sum((c - mean_j) ** 2 for c in col) / m
-            std_j = math.sqrt(var_j) if var_j > 1e-12 else 1.0
-            col_scales.append(std_j)
-
-    # ── Build reduced system: X_a'W X_a β_a = X_a'W y_adj ───────────
-    na = len(active)
-    XtWX = [[0.0] * na for _ in range(na)]
-    XtWy = [0.0] * na
-
-    for k in range(m):
-        for ii, i in enumerate(active):
-            xi = (X[k][i] if i < len(X[k]) else 0.0) / col_scales[ii]
-            XtWy[ii] += xi * w[k] * y_adj[k]
-            for jj, j in enumerate(active):
-                xj = (X[k][j] if j < len(X[k]) else 0.0) / col_scales[jj]
-                XtWX[ii][jj] += xi * w[k] * xj
+    # Scale outdoor_delta column
+    n_base = 2
+    col_scales_base = [1.0, 1.0]
+    col_od = [X_base[k][1] for k in range(m_base)]
+    mean_od = sum(col_od) / m_base
+    var_od = sum((c - mean_od) ** 2 for c in col_od) / m_base
+    col_scales_base[1] = math.sqrt(var_od) if var_od > 1e-12 else 1.0
 
     ridge = 1e-6
-    for ii in range(na):
-        XtWX[ii][ii] += ridge
+    XtWX_base = [[0.0] * n_base for _ in range(n_base)]
+    XtWy_base = [0.0] * n_base
+    for k in range(m_base):
+        for i in range(n_base):
+            xi = X_base[k][i] / col_scales_base[i]
+            XtWy_base[i] += xi * w_base[k] * y_base[k]
+            for j in range(n_base):
+                xj = X_base[k][j] / col_scales_base[j]
+                XtWX_base[i][j] += xi * w_base[k] * xj
+    for i in range(n_base):
+        XtWX_base[i][i] += ridge
 
-    beta_active_norm = _solve_symmetric(XtWX, XtWy, na)
-    if beta_active_norm is None:
+    beta_base_norm = _solve_symmetric(XtWX_base, XtWy_base, n_base)
+    if beta_base_norm is None:
         return None
+    beta_base = [beta_base_norm[i] / col_scales_base[i] for i in range(n_base)]
 
-    # ── Denormalize and reassemble full beta vector ──────────────────
-    beta = [0.0] * n
+    # Classify model input features
+    input_entity_ids = [m.get("entity_id", "") for m in m_inputs]
+    input_values_by_obs: list[list[float | None]] = []
+    for k, o in enumerate(base_eligible):
+        row: list[float | None] = []
+        for feat_idx, m_input in enumerate(m_inputs):
+            entity_id = input_entity_ids[feat_idx]
+            if entity_id and entity_id in o.raw_readings:
+                value = o.raw_readings[entity_id]
+                if m_input.get("delta_from_room"):
+                    value = value - o.current_c
+                row.append(value)
+            else:
+                row.append(None)
+        input_values_by_obs.append(row)
+
+    feature_obs_counts: dict[int, int] = {}
+    for feat_idx in range(len(m_inputs)):
+        feature_obs_counts[feat_idx + 2] = sum(
+            1 for row in input_values_by_obs if row[feat_idx] is not None
+        )
+
+    held: set[int] = set()
+    active_input_indices: list[int] = []
+    for feat_idx, m_input in enumerate(m_inputs):
+        coeff_idx = feat_idx + 2
+        entity_id = input_entity_ids[feat_idx]
+        if not entity_id:
+            held.add(coeff_idx)
+            continue
+        if feature_obs_counts[coeff_idx] < max(min_observations, 10):
+            held.add(coeff_idx)
+            continue
+        vals = [input_values_by_obs[k][feat_idx]
+                for k in range(m_base) if input_values_by_obs[k][feat_idx] is not None]
+        w_vals = [w_base[k] for k in range(m_base) if input_values_by_obs[k][feat_idx] is not None]
+        if _weighted_variance(vals, w_vals) < min_feature_variance:
+            held.add(coeff_idx)
+            continue
+        active_input_indices.append(feat_idx)
+
+    complete_indices = [
+        k for k in range(m_base)
+        if all(input_values_by_obs[k][fi] is not None for fi in active_input_indices)
+    ]
+
+    ctx = _RegressionContext(
+        n=n, n_base=n_base, m_base=m_base,
+        base_eligible=base_eligible, y_base=y_base, w_base=w_base,
+        X_base=X_base, col_scales_base=col_scales_base,
+        XtWX_base=XtWX_base, beta_base=beta_base, ridge=ridge,
+        m_inputs=m_inputs, input_entity_ids=input_entity_ids,
+        input_values_by_obs=input_values_by_obs,
+        feature_obs_counts=feature_obs_counts,
+        active_input_indices=active_input_indices, held=held,
+        complete_indices=complete_indices,
+        min_feature_variance=min_feature_variance,
+    )
+
+    # ── Phase 2: Solve ──────────────────────────────────────────────
+    n_active = len(active_input_indices)
+    if n_active > 0 and len(complete_indices) >= min_observations:
+        result = _solve_joint(ctx)
+    else:
+        result = None
+
+    if result is not None:
+        beta, std_err = result
+    elif n_active > 0:
+        beta, std_err = _solve_fwl(ctx)
+    else:
+        beta = [0.0] * n
+        beta[0] = beta_base[0]
+        beta[1] = beta_base[1]
+        std_err = [float("inf")] * n
+        cov_diag = _diagonal_of_inverse(XtWX_base, n_base)
+        if cov_diag is not None:
+            rms_base = math.sqrt(
+                sum((y_base[k] - sum(beta_base[i] * X_base[k][i] for i in range(n_base))) ** 2
+                    for k in range(m_base)) / max(1, m_base - n_base)
+            )
+            rms_sq = rms_base * rms_base if rms_base > 0 else 1e-12
+            for i in range(n_base):
+                var_i = rms_sq * max(0.0, cov_diag[i]) / (col_scales_base[i] ** 2)
+                std_err[i] = math.sqrt(var_i) if var_i > 0 else 0.0
+
+    # Fill held features from current model
+    fallback = current_beta if current_beta else [0.0] * n
     for j in held:
         beta[j] = fallback[j] if j < len(fallback) else 0.0
-    for ii, j in enumerate(active):
-        beta[j] = beta_active_norm[ii] / col_scales[ii]
 
-    # Compute residuals for outlier detection
-    residuals = []
-    for k in range(m):
-        pred = sum(beta[i] * (X[k][i] if i < len(X[k]) else 0.0) for i in range(n))
-        residuals.append(y[k] - pred)
+    # ── Phase 3: Package (residuals, outlier exclusion) ─────────────
+    if feature_order and m_inputs:
+        full_obs: list[Observation] = []
+        full_X: list[list[float]] = []
+        full_y: list[float] = []
+        for o in base_eligible:
+            vec = build_feature_vector_from_raw(o, m_inputs, feature_order)
+            if vec is not None:
+                full_obs.append(o)
+                full_X.append(vec)
+                full_y.append(o.hp_setpoint - o.current_c)
+        m_full = len(full_obs)
+    else:
+        full_obs = list(base_eligible)
+        full_X = X_base
+        full_y = y_base
+        m_full = m_base
 
-    rms = math.sqrt(sum(r * r for r in residuals) / m) if m > 0 else 0.0
+    residuals = [
+        full_y[k] - sum(beta[i] * (full_X[k][i] if i < len(full_X[k]) else 0.0) for i in range(n))
+        for k in range(m_full)
+    ]
+    rms = math.sqrt(sum(r * r for r in residuals) / m_full) if m_full > 0 else 0.0
 
-    # ── Residual outlier exclusion (Huber robust regression) ─────────
-    # Exclude observations with |residual| > outlier_sigma * RMS, then
-    # refit.  Observations where a rare feature is active are exempt —
-    # they may look like outliers because the model hasn't learned that
-    # feature yet, not because they're bad data.
+    # Outlier exclusion with rare-feature protection
     n_excluded = 0
-    if outlier_sigma > 0 and rms > 0 and m > min_observations + 5:
-        threshold = outlier_sigma * rms
-
-        # Count active observations per feature for the representation guard.
-        feature_active_count: list[int] = [0] * n
-        for k in range(m):
-            for j in range(1, n):  # skip intercept
-                xj = X[k][j] if j < len(X[k]) else 0.0
-                if abs(xj) > 1e-6:
-                    feature_active_count[j] += 1
-
+    if outlier_sigma > 0 and rms > 0 and m_full > min_observations + 5:
+        threshold_val = outlier_sigma * rms
         keep = []
-        for k in range(m):
-            if abs(residuals[k]) <= threshold:
+        for k in range(m_full):
+            if abs(residuals[k]) <= threshold_val:
                 keep.append(k)
             else:
-                # Check if this observation has an under-represented feature.
-                # If so, keep it — it's more likely new information than bad data.
-                has_rare_feature = False
-                for j in range(1, n):
-                    xj = X[k][j] if j < len(X[k]) else 0.0
-                    if abs(xj) > 1e-6 and feature_active_count[j] < min_feature_representation:
-                        has_rare_feature = True
-                        break
-                if has_rare_feature:
+                has_rare = False
+                for feat_idx, m_input in enumerate(m_inputs):
+                    entity_id = m_input.get("entity_id", "")
+                    if entity_id and entity_id in full_obs[k].raw_readings:
+                        val = full_obs[k].raw_readings[entity_id]
+                        if abs(val) > 1e-6 and feature_obs_counts.get(feat_idx + 2, 0) < min_feature_representation:
+                            has_rare = True
+                            break
+                if has_rare:
                     keep.append(k)
                 else:
                     n_excluded += 1
 
-        # Refit if any observations were excluded and we still have enough
         if n_excluded > 0 and len(keep) >= min_observations:
-            m2 = len(keep)
-            y_adj2 = [y_adj[k] for k in keep]
-            X2 = [X[k] for k in keep]
-            w2 = [w[k] for k in keep]
-            y2 = [y[k] for k in keep]
-
-            XtWX2 = [[0.0] * na for _ in range(na)]
-            XtWy2 = [0.0] * na
-            for k in range(m2):
-                for ii, i in enumerate(active):
-                    xi = X2[k][i] if i < len(X2[k]) else 0.0
-                    XtWy2[ii] += xi * w2[k] * y_adj2[k]
-                    for jj, j in enumerate(active):
-                        xj = X2[k][j] if j < len(X2[k]) else 0.0
-                        XtWX2[ii][jj] += xi * w2[k] * xj
-
-            for ii in range(na):
-                XtWX2[ii][ii] += ridge
-
-            beta_active2 = _solve_symmetric(XtWX2, XtWy2, na)
-            if beta_active2 is not None:
-                for j in held:
-                    beta[j] = fallback[j] if j < len(fallback) else 0.0
-                for ii, j in enumerate(active):
-                    beta[j] = beta_active2[ii]
-
-                # Recompute residuals and RMS with the cleaned fit
-                residuals = []
-                for k in range(m2):
-                    pred = sum(beta[i] * (X2[k][i] if i < len(X2[k]) else 0.0) for i in range(n))
-                    residuals.append(y2[k] - pred)
-                rms = math.sqrt(sum(r * r for r in residuals) / m2) if m2 > 0 else 0.0
-                m = m2
-                XtWX = XtWX2
-
-                _LOGGER.debug(
-                    "Residual filter: excluded %d observations (threshold=%.3f)",
-                    n_excluded, threshold,
-                )
-
-    # ── Per-coefficient standard error from (X'WX)⁻¹ ────────────────
-    # σ²(βᵢ) = RMS² × diag((X'WX)⁻¹)ᵢ  (Ljung §9.4)
-    # Solve (X'WX) eᵢ = eᵢ for each column to get diagonal of inverse.
-    std_err = [float("inf")] * n  # held features get inf (unknown)
-    cov_diag = _diagonal_of_inverse(XtWX, na)
-    if cov_diag is not None:
-        rms_sq = rms * rms if rms > 0 else 1e-12
-        for ii, j in enumerate(active):
-            var_j = rms_sq * max(0.0, cov_diag[ii])
-            std_err[j] = math.sqrt(var_j) if var_j > 0 else 0.0
+            residuals = [residuals[k] for k in keep]
+            rms = math.sqrt(sum(r * r for r in residuals) / len(keep)) if keep else 0.0
+            m_full = len(keep)
+            _LOGGER.debug(
+                "Residual filter: excluded %d observations (threshold=%.3f)",
+                n_excluded, threshold_val,
+            )
 
     return BatchResult(
         n_total=len(observations),
-        n_eligible=m,
+        n_eligible=m_full,
         n_outliers_excluded=n_excluded,
         beta_batch=beta,
-        beta_current=[],  # filled in by caller
+        beta_current=[],
         residual_rms=rms,
-        max_coeff_change_pct=0.0,  # filled in by caller
-        recommend_update=False,  # filled in by caller
+        max_coeff_change_pct=0.0,
+        recommend_update=False,
         held_features=held,
         beta_std_err=std_err,
     )
@@ -1153,6 +1350,7 @@ def analyze_residuals_by_hour(
     min_obs_per_hour: int = 5,
     residual_threshold: float = 0.5,
     feature_order: list[str] | None = None,
+    model_inputs: list[dict[str, Any]] | None = None,
 ) -> list[HourlyResidualPattern]:
     """Detect systematic time-of-day residual patterns.
 
@@ -1169,31 +1367,34 @@ def analyze_residuals_by_hour(
         room_rate_threshold: max |room_rate| for eligibility.
         min_obs_per_hour: minimum observations per hour bucket.
         residual_threshold: minimum |mean residual| to flag (°C).
+        model_inputs: current model input config for feature building.
 
     Returns:
         List of detected patterns (contiguous hour spans with consistent
         bias). Empty if no patterns exceed threshold.
     """
+    import datetime as _dt
+
     # Bin residuals by wall-clock hour
     hour_residuals: dict[int, list[float]] = {h: [] for h in range(24)}
 
     for o in observations:
-        if o.clamped_reason in ("no_output", "clamped") or abs(o.room_rate) >= room_rate_threshold or o.wall_hour < 0:
+        if o.clamped_reason in ("no_output", "clamped") or abs(o.room_rate) >= room_rate_threshold:
             continue
-        if feature_order is not None:
-            x = extract_feature_vector(o, feature_order)
-        elif isinstance(o.features, dict):
-            x = list(o.features.values())[:n_features]
-            while len(x) < n_features:
-                x.append(0.0)
-        else:
-            x = o.features[:n_features]
-            while len(x) < n_features:
-                x.append(0.0)
+        # Derive wall hour from wall_time (UTC epoch → local hour)
+        wall_hour = _dt.datetime.fromtimestamp(o.wall_time).hour if o.wall_time > 0 else -1
+        if wall_hour < 0:
+            continue
+        # Build feature vector from raw readings + current config
+        if feature_order is None or model_inputs is None:
+            continue
+        x = build_feature_vector_from_raw(o, model_inputs, feature_order)
+        if x is None:
+            continue
         predicted = sum(beta[i] * x[i] for i in range(n_features))
         actual = o.hp_setpoint - o.current_c
         residual = actual - predicted
-        hour_residuals[o.wall_hour].append(residual)
+        hour_residuals[wall_hour].append(residual)
 
     # Compute per-hour means
     hour_means: dict[int, float] = {}

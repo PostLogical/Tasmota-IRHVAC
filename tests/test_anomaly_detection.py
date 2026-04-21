@@ -400,11 +400,13 @@ class TestBufferExclusion:
         for i in range(20):
             buf.add(Observation(
                 timestamp=1000.0 + i * 60,
-                features=[1.0, float(i)],
+                wall_time=1713650000.0 + i * 60,
                 hp_setpoint=22.0,
                 current_c=21.0,
                 desired_c=21.0,
+                outdoor_temp_c=21.0 + float(i),
                 room_rate=0.0,
+                raw_readings={},
                 clamped=False,
             ))
         assert len(buf) == 20
@@ -427,11 +429,13 @@ class TestBufferExclusion:
         for i in range(10):
             buf.add(Observation(
                 timestamp=1000.0 + i * 60,
-                features=[1.0, float(i)],
+                wall_time=1713650000.0 + i * 60,
                 hp_setpoint=22.0,
                 current_c=21.0,
                 desired_c=21.0,
+                outdoor_temp_c=21.0 + float(i),
                 room_rate=0.0,
+                raw_readings={},
                 clamped=False,
             ))
 
@@ -448,11 +452,13 @@ class TestBufferExclusion:
         for i in range(5):
             buf.add(Observation(
                 timestamp=1000.0 + i * 60,
-                features=[1.0, float(i)],
+                wall_time=1713650000.0 + i * 60,
                 hp_setpoint=22.0,
                 current_c=21.0,
                 desired_c=21.0,
+                outdoor_temp_c=21.0 + float(i),
                 room_rate=0.0,
+                raw_readings={},
                 clamped=False,
             ))
 
@@ -465,15 +471,21 @@ class TestBufferExclusion:
         from custom_components.tasmota_irhvac.pi.batch_learning import (
             DiversityAwareBuffer, Observation,
         )
-        buf = DiversityAwareBuffer(n_features=2, max_size=50)
+        buf = DiversityAwareBuffer(
+            n_features=2, max_size=50,
+            feature_order=["intercept", "outdoor_delta"],
+            model_inputs=[],
+        )
         for i in range(10):
             buf.add(Observation(
                 timestamp=1000.0 + i * 60,
-                features=[1.0, float(i) * 0.5],
+                wall_time=1713650000.0 + i * 60,
                 hp_setpoint=22.0,
                 current_c=21.0,
                 desired_c=21.0,
+                outdoor_temp_c=21.0 + float(i) * 0.5,
                 room_rate=0.0,
+                raw_readings={},
                 clamped=False,
             ))
 
@@ -504,11 +516,13 @@ class TestPIControllerExclusion:
         for i in range(10):
             pi._observation_buffer_heat.add(Observation(
                 timestamp=1000.0 + i * 60,
-                features=[1.0, float(i)],
+                wall_time=1713650000.0 + i * 60,
                 hp_setpoint=22.0,
                 current_c=21.0,
                 desired_c=21.0,
+                outdoor_temp_c=21.0 + float(i),
                 room_rate=0.0,
+                raw_readings={},
                 clamped=False,
             ))
 

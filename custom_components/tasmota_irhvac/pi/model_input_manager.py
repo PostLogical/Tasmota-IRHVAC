@@ -181,6 +181,20 @@ class ModelInputManager:
             features[name] = self.filtered[i]
         return features
 
+    def build_raw_readings(self) -> dict[str, float]:
+        """Build raw sensor readings dict: entity_id → current raw value.
+
+        Returns pre-EMA, pre-gate values for each model input, keyed by
+        entity_id.  Used by Observation storage so batch WLS can rebuild
+        features from raw data + current config at regression time.
+        """
+        readings: dict[str, float] = {}
+        for i, m_input in enumerate(self._model_inputs):
+            entity_id = m_input.get("entity_id", "")
+            if entity_id:
+                readings[entity_id] = self.values[i]
+        return readings
+
     def get_lag_states(self) -> dict[str, float]:
         """Get current lag filter states for persistence."""
         return {

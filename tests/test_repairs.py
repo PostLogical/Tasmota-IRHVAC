@@ -593,11 +593,13 @@ class TestAnomalousObservationRepairFlow:
         for i in range(10):
             pi._observation_buffer_heat.add(Observation(
                 timestamp=1000.0 + i * 60,
-                features=[1.0, float(i)],
+                wall_time=1713650000.0 + i * 60,
                 hp_setpoint=22.0,
                 current_c=21.0,
                 desired_c=21.0,
+                outdoor_temp_c=21.0 + float(i),
                 room_rate=0.0,
+                raw_readings={},
                 clamped=False,
             ))
 
@@ -627,11 +629,13 @@ class TestAnomalousObservationRepairFlow:
         for i in range(5):
             pi._observation_buffer_heat.add(Observation(
                 timestamp=1000.0 + i * 60,
-                features=[1.0, float(i)],
+                wall_time=1713650000.0 + i * 60,
                 hp_setpoint=22.0,
                 current_c=21.0,
                 desired_c=21.0,
+                outdoor_temp_c=21.0 + float(i),
                 room_rate=0.0,
+                raw_readings={},
                 clamped=False,
             ))
 

@@ -169,11 +169,13 @@ class TestFlushObservationBufferService:
         for i in range(5):
             obs = Observation(
                 timestamp=time.monotonic() + i,
-                features=[1.0, 10.0],
+                wall_time=time.time() + i,
                 hp_setpoint=22.0,
                 current_c=21.0,
                 desired_c=22.0,
+                outdoor_temp_c=31.0,
                 room_rate=0.01,
+                raw_readings={},
                 clamped=False,
             )
             pi._observation_buffer_heat.add(obs)
@@ -242,9 +244,10 @@ class TestFlushObservationBufferService:
         for i in range(3):
             pi._observation_buffer_heat.add(Observation(
                 timestamp=time.monotonic() + i,
-                features=[1.0, 10.0],
+                wall_time=time.time() + i,
                 hp_setpoint=22.0, current_c=21.0, desired_c=22.0,
-                room_rate=0.01, clamped=False,
+                outdoor_temp_c=31.0, room_rate=0.01,
+                raw_readings={}, clamped=False,
             ))
 
         await hass.services.async_call(
@@ -256,9 +259,10 @@ class TestFlushObservationBufferService:
         for i in range(2):
             pi._observation_buffer_heat.add(Observation(
                 timestamp=time.monotonic() + 100 + i,
-                features=[1.0, 15.0],
+                wall_time=time.time() + 100 + i,
                 hp_setpoint=23.0, current_c=20.0, desired_c=22.0,
-                room_rate=0.02, clamped=False,
+                outdoor_temp_c=35.0, room_rate=0.02,
+                raw_readings={}, clamped=False,
             ))
 
         assert len(pi._observation_buffer_heat) == 2

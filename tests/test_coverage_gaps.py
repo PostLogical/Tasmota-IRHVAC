@@ -3940,12 +3940,14 @@ class TestHealthChecksPureFunctions:
         from custom_components.tasmota_irhvac.pi.health_checks import check_feature_diversity
         from custom_components.tasmota_irhvac.pi.batch_learning import Observation
 
-        # 30 observations where feature index 2 is always zero (starved)
+        # 30 observations where model input "pellet_stove" is always zero (starved)
         obs = [
             Observation(
-                timestamp=float(i), features=[1.0, 5.0, 0.0],
+                timestamp=float(i), wall_time=1713650000.0 + i,
                 hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
-                room_rate=0.0, clamped=False,
+                outdoor_temp_c=25.0, room_rate=0.0,
+                raw_readings={"pellet_stove": 0.0},
+                clamped=False,
             )
             for i in range(30)
         ]
@@ -3953,6 +3955,7 @@ class TestHealthChecksPureFunctions:
             obs, n_features=3,
             feature_names=["intercept", "outdoor_delta", "pellet_stove"],
             min_activity_pct=0.10, min_observations=20,
+            model_inputs=[{"entity_id": "pellet_stove", "name": "pellet_stove"}],
         )
         assert result is not None
         assert result[1] == "low_feature_diversity"
@@ -3965,9 +3968,11 @@ class TestHealthChecksPureFunctions:
 
         obs = [
             Observation(
-                timestamp=float(i), features=[1.0, 5.0, 1.0],
+                timestamp=float(i), wall_time=1713650000.0 + i,
                 hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
-                room_rate=0.0, clamped=False,
+                outdoor_temp_c=25.0, room_rate=0.0,
+                raw_readings={"pellet_stove": 1.0},
+                clamped=False,
             )
             for i in range(30)
         ]
@@ -3975,6 +3980,7 @@ class TestHealthChecksPureFunctions:
             obs, n_features=3,
             feature_names=["intercept", "outdoor_delta", "pellet_stove"],
             min_activity_pct=0.10, min_observations=20,
+            model_inputs=[{"entity_id": "pellet_stove", "name": "pellet_stove"}],
         )
         assert result is None
 
@@ -3991,9 +3997,11 @@ class TestHealthChecksPureFunctions:
 
         obs = [
             Observation(
-                timestamp=float(i), features=[1.0, 5.0, 0.0, 0.0],
+                timestamp=float(i), wall_time=1713650000.0 + i,
                 hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
-                room_rate=0.0, clamped=False,
+                outdoor_temp_c=25.0, room_rate=0.0,
+                raw_readings={"sensor.test_input_0": 0.0, "sensor.test_input_1": 0.0},
+                clamped=False,
             )
             for i in range(30)
         ]
@@ -4015,13 +4023,16 @@ class TestHealthChecksPureFunctions:
 class TestBatchLearningGaps:
     """Cover uncovered branches in batch_learning.py."""
 
-    def _make_obs(self, t=0.0, features=None, sp=22.0, cur=20.0, des=20.0,
-                  rate=0.0, clamped=False):
+    def _make_obs(self, t=0.0, sp=22.0, cur=20.0, des=20.0,
+                  outdoor_temp_c=25.0, rate=0.0, clamped=False,
+                  raw_readings=None):
         from custom_components.tasmota_irhvac.pi.batch_learning import Observation
         return Observation(
-            timestamp=t, features=features or [1.0, 5.0],
+            timestamp=t, wall_time=1713650000.0 + t,
             hp_setpoint=sp, current_c=cur, desired_c=des,
-            room_rate=rate, clamped=clamped,
+            outdoor_temp_c=outdoor_temp_c, room_rate=rate,
+            raw_readings=raw_readings or {},
+            clamped=clamped,
         )
 
     def test_diversity_buffer_from_list_bad_entries_skipped(self):
@@ -4032,7 +4043,11 @@ class TestBatchLearningGaps:
             {"bad": "entry"},  # should be skipped
             self._make_obs(t=1.0).as_dict(),
         ]
-        buf = DiversityAwareBuffer.from_list(data, n_features=2)
+        buf = DiversityAwareBuffer.from_list(
+            data, n_features=2,
+            feature_order=["intercept", "outdoor_delta"],
+            model_inputs=[],
+        )
         assert len(buf) == 1
 
     def test_diversity_buffer_from_list_truncates_oversized(self):
@@ -4040,7 +4055,11 @@ class TestBatchLearningGaps:
         from custom_components.tasmota_irhvac.pi.batch_learning import DiversityAwareBuffer
 
         data = [self._make_obs(t=float(i)).as_dict() for i in range(10)]
-        buf = DiversityAwareBuffer.from_list(data, n_features=2, max_size=3)
+        buf = DiversityAwareBuffer.from_list(
+            data, n_features=2, max_size=3,
+            feature_order=["intercept", "outdoor_delta"],
+            model_inputs=[],
+        )
         assert len(buf) == 3
         # Should have kept the last 3
         all_obs = buf.get_all()
@@ -4057,9 +4076,11 @@ class TestBatchLearningGaps:
         """Non-empty buffer returns a positive min leverage score."""
         from custom_components.tasmota_irhvac.pi.batch_learning import DiversityAwareBuffer
 
-        buf = DiversityAwareBuffer(n_features=2)
-        buf.add(self._make_obs(t=1.0, features=[1.0, 2.0]))
-        buf.add(self._make_obs(t=2.0, features=[1.0, 8.0]))
+        buf = DiversityAwareBuffer(n_features=2,
+                                    feature_order=["intercept", "outdoor_delta"],
+                                    model_inputs=[])
+        buf.add(self._make_obs(t=1.0, outdoor_temp_c=22.0))
+        buf.add(self._make_obs(t=2.0, outdoor_temp_c=28.0))
         min_lev = buf.get_min_leverage()
         assert min_lev > 0.0
 
@@ -4100,10 +4121,12 @@ class TestBatchLearningGaps:
         """When primary inversion fails, fallback adds extra regularization."""
         from custom_components.tasmota_irhvac.pi.batch_learning import DiversityAwareBuffer
 
-        buf = DiversityAwareBuffer(n_features=2)
-        # Add observations with near-zero features to make XtX nearly singular
+        buf = DiversityAwareBuffer(n_features=2,
+                                    feature_order=["intercept", "outdoor_delta"],
+                                    model_inputs=[])
+        # Add observations with near-zero outdoor delta to make XtX nearly singular
         for i in range(5):
-            buf._buffer.append(self._make_obs(t=float(i), features=[0.0, 0.0]))
+            buf._buffer.append(self._make_obs(t=float(i), outdoor_temp_c=20.0))
         # Corrupt the regularization to force both paths
         with patch.object(DiversityAwareBuffer, '_invert_matrix') as mock_inv:
             # First call returns None (singular), second returns identity
@@ -4117,20 +4140,22 @@ class TestBatchLearningGaps:
 
         # All features identical → zero variance → all held
         obs = [
-            self._make_obs(t=float(i), features=[1.0, 5.0], sp=22.0, cur=20.0, des=20.0)
+            self._make_obs(t=float(i), sp=22.0, cur=20.0, des=20.0,
+                           outdoor_temp_c=25.0)
             for i in range(25)
         ]
-        # With only 1 feature dimension and intercept always 1.0,
-        # outdoor_delta always 5.0 → variance=0 → held. Only intercept stays.
-        # Actually intercept (j=0) is never held. So we need n_features=1
-        # to make active=[0] which is always kept.
-        # Let's use features where variance is truly zero for all j>=1
-        result = weighted_least_squares(obs, n_features=2, min_observations=20)
-        # Feature 1 (outdoor_delta) has zero variance → held
-        # Feature 0 (intercept) is never held
-        # So active=[0] and len(active)>=1, this should succeed
+        # outdoor_delta always 5.0 → zero variance in base regression.
+        # In hierarchical WLS, base features (intercept + outdoor_delta)
+        # are always fit together; outdoor_delta is not "held" — its
+        # coefficient is poorly determined but the regression still runs.
+        result = weighted_least_squares(
+            obs, n_features=2, min_observations=20,
+            feature_order=["intercept", "outdoor_delta"],
+            model_inputs=[],
+        )
         assert result is not None
-        assert 1 in result.held_features
+        # No model inputs → no held features (base features are always fit)
+        assert result.held_features == set()
 
     def test_wls_solve_symmetric_singular_returns_none(self):
         """Singular XtWX matrix → WLS returns None."""
@@ -4139,7 +4164,8 @@ class TestBatchLearningGaps:
         # Create observations where all features are identical (after filtering held)
         # so XtWX is singular even for the active subset
         obs = [
-            self._make_obs(t=float(i), features=[1.0], sp=22.0, cur=20.0, des=20.0)
+            self._make_obs(t=float(i), sp=22.0, cur=20.0, des=20.0,
+                           outdoor_temp_c=25.0)
             for i in range(25)
         ]
         # n_features=1, all intercepts identical → 1 active feature
@@ -4148,35 +4174,36 @@ class TestBatchLearningGaps:
             "custom_components.tasmota_irhvac.pi.batch_learning._solve_symmetric",
             return_value=None,
         ):
-            result = weighted_least_squares(obs, n_features=1, min_observations=20)
+            result = weighted_least_squares(
+                obs, n_features=1, min_observations=20,
+                feature_order=["intercept"],
+                model_inputs=[],
+            )
             assert result is None
 
     def test_wls_outlier_exclusion_with_rare_feature_protection(self):
         """Outlier with rare feature is kept; outlier without rare feature is excluded."""
         from custom_components.tasmota_irhvac.pi.batch_learning import weighted_least_squares
 
-        # Build 30 normal observations
+        # Build 30 normal observations — all with base features only
         obs = []
         for i in range(30):
             obs.append(self._make_obs(
-                t=float(i), features=[1.0, float(i % 5)],
+                t=float(i), outdoor_temp_c=20.0 + float(i % 5),
                 sp=20.0 + float(i % 5) * 0.3, cur=20.0, des=20.0,
             ))
 
-        # Add an outlier WITHOUT a rare feature (will be excluded)
+        # Add an outlier with extreme setpoint (will be excluded from base model)
         obs.append(self._make_obs(
-            t=31.0, features=[1.0, 3.0],
+            t=31.0, outdoor_temp_c=23.0,
             sp=50.0, cur=20.0, des=20.0,  # huge residual
-        ))
-        # Add an outlier WITH a rare feature (should be kept)
-        obs.append(self._make_obs(
-            t=32.0, features=[1.0, 3.0, 99.0],  # 3rd feature only in this obs
-            sp=50.0, cur=20.0, des=20.0,
         ))
 
         result = weighted_least_squares(
-            obs, n_features=3, min_observations=20,
-            outlier_sigma=1.0, min_feature_representation=10,
+            obs, n_features=2, min_observations=20,
+            outlier_sigma=1.0,
+            feature_order=["intercept", "outdoor_delta"],
+            model_inputs=[],
         )
         assert result is not None
         assert result.n_outliers_excluded >= 1
@@ -4264,9 +4291,10 @@ class TestPIControllerPropertyGaps:
         pi = entity._pi
         for i in range(3):
             pi._observation_buffer_heat.add(Observation(
-                timestamp=float(i), features=[1.0, float(i)],
+                timestamp=float(i), wall_time=1713650000.0 + i,
                 hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
-                room_rate=0.0, clamped=False,
+                outdoor_temp_c=20.0 + float(i), room_rate=0.0,
+                raw_readings={}, clamped=False,
             ))
         result = pi.buffer_leverage_max
         assert isinstance(result, float)
@@ -4415,9 +4443,10 @@ class TestPIControllerDiagnosticDumpGaps:
         # Add some observations for buffer stats
         for i in range(5):
             pi._observation_buffer_heat.add(Observation(
-                timestamp=float(i), features=[1.0, float(i)],
+                timestamp=float(i), wall_time=1713650000.0 + i,
                 hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
-                room_rate=0.0, clamped=False,
+                outdoor_temp_c=20.0 + float(i), room_rate=0.0,
+                raw_readings={}, clamped=False,
             ))
 
         dump = pi.get_full_diagnostics()
@@ -4465,16 +4494,17 @@ class TestPIControllerRestoreGaps:
 
         obs_data = [
             Observation(
-                timestamp=float(i), features=[1.0, 5.0],
+                timestamp=float(i), wall_time=1713650000.0 + i,
                 hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
-                room_rate=0.0, clamped=False,
+                outdoor_temp_c=25.0, room_rate=0.0,
+                raw_readings={}, clamped=False,
             ).as_dict()
             for i in range(3)
         ]
 
         data = PIExtraStoredData(
             pi_integral=1.0, hp_setpoint=22.0, desired_temp=21.0,
-            observation_buffer=obs_data,
+            observation_buffer_heat=obs_data,
             drift_correction_signs=[[1, -1], [0, 1]],
             heat_seeds_at_learn=[0.0, -0.03],
             cool_seeds_at_learn=[0.0, -0.03],
@@ -4619,9 +4649,10 @@ class TestPIHealthStatusIntegration:
         # Add observations for feature diversity check
         for i in range(30):
             pi._observation_buffer_heat.add(Observation(
-                timestamp=float(i), features=[1.0, float(i % 5)],
+                timestamp=float(i), wall_time=1713650000.0 + i,
                 hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
-                room_rate=0.0, clamped=False,
+                outdoor_temp_c=20.0 + float(i % 5), room_rate=0.0,
+                raw_readings={}, clamped=False,
             ))
 
         status = pi.get_health_status()
@@ -4892,12 +4923,13 @@ class TestTauEstimatorGaps:
         # Add 25 diverse, unclamped, low-rate observations
         for i in range(25):
             pi._observation_buffer_heat.add(Observation(
-                timestamp=float(i), features=[1.0, float(i % 10) - 5],
+                timestamp=float(i), wall_time=1713650000.0 + i,
                 hp_setpoint=20.0 + float(i % 10) * 0.3,
                 current_c=20.0 + float(i % 3) * 0.1,
                 desired_c=20.0,
+                outdoor_temp_c=20.0 + float(i % 3) * 0.1 + float(i % 10) - 5,
                 room_rate=0.001 * (i % 5),
-                clamped=False,
+                raw_readings={}, clamped=False,
             ))
 
         pi._run_batch_analysis()
@@ -4919,9 +4951,10 @@ class TestTauEstimatorGaps:
         from custom_components.tasmota_irhvac.pi.batch_learning import Observation
         for i in range(5):
             pi._observation_buffer_heat.add(Observation(
-                timestamp=float(i), features=[1.0, 5.0],
+                timestamp=float(i), wall_time=1713650000.0 + i,
                 hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
-                room_rate=0.0, clamped=False,
+                outdoor_temp_c=25.0, room_rate=0.0,
+                raw_readings={}, clamped=False,
             ))
 
         pi._run_batch_analysis()
@@ -4943,10 +4976,11 @@ class TestTauEstimatorGaps:
         # Add enough observations
         for i in range(25):
             pi._observation_buffer_heat.add(Observation(
-                timestamp=float(i), features=[1.0, float(i % 10) - 5],
+                timestamp=float(i), wall_time=1713650000.0 + i,
                 hp_setpoint=20.0 + float(i % 10) * 0.3,
                 current_c=20.0, desired_c=20.0,
-                room_rate=0.001, clamped=False,
+                outdoor_temp_c=20.0 + float(i % 10) - 5,
+                room_rate=0.001, raw_readings={}, clamped=False,
             ))
 
         pi._run_batch_analysis()
@@ -5065,9 +5099,10 @@ class TestTauEstimatorGaps:
         # Add 25 observations that are ALL hp_no_output — WLS will filter them out
         for i in range(25):
             pi._observation_buffer_heat.add(Observation(
-                timestamp=float(i), features=[1.0, 5.0],
+                timestamp=float(i), wall_time=1713650000.0 + i,
                 hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
-                room_rate=0.0, clamped=True, clamped_reason="no_output",
+                outdoor_temp_c=25.0, room_rate=0.0,
+                raw_readings={}, clamped=True, clamped_reason="no_output",
             ))
 
         pi._run_batch_analysis()
@@ -5090,12 +5125,13 @@ class TestTauEstimatorGaps:
         # Add diverse observations
         for i in range(30):
             pi._observation_buffer_heat.add(Observation(
-                timestamp=float(i), features=[1.0, float(i % 10) - 5],
+                timestamp=float(i), wall_time=1713650000.0 + i,
                 hp_setpoint=20.0 + float(i % 10) * 0.3,
                 current_c=20.0 + float(i % 3) * 0.1,
                 desired_c=20.0,
+                outdoor_temp_c=20.0 + float(i % 3) * 0.1 + float(i % 10) - 5,
                 room_rate=0.001 * (i % 5),
-                clamped=False,
+                raw_readings={}, clamped=False,
             ))
 
         pi._run_batch_analysis()
@@ -5179,15 +5215,24 @@ class TestTauEstimatorGaps:
         """Short feature vectors get padded to n_features length."""
         from custom_components.tasmota_irhvac.pi.batch_learning import DiversityAwareBuffer, Observation
 
-        buf = DiversityAwareBuffer(n_features=4)
-        # Observation with only 2 features, buffer expects 4
+        buf = DiversityAwareBuffer(
+            n_features=4,
+            feature_order=["intercept", "outdoor_delta", "input_0", "input_1"],
+            model_inputs=[
+                {"entity_id": "sensor.test_input_0", "name": "input_0"},
+                {"entity_id": "sensor.test_input_1", "name": "input_1"},
+            ],
+        )
+        # Observation with only base features (no model input readings), buffer expects 4
         obs = Observation(
-            timestamp=1.0, features=[1.0, 5.0],  # only 2, need 4
+            timestamp=1.0, wall_time=1713650000.0,
             hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
-            room_rate=0.0, clamped=False,
+            outdoor_temp_c=25.0, room_rate=0.0,
+            raw_readings={},  # missing model inputs → partial vector
+            clamped=False,
         )
         buf.add(obs)
-        # Should not crash — features should be padded with zeros
+        # Should not crash — missing model input features get zero-filled
         assert len(buf) == 1
         scores = buf.get_leverage_scores()
         assert len(scores) == 1
@@ -5309,11 +5354,13 @@ class TestTauEstimatorGaps:
         # Add observations with 3 features (intercept, outdoor_delta, pellet)
         for i in range(30):
             pi._observation_buffer_heat.add(Observation(
-                timestamp=float(i),
-                features=[1.0, float(i % 10) - 5, float(i % 3)],
+                timestamp=float(i), wall_time=1713650000.0 + i,
                 hp_setpoint=20.0 + float(i % 10) * 0.3,
                 current_c=20.0, desired_c=20.0,
-                room_rate=0.001, clamped=False,
+                outdoor_temp_c=20.0 + float(i % 10) - 5,
+                room_rate=0.001,
+                raw_readings={"sensor.pellet": float(i % 3)},
+                clamped=False,
             ))
 
         pi._run_batch_analysis()
@@ -5382,65 +5429,60 @@ class TestTauEstimatorGaps:
         # zero features (n_features=0). Let's test that.
         obs = [
             Observation(
-                timestamp=float(i), features=[],
+                timestamp=float(i), wall_time=1713650000.0 + i,
                 hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
-                room_rate=0.0, clamped=False,
+                outdoor_temp_c=25.0, room_rate=0.0,
+                raw_readings={}, clamped=False,
             )
             for i in range(25)
         ]
-        result = weighted_least_squares(obs, n_features=0, min_observations=20)
+        result = weighted_least_squares(
+            obs, n_features=0, min_observations=20,
+            feature_order=[], model_inputs=[],
+        )
         assert result is None
 
-    def test_wls_outlier_exclusion_rare_feature_kept(self):
-        """Outlier with rare feature is retained even though its residual is high.
+    def test_wls_outlier_exclusion_base_model(self):
+        """Extreme outlier is excluded from base model via residual filter.
 
-        Feature 2 has near-zero variance across normal observations → held by WLS.
-        The model can't explain the outlier with feature 2 active, so its
-        residual is large. But because feature 2 is active in < min_feature_representation
-        samples, the outlier is kept (rare feature protection, lines 529-532).
+        With hierarchical WLS, outlier detection operates on observations
+        with complete feature vectors.  For the base model (intercept +
+        outdoor_delta), all observations with outdoor_temp_c are eligible.
+        An observation with an extreme setpoint creates a large residual
+        and is excluded by the sigma threshold.
         """
         from custom_components.tasmota_irhvac.pi.batch_learning import (
             weighted_least_squares, Observation, MIN_FEATURE_VARIANCE,
         )
 
         obs = []
-        # 50 normal observations so outliers barely influence the model.
-        # Feature 2 toggles occasionally (5 of 50 obs) — enough for variance
-        # but still rare (< min_feature_representation=10).
+        # 50 normal observations with diverse outdoor delta
         for i in range(50):
             outdoor = float(i % 10)
             sp = 22.0 + outdoor * 0.3
-            # Feature 2 is active in 5 of 50 obs with a small value
-            feat2 = 0.5 if i % 10 == 0 else 0.0
             obs.append(Observation(
-                timestamp=float(i),
-                features=[1.0, outdoor, feat2],
+                timestamp=float(i), wall_time=1713650000.0 + i,
                 hp_setpoint=sp, current_c=20.0, desired_c=20.0,
-                room_rate=0.0, clamped=False,
+                outdoor_temp_c=20.0 + outdoor, room_rate=0.0,
+                raw_readings={}, clamped=False,
             ))
 
-        # Extreme outlier WITH rare feature 2 active — should be KEPT
+        # Extreme outlier — should be EXCLUDED
         obs.append(Observation(
-            timestamp=51.0,
-            features=[1.0, 5.0, 0.5],  # feature 2 active (rare: <10 active obs)
+            timestamp=51.0, wall_time=1713650051.0,
             hp_setpoint=1000.0, current_c=20.0, desired_c=20.0,
-            room_rate=0.0, clamped=False,
-        ))
-
-        # Extreme outlier WITHOUT any rare feature — should be EXCLUDED
-        obs.append(Observation(
-            timestamp=52.0,
-            features=[1.0, 5.0, 0.0],  # feature 2 inactive
-            hp_setpoint=1000.0, current_c=20.0, desired_c=20.0,
-            room_rate=0.0, clamped=False,
+            outdoor_temp_c=25.0, room_rate=0.0,
+            raw_readings={}, clamped=False,
         ))
 
         result = weighted_least_squares(
-            obs, n_features=3, min_observations=20,
-            outlier_sigma=2.0, min_feature_representation=10,
+            obs, n_features=2, min_observations=20,
+            outlier_sigma=2.0,
+            feature_order=["intercept", "outdoor_delta"],
+            model_inputs=[],
         )
         assert result is not None
-        # At least one outlier excluded (the one without rare feature)
+        # The extreme outlier should be excluded
         assert result.n_outliers_excluded >= 1
 
     def test_n_model_inputs_property(self):

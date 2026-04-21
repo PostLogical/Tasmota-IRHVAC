@@ -43,17 +43,13 @@ class PIExtraStoredData(ExtraStoredData):
     plant_identifier_state: dict = dataclasses.field(default_factory=dict)
     observation_buffer_heat: list = dataclasses.field(default_factory=list)
     observation_buffer_cool: list = dataclasses.field(default_factory=list)
-    # Legacy single-buffer field kept for migration from pre-split data.
-    observation_buffer: list = dataclasses.field(default_factory=list)
     drift_correction_signs: list = dataclasses.field(default_factory=list)
     last_batch_result: dict | None = None
     last_batch_wallclock: str = ""  # ISO-8601 wall-clock time of last batch run
     tuning_alert_counters: dict = dataclasses.field(default_factory=dict)
-    obs_buffer_purged_v2: bool = False
     hp_deadband_estimate_heat: float = 0.5
     hp_deadband_estimate_cool: float = 0.5
     exclusion_count: int = 0
-    model_input_fingerprint: str = ""
     auto_perturb_state: dict = dataclasses.field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
@@ -86,11 +82,9 @@ class PIExtraStoredData(ExtraStoredData):
             "last_batch_result": self.last_batch_result,
             "last_batch_wallclock": self.last_batch_wallclock,
             "tuning_alert_counters": self.tuning_alert_counters,
-            "obs_buffer_purged_v2": self.obs_buffer_purged_v2,
             "hp_deadband_estimate_heat": self.hp_deadband_estimate_heat,
             "hp_deadband_estimate_cool": self.hp_deadband_estimate_cool,
             "exclusion_count": self.exclusion_count,
-            "model_input_fingerprint": self.model_input_fingerprint,
             "auto_perturb_state": self.auto_perturb_state,
         }
 
@@ -126,16 +120,13 @@ class PIExtraStoredData(ExtraStoredData):
                 plant_identifier_state=restored.get("plant_identifier_state", {}),
                 observation_buffer_heat=restored.get("observation_buffer_heat", []),
                 observation_buffer_cool=restored.get("observation_buffer_cool", []),
-                observation_buffer=restored.get("observation_buffer", []),
                 drift_correction_signs=restored.get("drift_correction_signs", []),
                 last_batch_result=restored.get("last_batch_result"),
                 last_batch_wallclock=str(restored.get("last_batch_wallclock", "")),
                 tuning_alert_counters=restored.get("tuning_alert_counters", {}),
-                obs_buffer_purged_v2=restored.get("obs_buffer_purged_v2", False),
                 hp_deadband_estimate_heat=float(restored.get("hp_deadband_estimate_heat", 0.5)),
                 hp_deadband_estimate_cool=float(restored.get("hp_deadband_estimate_cool", 0.5)),
                 exclusion_count=int(restored.get("exclusion_count", 0)),
-                model_input_fingerprint=str(restored.get("model_input_fingerprint", "")),
                 auto_perturb_state=restored.get("auto_perturb_state", {}),
             )
         except (KeyError, ValueError, TypeError, AttributeError):

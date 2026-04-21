@@ -40,7 +40,7 @@ import math
 
 from .batch_learning import BatchResult, DiversityAwareBuffer, HourlyResidualPattern, Observation, analyze_residuals_by_hour, weighted_least_squares, compare_and_report, compute_blended_update
 from .greybox_observer import GreyboxResult, fit_greybox, log_greybox_result
-from .health_checks import AnomalyEvent, compute_mad_sigma, CUSUM_K, CUSUM_H, MIN_RESIDUALS_FOR_DETECTION, MIN_SIGMA_FLOOR, MIN_EVENT_DURATION_SEC, CUSUM_COOLDOWN_SEC
+from .health_checks import AnomalyEvent, compute_mad_sigma, CUSUM_K, CUSUM_H, MIN_RESIDUALS_FOR_DETECTION, MIN_SIGMA_FLOOR, MIN_EVENT_DURATION_SEC, CUSUM_COOLDOWN_SEC, obs_raw_reading
 
 from ..const import (
     ATTR_DESIRED_TEMP,
@@ -416,10 +416,12 @@ class PIController:
         self._observation_buffer_heat = DiversityAwareBuffer(
             n_features=_n_buf_features,
             feature_order=self._feature_order,
+            model_inputs=self._model_inputs,
         )
         self._observation_buffer_cool = DiversityAwareBuffer(
             n_features=_n_buf_features,
             feature_order=self._feature_order,
+            model_inputs=self._model_inputs,
         )
         self._batch_analysis_timer: CALLBACK_TYPE | None = None
         self._last_batch_result: BatchResult | None = None
@@ -620,6 +622,7 @@ class PIController:
             observations, n_features=rls.n, current_beta=current_phys,
             room_rate_threshold=0.02, min_observations=20,
             feature_order=self._feature_order,
+            model_inputs=self._inputs.model_inputs,
         )
         if result is None:
             _LOGGER.debug(
@@ -704,6 +707,7 @@ class PIController:
         self._last_residual_patterns = analyze_residuals_by_hour(
             observations, beta_for_residuals, n_features=rls.n,
             feature_order=self._feature_order,
+            model_inputs=self._inputs.model_inputs,
         )
         if self._last_residual_patterns:
             for p in self._last_residual_patterns:
@@ -880,7 +884,6 @@ class PIController:
                 **self._tuning_alert_counters,
                 "had_stable_batch": self._has_had_stable_batch,
             },
-            obs_buffer_purged_v2=getattr(self, "_obs_buffer_purge_v2_done", False),
             hp_deadband_estimate_heat=self._hp_deadband_estimate_heat,
             hp_deadband_estimate_cool=self._hp_deadband_estimate_cool,
             exclusion_count=self._exclusion_count,
@@ -931,57 +934,22 @@ class PIController:
                 feature_scales=self._feature_scales,
             )
         # Restore per-mode observation buffers for batch learning.
-        # Migration: legacy single observation_buffer → heat buffer
-        # (heating-dominant assumption — no production user has cool data).
         _n_buf_features = len(self._feature_order)
+        _model_inputs_cfg = self._inputs.model_inputs
         if data.observation_buffer_heat:
             self._observation_buffer_heat = DiversityAwareBuffer.from_list(
-                data.observation_buffer_heat, n_features=_n_buf_features,
+                data.observation_buffer_heat,
+                n_features=_n_buf_features,
                 feature_order=self._feature_order,
-            )
-        elif data.observation_buffer:
-            # Legacy single-buffer migration
-            self._observation_buffer_heat = DiversityAwareBuffer.from_list(
-                data.observation_buffer, n_features=_n_buf_features,
-                feature_order=self._feature_order,
+                model_inputs=_model_inputs_cfg,
             )
         if data.observation_buffer_cool:
             self._observation_buffer_cool = DiversityAwareBuffer.from_list(
-                data.observation_buffer_cool, n_features=_n_buf_features,
+                data.observation_buffer_cool,
+                n_features=_n_buf_features,
                 feature_order=self._feature_order,
+                model_inputs=_model_inputs_cfg,
             )
-        # Strip features from removed model inputs.  Compares feature names
-        # present in stored observations against the current config's
-        # feature_order.  Removed features are deleted from all observations
-        # so stale data can't be matched if a new input reuses the name.
-        current_names = set(self._feature_order)
-        for buf in (self._observation_buffer_heat, self._observation_buffer_cool):
-            stored_names: set[str] = set()
-            for obs in buf.get_all():
-                if isinstance(obs.features, dict):
-                    stored_names.update(obs.features.keys())
-            removed = stored_names - current_names
-            if removed:
-                n = buf.strip_features(removed)
-                _LOGGER.info(
-                    "%sStripped removed features %s from %d observations",
-                    self._log_prefix, removed, n,
-                )
-
-        # One-time migration: purge observations where the HP had zero
-        # output (setpoint wrong side of room temp).  These observations
-        # were recorded before hp_no_output detection was added and carry
-        # no plant information — they corrupt the WLS regression.
-        if not data.obs_buffer_purged_v2:
-            n_heat = self._observation_buffer_heat.filter_inactive("heat")
-            n_cool = self._observation_buffer_cool.filter_inactive("cool")
-            if n_heat or n_cool:
-                _LOGGER.info(
-                    "%sBuffer migration: purged %d heat + %d cool "
-                    "HP-no-output observations",
-                    self._log_prefix, n_heat, n_cool,
-                )
-            self._obs_buffer_purge_v2_done = True
 
         # Restore learned HP thermostat deadband estimates
         self._hp_deadband_estimate_heat = data.hp_deadband_estimate_heat
@@ -1453,12 +1421,13 @@ class PIController:
             n_features = buf.n_features
             feature_active: dict[str, int] = {}
             for j in range(2, n_features):
+                input_idx = j - 2
                 name = coeff_names[j] if j < len(coeff_names) else f"feature_{j}"
+                entity_id = self._model_inputs[input_idx].get("entity_id", "") if input_idx < len(self._model_inputs) else ""
                 feature_active[name] = sum(
                     1 for o in obs
-                    if abs(o.features.get(name, 0.0) if isinstance(o.features, dict)
-                           else (o.features[j] if j < len(o.features) else 0.0)) > 1e-6
-                )
+                    if abs(obs_raw_reading(o, entity_id)) > 1e-6
+                ) if entity_id else 0
             if feature_active:
                 stats["feature_active_counts"] = feature_active
             # Multicollinearity diagnostics — gate on sufficient data
@@ -2222,10 +2191,11 @@ class PIController:
         active_buf = self._active_buffer
         checks.append(check_feature_diversity(
             active_buf.get_all(),
-            getattr(active_buf, "n_features", 0),
+            active_buf.n_features,
             feature_names,
             self.HEALTH_FEATURE_DIVERSITY_MIN,
             self.HEALTH_FEATURE_DIVERSITY_MIN_OBS,
+            model_inputs=self._model_inputs,
         ))
 
         # Assemble results — highest severity wins
@@ -3335,21 +3305,15 @@ class PIController:
         active_buffer = self._observation_buffer_heat if is_heating else self._observation_buffer_cool
         active_buffer.add(Observation(
             timestamp=now_mono,
-            features=self._inputs.build_named_features(outdoor_delta),
+            wall_time=time.time(),
             hp_setpoint=float(self._hp_setpoint),
             current_c=current_c,
             desired_c=desired_c,
+            outdoor_temp_c=self._inputs.outdoor_temp,
             room_rate=self._room_temp_rate,
+            raw_readings=self._inputs.build_raw_readings(),
             clamped=obs_clamped,
             clamped_reason=obs_clamped_reason,
-            pi_integral=self._pi_integral,
-            ff_offset=self._ff_offset,
-            ff_confidence=self._ff_confidence,
-            raw_c=raw_c,
-            wall_hour=datetime.now().hour,
-            outdoor_temp_c=self._inputs.outdoor_temp,
-            integral_settled=obs_integral_settled,
-            seconds_since_setpoint_change=obs_seconds_since_sp,
             supplemental_active=obs_supplemental_active,
         ))
 

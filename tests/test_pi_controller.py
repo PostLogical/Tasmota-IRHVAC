@@ -4259,11 +4259,13 @@ class TestBatchWLSApply:
         for i in range(30):
             obs = Observation(
                 timestamp=now + i * 900,
-                features=[1.0, float(i % 5 - 2)],  # intercept + varying outdoor_delta
+                wall_time=1713650000.0 + i * 900,
                 hp_setpoint=22.0,
                 current_c=21.0 + (i % 3) * 0.1,
                 desired_c=21.0,
+                outdoor_temp_c=21.0 + (i % 3) * 0.1 + float(i % 5 - 2),
                 room_rate=0.001,  # stable
+                raw_readings={},
                 clamped=False,
             )
             pi._observation_buffer_heat.add(obs)
@@ -4298,11 +4300,13 @@ class TestBatchWLSApply:
         for i in range(40):
             obs = Observation(
                 timestamp=now + i * 900,
-                features=[1.0, float(i % 8 - 4)],
+                wall_time=1713650000.0 + i * 900,
                 hp_setpoint=25.0,  # biased high
                 current_c=21.0,
                 desired_c=21.0,
+                outdoor_temp_c=21.0 + float(i % 8 - 4),
                 room_rate=0.005,
+                raw_readings={},
                 clamped=False,
             )
             pi._observation_buffer_heat.add(obs)
@@ -4334,11 +4338,13 @@ class TestBatchWLSApply:
         for i in range(30):
             obs = Observation(
                 timestamp=now + i * 900,
-                features=[1.0, float(i % 5 - 2)],
+                wall_time=1713650000.0 + i * 900,
                 hp_setpoint=22.0,
                 current_c=21.0 + (i % 3) * 0.1,
                 desired_c=21.0,
+                outdoor_temp_c=21.0 + (i % 3) * 0.1 + float(i % 5 - 2),
                 room_rate=0.001,
+                raw_readings={},
                 clamped=False,
             )
             pi._observation_buffer_heat.add(obs)
@@ -4379,11 +4385,13 @@ class TestBatchWLSApply:
         for i in range(30):
             obs = Observation(
                 timestamp=now + i * 900,
-                features=[1.0, float(i % 5 - 2)],
+                wall_time=1713650000.0 + i * 900,
                 hp_setpoint=22.0,
                 current_c=21.0 + (i % 3) * 0.1,
                 desired_c=21.0,
+                outdoor_temp_c=21.0 + (i % 3) * 0.1 + float(i % 5 - 2),
                 room_rate=0.001,
+                raw_readings={},
                 clamped=False,
             )
             pi._observation_buffer_heat.add(obs)
@@ -4420,11 +4428,13 @@ class TestBatchWLSApply:
         for i in range(30):
             obs = Observation(
                 timestamp=now + i * 900,
-                features=[1.0, float(i % 5 - 2)],
+                wall_time=1713650000.0 + i * 900,
                 hp_setpoint=22.0,
                 current_c=21.0 + (i % 3) * 0.1,
                 desired_c=21.0,
+                outdoor_temp_c=21.0 + (i % 3) * 0.1 + float(i % 5 - 2),
                 room_rate=0.001,
+                raw_readings={},
                 clamped=False,
             )
             pi._observation_buffer_heat.add(obs)
@@ -4466,11 +4476,13 @@ class TestBatchWLSApply:
         for i in range(15):
             obs = Observation(
                 timestamp=now + i * 900,
-                features=[1.0, float(i % 5 - 2)],
+                wall_time=1713650000.0 + i * 900,
                 hp_setpoint=21.0,
                 current_c=21.0,
                 desired_c=21.0,
+                outdoor_temp_c=21.0 + float(i % 5 - 2),
                 room_rate=0.001,
+                raw_readings={},
                 clamped=False,
             )
             pi._observation_buffer_heat.add(obs)
@@ -4499,11 +4511,13 @@ class TestBatchWLSApply:
         for i in range(30):
             obs = Observation(
                 timestamp=now + i * 900,
-                features=[1.0, 5.0],  # constant outdoor_delta
+                wall_time=1713650000.0 + i * 900,
                 hp_setpoint=22.0,
                 current_c=21.0 + (i % 3) * 0.1,
                 desired_c=21.0,
+                outdoor_temp_c=21.0 + (i % 3) * 0.1 + 5.0,  # constant outdoor_delta
                 room_rate=0.001,
+                raw_readings={},
                 clamped=False,
             )
             pi._observation_buffer_heat.add(obs)
@@ -4801,11 +4815,13 @@ class TestBatchModelRMS:
         for i in range(30):
             obs = Observation(
                 timestamp=now + i * 900,
-                features=[1.0, float(i % 5 - 2)],
+                wall_time=1713650000.0 + i * 900,
                 hp_setpoint=22.0,
                 current_c=21.0 + (i % 3) * 0.1,
                 desired_c=21.0,
+                outdoor_temp_c=21.0 + (i % 3) * 0.1 + float(i % 5 - 2),
                 room_rate=0.001,
+                raw_readings={},
                 clamped=False,
             )
             pi._observation_buffer_heat.add(obs)
@@ -5139,11 +5155,13 @@ class TestDriftDetection:
         for i in range(30):
             obs = Observation(
                 timestamp=now + i * 900,
-                features=[1.0, float(i % 5 - 2)],
+                wall_time=1713650000.0 + i * 900,
                 hp_setpoint=22.0,
                 current_c=21.0 + (i % 3) * 0.1,
                 desired_c=21.0,
+                outdoor_temp_c=21.0 + (i % 3) * 0.1 + float(i % 5 - 2),
                 room_rate=0.001,
+                raw_readings={},
                 clamped=False,
             )
             pi._observation_buffer_heat.add(obs)
@@ -5178,11 +5196,13 @@ class TestDriftDetection:
         for i in range(30):
             obs = Observation(
                 timestamp=now + i * 900,
-                features=[1.0, float(i % 5 - 2)],
+                wall_time=1713650000.0 + i * 900,
                 hp_setpoint=22.0,
                 current_c=21.0 + (i % 3) * 0.1,
                 desired_c=21.0,
+                outdoor_temp_c=21.0 + (i % 3) * 0.1 + float(i % 5 - 2),
                 room_rate=0.001,
+                raw_readings={},
                 clamped=False,
             )
             pi._observation_buffer_heat.add(obs)

@@ -368,9 +368,10 @@ class TestCheckTuningHealthOrchestration:
         for i in range(25):
             pi._observation_buffer_heat.add(Observation(
                 timestamp=time.monotonic() + i,
-                features=[1.0, float(i % 10)],
+                wall_time=1713650000.0 + i,
                 hp_setpoint=22.0, current_c=21.0, desired_c=22.0,
-                room_rate=0.005, clamped=False,
+                outdoor_temp_c=21.0 + float(i % 10),
+                room_rate=0.005, raw_readings={}, clamped=False,
             ))
 
         pi._run_batch_analysis()

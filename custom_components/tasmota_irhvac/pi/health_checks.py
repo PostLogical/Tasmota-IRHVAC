@@ -171,25 +171,43 @@ def check_model_drift(
     return results
 
 
+def obs_raw_reading(o: Any, entity_id: str) -> float:
+    """Get a raw sensor reading from a v2 Observation by entity_id.
+
+    Returns 0.0 if the observation doesn't have a reading for this entity.
+    """
+    if hasattr(o, "raw_readings") and isinstance(o.raw_readings, dict):
+        return float(o.raw_readings.get(entity_id, 0.0))
+    return 0.0
+
+
 def check_feature_diversity(
     observations: list[Any],
     n_features: int,
     feature_names: list[str],
     min_activity_pct: float,
     min_observations: int,
+    model_inputs: list[dict[str, Any]] | None = None,
 ) -> tuple[str, str, str] | None:
-    """Check observation buffer feature diversity."""
+    """Check observation buffer feature diversity.
+
+    Args:
+        model_inputs: model input config dicts, used to resolve entity_ids
+            for raw_readings lookup.  Required for v2 observations.
+    """
     total_obs = len(observations)
     if total_obs < min_observations:
         return None
+    m_inputs = model_inputs or []
     starved: list[str] = []
     for j in range(2, n_features):  # skip intercept & outdoor_delta
+        input_idx = j - 2
         name = feature_names[j] if j < len(feature_names) else f"feature_{j}"
+        entity_id = m_inputs[input_idx].get("entity_id", "") if input_idx < len(m_inputs) else ""
         active = sum(
             1 for o in observations
-            if abs(o.features.get(name, 0.0) if isinstance(o.features, dict)
-                   else (o.features[j] if j < len(o.features) else 0.0)) > 1e-6
-        )
+            if abs(obs_raw_reading(o, entity_id)) > 1e-6
+        ) if entity_id else 0
         if active / total_obs < min_activity_pct:
             starved.append(name)
     if starved:

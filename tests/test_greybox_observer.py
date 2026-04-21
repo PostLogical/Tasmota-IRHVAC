@@ -12,7 +12,7 @@ import pytest
 from custom_components.tasmota_irhvac.pi.greybox_observer import (
     SCIPY_AVAILABLE,
     GreyboxResult,
-    _find_solar_name,
+    _find_solar_entity,
     fit_greybox,
     log_greybox_result,
 )
@@ -24,20 +24,20 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-class TestFindSolarName:
+class TestFindSolarEntity:
     def test_finds_solar_input(self):
         inputs = [
-            {"name": "stove", "input_role": "heat_source"},
-            {"name": "Solar Proxy", "input_role": "solar"},
+            {"name": "stove", "entity_id": "sensor.stove", "input_role": "heat_source"},
+            {"name": "Solar Proxy", "entity_id": "sensor.solar_proxy", "input_role": "solar"},
         ]
-        assert _find_solar_name(inputs) == "Solar Proxy"
+        assert _find_solar_entity(inputs) == "sensor.solar_proxy"
 
     def test_no_solar_returns_none(self):
-        inputs = [{"name": "stove", "input_role": "heat_source"}]
-        assert _find_solar_name(inputs) is None
+        inputs = [{"name": "stove", "entity_id": "sensor.stove", "input_role": "heat_source"}]
+        assert _find_solar_entity(inputs) is None
 
     def test_empty_inputs(self):
-        assert _find_solar_name([]) is None
+        assert _find_solar_entity([]) is None
 
 
 class TestFitGreybox:
@@ -91,28 +91,24 @@ class TestFitGreybox:
                 + random.gauss(0, noise_std)
             )
 
-            features = {
-                "intercept": 1.0,
-                "outdoor_delta": max(0, 20.0 - t_out),
-                "Solar Proxy": solar,
-            }
             obs.append(Observation(
                 timestamp=float(i * 60),
-                features=features,
+                wall_time=1713650000.0 + i * 60,
                 hp_setpoint=hp_setpoint,
                 current_c=t_air,
                 desired_c=20.0,
+                outdoor_temp_c=t_out,
                 room_rate=room_rate,
+                raw_readings={"sensor.solar_proxy": solar},
                 clamped=clamped_reason != "",
                 clamped_reason=clamped_reason,
-                outdoor_temp_c=t_out,
             ))
         return obs
 
     def test_recovers_known_parameters(self):
         """Fit should recover ua_c, k_c, α_c from clean synthetic data."""
         obs = self._generate_observations(n=500, noise_std=0.0005)
-        model_inputs = [{"name": "Solar Proxy", "input_role": "solar"}]
+        model_inputs = [{"name": "Solar Proxy", "entity_id": "sensor.solar_proxy", "input_role": "solar"}]
 
         result = fit_greybox(obs, model_inputs)
         assert result is not None
@@ -126,7 +122,7 @@ class TestFitGreybox:
     def test_uses_hp_off_data(self):
         """HP-off observations should contribute to ua_c and α_c estimation."""
         obs = self._generate_observations(n=500, include_hp_off=True)
-        model_inputs = [{"name": "Solar Proxy", "input_role": "solar"}]
+        model_inputs = [{"name": "Solar Proxy", "entity_id": "sensor.solar_proxy", "input_role": "solar"}]
         result = fit_greybox(obs, model_inputs)
         assert result is not None
         assert result.n_hp_off > 0
@@ -135,9 +131,9 @@ class TestFitGreybox:
     def test_no_solar_input(self):
         """Works without a solar proxy -- fits ua_c, k_c only."""
         obs = self._generate_observations(n=300, noise_std=0.001)
-        # Remove solar from features
+        # Remove solar from raw_readings
         for o in obs:
-            o.features.pop("Solar Proxy", None)
+            o.raw_readings.pop("sensor.solar_proxy", None)
 
         result = fit_greybox(obs, model_inputs=[])
         assert result is not None
@@ -160,7 +156,7 @@ class TestFitGreybox:
     def test_plant_id_cross_check(self):
         """τ_eff should be compared against plant ID τ_slow."""
         obs = self._generate_observations(n=500, noise_std=0.001)
-        model_inputs = [{"name": "Solar Proxy", "input_role": "solar"}]
+        model_inputs = [{"name": "Solar Proxy", "entity_id": "sensor.solar_proxy", "input_role": "solar"}]
         # True τ = 1/0.006 ≈ 167 min
         result = fit_greybox(
             obs, model_inputs,

@@ -121,11 +121,11 @@ class GreyboxResult:
         }
 
 
-def _find_solar_name(model_inputs: list[dict[str, Any]]) -> str | None:
-    """Find the feature name of the solar proxy input, or None."""
+def _find_solar_entity(model_inputs: list[dict[str, Any]]) -> str | None:
+    """Find the entity_id of the solar proxy input, or None."""
     for m in model_inputs:
         if m.get("input_role") == "solar":
-            return m.get("name")
+            return m.get("entity_id")
     return None
 
 
@@ -161,7 +161,7 @@ def fit_greybox(
         )
         return None
 
-    solar_name = _find_solar_name(model_inputs)
+    solar_entity = _find_solar_entity(model_inputs)
 
     # Filter to observations with valid outdoor temperature.
     eligible = [
@@ -194,14 +194,14 @@ def fit_greybox(
             hp_offset.append(o.hp_setpoint - o.current_c)
             n_hp_on += 1
 
-    # Solar proxy values (by feature name).
+    # Solar proxy values (from raw_readings by entity_id).
     solar: list[float]
-    if solar_name is not None:
-        solar = [o.features.get(solar_name, 0.0) for o in eligible]
+    if solar_entity is not None:
+        solar = [o.raw_readings.get(solar_entity, 0.0) for o in eligible]
     else:
         solar = [0.0] * m
 
-    has_solar = solar_name is not None and any(abs(s) > 1e-6 for s in solar)
+    has_solar = solar_entity is not None and any(abs(s) > 1e-6 for s in solar)
 
     # Check HP offset variance -- need some HP-on data to identify k_c.
     hp_mean = sum(hp_offset) / m

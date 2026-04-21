@@ -21,6 +21,22 @@ from custom_components.tasmota_irhvac.pi.batch_learning import (
 )
 
 
+import time as _time
+
+# Synthetic entity IDs for test model inputs
+_SOLAR_ENTITY = "sensor.test_solar"
+_PELLET_ENTITY = "sensor.test_pellet"
+_DOOR_ENTITY = "sensor.test_door"
+
+TEST_MODEL_INPUTS = [
+    {"entity_id": _SOLAR_ENTITY, "name": "solar"},
+    {"entity_id": _PELLET_ENTITY, "name": "pellet"},
+    {"entity_id": _DOOR_ENTITY, "name": "door"},
+]
+
+TEST_FEATURE_ORDER = ["intercept", "outdoor_delta", "solar", "pellet", "door"]
+
+
 def _make_obs(
     t: float = 0.0,
     outdoor_delta: float = 5.0,
@@ -34,16 +50,22 @@ def _make_obs(
     clamped: bool = False,
     n_features: int = 5,
 ) -> Observation:
-    """Build an observation with a standard 5-feature vector.
+    """Build a v2 observation with raw sensor readings.
 
     Features: [intercept=1, outdoor_delta, solar, pellet, door]
     """
-    features = [1.0, outdoor_delta, solar, pellet, door][:n_features]
-    while len(features) < n_features:
-        features.append(0.0)
+    raw_readings: dict[str, float] = {}
+    if n_features > 2:
+        raw_readings[_SOLAR_ENTITY] = solar
+    if n_features > 3:
+        raw_readings[_PELLET_ENTITY] = pellet
+    if n_features > 4:
+        raw_readings[_DOOR_ENTITY] = door
     return Observation(
-        timestamp=t, features=features, hp_setpoint=sp,
-        current_c=cur, desired_c=des, room_rate=rate, clamped=clamped,
+        timestamp=t, wall_time=1713650000.0 + t,
+        hp_setpoint=sp, current_c=cur, desired_c=des,
+        outdoor_temp_c=cur + outdoor_delta,
+        room_rate=rate, raw_readings=raw_readings, clamped=clamped,
     )
 
 
@@ -54,7 +76,7 @@ class TestBufferDiversity:
 
     def test_1_steady_state_does_not_evict_rare(self):
         """Steady-state flooding doesn't evict rare observations."""
-        buf = DiversityAwareBuffer(n_features=5, max_size=100)
+        buf = DiversityAwareBuffer(n_features=5, max_size=100, feature_order=TEST_FEATURE_ORDER, model_inputs=TEST_MODEL_INPUTS)
         # Fill with mild-night observations
         for i in range(100):
             buf.add(_make_obs(t=float(i), outdoor_delta=5.0, solar=0.0))
@@ -72,14 +94,14 @@ class TestBufferDiversity:
 
         # Cold-night observations should still be in the buffer
         all_obs = buf.get_all()
-        cold_deltas = [o for o in all_obs if o.features[1] > 15.0]
+        cold_deltas = [o for o in all_obs if (o.outdoor_temp_c - o.current_c) > 15.0]
         assert len(cold_deltas) >= 3, (
             f"Expected cold-night observations to survive, found {len(cold_deltas)}"
         )
 
     def test_2_all_dimensions_retain_representation(self):
         """All feature dimensions retain representation under single-dim flooding."""
-        buf = DiversityAwareBuffer(n_features=5, max_size=200)
+        buf = DiversityAwareBuffer(n_features=5, max_size=200, feature_order=TEST_FEATURE_ORDER, model_inputs=TEST_MODEL_INPUTS)
         # Seed buffer with diverse observations
         for i in range(50):
             buf.add(_make_obs(t=float(i), outdoor_delta=float(i % 10),
@@ -91,16 +113,16 @@ class TestBufferDiversity:
             buf.add(_make_obs(t=100.0 + i, outdoor_delta=float(i % 10)))
 
         all_obs = buf.get_all()
-        has_solar = any(o.features[2] > 0.3 for o in all_obs)
-        has_pellet = any(o.features[3] > 0.5 for o in all_obs)
-        has_door = any(o.features[4] > 0.5 for o in all_obs)
+        has_solar = any(o.raw_readings.get(_SOLAR_ENTITY, 0.0) > 0.3 for o in all_obs)
+        has_pellet = any(o.raw_readings.get(_PELLET_ENTITY, 0.0) > 0.5 for o in all_obs)
+        has_door = any(o.raw_readings.get(_DOOR_ENTITY, 0.0) > 0.5 for o in all_obs)
         assert has_solar, "Solar observations should survive"
         assert has_pellet, "Pellet observations should survive"
         assert has_door, "Door observations should survive"
 
     def test_3_diurnal_cycling_retained(self):
         """Buffer captures all phases of daily solar cycling."""
-        buf = DiversityAwareBuffer(n_features=5, max_size=200)
+        buf = DiversityAwareBuffer(n_features=5, max_size=200, feature_order=TEST_FEATURE_ORDER, model_inputs=TEST_MODEL_INPUTS)
         # 5 days of solar cycling: 0 at night, peak 0.6 midday
         for day in range(5):
             for hour in range(24):
@@ -109,7 +131,7 @@ class TestBufferDiversity:
                 buf.add(_make_obs(t=float(t), outdoor_delta=5.0, solar=solar))
 
         all_obs = buf.get_all()
-        solar_vals = [o.features[2] for o in all_obs]
+        solar_vals = [o.raw_readings.get(_SOLAR_ENTITY, 0.0) for o in all_obs]
         has_zero = any(s < 0.01 for s in solar_vals)
         has_low = any(0.1 < s < 0.3 for s in solar_vals)
         has_peak = any(s > 0.4 for s in solar_vals)
@@ -119,7 +141,7 @@ class TestBufferDiversity:
 
     def test_4_intermittent_feature_survives_gap(self):
         """Pellet stove observations survive a week-long gap."""
-        buf = DiversityAwareBuffer(n_features=5, max_size=200)
+        buf = DiversityAwareBuffer(n_features=5, max_size=200, feature_order=TEST_FEATURE_ORDER, model_inputs=TEST_MODEL_INPUTS)
         # 2 days of pellet on
         for i in range(48):  # 48 ticks = 2 days at 1/hr
             buf.add(_make_obs(t=float(i), pellet=1.0, outdoor_delta=15.0))
@@ -128,14 +150,14 @@ class TestBufferDiversity:
             buf.add(_make_obs(t=48.0 + i, pellet=0.0, outdoor_delta=5.0))
 
         all_obs = buf.get_all()
-        pellet_on = [o for o in all_obs if o.features[3] > 0.5]
+        pellet_on = [o for o in all_obs if o.raw_readings.get(_PELLET_ENTITY, 0.0) > 0.5]
         assert len(pellet_on) >= 5, (
             f"Pellet-on observations should survive 7-day gap, found {len(pellet_on)}"
         )
 
     def test_5_novel_combination_retained(self):
         """Novel feature combination displaces redundant observations."""
-        buf = DiversityAwareBuffer(n_features=5, max_size=50)
+        buf = DiversityAwareBuffer(n_features=5, max_size=50, feature_order=TEST_FEATURE_ORDER, model_inputs=TEST_MODEL_INPUTS)
         # Fill with common observations
         for i in range(50):
             buf.add(_make_obs(t=float(i), outdoor_delta=5.0))
@@ -145,7 +167,7 @@ class TestBufferDiversity:
         buf.add(novel)
 
         all_obs = buf.get_all()
-        has_novel = any(o.features[3] > 0.5 and o.features[2] > 0.3 for o in all_obs)
+        has_novel = any(o.raw_readings.get(_PELLET_ENTITY, 0.0) > 0.5 and o.raw_readings.get(_SOLAR_ENTITY, 0.0) > 0.3 for o in all_obs)
         assert has_novel, "Novel combination should be retained"
 
 
@@ -172,9 +194,9 @@ class TestResidualFiltering:
             # hp_setpoint - current_c = y, so sp = y + cur
             cur = 20.0
             sp = y_noisy + cur
-            obs.append(Observation(
-                timestamp=float(i), features=features, hp_setpoint=sp,
-                current_c=cur, desired_c=20.0, room_rate=0.001, clamped=False,
+            obs.append(_make_obs(
+                t=float(i), outdoor_delta=outdoor, solar=solar,
+                sp=sp, cur=cur, n_features=n_features,
             ))
         return obs, true_beta
 
@@ -182,15 +204,14 @@ class TestResidualFiltering:
         """Single sensor glitch excluded from fit."""
         obs, true_beta = self._generate_clean_observations(n=100, n_features=3)
         # Add a glitch: y-value 10°C off
-        glitch = Observation(
-            timestamp=999.0, features=[1.0, 5.0, 0.3],
-            hp_setpoint=40.0,  # way off: normal would be ~22
-            current_c=20.0, desired_c=20.0, room_rate=0.001, clamped=False,
+        glitch = _make_obs(
+            t=999.0, outdoor_delta=5.0, solar=0.3,
+            sp=40.0, n_features=3,
         )
         obs_with_glitch = obs + [glitch]
 
-        result_clean = weighted_least_squares(obs, n_features=3)
-        result_glitch = weighted_least_squares(obs_with_glitch, n_features=3)
+        result_clean = weighted_least_squares(obs, n_features=3, feature_order=TEST_FEATURE_ORDER[:3], model_inputs=TEST_MODEL_INPUTS[:1])
+        result_glitch = weighted_least_squares(obs_with_glitch, n_features=3, feature_order=TEST_FEATURE_ORDER[:3], model_inputs=TEST_MODEL_INPUTS[:1])
 
         assert result_glitch is not None
         assert result_glitch.n_outliers_excluded >= 1, "Glitch should be excluded"
@@ -203,21 +224,20 @@ class TestResidualFiltering:
 
     def test_7_glitch_observation_stays_in_buffer(self):
         """Glitch observation stays in buffer after WLS exclusion."""
-        buf = DiversityAwareBuffer(n_features=3, max_size=200)
+        buf = DiversityAwareBuffer(n_features=3, max_size=200, feature_order=TEST_FEATURE_ORDER[:3], model_inputs=TEST_MODEL_INPUTS[:1])
         obs, _ = self._generate_clean_observations(n=100, n_features=3)
         for o in obs:
             buf.add(o)
 
-        glitch = Observation(
-            timestamp=999.0, features=[1.0, 5.0, 0.3],
-            hp_setpoint=40.0, current_c=20.0, desired_c=20.0,
-            room_rate=0.001, clamped=False,
+        glitch = _make_obs(
+            t=999.0, outdoor_delta=5.0, solar=0.3,
+            sp=40.0, n_features=3,
         )
         buf.add(glitch)
 
         # Run WLS — the glitch should be excluded from the fit
         all_obs = buf.get_all()
-        result = weighted_least_squares(all_obs, n_features=3)
+        result = weighted_least_squares(all_obs, n_features=3, feature_order=TEST_FEATURE_ORDER[:3], model_inputs=TEST_MODEL_INPUTS[:1])
         assert result is not None
 
         # But the glitch should still be in the buffer
@@ -232,16 +252,13 @@ class TestResidualFiltering:
         # Add 5 observations with pellet=1 that have large residuals
         # under the pellet-unaware model
         for i in range(5):
-            features = [1.0, 5.0, 0.0, 1.0]  # pellet=1
-            # y is much lower (stove heats room, HP needs less offset)
-            sp = 14.0  # very different from normal ~22
-            obs.append(Observation(
-                timestamp=200.0 + i, features=features,
-                hp_setpoint=sp, current_c=20.0, desired_c=20.0,
-                room_rate=0.001, clamped=False,
+            # pellet=1, y is much lower (stove heats room, HP needs less offset)
+            obs.append(_make_obs(
+                t=200.0 + i, outdoor_delta=5.0, pellet=1.0,
+                sp=14.0, n_features=4,
             ))
 
-        result = weighted_least_squares(obs, n_features=4,
+        result = weighted_least_squares(obs, n_features=4, feature_order=TEST_FEATURE_ORDER[:4], model_inputs=TEST_MODEL_INPUTS[:2],
                                         min_feature_representation=10)
         assert result is not None
         # The pellet observations should NOT have been excluded
@@ -259,22 +276,19 @@ class TestResidualFiltering:
         for i in range(80):
             pellet = 1.0 if i < 20 else 0.0  # 20 pellet-on observations (> threshold)
             outdoor = rng.uniform(0, 10)
-            features = [1.0, outdoor, 0.0, pellet]
             y_true = 2.0 + 0.3 * outdoor - 6.0 * pellet
             sp = y_true + 20.0 + rng.gauss(0, 0.1)
-            obs.append(Observation(
-                timestamp=float(i), features=features,
-                hp_setpoint=sp, current_c=20.0, desired_c=20.0,
-                room_rate=0.001, clamped=False,
+            obs.append(_make_obs(
+                t=float(i), outdoor_delta=outdoor, pellet=pellet,
+                sp=sp, n_features=4,
             ))
         # Add 1 anomalous pellet-on observation
-        obs.append(Observation(
-            timestamp=999.0, features=[1.0, 5.0, 0.0, 1.0],
-            hp_setpoint=30.0,  # should be ~14 with pellet on
-            current_c=20.0, desired_c=20.0, room_rate=0.001, clamped=False,
+        obs.append(_make_obs(
+            t=999.0, outdoor_delta=5.0, pellet=1.0,
+            sp=30.0, n_features=4,  # should be ~14 with pellet on
         ))
 
-        result = weighted_least_squares(obs, n_features=4,
+        result = weighted_least_squares(obs, n_features=4, feature_order=TEST_FEATURE_ORDER[:4], model_inputs=TEST_MODEL_INPUTS[:2],
                                         min_feature_representation=10)
         assert result is not None
         assert result.n_outliers_excluded >= 1, "Anomalous pellet obs should be excluded"
@@ -286,16 +300,14 @@ class TestResidualFiltering:
         bias = 0.3  # sensor reads 0.3°C high
         for i in range(100):
             outdoor = rng.uniform(0, 10)
-            features = [1.0, outdoor, 0.0]
             y_true = 2.0 + 0.3 * outdoor
             sp = y_true + 20.0 + bias + rng.gauss(0, 0.05)
-            obs.append(Observation(
-                timestamp=float(i), features=features,
-                hp_setpoint=sp, current_c=20.0, desired_c=20.0,
-                room_rate=0.001, clamped=False,
+            obs.append(_make_obs(
+                t=float(i), outdoor_delta=outdoor,
+                sp=sp, n_features=3,
             ))
 
-        result = weighted_least_squares(obs, n_features=3)
+        result = weighted_least_squares(obs, n_features=3, feature_order=TEST_FEATURE_ORDER[:3], model_inputs=TEST_MODEL_INPUTS[:1])
         assert result is not None
         # Intercept should absorb the bias: ~2.3 instead of 2.0
         assert abs(result.beta_batch[0] - 2.3) < 0.15, (
@@ -315,27 +327,25 @@ class TestPhysicalChanges:
     def test_11_intercept_change_batch_converges(self):
         """Batch converges after intercept change without intervention."""
         rng = random.Random(42)
-        buf = DiversityAwareBuffer(n_features=3, max_size=500)
+        buf = DiversityAwareBuffer(n_features=3, max_size=500, feature_order=TEST_FEATURE_ORDER[:3], model_inputs=TEST_MODEL_INPUTS[:1])
         # 200 observations with intercept=3.0
         for i in range(200):
             outdoor = rng.uniform(0, 10)
-            features = [1.0, outdoor, 0.0]
             sp = 3.0 + 0.3 * outdoor + 20.0 + rng.gauss(0, 0.1)
-            buf.add(Observation(
-                timestamp=float(i), features=features, hp_setpoint=sp,
-                current_c=20.0, desired_c=20.0, room_rate=0.001, clamped=False,
+            buf.add(_make_obs(
+                t=float(i), outdoor_delta=outdoor,
+                sp=sp, n_features=3,
             ))
         # 100 observations with intercept=2.5 (window sealed)
         for i in range(100):
             outdoor = rng.uniform(0, 10)
-            features = [1.0, outdoor, 0.0]
             sp = 2.5 + 0.3 * outdoor + 20.0 + rng.gauss(0, 0.1)
-            buf.add(Observation(
-                timestamp=200.0 + i, features=features, hp_setpoint=sp,
-                current_c=20.0, desired_c=20.0, room_rate=0.001, clamped=False,
+            buf.add(_make_obs(
+                t=200.0 + i, outdoor_delta=outdoor,
+                sp=sp, n_features=3,
             ))
 
-        result = weighted_least_squares(buf.get_all(), n_features=3)
+        result = weighted_least_squares(buf.get_all(), n_features=3, feature_order=TEST_FEATURE_ORDER[:3], model_inputs=TEST_MODEL_INPUTS[:1])
         assert result is not None
         # Intercept should be between 2.5 and 3.0, trending toward 2.5
         # as more new observations accumulate
@@ -346,27 +356,25 @@ class TestPhysicalChanges:
     def test_12_intercept_change_other_coefficients_stable(self):
         """Other coefficients stay stable during intercept transition."""
         rng = random.Random(42)
-        buf = DiversityAwareBuffer(n_features=3, max_size=500)
+        buf = DiversityAwareBuffer(n_features=3, max_size=500, feature_order=TEST_FEATURE_ORDER[:3], model_inputs=TEST_MODEL_INPUTS[:1])
         # Phase 1: intercept=3.0, slope=0.3
         for i in range(200):
             outdoor = rng.uniform(0, 10)
-            features = [1.0, outdoor, 0.0]
             sp = 3.0 + 0.3 * outdoor + 20.0 + rng.gauss(0, 0.1)
-            buf.add(Observation(
-                timestamp=float(i), features=features, hp_setpoint=sp,
-                current_c=20.0, desired_c=20.0, room_rate=0.001, clamped=False,
+            buf.add(_make_obs(
+                t=float(i), outdoor_delta=outdoor,
+                sp=sp, n_features=3,
             ))
         # Phase 2: intercept=2.5, slope still 0.3
         for i in range(100):
             outdoor = rng.uniform(0, 10)
-            features = [1.0, outdoor, 0.0]
             sp = 2.5 + 0.3 * outdoor + 20.0 + rng.gauss(0, 0.1)
-            buf.add(Observation(
-                timestamp=200.0 + i, features=features, hp_setpoint=sp,
-                current_c=20.0, desired_c=20.0, room_rate=0.001, clamped=False,
+            buf.add(_make_obs(
+                t=200.0 + i, outdoor_delta=outdoor,
+                sp=sp, n_features=3,
             ))
 
-        result = weighted_least_squares(buf.get_all(), n_features=3)
+        result = weighted_least_squares(buf.get_all(), n_features=3, feature_order=TEST_FEATURE_ORDER[:3], model_inputs=TEST_MODEL_INPUTS[:1])
         assert result is not None
         assert abs(result.beta_batch[1] - 0.3) < 0.05, (
             f"Outdoor slope should stay stable: got {result.beta_batch[1]:.3f}"
@@ -375,27 +383,25 @@ class TestPhysicalChanges:
     def test_13_pi_gap_during_convergence_is_small(self):
         """Batch error during transition is small enough for PI to cover."""
         rng = random.Random(42)
-        buf = DiversityAwareBuffer(n_features=3, max_size=500)
+        buf = DiversityAwareBuffer(n_features=3, max_size=500, feature_order=TEST_FEATURE_ORDER[:3], model_inputs=TEST_MODEL_INPUTS[:1])
         # 300 observations with intercept=3.0
         for i in range(300):
             outdoor = rng.uniform(0, 10)
-            features = [1.0, outdoor, 0.0]
             sp = 3.0 + 0.3 * outdoor + 20.0 + rng.gauss(0, 0.1)
-            buf.add(Observation(
-                timestamp=float(i), features=features, hp_setpoint=sp,
-                current_c=20.0, desired_c=20.0, room_rate=0.001, clamped=False,
+            buf.add(_make_obs(
+                t=float(i), outdoor_delta=outdoor,
+                sp=sp, n_features=3,
             ))
         # 50 observations with intercept=2.5
         for i in range(50):
             outdoor = rng.uniform(0, 10)
-            features = [1.0, outdoor, 0.0]
             sp = 2.5 + 0.3 * outdoor + 20.0 + rng.gauss(0, 0.1)
-            buf.add(Observation(
-                timestamp=300.0 + i, features=features, hp_setpoint=sp,
-                current_c=20.0, desired_c=20.0, room_rate=0.001, clamped=False,
+            buf.add(_make_obs(
+                t=300.0 + i, outdoor_delta=outdoor,
+                sp=sp, n_features=3,
             ))
 
-        result = weighted_least_squares(buf.get_all(), n_features=3)
+        result = weighted_least_squares(buf.get_all(), n_features=3, feature_order=TEST_FEATURE_ORDER[:3], model_inputs=TEST_MODEL_INPUTS[:1])
         assert result is not None
         # Gap between batch intercept and true new intercept (2.5) should be < 2°C
         gap = abs(result.beta_batch[0] - 2.5)
@@ -410,28 +416,26 @@ class TestPhysicalChanges:
         # Each batch cycle, track whether the correction is in the same direction
         corrections: list[float] = []
         for cycle in range(6):
-            buf = DiversityAwareBuffer(n_features=3, max_size=500)
+            buf = DiversityAwareBuffer(n_features=3, max_size=500, feature_order=TEST_FEATURE_ORDER[:3], model_inputs=TEST_MODEL_INPUTS[:1])
             # Old data: intercept=3.0
             for i in range(200):
                 outdoor = rng.uniform(0, 10)
-                features = [1.0, outdoor, 0.0]
                 sp = 3.0 + 0.3 * outdoor + 20.0 + rng.gauss(0, 0.1)
-                buf.add(Observation(
-                    timestamp=float(i), features=features, hp_setpoint=sp,
-                    current_c=20.0, desired_c=20.0, room_rate=0.001, clamped=False,
+                buf.add(_make_obs(
+                    t=float(i), outdoor_delta=outdoor,
+                    sp=sp, n_features=3,
                 ))
             # New data: intercept=2.5 (growing each cycle)
             n_new = 30 * (cycle + 1)
             for i in range(n_new):
                 outdoor = rng.uniform(0, 10)
-                features = [1.0, outdoor, 0.0]
                 sp = 2.5 + 0.3 * outdoor + 20.0 + rng.gauss(0, 0.1)
-                buf.add(Observation(
-                    timestamp=200.0 + i, features=features, hp_setpoint=sp,
-                    current_c=20.0, desired_c=20.0, room_rate=0.001, clamped=False,
+                buf.add(_make_obs(
+                    t=200.0 + i, outdoor_delta=outdoor,
+                    sp=sp, n_features=3,
                 ))
 
-            result = weighted_least_squares(buf.get_all(), n_features=3)
+            result = weighted_least_squares(buf.get_all(), n_features=3, feature_order=TEST_FEATURE_ORDER[:3], model_inputs=TEST_MODEL_INPUTS[:1])
             if result is not None:
                 # Correction: batch says intercept should be X, online is at 3.0
                 corrections.append(result.beta_batch[0] - 3.0)
@@ -456,15 +460,14 @@ class TestModelInputChanges:
         for i in range(100):
             outdoor = rng.uniform(0, 10)
             solar = rng.uniform(0, 0.5)
-            features = [1.0, outdoor, solar]  # no pellet column
             sp = 2.0 + 0.3 * outdoor - 4.0 * solar + 20.0 + rng.gauss(0, 0.1)
-            obs_old.append(Observation(
-                timestamp=float(i), features=features, hp_setpoint=sp,
-                current_c=20.0, desired_c=20.0, room_rate=0.001, clamped=False,
+            obs_old.append(_make_obs(
+                t=float(i), outdoor_delta=outdoor, solar=solar,
+                sp=sp, n_features=3,  # no pellet column
             ))
 
         # Fit with 4 features — old observations have features[:4] which pads pellet=0
-        result = weighted_least_squares(obs_old, n_features=4)
+        result = weighted_least_squares(obs_old, n_features=4, feature_order=TEST_FEATURE_ORDER[:4], model_inputs=TEST_MODEL_INPUTS[:2])
         assert result is not None
         # Intercept and outdoor slope should still be well-identified
         assert abs(result.beta_batch[0] - 2.0) < 0.3
@@ -476,15 +479,15 @@ class TestModelInputChanges:
         obs = []
         for i in range(100):
             outdoor = rng.uniform(0, 10)
-            features = [1.0, outdoor, 0.0, 1.0 if i < 20 else 0.0]  # 4 features including pellet
-            sp = 2.0 + 0.3 * outdoor - 6.0 * (1.0 if i < 20 else 0.0) + 20.0 + rng.gauss(0, 0.1)
-            obs.append(Observation(
-                timestamp=float(i), features=features, hp_setpoint=sp,
-                current_c=20.0, desired_c=20.0, room_rate=0.001, clamped=False,
+            pellet = 1.0 if i < 20 else 0.0
+            sp = 2.0 + 0.3 * outdoor - 6.0 * pellet + 20.0 + rng.gauss(0, 0.1)
+            obs.append(_make_obs(
+                t=float(i), outdoor_delta=outdoor, pellet=pellet,
+                sp=sp, n_features=4,
             ))
 
-        # Fit with only 3 features (pellet removed) — features[:3] truncates
-        result = weighted_least_squares(obs, n_features=3)
+        # Fit with only 3 features (pellet removed) — old obs have extra raw_readings
+        result = weighted_least_squares(obs, n_features=3, feature_order=TEST_FEATURE_ORDER[:3], model_inputs=TEST_MODEL_INPUTS[:1])
         assert result is not None
         assert abs(result.beta_batch[1] - 0.3) < 0.15, (
             f"Outdoor slope should be stable: got {result.beta_batch[1]:.3f}"
@@ -497,24 +500,22 @@ class TestModelInputChanges:
         obs = []
         for i in range(50):
             outdoor = rng.uniform(0, 10)
-            features = [1.0, outdoor, 0.0, 0.0]  # pellet=0 (missing, backfilled)
             sp = 2.0 + 0.3 * outdoor + 20.0 + rng.gauss(0, 0.1)
-            obs.append(Observation(
-                timestamp=float(i), features=features, hp_setpoint=sp,
-                current_c=20.0, desired_c=20.0, room_rate=0.001, clamped=False,
+            obs.append(_make_obs(
+                t=float(i), outdoor_delta=outdoor,
+                sp=sp, n_features=4,  # pellet=0 (missing, backfilled)
             ))
         # 30 new observations with actual pellet data
         for i in range(30):
             outdoor = rng.uniform(0, 10)
             pellet = 1.0 if i < 15 else 0.0
-            features = [1.0, outdoor, 0.0, pellet]
             sp = 2.0 + 0.3 * outdoor - 6.0 * pellet + 20.0 + rng.gauss(0, 0.1)
-            obs.append(Observation(
-                timestamp=50.0 + i, features=features, hp_setpoint=sp,
-                current_c=20.0, desired_c=20.0, room_rate=0.001, clamped=False,
+            obs.append(_make_obs(
+                t=50.0 + i, outdoor_delta=outdoor, pellet=pellet,
+                sp=sp, n_features=4,
             ))
 
-        result = weighted_least_squares(obs, n_features=4)
+        result = weighted_least_squares(obs, n_features=4, feature_order=TEST_FEATURE_ORDER[:4], model_inputs=TEST_MODEL_INPUTS[:2])
         assert result is not None
         # Pellet coefficient should be learned from the 30 new observations
         assert abs(result.beta_batch[3] - (-6.0)) < 1.5, (
@@ -529,7 +530,7 @@ class TestBufferMechanics:
 
     def test_18_leverage_identifies_novel_observations(self):
         """Novel observations have higher leverage than redundant ones."""
-        buf = DiversityAwareBuffer(n_features=3, max_size=100)
+        buf = DiversityAwareBuffer(n_features=3, max_size=100, feature_order=TEST_FEATURE_ORDER[:3], model_inputs=TEST_MODEL_INPUTS[:1])
         # Fill with observations at outdoor_delta=5
         for i in range(50):
             buf.add(_make_obs(t=float(i), outdoor_delta=5.0, n_features=3))
@@ -546,7 +547,7 @@ class TestBufferMechanics:
 
     def test_19_eviction_displaces_lowest_leverage(self):
         """Eviction targets lowest-leverage observation, not oldest."""
-        buf = DiversityAwareBuffer(n_features=3, max_size=10)
+        buf = DiversityAwareBuffer(n_features=3, max_size=10, feature_order=TEST_FEATURE_ORDER[:3], model_inputs=TEST_MODEL_INPUTS[:1])
         # Add diverse observations
         for i in range(10):
             buf.add(_make_obs(t=float(i), outdoor_delta=float(i * 2), n_features=3))
@@ -568,7 +569,7 @@ class TestBufferMechanics:
 
     def test_20_recomputation_matches_incremental(self):
         """Periodic recomputation matches incremental Sherman-Morrison updates."""
-        buf = DiversityAwareBuffer(n_features=3, max_size=200)
+        buf = DiversityAwareBuffer(n_features=3, max_size=200, feature_order=TEST_FEATURE_ORDER[:3], model_inputs=TEST_MODEL_INPUTS[:1])
         for i in range(100):
             buf.add(_make_obs(t=float(i), outdoor_delta=float(i % 10),
                               solar=0.1 * (i % 5), n_features=3))
@@ -588,7 +589,7 @@ class TestBufferMechanics:
 
     def test_21_regularization_prevents_singularity(self):
         """λI regularization keeps matrix invertible with fewer obs than features."""
-        buf = DiversityAwareBuffer(n_features=5, max_size=100)
+        buf = DiversityAwareBuffer(n_features=5, max_size=100, feature_order=TEST_FEATURE_ORDER, model_inputs=TEST_MODEL_INPUTS)
         # Add only 3 observations for 5 features (rank deficient)
         buf.add(_make_obs(t=0.0, outdoor_delta=5.0))
         buf.add(_make_obs(t=1.0, outdoor_delta=10.0))
@@ -610,7 +611,10 @@ class TestBufferMechanics:
         ]
 
         # Import into diversity buffer
-        new_buf = DiversityAwareBuffer.from_list(serialized, n_features=5)
+        new_buf = DiversityAwareBuffer.from_list(
+            serialized, n_features=5,
+            feature_order=TEST_FEATURE_ORDER, model_inputs=TEST_MODEL_INPUTS,
+        )
         assert len(new_buf) == 50
         scores = new_buf.get_leverage_scores()
         assert len(scores) == 50
@@ -618,13 +622,16 @@ class TestBufferMechanics:
 
     def test_23_serialization_roundtrip(self):
         """Serialize and deserialize preserves observations."""
-        buf = DiversityAwareBuffer(n_features=5, max_size=100)
+        buf = DiversityAwareBuffer(n_features=5, max_size=100, feature_order=TEST_FEATURE_ORDER, model_inputs=TEST_MODEL_INPUTS)
         for i in range(30):
             buf.add(_make_obs(t=float(i), outdoor_delta=float(i % 10),
                               pellet=1.0 if i % 10 == 0 else 0.0))
 
         serialized = buf.as_list()
-        restored = DiversityAwareBuffer.from_list(serialized, n_features=5)
+        restored = DiversityAwareBuffer.from_list(
+            serialized, n_features=5,
+            feature_order=TEST_FEATURE_ORDER, model_inputs=TEST_MODEL_INPUTS,
+        )
 
         assert len(restored) == len(buf)
         orig = buf.get_all()
@@ -641,7 +648,7 @@ class TestRegimeCoverage:
 
     def test_24_cold_snap_after_mild_both_regimes_in_buffer(self):
         """Both mild and cold regimes contribute after a cold snap."""
-        buf = DiversityAwareBuffer(n_features=3, max_size=200)
+        buf = DiversityAwareBuffer(n_features=3, max_size=200, feature_order=TEST_FEATURE_ORDER[:3], model_inputs=TEST_MODEL_INPUTS[:1])
         rng = random.Random(42)
         # 2 weeks of mild weather (outdoor_delta ≈ 5)
         for i in range(336):  # 14 days * 24 hours
@@ -653,8 +660,8 @@ class TestRegimeCoverage:
                               n_features=3))
 
         all_obs = buf.get_all()
-        mild = [o for o in all_obs if o.features[1] < 10]
-        cold = [o for o in all_obs if o.features[1] > 15]
+        mild = [o for o in all_obs if (o.outdoor_temp_c - o.current_c) < 10]
+        cold = [o for o in all_obs if (o.outdoor_temp_c - o.current_c) > 15]
         assert len(mild) > 10, f"Should retain mild observations: {len(mild)}"
         assert len(cold) > 10, f"Should retain cold observations: {len(cold)}"
 
@@ -666,11 +673,10 @@ class TestRegimeCoverage:
         for i in range(200):
             outdoor = rng.uniform(10, 20)
             solar = rng.uniform(0, 0.2)  # low solar in winter
-            features = [1.0, outdoor, solar]
             sp = 2.0 + 0.3 * outdoor - 4.0 * solar + 20.0 + rng.gauss(0, 0.2)
-            obs_winter.append(Observation(
-                timestamp=float(i), features=features, hp_setpoint=sp,
-                current_c=20.0, desired_c=20.0, room_rate=0.001, clamped=False,
+            obs_winter.append(_make_obs(
+                t=float(i), outdoor_delta=outdoor, solar=solar,
+                sp=sp, n_features=3,
             ))
 
         # Multi-season: winter + spring + summer
@@ -678,24 +684,22 @@ class TestRegimeCoverage:
         for i in range(100):
             outdoor = rng.uniform(0, 5)  # spring
             solar = rng.uniform(0, 0.6)  # more solar
-            features = [1.0, outdoor, solar]
             sp = 2.0 + 0.3 * outdoor - 4.0 * solar + 20.0 + rng.gauss(0, 0.2)
-            obs_multi.append(Observation(
-                timestamp=200.0 + i, features=features, hp_setpoint=sp,
-                current_c=20.0, desired_c=20.0, room_rate=0.001, clamped=False,
+            obs_multi.append(_make_obs(
+                t=200.0 + i, outdoor_delta=outdoor, solar=solar,
+                sp=sp, n_features=3,
             ))
         for i in range(100):
             outdoor = rng.uniform(-5, 0)  # summer (negative delta = above reference)
             solar = rng.uniform(0.2, 0.6)
-            features = [1.0, outdoor, solar]
             sp = 2.0 + 0.3 * outdoor - 4.0 * solar + 20.0 + rng.gauss(0, 0.2)
-            obs_multi.append(Observation(
-                timestamp=300.0 + i, features=features, hp_setpoint=sp,
-                current_c=20.0, desired_c=20.0, room_rate=0.001, clamped=False,
+            obs_multi.append(_make_obs(
+                t=300.0 + i, outdoor_delta=outdoor, solar=solar,
+                sp=sp, n_features=3,
             ))
 
-        result_winter = weighted_least_squares(obs_winter, n_features=3)
-        result_multi = weighted_least_squares(obs_multi, n_features=3)
+        result_winter = weighted_least_squares(obs_winter, n_features=3, feature_order=TEST_FEATURE_ORDER[:3], model_inputs=TEST_MODEL_INPUTS[:1])
+        result_multi = weighted_least_squares(obs_multi, n_features=3, feature_order=TEST_FEATURE_ORDER[:3], model_inputs=TEST_MODEL_INPUTS[:1])
 
         assert result_winter is not None and result_multi is not None
         # Multi-season should have smaller standard errors
@@ -716,15 +720,14 @@ class TestRegimeCoverage:
         for i in range(500):
             outdoor = rng.uniform(-5, 20)
             solar = rng.uniform(0, 0.6)
-            features = [1.0, outdoor, solar]
-            y_true = sum(b * x for b, x in zip(true_beta, features))
+            y_true = sum(b * x for b, x in zip(true_beta, [1.0, outdoor, solar]))
             sp = y_true + 20.0 + rng.gauss(0, 0.15)
-            obs.append(Observation(
-                timestamp=float(i), features=features, hp_setpoint=sp,
-                current_c=20.0, desired_c=20.0, room_rate=0.001, clamped=False,
+            obs.append(_make_obs(
+                t=float(i), outdoor_delta=outdoor, solar=solar,
+                sp=sp, n_features=3,
             ))
 
-        result = weighted_least_squares(obs, n_features=3)
+        result = weighted_least_squares(obs, n_features=3, feature_order=TEST_FEATURE_ORDER[:3], model_inputs=TEST_MODEL_INPUTS[:1])
         assert result is not None
         for i in range(3):
             se = result.beta_std_err[i]
@@ -744,7 +747,7 @@ class TestBufferClear:
 
     def test_clear_empties_buffer(self):
         """clear() should remove all observations."""
-        buf = DiversityAwareBuffer(n_features=3, max_size=50)
+        buf = DiversityAwareBuffer(n_features=3, max_size=50, feature_order=TEST_FEATURE_ORDER[:3], model_inputs=TEST_MODEL_INPUTS[:1])
         for i in range(20):
             buf.add(_make_obs(t=float(i), outdoor_delta=float(i)))
         assert len(buf) == 20
@@ -757,7 +760,7 @@ class TestBufferClear:
         """After clear, info matrix should be back to regularized identity."""
         from custom_components.tasmota_irhvac.pi.batch_learning import INFO_MATRIX_REGULARIZATION
 
-        buf = DiversityAwareBuffer(n_features=3, max_size=50)
+        buf = DiversityAwareBuffer(n_features=3, max_size=50, feature_order=TEST_FEATURE_ORDER[:3], model_inputs=TEST_MODEL_INPUTS[:1])
         for i in range(20):
             buf.add(_make_obs(t=float(i), outdoor_delta=float(i)))
 
@@ -771,7 +774,7 @@ class TestBufferClear:
 
     def test_clear_allows_refill(self):
         """Buffer should accept new observations after clear."""
-        buf = DiversityAwareBuffer(n_features=3, max_size=10)
+        buf = DiversityAwareBuffer(n_features=3, max_size=10, feature_order=TEST_FEATURE_ORDER[:3], model_inputs=TEST_MODEL_INPUTS[:1])
         for i in range(10):
             buf.add(_make_obs(t=float(i), outdoor_delta=5.0))
         assert len(buf) == 10
