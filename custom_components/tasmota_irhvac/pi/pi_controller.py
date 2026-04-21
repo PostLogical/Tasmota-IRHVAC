@@ -39,7 +39,13 @@ from homeassistant.util.unit_conversion import TemperatureConverter
 import math
 
 from .batch_learning import BatchResult, DiversityAwareBuffer, HourlyResidualPattern, Observation, analyze_residuals_by_hour, weighted_least_squares, compare_and_report, compute_blended_update
-from .greybox_observer import GreyboxResult, fit_greybox, log_greybox_result
+from .greybox_observer import (
+    GreyboxBridgeResult,
+    GreyboxResult,
+    fit_greybox,
+    greybox_to_beta,
+    log_greybox_result,
+)
 from .health_checks import AnomalyEvent, compute_mad_sigma, CUSUM_K, CUSUM_H, MIN_RESIDUALS_FOR_DETECTION, MIN_SIGMA_FLOOR, MIN_EVENT_DURATION_SEC, CUSUM_COOLDOWN_SEC, obs_raw_reading
 
 from ..const import (
@@ -426,6 +432,7 @@ class PIController:
         self._batch_analysis_timer: CALLBACK_TYPE | None = None
         self._last_batch_result: BatchResult | None = None
         self._last_greybox_result: GreyboxResult | None = None
+        self._last_greybox_bridge: GreyboxBridgeResult | None = None
         self._last_greybox_timestamp_iso: str | None = None
         self._last_batch_timestamp: float | None = None
         self._last_batch_wallclock: str = ""  # ISO-8601 wall-clock time
@@ -717,7 +724,7 @@ class PIController:
                     p.mean_residual, p.n_observations,
                 )
 
-        # ── Grey-box 1R1C energy balance (observation mode) ──
+        # ── Grey-box 1R1C energy balance + steady-state bridge ──
         greybox = fit_greybox(
             observations,
             model_inputs=self._model_inputs,
@@ -728,6 +735,18 @@ class PIController:
             log_greybox_result(greybox, log_prefix=self._log_prefix)
             self._last_greybox_result = greybox
             self._last_greybox_timestamp_iso = datetime.utcnow().isoformat() + "Z"
+
+            # Bridge: convert rate coefficients to WLS-compatible β
+            bridge = greybox_to_beta(
+                greybox,
+                model_inputs=self._model_inputs,
+                log_prefix=self._log_prefix,
+            )
+            self._last_greybox_bridge = bridge
+
+            # Cross-validation: compare grey-box β against WLS β
+            if result.beta_batch:
+                self._log_greybox_wls_comparison(bridge, result)
 
         # ── Drift detection: track per-coefficient correction direction ──
         if result.beta_blended and result.beta_current:
@@ -1192,7 +1211,51 @@ class PIController:
                 if self._last_greybox_result is not None else None
             ),
             "greybox_last_run": self._last_greybox_timestamp_iso,
+            "greybox_gates_passed": (
+                self._last_greybox_bridge.gates_passed
+                if self._last_greybox_bridge is not None else None
+            ),
+            "greybox_k_eff": (
+                round(self._last_greybox_bridge.k_eff, 3)
+                if self._last_greybox_bridge is not None else None
+            ),
         }
+
+    def _log_greybox_wls_comparison(
+        self,
+        bridge: GreyboxBridgeResult,
+        wls_result: BatchResult,
+    ) -> None:
+        """Log side-by-side comparison of grey-box bridge β vs WLS β."""
+        names = self._coeff_names()
+        wls_beta = wls_result.beta_batch
+        wls_se = wls_result.beta_std_err
+
+        _LOGGER.info(
+            "%sGrey-box vs WLS cross-validation (gates %s):",
+            self._log_prefix,
+            "PASS" if bridge.gates_passed else "FAIL",
+        )
+        for i in range(min(len(bridge.beta), len(wls_beta))):
+            name = names[i] if i < len(names) else f"β{i}"
+            gb = bridge.beta[i]
+            ws = wls_beta[i]
+            gb_se = bridge.beta_std_err[i]
+            ws_se = wls_se[i] if i < len(wls_se) else float("inf")
+
+            if gb is None:
+                _LOGGER.info(
+                    "%s  %s: WLS=%.4f (σ=%.4f), grey-box=N/A",
+                    self._log_prefix, name, ws, ws_se,
+                )
+            else:
+                diff = abs(gb - ws)
+                pct = diff / max(abs(ws), 1e-6) * 100
+                _LOGGER.info(
+                    "%s  %s: WLS=%.4f (σ=%.4f), grey-box=%.4f (σ=%.4f), "
+                    "diff=%.4f (%.0f%%)",
+                    self._log_prefix, name, ws, ws_se, gb, gb_se, diff, pct,
+                )
 
     def _coeff_names(self) -> list[str]:
         """Build coefficient name list: intercept, outdoor_delta, then model inputs."""
@@ -1265,10 +1328,14 @@ class PIController:
                 **dataclasses.asdict(self._last_batch_result),
                 "held_features": list(self._last_batch_result.held_features),
             }
-        # Grey-box observer result
+        # Grey-box observer result + bridge
         dump["greybox_observer"] = (
             self._last_greybox_result.as_dict()
             if self._last_greybox_result is not None else None
+        )
+        dump["greybox_bridge"] = (
+            self._last_greybox_bridge.as_dict()
+            if self._last_greybox_bridge is not None else None
         )
         # Model input configs (roles, names, flags for interpreting feature vectors)
         dump["model_input_configs"] = [
@@ -1395,10 +1462,14 @@ class PIController:
         else:
             result["batch_learning"] = None
 
-        # Grey-box observer
+        # Grey-box observer + bridge
         result["greybox_observer"] = (
             self._last_greybox_result.as_dict()
             if self._last_greybox_result is not None else None
+        )
+        result["greybox_bridge"] = (
+            self._last_greybox_bridge.as_dict()
+            if self._last_greybox_bridge is not None else None
         )
 
         # Observation buffer stats (per-mode)
