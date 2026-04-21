@@ -1,8 +1,8 @@
-"""Grey-box 1R1C energy balance observer.
+"""Grey-box 1R1C energy balance observer and steady-state bridge.
 
-Observation-mode-only module -- fits a physically grounded energy balance
-to the observation buffer and logs results.  Does not modify the online
-RLS model.  Runs alongside the existing WLS batch on the same 12h schedule.
+Fits a physically grounded energy balance to the observation buffer and
+optionally bridges its rate coefficients to WLS-compatible β for blending.
+Runs alongside the existing WLS batch on the same 12h schedule.
 
 The 1R1C energy balance divided by C_eff:
 
@@ -16,8 +16,12 @@ where ua_c = UA/C, k_c = K_hp/C, α_c = α_solar/C.  These rate
 coefficients are directly identifiable from derivative data without
 the scaling ambiguity of the original parameterization.
 
-The effective time constant τ_eff = 1/ua_c (minutes) is compared
-against plant ID's τ_slow as a cross-validation check.
+Steady-state bridge (set dT/dt = 0, solve for hp_offset):
+
+    hp_offset_eq = -(ua_c/k_c) × ΔT_outdoor - (α_c/k_c) × solar
+
+This maps to WLS β: β₁ = -ua_c/k_c, β₂ = -α_c/k_c.  Standard errors
+propagated via the delta method on the ratio.
 
 Key advantage over the static WLS batch: uses ALL data including HP-off
 periods (hp_offset=0), which directly inform ua_c and α_c from room
@@ -28,7 +32,8 @@ References:
   of buildings" (2011) -- grey-box RC models for building identification
 - Madsen & Holst, "Estimation of continuous-time models for the heat
   dynamics of a building" (1995) -- rate coefficient parameterization
-- Ljung, "System Identification: Theory for the User" -- prediction error
+- Ljung, "System Identification: Theory for the User" -- prediction error,
+  §16.4 cross-validation for model selection
 
 Standalone module -- no Home Assistant dependencies.
 """
@@ -372,3 +377,213 @@ def log_greybox_result(
             log_prefix, result.tau_eff,
             result.plant_tau_slow, result.tau_agreement_pct, agree,
         )
+
+
+# ── Steady-state bridge ─────────────────────────────────────────────
+#
+# At equilibrium (dT/dt = 0) the energy balance becomes algebraic:
+#
+#   hp_offset = -(ua_c/k_c) × ΔT_outdoor - (α_c/k_c) × solar
+#
+# The ratios map directly to the WLS β coefficients.
+#
+# Standard errors propagated via the delta method for f(a,b) = a/b:
+#   σ_{a/b}² ≈ (a/b)² × (σ_a²/a² + σ_b²/b² - 2·ρ_{ab}·σ_a·σ_b/(a·b))
+#
+# Without the cross-correlation ρ_{ab} (not available from scipy), we
+# use the conservative upper bound (ρ=0):
+#   σ_{a/b}² ≈ (a/b)² × (σ_a²/a² + σ_b²/b²)
+
+# Quality gate thresholds
+GATE_MIN_TAU = 30.0    # minutes — faster implies unrealistic building
+GATE_MAX_TAU = 500.0   # minutes — slower implies parameter at bound
+GATE_MAX_CV = 0.5      # coefficient of variation (std_err / |estimate|)
+GATE_MAX_RMS = 0.02    # °C/min — residual quality threshold
+
+
+@dataclass
+class GreyboxBridgeResult:
+    """Grey-box rate coefficients mapped to WLS-compatible β."""
+
+    # β coefficients in WLS order: [intercept, outdoor_delta, ...model_inputs]
+    # intercept is None (grey-box doesn't produce it; use WLS β₀)
+    beta: list[float | None]
+    beta_std_err: list[float]
+
+    # Bonus outputs WLS cannot provide
+    tau_eff: float       # 1/ua_c (minutes) — independent τ estimate
+    k_eff: float         # k_c/ua_c — process gain (currently assumed 1.0 in IMC)
+
+    # Quality gate results
+    gates_passed: bool   # True if all quality gates passed
+    gate_details: dict[str, bool]  # per-gate pass/fail
+
+    # Source grey-box result for reference
+    greybox: GreyboxResult
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "beta": self.beta,
+            "beta_std_err": [round(s, 6) for s in self.beta_std_err],
+            "tau_eff": round(self.tau_eff, 1),
+            "k_eff": round(self.k_eff, 4),
+            "gates_passed": self.gates_passed,
+            "gate_details": self.gate_details,
+        }
+
+
+def _delta_method_ratio_std(
+    a: float,
+    b: float,
+    sigma_a: float,
+    sigma_b: float,
+) -> float:
+    """Standard error of a/b via delta method (assuming zero correlation).
+
+    Conservative upper bound: σ_{a/b} = |a/b| × √(σ_a²/a² + σ_b²/b²).
+    """
+    if abs(b) < 1e-12 or abs(a) < 1e-12:
+        return float("inf")
+    ratio = a / b
+    cv_a_sq = (sigma_a / a) ** 2
+    cv_b_sq = (sigma_b / b) ** 2
+    return abs(ratio) * math.sqrt(cv_a_sq + cv_b_sq)
+
+
+def _check_quality_gates(
+    result: GreyboxResult,
+) -> dict[str, bool]:
+    """Check all quality gates.  Returns {gate_name: passed}."""
+    gates: dict[str, bool] = {}
+
+    # Gate 1: hp_offset variance (already checked during fit — if k_c was
+    # fixed at default, the fit ran but k_c is unreliable).
+    # Use n_hp_on and n_hp_off as proxy: need both to separate k_c from ua_c.
+    min_fraction = 0.1  # at least 10% HP-off OR 10% HP-on
+    n = result.n_observations
+    if n > 0:
+        off_frac = result.n_hp_off / n
+        on_frac = result.n_hp_on / n
+        gates["hp_offset_diversity"] = off_frac >= min_fraction and on_frac >= min_fraction
+    else:
+        gates["hp_offset_diversity"] = False
+
+    # Gate 2: parameter precision (coefficient of variation)
+    se = result.param_std_err
+    ua_c_cv = se.get("ua_c", float("inf")) / max(abs(result.ua_c), 1e-12)
+    k_c_cv = se.get("k_c", float("inf")) / max(abs(result.k_c), 1e-12)
+    gates["param_precision_ua_c"] = ua_c_cv < GATE_MAX_CV
+    gates["param_precision_k_c"] = k_c_cv < GATE_MAX_CV
+    # α_c precision only checked if solar was fitted
+    if "alpha_c" in se:
+        alpha_cv = se["alpha_c"] / max(abs(result.alpha_c), 1e-12)
+        gates["param_precision_alpha_c"] = alpha_cv < GATE_MAX_CV
+
+    # Gate 3: physical plausibility
+    gates["tau_plausible"] = GATE_MIN_TAU <= result.tau_eff <= GATE_MAX_TAU
+    gates["k_c_positive"] = result.k_c > 0
+    gates["alpha_c_nonpositive"] = result.alpha_c <= 0.0 or "alpha_c" not in se
+
+    # Gate 4: residual quality
+    gates["residual_rms"] = result.residual_rms < GATE_MAX_RMS
+
+    return gates
+
+
+def greybox_to_beta(
+    result: GreyboxResult,
+    model_inputs: list[dict[str, Any]],
+    log_prefix: str = "",
+) -> GreyboxBridgeResult:
+    """Convert grey-box rate coefficients to WLS-compatible β via steady-state bridge.
+
+    The mapping:
+        β₁ (outdoor_delta) = -ua_c / k_c
+        β₂ (solar input)   = -α_c / k_c   (only for the solar model input)
+        β₀ (intercept)     = None           (grey-box doesn't produce this)
+
+    Other model inputs (heat sources, adjacent zones) get None — grey-box
+    doesn't identify those separately.
+
+    Standard errors propagated via delta method on the ratio.
+
+    Args:
+        result: fitted GreyboxResult from fit_greybox().
+        model_inputs: model input config dicts (same as passed to fit_greybox).
+        log_prefix: logging prefix string.
+
+    Returns:
+        GreyboxBridgeResult with β, std_err, quality gates, and bonus outputs.
+    """
+    # Quality gates
+    gate_details = _check_quality_gates(result)
+    gates_passed = all(gate_details.values())
+
+    se = result.param_std_err
+    sigma_ua_c = se.get("ua_c", float("inf"))
+    sigma_k_c = se.get("k_c", float("inf"))
+    sigma_alpha_c = se.get("alpha_c", float("inf"))
+
+    # β₁ (outdoor_delta) = -ua_c / k_c
+    beta_outdoor = -result.ua_c / result.k_c if result.k_c > 1e-12 else 0.0
+    se_outdoor = _delta_method_ratio_std(
+        result.ua_c, result.k_c, sigma_ua_c, sigma_k_c,
+    )
+
+    # Build β in WLS order: [intercept, outdoor_delta, ...model_inputs]
+    n_coeffs = 2 + len(model_inputs)  # intercept + outdoor_delta + inputs
+    beta: list[float | None] = [None] * n_coeffs
+    beta_std_err = [float("inf")] * n_coeffs
+
+    # β₀ (intercept): grey-box doesn't produce this
+    # β₁ (outdoor_delta): from bridge
+    beta[1] = beta_outdoor
+    beta_std_err[1] = se_outdoor
+
+    # Model inputs: only solar gets a grey-box estimate
+    for i, m in enumerate(model_inputs):
+        coeff_idx = 2 + i
+        if m.get("input_role") == "solar" and result.alpha_c != 0.0:
+            beta_solar = -result.alpha_c / result.k_c if result.k_c > 1e-12 else 0.0
+            se_solar = _delta_method_ratio_std(
+                result.alpha_c, result.k_c, sigma_alpha_c, sigma_k_c,
+            )
+            beta[coeff_idx] = beta_solar
+            beta_std_err[coeff_idx] = se_solar
+
+    # Bonus outputs
+    tau_eff = result.tau_eff
+    k_eff = result.k_c / result.ua_c if result.ua_c > 1e-12 else 0.0
+
+    bridge = GreyboxBridgeResult(
+        beta=beta,
+        beta_std_err=beta_std_err,
+        tau_eff=tau_eff,
+        k_eff=k_eff,
+        gates_passed=gates_passed,
+        gate_details=gate_details,
+        greybox=result,
+    )
+
+    # Log
+    _LOGGER.info(
+        "%sGrey-box bridge: outdoor_delta=%.4f (σ=%.4f), τ_eff=%.0f min, K_eff=%.3f",
+        log_prefix, beta_outdoor, se_outdoor, tau_eff, k_eff,
+    )
+    for i, m in enumerate(model_inputs):
+        coeff_idx = 2 + i
+        if beta[coeff_idx] is not None:
+            _LOGGER.info(
+                "%s  %s: β=%.4f (σ=%.4f)",
+                log_prefix, m.get("name", f"input_{i}"),
+                beta[coeff_idx], beta_std_err[coeff_idx],
+            )
+    gate_summary = ", ".join(
+        f"{k}={'OK' if v else 'FAIL'}" for k, v in gate_details.items()
+    )
+    _LOGGER.info(
+        "%s  Quality gates: %s → %s",
+        log_prefix, gate_summary, "PASS" if gates_passed else "REJECT",
+    )
+
+    return bridge
