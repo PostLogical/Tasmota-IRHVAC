@@ -202,6 +202,9 @@ CONF_PI_IMC_LAMBDA = "pi_imc_lambda"
 CONF_PI_SENSOR_FILTER_TAU = "pi_sensor_filter_tau"
 CONF_PI_SMITH_ENABLED = "pi_smith_enabled"
 CONF_PI_SETPOINT_HOLD = "pi_setpoint_hold"
+CONF_PI_AUTO_PERTURB_ENABLED = "pi_auto_perturb_enabled"
+CONF_PI_AUTO_PERTURB_WINDOW_START = "pi_auto_perturb_window_start"
+CONF_PI_AUTO_PERTURB_WINDOW_END = "pi_auto_perturb_window_end"
 CONF_PI_MODEL_INPUTS = "pi_model_inputs"
 
 # Subentry types

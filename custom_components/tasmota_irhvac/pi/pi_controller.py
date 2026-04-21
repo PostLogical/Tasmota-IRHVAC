@@ -70,6 +70,9 @@ from ..const import (
     CONF_PI_SETPOINT_HOLD,
     CONF_PI_SETPOINT_WEIGHT,
     CONF_PI_SMITH_ENABLED,
+    CONF_PI_AUTO_PERTURB_ENABLED,
+    CONF_PI_AUTO_PERTURB_WINDOW_START,
+    CONF_PI_AUTO_PERTURB_WINDOW_END,
     CONF_PI_TAU_ESTIMATE,
     DEFAULT_PI_DEADBAND,
     DEFAULT_PI_ENABLED,
@@ -204,11 +207,10 @@ class PIController:
             )
 
         # Auto-perturbation for plant identification (Layer 2.5).
-        # Config keys added in Phase 3; until then, defaults to disabled.
         self._auto_perturb = AutoPerturbation(
-            enabled=config.get("pi_auto_perturb_enabled", False),
-            window_start=config.get("pi_auto_perturb_window_start"),
-            window_end=config.get("pi_auto_perturb_window_end"),
+            enabled=config.get(CONF_PI_AUTO_PERTURB_ENABLED, False),
+            window_start=config.get(CONF_PI_AUTO_PERTURB_WINDOW_START),
+            window_end=config.get(CONF_PI_AUTO_PERTURB_WINDOW_END),
         )
 
         # Derive effective Kp/Ki: IMC formula or manual config

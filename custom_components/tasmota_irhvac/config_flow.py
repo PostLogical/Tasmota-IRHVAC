@@ -114,6 +114,9 @@ from .const import (
     CONF_PI_SETPOINT_HOLD,
     CONF_PI_SETPOINT_WEIGHT,
     CONF_PI_SMITH_ENABLED,
+    CONF_PI_AUTO_PERTURB_ENABLED,
+    CONF_PI_AUTO_PERTURB_WINDOW_START,
+    CONF_PI_AUTO_PERTURB_WINDOW_END,
     CONF_PI_TAU_ESTIMATE,
     CONF_PI_MODEL_INPUTS,
     CONF_SUPPLEMENTAL_AUTO_MODEL_INPUT,
@@ -470,6 +473,13 @@ OPTIONS_PI_CONTROLLER_SCHEMA = vol.Schema(
         vol.Optional(CONF_PI_SMITH_ENABLED, default=DEFAULT_PI_SMITH_ENABLED): BooleanSelector(),
         vol.Optional(CONF_PI_SETPOINT_HOLD, default=DEFAULT_PI_SETPOINT_HOLD): NumberSelector(
             NumberSelectorConfig(min=0, max=3600, step=60, unit_of_measurement="s", mode=NumberSelectorMode.BOX)
+        ),
+        vol.Optional(CONF_PI_AUTO_PERTURB_ENABLED, default=False): BooleanSelector(),
+        vol.Optional(CONF_PI_AUTO_PERTURB_WINDOW_START): NumberSelector(
+            NumberSelectorConfig(min=0, max=23, step=1, mode=NumberSelectorMode.BOX)
+        ),
+        vol.Optional(CONF_PI_AUTO_PERTURB_WINDOW_END): NumberSelector(
+            NumberSelectorConfig(min=0, max=23, step=1, mode=NumberSelectorMode.BOX)
         ),
     }
 )

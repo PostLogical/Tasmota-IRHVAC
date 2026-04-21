@@ -183,7 +183,10 @@
           "pi_imc_lambda": "IMC Lambda (minutes)",
           "pi_sensor_filter_tau": "Sensor Filter (seconds)",
           "pi_smith_enabled": "Smith Predictor",
-          "pi_setpoint_hold": "Setpoint Hold (seconds)"
+          "pi_setpoint_hold": "Setpoint Hold (seconds)",
+          "pi_auto_perturb_enabled": "Auto-Perturbation",
+          "pi_auto_perturb_window_start": "Perturbation Window Start (hour)",
+          "pi_auto_perturb_window_end": "Perturbation Window End (hour)"
         },
         "data_description": {
           "pi_enabled": "Enable the PI+feedforward controller for automatic temperature regulation.",
@@ -208,7 +211,10 @@
           "pi_imc_lambda": "IMC closed-loop speed parameter (minutes). Controls aggressiveness of IMC-derived gains. Lower = faster but less robust. 0 = auto (response_lag / 3).",
           "pi_sensor_filter_tau": "Low-pass filter time constant on room temperature sensor (seconds). Smooths noise without adding significant lag. 0 = disabled. Default 120s (2 min).",
           "pi_smith_enabled": "Enable Smith predictor for dead-time compensation. Requires IMC (τ estimate > 0). Adjusts proportional term to anticipate HP pipeline delay.",
-          "pi_setpoint_hold": "Minimum seconds between HP setpoint changes. Prevents oscillation from incomplete information. 0 = no hold (not recommended). Default 1200s (20 min)."
+          "pi_setpoint_hold": "Minimum seconds between HP setpoint changes. Prevents oscillation from incomplete information. 0 = no hold (not recommended). Default 1200s (20 min).",
+          "pi_auto_perturb_enabled": "Automatically perturb the setpoint ±1°C when steady state is detected to accelerate plant identification. Temperature may vary ~1°C during learning cycles. Requires IMC (τ estimate > 0).",
+          "pi_auto_perturb_window_start": "Optional: only start perturbation cycles during this time window (hour 0-23). Leave empty for anytime.",
+          "pi_auto_perturb_window_end": "Optional: end hour of perturbation window (0-23). Leave empty for anytime."
         }
       },
       "reconfigure": {
@@ -485,7 +491,10 @@
           "pi_imc_lambda": "IMC Lambda (minutes)",
           "pi_sensor_filter_tau": "Sensor Filter (seconds)",
           "pi_smith_enabled": "Smith Predictor",
-          "pi_setpoint_hold": "Setpoint Hold (seconds)"
+          "pi_setpoint_hold": "Setpoint Hold (seconds)",
+          "pi_auto_perturb_enabled": "Auto-Perturbation",
+          "pi_auto_perturb_window_start": "Perturbation Window Start (hour)",
+          "pi_auto_perturb_window_end": "Perturbation Window End (hour)"
         },
         "data_description": {
           "pi_enabled": "Enable the PI+feedforward controller for automatic temperature regulation.",
@@ -510,7 +519,10 @@
           "pi_imc_lambda": "IMC closed-loop speed parameter (minutes). Controls aggressiveness of IMC-derived gains. Lower = faster but less robust. 0 = auto (response_lag / 3).",
           "pi_sensor_filter_tau": "Low-pass filter time constant on room temperature sensor (seconds). Smooths noise without adding significant lag. 0 = disabled. Default 120s (2 min).",
           "pi_smith_enabled": "Enable Smith predictor for dead-time compensation. Requires IMC (τ estimate > 0). Adjusts proportional term to anticipate HP pipeline delay.",
-          "pi_setpoint_hold": "Minimum seconds between HP setpoint changes. Prevents oscillation from incomplete information. 0 = no hold (not recommended). Default 1200s (20 min)."
+          "pi_setpoint_hold": "Minimum seconds between HP setpoint changes. Prevents oscillation from incomplete information. 0 = no hold (not recommended). Default 1200s (20 min).",
+          "pi_auto_perturb_enabled": "Automatically perturb the setpoint ±1°C when steady state is detected to accelerate plant identification. Temperature may vary ~1°C during learning cycles. Requires IMC (τ estimate > 0).",
+          "pi_auto_perturb_window_start": "Optional: only start perturbation cycles during this time window (hour 0-23). Leave empty for anytime.",
+          "pi_auto_perturb_window_end": "Optional: end hour of perturbation window (0-23). Leave empty for anytime."
         }
       }
     }
@@ -616,6 +628,18 @@
           "confirm": {
             "title": "Handle anomalous observations",
             "description": "Detected {direction} at {time_range} (mean residual: {mean_residual}°C).\n\nChoose an action:"
+          }
+        }
+      }
+    },
+    "auto_perturb_stall": {
+      "title": "Plant identification stalled ({mode})",
+      "description": "Auto-perturbation completed {cycles} cycles without meaningful improvement in plant identification confidence. This may indicate insufficient excitation, an unmodeled disturbance, or sensor placement issues. Consider running a full plant test (identify_plant service) or reviewing model inputs.",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Reset auto-perturbation",
+            "description": "Clear the stall counter and allow auto-perturbation to try again."
           }
         }
       }
