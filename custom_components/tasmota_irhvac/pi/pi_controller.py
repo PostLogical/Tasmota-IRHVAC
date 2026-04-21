@@ -686,6 +686,19 @@ class PIController:
             if result.beta_batch:
                 self._log_greybox_wls_comparison(bridge, result)
 
+            # Feed τ_eff to plant ID as a grey-box τ_slow estimate
+            if bridge.gates_passed and self._plant_id.enabled:
+                se = greybox.param_std_err
+                ua_c_cv = se.get("ua_c", float("inf")) / max(abs(greybox.ua_c), 1e-12)
+                gain_update = self._plant_id.update_from_greybox(
+                    tau_eff=bridge.tau_eff,
+                    ua_c_cv=ua_c_cv,
+                )
+                if gain_update is not None:
+                    self._pi_kp = gain_update.kp
+                    self._pi_ki = gain_update.ki
+                    self._imc_lambda = gain_update.imc_lambda
+
         # ── Grey-box fusion ──
         # If bridge available, gates pass, and blending enabled, fuse
         # grey-box β into the batch estimate before blending with the

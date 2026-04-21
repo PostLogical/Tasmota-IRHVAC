@@ -279,6 +279,83 @@ class PlantIdentifier:
                 )
                 self._plant = dataclasses.replace(self._plant, **{field: updated})
 
+    # ── Grey-box τ provider (Layer 4) ─────────────────────────────────
+
+    def update_from_greybox(
+        self,
+        tau_eff: float,
+        ua_c_cv: float,
+    ) -> GainUpdate | None:
+        """Accept a grey-box τ_eff estimate and update tau_slow if appropriate.
+
+        The grey-box energy balance produces τ_eff = 1/ua_c, which is the
+        building's effective time constant from a fundamentally different
+        method (energy balance regression vs transient step/area analysis).
+
+        Confidence derived from ua_c coefficient of variation (CV):
+            confidence = max(0, 1 - 2×CV)
+        So CV=0 → conf=1, CV=0.25 → conf=0.5, CV≥0.5 → conf=0.
+
+        Only updates tau_slow when:
+        - Confidence > 0.3
+        - Current tau_slow source is "seed" or "closed_loop" (grey-box
+          doesn't override area_method or step_response primaries)
+        - Ratio to current is modest (<2× change)
+
+        Args:
+            tau_eff: 1/ua_c in minutes from grey-box fit.
+            ua_c_cv: Coefficient of variation of ua_c (std_err / ua_c).
+
+        Returns:
+            GainUpdate if plant was updated, None otherwise.
+        """
+        if not self._enabled or tau_eff <= 0:
+            return None
+
+        confidence = max(0.0, 1.0 - 2.0 * ua_c_cv)
+        if confidence < 0.3:
+            _LOGGER.debug(
+                "Grey-box τ_eff=%.0f rejected: low confidence (CV=%.2f → conf=%.2f)",
+                tau_eff, ua_c_cv, confidence,
+            )
+            return None
+
+        current = self._plant.tau_slow
+        # Only override seed or closed_loop estimates — don't replace
+        # area method or step response primaries.
+        overridable = {"seed", "closed_loop", "greybox"}
+        if current.source not in overridable:
+            _LOGGER.debug(
+                "Grey-box τ_eff=%.0f: not overriding %s estimate (τ_slow=%.0f)",
+                tau_eff, current.source, current.value,
+            )
+            return None
+
+        # Modest change gate: don't jump >2× from current
+        if current.value > 0:
+            ratio = tau_eff / current.value
+            if not (0.5 <= ratio <= 2.0):
+                _LOGGER.info(
+                    "Grey-box τ_eff=%.0f rejected: ratio=%.2f from current=%.0f too large",
+                    tau_eff, ratio, current.value,
+                )
+                return None
+
+        # Discount confidence slightly vs primary providers
+        est = ParameterEstimate(
+            value=tau_eff,
+            confidence=confidence * 0.8,
+            source="greybox",
+            observations=1,
+        )
+        self._plant = dataclasses.replace(self._plant, tau_slow=est)
+        gains = self.compute_gains()
+        _LOGGER.info(
+            "Grey-box τ_eff=%.0f (CV=%.2f, conf=%.2f) → τ_slow updated. Kp=%.3f Ki=%.4f",
+            tau_eff, ua_c_cv, est.confidence, gains.kp, gains.ki,
+        )
+        return gains
+
     # ── Plant test (Layer 3: active identification) ──────────────────
 
     def start_plant_test(

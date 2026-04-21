@@ -238,3 +238,96 @@ class TestPlantIdentifierDiagnostics:
         assert diag["plant_test"]["active"] is True
         assert diag["plant_test"]["phase"] == "relay_high"
         assert diag["plant_test"]["cycle_count"] == 0
+
+
+class TestGreyboxTauProvider:
+    """Tests for grey-box τ_eff → tau_slow integration."""
+
+    def _make(self, tau=60.0, lag=15.0, imc_lambda=5.0):
+        return PlantIdentifier(tau_seed=tau, response_lag=lag, imc_lambda=imc_lambda)
+
+    def test_updates_seed_tau_slow(self):
+        """Grey-box τ_eff should update tau_slow when source is seed."""
+        pi = self._make(tau=60.0)
+        assert pi.plant.tau_slow.source == "seed"
+
+        gains = pi.update_from_greybox(tau_eff=100.0, ua_c_cv=0.1)
+        assert gains is not None
+        assert pi.plant.tau_slow.source == "greybox"
+        assert pi.plant.tau_slow.value == 100.0
+
+    def test_confidence_from_cv(self):
+        """Confidence = max(0, 1 - 2×CV), discounted by 0.8."""
+        pi = self._make(tau=60.0)
+        pi.update_from_greybox(tau_eff=80.0, ua_c_cv=0.15)
+        # conf = (1 - 2*0.15) * 0.8 = 0.7 * 0.8 = 0.56
+        assert abs(pi.plant.tau_slow.confidence - 0.56) < 0.01
+
+    def test_rejected_low_confidence(self):
+        """High CV → low confidence → rejected."""
+        pi = self._make(tau=60.0)
+        gains = pi.update_from_greybox(tau_eff=100.0, ua_c_cv=0.45)
+        # conf = (1 - 2*0.45) * 0.8 = 0.1 * 0.8 = 0.08 < 0.3
+        assert gains is None
+        assert pi.plant.tau_slow.source == "seed"  # unchanged
+
+    def test_does_not_override_area_method(self):
+        """Grey-box shouldn't replace a primary area_method estimate."""
+        from custom_components.tasmota_irhvac.pi.plant_model import ParameterEstimate
+        import dataclasses
+        pi = self._make(tau=60.0)
+        # Simulate area method having fired
+        area_est = ParameterEstimate(
+            value=120.0, confidence=0.9, source="area_method", observations=5
+        )
+        pi._plant = dataclasses.replace(pi._plant, tau_slow=area_est)
+
+        gains = pi.update_from_greybox(tau_eff=100.0, ua_c_cv=0.1)
+        assert gains is None
+        assert pi.plant.tau_slow.source == "area_method"  # unchanged
+
+    def test_overrides_closed_loop(self):
+        """Grey-box should override a closed_loop interim estimate."""
+        from custom_components.tasmota_irhvac.pi.plant_model import ParameterEstimate
+        import dataclasses
+        pi = self._make(tau=60.0)
+        cl_est = ParameterEstimate(
+            value=90.0, confidence=0.5, source="closed_loop", observations=1
+        )
+        pi._plant = dataclasses.replace(pi._plant, tau_slow=cl_est)
+
+        gains = pi.update_from_greybox(tau_eff=100.0, ua_c_cv=0.1)
+        assert gains is not None
+        assert pi.plant.tau_slow.source == "greybox"
+
+    def test_rejected_large_ratio(self):
+        """τ_eff >2× current → rejected (too large a jump)."""
+        pi = self._make(tau=60.0)
+        gains = pi.update_from_greybox(tau_eff=200.0, ua_c_cv=0.1)
+        assert gains is None
+        assert pi.plant.tau_slow.source == "seed"
+
+    def test_gains_updated(self):
+        """Gain update should produce new Kp/Ki from IMC."""
+        pi = self._make(tau=60.0, lag=15.0, imc_lambda=5.0)
+        gains = pi.update_from_greybox(tau_eff=100.0, ua_c_cv=0.1)
+        assert gains is not None
+        assert gains.kp > 0
+        assert gains.ki > 0
+
+    def test_disabled_returns_none(self):
+        """Disabled plant ID (tau_seed=0) → no update."""
+        pi = PlantIdentifier(tau_seed=0.0, response_lag=15.0, imc_lambda=5.0)
+        gains = pi.update_from_greybox(tau_eff=100.0, ua_c_cv=0.1)
+        assert gains is None
+
+    def test_successive_greybox_updates(self):
+        """Grey-box can update its own previous estimate."""
+        pi = self._make(tau=60.0)
+        pi.update_from_greybox(tau_eff=80.0, ua_c_cv=0.15)
+        assert pi.plant.tau_slow.source == "greybox"
+        assert pi.plant.tau_slow.value == 80.0
+
+        # Second update with slightly different value
+        pi.update_from_greybox(tau_eff=90.0, ua_c_cv=0.1)
+        assert pi.plant.tau_slow.value == 90.0
