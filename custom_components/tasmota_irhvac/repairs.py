@@ -34,6 +34,8 @@ async def async_create_fix_flow(
         return HighIntegralTuningRepairFlow(data)
     if repair_type == "anomalous_observation":
         return AnomalousObservationRepairFlow(data)
+    if repair_type == "auto_perturb_stall":
+        return AutoPerturbStallRepairFlow(data)
 
     return UnknownRepairFlow()
 
@@ -259,6 +261,38 @@ class AnomalousObservationRepairFlow(RepairsFlow):
                 "direction": self._direction,
                 "mean_residual": self._mean_residual,
             },
+        )
+
+
+class AutoPerturbStallRepairFlow(RepairsFlow):
+    """Reset auto-perturbation stall counter."""
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        super().__init__()
+        self._entry_id: str = data.get("entry_id", "")
+
+    async def async_step_init(
+        self, user_input: dict[str, str] | None = None
+    ) -> data_entry_flow.FlowResult:
+        return await self.async_step_confirm()
+
+    async def async_step_confirm(
+        self, user_input: dict[str, str] | None = None
+    ) -> data_entry_flow.FlowResult:
+        """Confirm and reset stall counter."""
+        if user_input is not None:
+            climate = self.hass.data.get(DATA_KEY, {}).get(self._entry_id)
+            if climate is not None and hasattr(climate, "_pi") and climate._pi is not None:
+                climate._pi.perturb_now()  # clears stall + starts new cycle
+                _LOGGER.info(
+                    "Repair flow: reset auto-perturbation stall for %s",
+                    self._entry_id,
+                )
+            return self.async_create_entry(title="", data={})
+
+        return self.async_show_form(
+            step_id="confirm",
+            data_schema=vol.Schema({}),
         )
 
 
