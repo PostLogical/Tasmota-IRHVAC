@@ -884,6 +884,7 @@ class PIController:
             hp_deadband_estimate_heat=self._hp_deadband_estimate_heat,
             hp_deadband_estimate_cool=self._hp_deadband_estimate_cool,
             exclusion_count=self._exclusion_count,
+            auto_perturb_state=self._auto_perturb.as_dict(),
         )
 
     def restore_extra_stored_data(self, data: PIExtraStoredData) -> None:
@@ -995,6 +996,10 @@ class PIController:
 
         # Restore anomaly exclusion count
         self._exclusion_count = data.exclusion_count
+
+        # Restore auto-perturbation counters
+        if data.auto_perturb_state:
+            self._auto_perturb.restore(data.auto_perturb_state)
 
         # Restore drift detection history
         if data.drift_correction_signs:
