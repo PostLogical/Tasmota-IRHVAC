@@ -1,8 +1,12 @@
-"""Tests for AutoPerturbation state machine (Layer 2.5)."""
+"""Tests for AutoPerturbation state machine (Layer 2.5).
+
+Unit tests for the pure state machine + integration tests for PI controller wiring.
+"""
 
 from __future__ import annotations
 
 import pytest
+from unittest.mock import MagicMock, AsyncMock
 
 from custom_components.tasmota_irhvac.pi.auto_perturbation import (
     AMPLITUDE_C,
@@ -381,3 +385,66 @@ class TestPersistence:
         ap.restore({})
         assert ap.cycles_completed == 0
         assert ap.state == PerturbState.IDLE
+
+
+# ── PI Controller Integration ────────────────────────────────────────
+
+from tests.conftest import make_pi_config
+from tests.test_pi_controller import FakePIEntity
+
+
+class TestPIControllerIntegration:
+    """Verify auto-perturbation wiring in pi_controller.py."""
+
+    def _make_entity(self, **overrides):
+        config = make_pi_config({"pi_auto_perturb_enabled": True, **overrides})
+        return FakePIEntity(config)
+
+    def test_auto_perturb_composed(self):
+        entity = self._make_entity()
+        assert entity._pi._auto_perturb.enabled is True
+
+    def test_auto_perturb_disabled_by_default(self):
+        entity = FakePIEntity(make_pi_config())
+        assert entity._pi._auto_perturb.enabled is False
+
+    def test_health_status_includes_perturbation_state(self):
+        entity = self._make_entity()
+        status = entity._pi.get_health_status()
+        assert "auto_perturbation_state" in status
+        assert status["auto_perturbation_state"] == "idle"
+
+    def test_perturb_now_method(self):
+        entity = self._make_entity()
+        pi = entity._pi
+        pi.perturb_now()
+        assert pi._auto_perturb.state == PerturbState.WAITING
+
+    def test_abort_on_set_temperature(self):
+        """User setpoint change aborts active perturbation."""
+        entity = self._make_entity()
+        pi = entity._pi
+        # Force into STEP_ACTIVE
+        pi._auto_perturb._state = PerturbState.STEP_ACTIVE
+        pi._auto_perturb._direction = 1.0
+        assert pi._auto_perturb.offset != 0.0
+        # Simulate set_temperature abort
+        pi._auto_perturb.abort("user_setpoint_change")
+        assert pi._auto_perturb.state == PerturbState.IDLE
+        assert pi._auto_perturb.offset == 0.0
+
+    def test_stored_data_round_trip(self):
+        """Perturbation counters survive save/restore."""
+        entity = self._make_entity()
+        pi = entity._pi
+        pi._auto_perturb._cycles_completed = 3
+        pi._auto_perturb._cycles_without_improvement = 2
+
+        data = pi.get_extra_stored_data()
+        assert data is not None
+        assert data.auto_perturb_state["cycles_completed"] == 3
+
+        entity2 = self._make_entity()
+        entity2._pi.restore_extra_stored_data(data)
+        assert entity2._pi._auto_perturb.cycles_completed == 3
+        assert entity2._pi._auto_perturb.cycles_without_improvement == 2
