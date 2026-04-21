@@ -610,7 +610,7 @@
     },
     "multicollinearity": {
       "title": "Highly correlated model inputs",
-      "description": "The information matrix condition number is {condition_number}, indicating multicollinearity. Correlated features: {pairs}. The system cannot reliably separate their effects, which may cause unstable coefficient estimates. Consider removing one of the correlated inputs, or wait for conditions where they vary independently."
+      "description": "The information matrix condition number is {condition_number}, indicating multicollinearity. Correlated features: {pairs}. This may cause coefficient estimates to shift between batch cycles. This often resolves on its own as the system sees more varied conditions (e.g. different weather, time of day). No action needed unless coefficients are visibly unstable."
     },
     "freeze_impact": {
       "title": "Frozen coefficient {coeff_name} is degrading model fit",

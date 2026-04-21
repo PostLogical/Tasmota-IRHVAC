@@ -480,12 +480,16 @@ class DiversityAwareBuffer:
 
     def get_pairwise_correlations(
         self, feature_names: list[str] | None = None,
+        *, include_top: bool = False,
     ) -> list[tuple[str, str, float]]:
         """Compute pairwise Pearson correlations between features.
 
         Returns (name_i, name_j, r) for all pairs with |r| > 0.7,
         skipping the intercept (always 1.0, undefined correlation).
         Only uses unclamped observations for relevance to WLS.
+
+        If *include_top* is True and no pair exceeds 0.7, the single
+        highest-|r| pair is returned so callers always have context.
         """
         n = self._n_features
         if n < 3 or len(self._buffer) < 20:
@@ -507,6 +511,7 @@ class DiversityAwareBuffer:
             cols.append(col)
 
         results: list[tuple[str, str, float]] = []
+        top_pair: tuple[str, str, float] | None = None
         nc = len(cols)
         for a in range(nc):
             for b in range(a + 1, nc):
@@ -522,6 +527,11 @@ class DiversityAwareBuffer:
                 if abs(r) > 0.7:
                     # a, b are 0-indexed into cols which starts at feature 1
                     results.append((names[a + 1], names[b + 1], r))
+                if top_pair is None or abs(r) > abs(top_pair[2]):
+                    top_pair = (names[a + 1], names[b + 1], r)
+
+        if not results and include_top and top_pair is not None:
+            results.append(top_pair)
 
         return results
 

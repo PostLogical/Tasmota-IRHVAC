@@ -1755,12 +1755,17 @@ class PIController:
         label = mode or "heat+cool"
         _LOGGER.info("Observation buffer (%s) flushed — batch learning will restart from scratch", label)
 
-    def _check_tuning_health(self) -> list[tuple[str, str, str, dict[str, str], bool, bool, dict[str, Any] | None]]:
+    def _check_tuning_health(self, *, from_batch: bool = False) -> list[tuple[str, str, str, dict[str, str], bool, bool, dict[str, Any] | None]]:
         """Evaluate tuning health and return issues for HA Repairs.
 
         Returns list of (issue_id, severity, translation_key, placeholders,
         should_create, is_fixable, data) tuples.  Called after each batch
         cycle and on startup.
+
+        Args:
+            from_batch: True when called after a batch cycle.  Sustained-cycle
+                counters are only incremented during batch calls so that
+                HA restarts don't inflate them.
         """
         from .health_checks import (
             check_batch_online_disagreement_repair,
@@ -1798,10 +1803,11 @@ class PIController:
             # Check if currently drifting
             drift_abs = abs(learned - configured)
             drift_pct = (drift_abs / abs(configured)) * 100 if configured != 0 else 0
-            if drift_pct > 30.0 and drift_abs > 0.05:
-                self._tuning_alert_counters[counter_key] = self._tuning_alert_counters.get(counter_key, 0) + 1
-            else:
-                self._tuning_alert_counters[counter_key] = 0
+            if from_batch:
+                if drift_pct > 30.0 and drift_abs > 0.05:
+                    self._tuning_alert_counters[counter_key] = self._tuning_alert_counters.get(counter_key, 0) + 1
+                else:
+                    self._tuning_alert_counters[counter_key] = 0
 
             result = check_slope_divergence_repair(
                 learned_slope=learned,
@@ -1891,10 +1897,11 @@ class PIController:
         ki_correction = abs(self._pi_ki * self._metrics.integral_convergence)
 
         counter_key = "high_integral"
-        if ki_correction > 2.0:
-            self._tuning_alert_counters[counter_key] = self._tuning_alert_counters.get(counter_key, 0) + 1
-        else:
-            self._tuning_alert_counters[counter_key] = 0
+        if from_batch:
+            if ki_correction > 2.0:
+                self._tuning_alert_counters[counter_key] = self._tuning_alert_counters.get(counter_key, 0) + 1
+            else:
+                self._tuning_alert_counters[counter_key] = 0
 
         result = check_high_integral_repair(
             ki_integral_correction=ki_correction,
@@ -2067,10 +2074,11 @@ class PIController:
         # ── Residual time-of-day patterns ──────────────────────────
         for idx, pattern in enumerate(self._last_residual_patterns):
             counter_key = f"residual_pattern_{pattern.start_hour}_{pattern.end_hour}"
-            if abs(pattern.mean_residual) > 0.5:
-                self._tuning_alert_counters[counter_key] = self._tuning_alert_counters.get(counter_key, 0) + 1
-            else:
-                self._tuning_alert_counters[counter_key] = 0
+            if from_batch:
+                if abs(pattern.mean_residual) > 0.5:
+                    self._tuning_alert_counters[counter_key] = self._tuning_alert_counters.get(counter_key, 0) + 1
+                else:
+                    self._tuning_alert_counters[counter_key] = 0
 
             result = check_residual_pattern_repair(
                 start_hour=pattern.start_hour,
@@ -2098,13 +2106,14 @@ class PIController:
             coeff_names_mc = ["intercept", "outdoor_delta"]
             for m in self._model_inputs:
                 coeff_names_mc.append(m.get("name", "input"))
-            corr_pairs = mc_buffer.get_pairwise_correlations(coeff_names_mc)
+            corr_pairs = mc_buffer.get_pairwise_correlations(coeff_names_mc, include_top=True)
 
             counter_key = "multicollinearity"
-            if cond_num > 30.0:  # Belsley (1980): κ > 30 = moderate
-                self._tuning_alert_counters[counter_key] = self._tuning_alert_counters.get(counter_key, 0) + 1
-            else:
-                self._tuning_alert_counters[counter_key] = 0
+            if from_batch:
+                if cond_num > 30.0:  # Belsley (1980): κ > 30 = moderate
+                    self._tuning_alert_counters[counter_key] = self._tuning_alert_counters.get(counter_key, 0) + 1
+                else:
+                    self._tuning_alert_counters[counter_key] = 0
 
             result = check_multicollinearity_repair(
                 condition_number=cond_num,
@@ -2141,11 +2150,12 @@ class PIController:
                         continue
                     counter_key = f"freeze_impact_{mode_label}_{i}"
                     increase_pct = ((current_rms - rms_at_freeze) / rms_at_freeze) * 100.0 if rms_at_freeze > 0 else 0.0
-                    if increase_pct > 20.0:
-                        self._tuning_alert_counters[counter_key] = self._tuning_alert_counters.get(counter_key, 0) + 1
-                    elif increase_pct < 5.0:
-                        self._tuning_alert_counters[counter_key] = 0
-                    # else: hysteresis band, don't change counter
+                    if from_batch:
+                        if increase_pct > 20.0:
+                            self._tuning_alert_counters[counter_key] = self._tuning_alert_counters.get(counter_key, 0) + 1
+                        elif increase_pct < 5.0:
+                            self._tuning_alert_counters[counter_key] = 0
+                        # else: hysteresis band, don't change counter
 
                     name = coeff_names[i] if i < len(coeff_names) else f"coeff_{i}"
                     result = check_freeze_impact_repair(

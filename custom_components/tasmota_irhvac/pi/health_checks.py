@@ -672,10 +672,17 @@ def check_multicollinearity_repair(
 
     # Build human-readable pair list
     if correlated_pairs:
+        above_threshold = [p for p in correlated_pairs if abs(p[2]) > 0.7]
         pair_strs = [f"{a} and {b} (r={r:.2f})" for a, b, r in correlated_pairs[:3]]
-        pairs_text = "; ".join(pair_strs)
+        if above_threshold:
+            pairs_text = "; ".join(pair_strs)
+        else:
+            # Top pair included but below 0.7 — distributed multicollinearity
+            pairs_text = (
+                f"distributed across inputs (highest: {pair_strs[0]})"
+            )
     else:
-        pairs_text = "unknown (condition number high but no single pair dominates)"
+        pairs_text = "distributed across inputs (not enough data to identify pairs)"
 
     return (
         "multicollinearity",

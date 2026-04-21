@@ -305,10 +305,32 @@ class TestCheckTuningHealthOrchestration:
         # Sustained for 6 cycles
         pi._tuning_alert_counters["slope_div_heat"] = 5  # will be incremented to 6
 
-        issues = pi._check_tuning_health()
+        issues = pi._check_tuning_health(from_batch=True)
         slope_issues = [i for i in issues if "slope_divergence" in i[0]]
         assert len(slope_issues) >= 1
         assert slope_issues[0][4] is True  # should_create
+
+    @pytest.mark.asyncio
+    async def test_startup_does_not_inflate_counters(self, hass, setup_pi_integration):
+        """Startup health checks must not increment sustained-cycle counters."""
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        # Simulate conditions that would increment slope_div counter
+        pi._rls_heat.beta[1] = 0.5 * pi._rls_heat.feature_scales[1]
+        pi._rls_heat.observation_count = 100
+
+        # Call without from_batch (startup path) multiple times
+        for _ in range(10):
+            pi._check_tuning_health()
+
+        # Counter should not have been incremented
+        assert pi._tuning_alert_counters.get("slope_div_heat", 0) == 0
+
+        # Now call with from_batch=True — counter should increment
+        pi._check_tuning_health(from_batch=True)
+        assert pi._tuning_alert_counters.get("slope_div_heat", 0) == 1
 
     @pytest.mark.asyncio
     async def test_save_seeds_detected(self, hass, setup_pi_integration):
@@ -340,7 +362,7 @@ class TestCheckTuningHealthOrchestration:
         pi._rls_heat.observation_count = 100
         pi._tuning_alert_counters["high_integral"] = 5  # will be incremented to 6
 
-        issues = pi._check_tuning_health()
+        issues = pi._check_tuning_health(from_batch=True)
         integral_issues = [i for i in issues if "high_integral" in i[0]]
         assert len(integral_issues) == 1
         assert integral_issues[0][4] is True
@@ -798,7 +820,18 @@ class TestMulticollinearityRepair:
         )
         assert result is not None
         assert result[2] is True
-        assert "unknown" in result[1]["pairs"]
+        assert "distributed across inputs" in result[1]["pairs"]
+
+    def test_distributed_shows_top_pair(self):
+        """When top pair is below 0.7, show it as distributed with context."""
+        result = check_multicollinearity_repair(
+            condition_number=50.0,
+            correlated_pairs=[("outdoor_delta", "solar", 0.55)],
+            sustained_cycles=5,
+        )
+        assert result is not None
+        assert "distributed" in result[1]["pairs"]
+        assert "outdoor_delta and solar" in result[1]["pairs"]
 
     def test_multiple_pairs_truncated(self):
         """At most 3 correlated pairs shown."""
@@ -989,11 +1022,11 @@ class TestFreezeImpactOrchestration:
         pi._metrics.batch_model_rms = 1.5  # 50% increase
         pi._rls_heat.observation_count = 100
 
-        # Run 3 cycles to build sustained counter
+        # Run 3 batch cycles to build sustained counter
         for _ in range(3):
-            pi._check_tuning_health()
+            pi._check_tuning_health(from_batch=True)
 
-        issues = pi._check_tuning_health()
+        issues = pi._check_tuning_health(from_batch=True)
         freeze_issues = [i for i in issues if "freeze_impact" in i[0]]
         assert len(freeze_issues) >= 1
         assert freeze_issues[0][4] is True

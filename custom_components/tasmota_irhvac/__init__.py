@@ -67,7 +67,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Listen for batch completion to re-check tuning health
     @callback
     def _on_batch_complete() -> None:
-        _check_tuning_health_issues(hass, entry)
+        _check_tuning_health_issues(hass, entry, from_batch=True)
 
     unsub = async_dispatcher_connect(
         hass, SIGNAL_PI_BATCH_COMPLETE.format(entry.entry_id), _on_batch_complete,
@@ -205,7 +205,7 @@ def _check_config_issues(hass: HomeAssistant, entry: ConfigEntry) -> None:
         ir.async_delete_issue(hass, DOMAIN, f"{legacy_key}_{entry.entry_id}")
 
 
-def _check_tuning_health_issues(hass: HomeAssistant, entry: ConfigEntry) -> None:
+def _check_tuning_health_issues(hass: HomeAssistant, entry: ConfigEntry, *, from_batch: bool = False) -> None:
     """Check PI tuning health and surface/clear issues via HA Repairs."""
     climate_entity = hass.data.get(DATA_KEY, {}).get(entry.entry_id)
     if climate_entity is None:
@@ -216,7 +216,7 @@ def _check_tuning_health_issues(hass: HomeAssistant, entry: ConfigEntry) -> None
     if not isinstance(pi, PIController):
         return
 
-    issues = pi._check_tuning_health()
+    issues = pi._check_tuning_health(from_batch=from_batch)
     for issue_id, severity, translation_key, placeholders, should_create, is_fixable, data in issues:
         if should_create:
             kwargs: dict[str, Any] = dict(

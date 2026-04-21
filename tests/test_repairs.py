@@ -300,7 +300,7 @@ class TestTuningHealthFixableIssues:
         pi._rls_heat.observation_count = 100
         pi._tuning_alert_counters["high_integral"] = 5
 
-        issues = pi._check_tuning_health()
+        issues = pi._check_tuning_health(from_batch=True)
         integral_issues = [i for i in issues if "high_integral" in i[0]]
         assert len(integral_issues) == 1
 
@@ -430,7 +430,7 @@ class TestSlopeDivergenceRepairFlow:
         pi._rls_heat.observation_count = 100
         pi._tuning_alert_counters["slope_div_heat"] = 5
 
-        issues = pi._check_tuning_health()
+        issues = pi._check_tuning_health(from_batch=True)
         slope_issues = [i for i in issues if "slope_divergence" in i[0]]
         assert len(slope_issues) >= 1
 
@@ -517,7 +517,7 @@ class TestHighIntegralTuningRepairFlow:
         # Align learned slope to configured to avoid sub-case 2 (slope_gap)
         pi._rls_heat.beta[1] = pi._ff_heat_slope * pi._rls_heat.feature_scales[1]
 
-        issues = pi._check_tuning_health()
+        issues = pi._check_tuning_health(from_batch=True)
         integral_issues = [i for i in issues if "high_integral" in i[0]]
         assert len(integral_issues) == 1
 
@@ -545,7 +545,7 @@ class TestHighIntegralTuningRepairFlow:
         pi._rls_heat.observation_count = 10  # < maturity_obs (50)
         pi._tuning_alert_counters["high_integral"] = 5
 
-        issues = pi._check_tuning_health()
+        issues = pi._check_tuning_health(from_batch=True)
         integral_issues = [i for i in issues if "high_integral" in i[0]]
         assert len(integral_issues) == 1
 
