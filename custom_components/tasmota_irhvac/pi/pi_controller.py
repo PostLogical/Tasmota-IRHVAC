@@ -112,6 +112,7 @@ from .health_checks import (
     check_slope_drift,
 )
 from .performance_metrics import PerformanceMetrics
+from .auto_perturbation import AutoPerturbation
 from .smith_predictor import SmithPredictor
 from .supplemental_controller import SupplementalController
 from .plant_identifier import PlantIdentifier
@@ -201,6 +202,14 @@ class PIController:
                 tau=self._plant_id.plant.tau_fast.value,
                 lag=self._plant_id.response_lag,
             )
+
+        # Auto-perturbation for plant identification (Layer 2.5).
+        # Config keys added in Phase 3; until then, defaults to disabled.
+        self._auto_perturb = AutoPerturbation(
+            enabled=config.get("pi_auto_perturb_enabled", False),
+            window_start=config.get("pi_auto_perturb_window_start"),
+            window_end=config.get("pi_auto_perturb_window_end"),
+        )
 
         # Derive effective Kp/Ki: IMC formula or manual config
         self._pi_kp: float = 0.0
@@ -1071,6 +1080,7 @@ class PIController:
             await e.set_mode(hvac_mode)
         old_desired = self._desired_temp
         self._desired_temp = temperature
+        self._auto_perturb.abort("user_setpoint_change")
         self._plant_id.cancel_observation()
         # Bumpless transfer (Åström & Hägglund): keep output continuous
         if old_desired is not None:
@@ -2120,6 +2130,12 @@ class PIController:
                 False, None,
             ))
 
+        # Auto-perturbation stall
+        hvac_mode = "heat" if self._entity._attr_hvac_mode == HVACMode.HEAT else "cool"
+        stall_issue = self._auto_perturb.get_stall_issue(entry_id, hvac_mode)
+        if stall_issue is not None:
+            issues.append(stall_issue)
+
         return issues
 
     def get_health_status(self) -> dict[str, Any]:
@@ -2240,6 +2256,7 @@ class PIController:
             "smith_correction": (
                 round(self._smith.correction, 3) if self._smith is not None else None
             ),
+            "auto_perturbation_state": self._auto_perturb.state.value,
         }
 
     def filter_hvac_modes(self, modes: list[HVACMode]) -> list[HVACMode]:
@@ -2334,6 +2351,10 @@ class PIController:
             self._plant_id.abort_plant_test()
             self._pi_paused = False
             _LOGGER.info("%sPlant test aborted, PI resumed", self._log_prefix)
+
+    def perturb_now(self) -> None:
+        """Request an auto-perturbation cycle (service call handler)."""
+        self._auto_perturb.force_start()
 
     async def async_suppress_ff_learning(self, reason: str = "") -> None:
         """Manually suppress FF learning (service call handler)."""
@@ -2802,8 +2823,6 @@ class PIController:
         else:
             current_c = raw_c
 
-        error = desired_c - current_c
-
         # Track room temperature rate of change (°C/min) from RAW readings.
         # Keep last 5 readings (~5 ticks). Compute rate from oldest to newest.
         self._room_temp_history.append((now_mono, raw_c))
@@ -2815,6 +2834,36 @@ class PIController:
             elapsed_min = (t1 - t0) / 60.0
             if elapsed_min > 0:
                 self._room_temp_rate = (temp1 - temp0) / elapsed_min
+
+        # Auto-perturbation offset (Layer 2.5): inject before error computation.
+        # FF sees original desired_c (feature vectors, not error signal).
+        is_heating = e._attr_hvac_mode == HVACMode.HEAT
+        desired_c += self._auto_perturb.tick(
+            now_mono=now_mono,
+            room_temp_rate=self._room_temp_rate,
+            integral_change_output=(
+                abs(self._pi_integral - self._prev_integral_for_oodb) * self._pi_ki
+            ),
+            ff_settled_ticks=self._ff_settled_ticks,
+            is_clamped=(
+                self._hp_setpoint is not None
+                and (self._hp_setpoint <= self._min_temp_c
+                     or self._hp_setpoint >= self._max_temp_c)
+            ),
+            supplemental_active=(
+                self._supplemental.tracking_mode or self._supplemental.assist_active
+            ),
+            learning_suppressed=self._manual_ff_suppress,
+            plant_test_active=self._plant_id.plant_test_active,
+            mode_heating=is_heating,
+            plant_confidence=min(
+                self._plant_id.plant.tau_fast.confidence,
+                self._plant_id.plant.tau_slow.confidence,
+            ) if self._plant_id.enabled else 1.0,
+            current_hour=datetime.now().hour,
+        )
+
+        error = desired_c - current_c
 
         # Check ongoing τ step-response observation (raw — measures real plant)
         tau_gain_update = self._plant_id.check_observation(
