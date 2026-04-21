@@ -1183,15 +1183,18 @@ def compare_and_report(
 
     max_change = 0.0
     changes: list[tuple[str, float, float, float, bool]] = []
+    # When |current| is below this floor (post-reset / near-seed), percent
+    # change is meaningless — cap at 100% so the threshold gate still works.
+    _NEAR_ZERO_FLOOR = 0.1
     for i in range(min(n, len(current_beta_physical))):
         current = current_beta_physical[i]
         batch = result.beta_batch[i]
         is_held = i in held
         if is_held:
             pct = 0.0
-        elif abs(current) > 1e-6:
+        elif abs(current) > _NEAR_ZERO_FLOOR:
             pct = abs(batch - current) / abs(current) * 100
-        elif abs(batch) > 1e-6:
+        elif abs(batch - current) > 1e-6:
             pct = 100.0
         else:
             pct = 0.0

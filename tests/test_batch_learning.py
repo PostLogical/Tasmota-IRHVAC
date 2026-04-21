@@ -329,6 +329,20 @@ class TestCompareAndReport:
         assert result.max_coeff_change_pct < 20.0
         assert not result.recommend_update
 
+    def test_near_zero_current_caps_at_100pct(self):
+        """Post-reset coefficients near zero should cap at 100%, not explode."""
+        result = BatchResult(
+            n_total=50, n_eligible=40,
+            beta_batch=[1.5, 0.3],
+            beta_current=[], residual_rms=0.1,
+            max_coeff_change_pct=0.0, recommend_update=False,
+        )
+        # current values near zero (post-reset): 0.001 would produce
+        # 149900% under pure %-change; should cap at 100%.
+        result = compare_and_report(result, [0.001, 0.05], ["intercept", "slope"])
+        assert result.recommend_update
+        assert result.max_coeff_change_pct == 100.0
+
     def test_held_features_logged(self, caplog):
         """Held features should log 'held at' instead of a change percentage."""
         import logging
