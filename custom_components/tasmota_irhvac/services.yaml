@@ -370,3 +370,10 @@ set_swingh:
           options:
             - StoreOnly
             - SendStore
+
+perturb_now:
+  name: Perturb now
+  description: Request an immediate auto-perturbation cycle for plant identification. Bypasses the convergence-based frequency governor but still waits for steady-state conditions before stepping. Times out after 60 minutes if steady state is not reached.
+  target:
+    entity:
+      integration: tasmota_irhvac

@@ -508,6 +508,10 @@ SERVICE_TO_METHOD = {
         "method": "async_abort_identify_plant",
         "schema": IRHVAC_SERVICE_SCHEMA,
     },
+    "perturb_now": {
+        "method": "async_perturb_now",
+        "schema": IRHVAC_SERVICE_SCHEMA,
+    },
 }
 
 
@@ -1873,6 +1877,13 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         if pi is None:
             return
         pi.abort_plant_test()
+
+    async def async_perturb_now(self) -> None:
+        """Request an immediate auto-perturbation cycle."""
+        pi = self._pi
+        if pi is None:
+            return
+        pi.perturb_now()
 
     def _resolve_coeff_index(self, name: str) -> int | None:
         """Resolve a coefficient name to its index."""
