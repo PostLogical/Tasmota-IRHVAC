@@ -1332,7 +1332,66 @@ def compute_blended_update(
     return result
 
 
-# ── Residual time-of-day analysis ──────────────────────────────────
+def fuse_batch_greybox(
+    result: BatchResult,
+    greybox_beta: list[float | None],
+    greybox_std_err: list[float],
+) -> None:
+    """Fuse WLS and grey-box β estimates via inverse-variance weighting.
+
+    For each coefficient where grey-box provides an estimate (not None)
+    and has finite std_err, combines the two independent estimates:
+
+        1/σ²_fused = 1/σ²_wls + 1/σ²_gb
+        β_fused = σ²_fused × (β_wls/σ²_wls + β_gb/σ²_gb)
+
+    Modifies result.beta_batch and result.beta_std_err in-place so
+    the downstream compute_blended_update() sees the fused estimate.
+
+    When grey-box estimate is None or std_err is infinite, the WLS
+    estimate passes through unchanged.
+    """
+    n = min(len(result.beta_batch), len(greybox_beta))
+    fused_count = 0
+    for i in range(n):
+        gb = greybox_beta[i]
+        gb_se = greybox_std_err[i] if i < len(greybox_std_err) else float("inf")
+        wls_se = result.beta_std_err[i] if i < len(result.beta_std_err) else float("inf")
+
+        if gb is None or math.isinf(gb_se) or math.isinf(wls_se):
+            continue
+
+        gb_var = gb_se * gb_se
+        wls_var = wls_se * wls_se
+
+        if gb_var < 1e-12 or wls_var < 1e-12:
+            continue
+
+        # Inverse-variance weighting
+        fused_prec = 1.0 / wls_var + 1.0 / gb_var
+        fused_var = 1.0 / fused_prec
+        fused_beta = fused_var * (
+            result.beta_batch[i] / wls_var + gb / gb_var
+        )
+        fused_se = math.sqrt(fused_var)
+
+        _LOGGER.info(
+            "  β%d fuse: WLS=%.4f (σ=%.4f) + GB=%.4f (σ=%.4f) → %.4f (σ=%.4f)",
+            i, result.beta_batch[i], wls_se, gb, gb_se, fused_beta, fused_se,
+        )
+
+        result.beta_batch[i] = fused_beta
+        result.beta_std_err[i] = fused_se
+        fused_count += 1
+
+    if fused_count > 0:
+        _LOGGER.info(
+            "Fused %d coefficient(s) from WLS + grey-box",
+            fused_count,
+        )
+
+
+# ─��� Residual time-of-day analysis ─────���────────────────────────────
 
 
 @dataclass

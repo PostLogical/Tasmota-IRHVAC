@@ -38,7 +38,7 @@ from homeassistant.util.unit_conversion import TemperatureConverter
 
 import math
 
-from .batch_learning import BatchResult, DiversityAwareBuffer, HourlyResidualPattern, Observation, analyze_residuals_by_hour, weighted_least_squares, compare_and_report, compute_blended_update
+from .batch_learning import BatchResult, DiversityAwareBuffer, HourlyResidualPattern, Observation, analyze_residuals_by_hour, fuse_batch_greybox, weighted_least_squares, compare_and_report, compute_blended_update
 from .greybox_observer import (
     GreyboxBridgeResult,
     GreyboxResult,
@@ -191,6 +191,7 @@ class PIController:
             CONF_PI_SENSOR_FILTER_TAU, DEFAULT_PI_SENSOR_FILTER_TAU
         )  # Low-pass filter τ on room temperature (seconds). 0 = disabled.
         self._smith_enabled: bool = config.get(CONF_PI_SMITH_ENABLED, DEFAULT_PI_SMITH_ENABLED)
+        self._greybox_blending_enabled: bool = config.get("pi_greybox_blending", False)
         self._SETPOINT_HOLD_SECONDS: float = float(
             config.get(CONF_PI_SETPOINT_HOLD, DEFAULT_PI_SETPOINT_HOLD)
         )
@@ -647,6 +648,64 @@ class PIController:
             log_prefix=self._log_prefix,
         )
 
+        # Record plant ID snapshot (needed for grey-box seeding).
+        plant = self._plant_id.plant
+        result.plant_snapshot = {
+            "k": plant.k.value,
+            "k_confidence": plant.k.confidence,
+            "theta": plant.theta.value,
+            "tau_fast": plant.tau_fast.value,
+            "tau_fast_confidence": plant.tau_fast.confidence,
+            "tau_slow": plant.tau_slow.value,
+            "tau_slow_confidence": plant.tau_slow.confidence,
+        }
+
+        # ── Grey-box 1R1C energy balance + steady-state bridge ──
+        # Run BEFORE fusion+blend so this cycle's grey-box can inform
+        # the coefficient update (no one-cycle lag).
+        greybox = fit_greybox(
+            observations,
+            model_inputs=self._model_inputs,
+            plant_tau_slow=plant.tau_slow.value if plant.tau_slow.confidence > 0 else None,
+            plant_tau_slow_confidence=plant.tau_slow.confidence,
+        )
+        if greybox is not None:
+            log_greybox_result(greybox, log_prefix=self._log_prefix)
+            self._last_greybox_result = greybox
+            self._last_greybox_timestamp_iso = datetime.utcnow().isoformat() + "Z"
+
+            # Bridge: convert rate coefficients to WLS-compatible β
+            bridge = greybox_to_beta(
+                greybox,
+                model_inputs=self._model_inputs,
+                log_prefix=self._log_prefix,
+            )
+            self._last_greybox_bridge = bridge
+
+            # Cross-validation: compare grey-box β against WLS β
+            if result.beta_batch:
+                self._log_greybox_wls_comparison(bridge, result)
+
+        # ── Grey-box fusion ──
+        # If bridge available, gates pass, and blending enabled, fuse
+        # grey-box β into the batch estimate before blending with the
+        # online model.  When disabled (default), the bridge still runs
+        # for logging/diagnostics but doesn't influence coefficients.
+        if (
+            self._greybox_blending_enabled
+            and self._last_greybox_bridge is not None
+            and self._last_greybox_bridge.gates_passed
+        ):
+            _LOGGER.info(
+                "%sGrey-box blending: fusing into batch estimate",
+                self._log_prefix,
+            )
+            fuse_batch_greybox(
+                result,
+                self._last_greybox_bridge.beta,
+                self._last_greybox_bridge.beta_std_err,
+            )
+
         compute_blended_update(result, prior_std=1.0, max_step=1.0)
         if result.recommend_update and result.beta_blended:
             for i, val in enumerate(result.beta_blended):
@@ -691,25 +750,12 @@ class PIController:
                 self._log_prefix, "heat" if is_heating else "cool",
             )
 
-        # Record plant ID snapshot for future cross-validation.
-        plant = self._plant_id.plant
-        result.plant_snapshot = {
-            "k": plant.k.value,
-            "k_confidence": plant.k.confidence,
-            "theta": plant.theta.value,
-            "tau_fast": plant.tau_fast.value,
-            "tau_fast_confidence": plant.tau_fast.confidence,
-            "tau_slow": plant.tau_slow.value,
-            "tau_slow_confidence": plant.tau_slow.confidence,
-        }
-
         self._last_batch_result = result
         self._last_batch_timestamp = time.monotonic()
         self._last_batch_wallclock = datetime.now().isoformat(timespec="seconds")
         self._metrics.batch_model_rms = result.residual_rms
 
         # ── Residual time-of-day analysis ──
-        # Use the blended or batch beta for residual computation
         beta_for_residuals = result.beta_blended if result.beta_blended else result.beta_batch
         self._last_residual_patterns = analyze_residuals_by_hour(
             observations, beta_for_residuals, n_features=rls.n,
@@ -723,30 +769,6 @@ class PIController:
                     self._log_prefix, p.start_hour, p.end_hour,
                     p.mean_residual, p.n_observations,
                 )
-
-        # ── Grey-box 1R1C energy balance + steady-state bridge ──
-        greybox = fit_greybox(
-            observations,
-            model_inputs=self._model_inputs,
-            plant_tau_slow=plant.tau_slow.value if plant.tau_slow.confidence > 0 else None,
-            plant_tau_slow_confidence=plant.tau_slow.confidence,
-        )
-        if greybox is not None:
-            log_greybox_result(greybox, log_prefix=self._log_prefix)
-            self._last_greybox_result = greybox
-            self._last_greybox_timestamp_iso = datetime.utcnow().isoformat() + "Z"
-
-            # Bridge: convert rate coefficients to WLS-compatible β
-            bridge = greybox_to_beta(
-                greybox,
-                model_inputs=self._model_inputs,
-                log_prefix=self._log_prefix,
-            )
-            self._last_greybox_bridge = bridge
-
-            # Cross-validation: compare grey-box β against WLS β
-            if result.beta_batch:
-                self._log_greybox_wls_comparison(bridge, result)
 
         # ── Drift detection: track per-coefficient correction direction ──
         if result.beta_blended and result.beta_current:

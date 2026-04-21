@@ -18,6 +18,7 @@ from custom_components.tasmota_irhvac.pi.batch_learning import (
     analyze_residuals_by_hour,
     compare_and_report,
     compute_blended_update,
+    fuse_batch_greybox,
     weighted_least_squares,
 )
 
@@ -660,6 +661,77 @@ class TestComputeBlendedUpdate:
         assert diag is not None
         assert abs(diag[0] - 0.375) < 1e-9
         assert abs(diag[1] - 0.5) < 1e-9
+
+
+class TestFuseBatchGreybox:
+    """Tests for inverse-variance fusion of WLS and grey-box β."""
+
+    def _make_result(self, beta_batch, std_err):
+        return BatchResult(
+            n_total=100, n_eligible=60,
+            beta_batch=list(beta_batch),
+            beta_current=[],
+            residual_rms=0.5,
+            max_coeff_change_pct=0.0,
+            recommend_update=True,
+            beta_std_err=list(std_err),
+        )
+
+    def test_equal_variance_averages(self):
+        """Equal σ → fused β is arithmetic mean."""
+        r = self._make_result([1.0, -0.5], [0.1, 0.1])
+        fuse_batch_greybox(r, [None, -0.3], [float("inf"), 0.1])
+        # β₀: gb=None → unchanged
+        assert r.beta_batch[0] == 1.0
+        # β₁: mean of -0.5 and -0.3 = -0.4
+        assert abs(r.beta_batch[1] - (-0.4)) < 1e-10
+
+    def test_tighter_greybox_pulls_more(self):
+        """Lower grey-box σ → fused β closer to grey-box."""
+        r = self._make_result([1.0, -0.5], [0.1, 1.0])
+        fuse_batch_greybox(r, [None, -0.3], [float("inf"), 0.1])
+        # gb σ=0.1 vs wls σ=1.0 → gb has 100× more precision
+        # fused ≈ -0.3 (grey-box dominates)
+        assert abs(r.beta_batch[1] - (-0.3)) < 0.01
+
+    def test_tighter_wls_stays_close(self):
+        """Lower WLS σ → fused β stays close to WLS."""
+        r = self._make_result([1.0, -0.5], [0.1, 0.1])
+        fuse_batch_greybox(r, [None, -0.3], [float("inf"), 1.0])
+        # wls σ=0.1 vs gb σ=1.0 → WLS dominates
+        assert abs(r.beta_batch[1] - (-0.5)) < 0.01
+
+    def test_none_greybox_passthrough(self):
+        """None grey-box β → WLS unchanged."""
+        r = self._make_result([1.0, -0.5, 0.3], [0.1, 0.1, 0.1])
+        fuse_batch_greybox(r, [None, None, None], [float("inf")] * 3)
+        assert r.beta_batch == [1.0, -0.5, 0.3]
+
+    def test_infinite_greybox_se_passthrough(self):
+        """Infinite grey-box σ → WLS unchanged."""
+        r = self._make_result([1.0, -0.5], [0.1, 0.1])
+        fuse_batch_greybox(r, [0.5, -0.3], [float("inf"), float("inf")])
+        assert r.beta_batch == [1.0, -0.5]
+
+    def test_fused_se_reduced(self):
+        """Fused σ is always less than both inputs."""
+        r = self._make_result([1.0, -0.5], [0.2, 0.3])
+        fuse_batch_greybox(r, [None, -0.4], [float("inf"), 0.25])
+        # Fused σ = 1/√(1/0.3² + 1/0.25²) ≈ 0.192
+        assert r.beta_std_err[1] < 0.25
+        assert r.beta_std_err[1] < 0.3
+
+    def test_mixed_some_fused_some_not(self):
+        """Only coefficients with both finite σ and non-None β get fused."""
+        r = self._make_result([1.0, -0.5, 0.3], [0.1, 0.1, 0.1])
+        fuse_batch_greybox(
+            r,
+            [None, -0.3, 0.5],             # only β₁ and β₂ from grey-box
+            [float("inf"), 0.1, float("inf")],  # only β₁ has finite σ
+        )
+        assert r.beta_batch[0] == 1.0   # no gb β → unchanged
+        assert r.beta_batch[1] != -0.5  # fused
+        assert r.beta_batch[2] == 0.3   # gb σ infinite → unchanged
 
 
 class TestRawReadingsFeatures:
