@@ -53,6 +53,7 @@ class PIExtraStoredData(ExtraStoredData):
     hp_deadband_estimate_heat: float = 0.5
     hp_deadband_estimate_cool: float = 0.5
     exclusion_count: int = 0
+    model_input_fingerprint: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize to JSON-compatible dict."""
@@ -88,6 +89,7 @@ class PIExtraStoredData(ExtraStoredData):
             "hp_deadband_estimate_heat": self.hp_deadband_estimate_heat,
             "hp_deadband_estimate_cool": self.hp_deadband_estimate_cool,
             "exclusion_count": self.exclusion_count,
+            "model_input_fingerprint": self.model_input_fingerprint,
         }
 
     @classmethod
@@ -131,6 +133,7 @@ class PIExtraStoredData(ExtraStoredData):
                 hp_deadband_estimate_heat=float(restored.get("hp_deadband_estimate_heat", 0.5)),
                 hp_deadband_estimate_cool=float(restored.get("hp_deadband_estimate_cool", 0.5)),
                 exclusion_count=int(restored.get("exclusion_count", 0)),
+                model_input_fingerprint=str(restored.get("model_input_fingerprint", "")),
             )
         except (KeyError, ValueError, TypeError, AttributeError):
             return None

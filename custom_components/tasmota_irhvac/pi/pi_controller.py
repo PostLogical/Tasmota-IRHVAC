@@ -413,6 +413,7 @@ class PIController:
         self._batch_analysis_timer: CALLBACK_TYPE | None = None
         self._last_batch_result: BatchResult | None = None
         self._last_greybox_result: GreyboxResult | None = None
+        self._last_greybox_timestamp_iso: str | None = None
         self._last_batch_timestamp: float | None = None
         self._last_batch_wallclock: str = ""  # ISO-8601 wall-clock time
         self._last_residual_patterns: list[HourlyResidualPattern] = []
@@ -711,6 +712,7 @@ class PIController:
         if greybox is not None:
             log_greybox_result(greybox, log_prefix=self._log_prefix)
             self._last_greybox_result = greybox
+            self._last_greybox_timestamp_iso = datetime.utcnow().isoformat() + "Z"
 
         # ── Drift detection: track per-coefficient correction direction ──
         if result.beta_blended and result.beta_current:
@@ -1190,6 +1192,21 @@ class PIController:
                 round(self._sensor_filtered, 3)
                 if self._sensor_filtered is not None else None
             ),
+            "greybox_tau_eff": (
+                round(self._last_greybox_result.tau_eff, 1)
+                if self._last_greybox_result is not None else None
+            ),
+            "greybox_tau_agreement_pct": (
+                round(self._last_greybox_result.tau_agreement_pct, 1)
+                if self._last_greybox_result is not None
+                and self._last_greybox_result.tau_agreement_pct is not None
+                else None
+            ),
+            "greybox_rms": (
+                round(self._last_greybox_result.residual_rms, 5)
+                if self._last_greybox_result is not None else None
+            ),
+            "greybox_last_run": self._last_greybox_timestamp_iso,
         }
 
     def _coeff_names(self) -> list[str]:

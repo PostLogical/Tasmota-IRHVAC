@@ -2907,6 +2907,86 @@ class TestIMCStateAttributes:
         assert status["tau_estimate"] == 120.0
 
 
+# ── Grey-box Attribute Tests ─────────────────────────────────────────
+
+
+class TestGreyboxAttributes:
+    """Tests for grey-box observer attributes in get_extra_state_attributes."""
+
+    def test_greybox_attrs_none_before_first_fit(self):
+        """All greybox attrs are None when no fit has run."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        attrs = pi.get_extra_state_attributes()
+        assert attrs["greybox_tau_eff"] is None
+        assert attrs["greybox_tau_agreement_pct"] is None
+        assert attrs["greybox_rms"] is None
+        assert attrs["greybox_last_run"] is None
+
+    def test_greybox_attrs_populated_after_fit(self):
+        """Attributes reflect the GreyboxResult after a successful fit."""
+        from custom_components.tasmota_irhvac.pi.greybox_observer import GreyboxResult
+
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        result = GreyboxResult(
+            n_observations=100,
+            n_hp_on=60,
+            n_hp_off=40,
+            ua_c=0.012,
+            k_c=0.015,
+            alpha_c=-0.003,
+            tau_eff=83.3,
+            residual_rms=0.00042,
+            cost=0.5,
+            n_function_evals=20,
+            plant_tau_slow=85.0,
+            tau_agreement_pct=2.0,
+        )
+        pi._last_greybox_result = result
+        pi._last_greybox_timestamp_iso = "2026-04-20T12:00:00Z"
+
+        attrs = pi.get_extra_state_attributes()
+        assert attrs["greybox_tau_eff"] == 83.3
+        assert attrs["greybox_tau_agreement_pct"] == 2.0
+        assert attrs["greybox_rms"] == 0.00042
+        assert attrs["greybox_last_run"] == "2026-04-20T12:00:00Z"
+
+    def test_greybox_agreement_none_when_no_plant_tau(self):
+        """tau_agreement_pct is None when plant tau_slow wasn't available."""
+        from custom_components.tasmota_irhvac.pi.greybox_observer import GreyboxResult
+
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        result = GreyboxResult(
+            n_observations=50,
+            n_hp_on=30,
+            n_hp_off=20,
+            ua_c=0.01,
+            k_c=0.012,
+            alpha_c=-0.002,
+            tau_eff=100.0,
+            residual_rms=0.00055,
+            cost=0.3,
+            n_function_evals=15,
+            plant_tau_slow=None,
+            tau_agreement_pct=None,
+        )
+        pi._last_greybox_result = result
+        pi._last_greybox_timestamp_iso = "2026-04-20T06:00:00Z"
+
+        attrs = pi.get_extra_state_attributes()
+        assert attrs["greybox_tau_eff"] == 100.0
+        assert attrs["greybox_tau_agreement_pct"] is None
+        assert attrs["greybox_rms"] == 0.00055
+        assert attrs["greybox_last_run"] == "2026-04-20T06:00:00Z"
+
+
 # ── Sensor Low-Pass Filter Tests ──────────────────────────────────────
 
 
