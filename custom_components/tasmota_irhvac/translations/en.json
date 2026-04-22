@@ -48,6 +48,14 @@
           "Critical": "Critical",
           "Disabled": "Disabled"
         }
+      },
+      "learning": {
+        "name": "Learning State",
+        "state": {
+          "Learning": "Learning",
+          "Optimizing": "Optimizing",
+          "Optimized": "Optimized"
+        }
       }
     },
     "button": {

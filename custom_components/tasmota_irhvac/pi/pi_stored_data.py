@@ -18,6 +18,10 @@ class PIExtraStoredData(ExtraStoredData):
 
     Stores RLS models, integral, desired_temp, and hp_setpoint so they survive
     restarts without bloating the recorder DB on every state write.
+
+    Fields typed dict[str, Any] are opaque serialized blobs from subsystems
+    (RLS, plant ID, auto-perturbation).  The stored data module doesn't parse
+    them — it passes them through to the subsystem's restore() method.
     """
 
     pi_integral: float
@@ -32,26 +36,28 @@ class PIExtraStoredData(ExtraStoredData):
     controllable_cvh: float = 0.0
     uncontrollable_cvh: float = 0.0
     ff_load_fraction: float = 0.5
-    rls_heat_model: dict = dataclasses.field(default_factory=dict)
-    rls_cool_model: dict = dataclasses.field(default_factory=dict)
-    lag_filter_states: dict = dataclasses.field(default_factory=dict)
-    heat_seeds_at_learn: list = dataclasses.field(default_factory=list)
-    cool_seeds_at_learn: list = dataclasses.field(default_factory=list)
+    rls_heat_model: dict[str, Any] = dataclasses.field(default_factory=dict)  # RLSModel.as_dict()
+    rls_cool_model: dict[str, Any] = dataclasses.field(default_factory=dict)  # RLSModel.as_dict()
+    lag_filter_states: dict[str, float] = dataclasses.field(default_factory=dict)
+    heat_seeds_at_learn: list[float] = dataclasses.field(default_factory=list)
+    cool_seeds_at_learn: list[float] = dataclasses.field(default_factory=list)
     ki_at_save: float = 0.0
     tau_estimate: float = 0.0  # backward compat (tau_fast)
     tau_observations: int = 0  # backward compat (tau_fast)
-    plant_identifier_state: dict = dataclasses.field(default_factory=dict)
-    observation_buffer_heat: list = dataclasses.field(default_factory=list)
-    observation_buffer_cool: list = dataclasses.field(default_factory=list)
-    drift_correction_signs: list = dataclasses.field(default_factory=list)
-    last_batch_result: dict | None = None
+    plant_identifier_state: dict[str, Any] = dataclasses.field(default_factory=dict)  # PlantIdentifier.as_dict()
+    observation_buffer_heat: list[dict[str, Any]] = dataclasses.field(default_factory=list)  # Observation.as_dict()
+    observation_buffer_cool: list[dict[str, Any]] = dataclasses.field(default_factory=list)  # Observation.as_dict()
+    drift_correction_signs: list[list[int]] = dataclasses.field(default_factory=list)
+    last_batch_result: dict[str, Any] | None = None  # BatchResult via dataclasses.asdict()
     last_batch_wallclock: str = ""  # ISO-8601 wall-clock time of last batch run
-    tuning_alert_counters: dict = dataclasses.field(default_factory=dict)
-    tuning_alert_snapshots: dict = dataclasses.field(default_factory=dict)
+    tuning_alert_counters: dict[str, int] = dataclasses.field(default_factory=dict)
+    tuning_alert_snapshots: dict[str, float] = dataclasses.field(default_factory=dict)
     hp_deadband_estimate_heat: float = 0.5
     hp_deadband_estimate_cool: float = 0.5
     exclusion_count: int = 0
-    auto_perturb_state: dict = dataclasses.field(default_factory=dict)
+    auto_perturb_state: dict[str, Any] = dataclasses.field(default_factory=dict)  # AutoPerturbation.as_dict()
+    manual_override_heat: list[bool | None] = dataclasses.field(default_factory=list)
+    manual_override_cool: list[bool | None] = dataclasses.field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize to JSON-compatible dict."""
@@ -88,6 +94,8 @@ class PIExtraStoredData(ExtraStoredData):
             "hp_deadband_estimate_cool": self.hp_deadband_estimate_cool,
             "exclusion_count": self.exclusion_count,
             "auto_perturb_state": self.auto_perturb_state,
+            "manual_override_heat": self.manual_override_heat,
+            "manual_override_cool": self.manual_override_cool,
         }
 
     @classmethod
@@ -136,6 +144,8 @@ class PIExtraStoredData(ExtraStoredData):
                 hp_deadband_estimate_cool=float(restored.get("hp_deadband_estimate_cool", 0.5)),
                 exclusion_count=int(restored.get("exclusion_count", 0)),
                 auto_perturb_state=restored.get("auto_perturb_state", {}),
+                manual_override_heat=restored.get("manual_override_heat", []),
+                manual_override_cool=restored.get("manual_override_cool", []),
             )
         except (KeyError, ValueError, TypeError, AttributeError):
             return None

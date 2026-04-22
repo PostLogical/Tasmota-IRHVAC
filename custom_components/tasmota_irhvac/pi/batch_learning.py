@@ -41,7 +41,7 @@ class Observation:
 
     timestamp: float  # monotonic time (for ordering/age)
     wall_time: float  # UTC epoch seconds (for sun position, time-of-day)
-    hp_setpoint: float  # integer HP setpoint (°C)
+    hp_setpoint: float | None  # HP setpoint (°C), None for passive observations
     current_c: float  # filtered room temperature (°C)
     desired_c: float  # target temperature (°C)
     outdoor_temp_c: float | None  # absolute outdoor temperature (°C)
@@ -249,9 +249,9 @@ class DiversityAwareBuffer:
         """
         before = len(self._buffer)
         if mode == "heat":
-            self._buffer = [o for o in self._buffer if not (o.hp_setpoint < o.current_c)]
+            self._buffer = [o for o in self._buffer if o.hp_setpoint is None or not (o.hp_setpoint < o.current_c)]
         else:
-            self._buffer = [o for o in self._buffer if not (o.hp_setpoint > o.current_c)]
+            self._buffer = [o for o in self._buffer if o.hp_setpoint is None or not (o.hp_setpoint > o.current_c)]
         removed = before - len(self._buffer)
         if removed:
             self.recompute_info_matrix()
@@ -403,6 +403,16 @@ class DiversityAwareBuffer:
 
         self._updates_since_recompute = 0
 
+    def _ensure_xtx_matrix(self) -> None:
+        """Ensure the forward X'X matrix is available for VIF/κ computation.
+
+        The Sherman-Morrison incremental updates only maintain the inverse.
+        The forward matrix is computed from scratch by recompute_info_matrix()
+        and stored separately.  Call this before any method that needs X'X.
+        """
+        if self._xtx_matrix is None and len(self._buffer) > 0:
+            self.recompute_info_matrix()
+
     def compute_condition_number(self) -> float:
         """Compute the spectral condition number of the column-normalized X'X.
 
@@ -419,8 +429,9 @@ class DiversityAwareBuffer:
         - κ > 100: severe multicollinearity, coefficient estimates numerically unstable
 
         Uses power iteration for λ_max and inverse iteration for λ_min.
-        Returns inf if the forward matrix hasn't been computed yet.
+        Returns inf if the matrix cannot be computed (empty buffer).
         """
+        self._ensure_xtx_matrix()
         if self._xtx_matrix is None:
             return float('inf')
         n = self._n_features
@@ -479,6 +490,41 @@ class DiversityAwareBuffer:
             return float('inf')
 
         return math.sqrt(lambda_max / lambda_min)
+
+    def compute_vif(self) -> list[float]:
+        """Compute per-feature Variance Inflation Factor from (X'X)⁻¹.
+
+        VIF_j = diag((corr)⁻¹)_j where corr is the column-normalized X'X
+        (correlation matrix).  VIF > 10 indicates the feature is too
+        collinear with others for reliable estimation (Belsley 1980).
+
+        Returns a list of VIF values, one per feature.  Returns all inf
+        if the matrix cannot be computed (empty buffer) or is not invertible.
+        """
+        self._ensure_xtx_matrix()
+        if self._xtx_matrix is None:
+            return [float('inf')] * self._n_features
+        n = self._n_features
+        if n < 2:
+            return [1.0] * n
+
+        # Column-normalize to correlation matrix (same as condition number)
+        diag_sqrt = [
+            math.sqrt(self._xtx_matrix[i][i])
+            if self._xtx_matrix[i][i] > 1e-15 else 1.0
+            for i in range(n)
+        ]
+        corr = [
+            [self._xtx_matrix[i][j] / (diag_sqrt[i] * diag_sqrt[j])
+             for j in range(n)]
+            for i in range(n)
+        ]
+
+        corr_inv = self._invert_matrix([row[:] for row in corr], n)
+        if corr_inv is None:
+            return [float('inf')] * n
+
+        return [max(corr_inv[i][i], 1.0) for i in range(n)]
 
     def get_pairwise_correlations(
         self, feature_names: list[str] | None = None,
@@ -653,6 +699,7 @@ class BatchResult:
     beta_blended: list[float] = field(default_factory=list)  # safe update after covariance-weighted blend
     blend_gains: list[float] = field(default_factory=list)  # per-coefficient Kalman gain K_i ∈ [0, 1]
     plant_snapshot: dict[str, Any] = field(default_factory=dict)  # plant ID state at batch time
+    feature_vif: list[float] = field(default_factory=list)  # per-feature VIF from regression data
 
 
 def _weighted_variance(values: list[float], weights: list[float]) -> float:
@@ -890,6 +937,7 @@ def weighted_least_squares(
     min_feature_representation: int = 10,
     feature_order: list[str] | None = None,
     model_inputs: list[dict[str, Any]] | None = None,
+    frozen_features: set[int] | None = None,
 ) -> BatchResult | None:
     """Run weighted least squares on physical observations.
 
@@ -907,6 +955,7 @@ def weighted_least_squares(
     eligible = [
         o for o in observations
         if o.clamped_reason not in _EXCLUDE_REASONS
+        and o.hp_setpoint is not None
         and abs(o.room_rate) < room_rate_threshold
     ]
 
@@ -923,7 +972,10 @@ def weighted_least_squares(
         return None
 
     m_base = len(base_eligible)
-    y_base = [o.hp_setpoint - o.current_c for o in base_eligible]
+    y_base: list[float] = []
+    for o in base_eligible:
+        assert o.hp_setpoint is not None
+        y_base.append(o.hp_setpoint - o.current_c)
     w_base = [1.0 / (1.0 + (o.room_rate / room_rate_threshold) ** 2) for o in base_eligible]
     X_base: list[list[float]] = [[1.0, o.outdoor_temp_c - o.current_c] for o in base_eligible]  # type: ignore[operator]  # filtered not-None above
 
@@ -976,9 +1028,16 @@ def weighted_least_squares(
         )
 
     held: set[int] = set()
+    # Frozen features (from per-feature gating) are treated as held so
+    # batch WLS matches the online RLS partial model — both estimators
+    # see the same features, preventing batch-online oscillation.
+    _frozen = frozen_features or set()
     active_input_indices: list[int] = []
     for feat_idx, m_input in enumerate(m_inputs):
         coeff_idx = feat_idx + 2
+        if coeff_idx in _frozen:
+            held.add(coeff_idx)
+            continue
         entity_id = input_entity_ids[feat_idx]
         if not entity_id:
             held.add(coeff_idx)
@@ -1052,6 +1111,7 @@ def weighted_least_squares(
         for o in base_eligible:
             vec = build_feature_vector_from_raw(o, m_inputs, feature_order)
             if vec is not None:
+                assert o.hp_setpoint is not None
                 full_obs.append(o)
                 full_X.append(vec)
                 full_y.append(o.hp_setpoint - o.current_c)
@@ -1099,6 +1159,13 @@ def weighted_least_squares(
                 n_excluded, threshold_val,
             )
 
+    # ── VIF from regression data ──────────────────────────────────────
+    # Compute per-feature VIF from the eligible-only feature matrix.
+    # This uses the same observations the regression used, not the full
+    # buffer (which may include passive/clamped observations with different
+    # correlation structure).
+    vif = _compute_vif_from_features(full_X, n, m_full)
+
     return BatchResult(
         n_total=len(observations),
         n_eligible=m_full,
@@ -1110,7 +1177,48 @@ def weighted_least_squares(
         recommend_update=False,
         held_features=held,
         beta_std_err=std_err,
+        feature_vif=vif,
     )
+
+
+def _compute_vif_from_features(
+    X: list[list[float]], n_features: int, n_obs: int,
+) -> list[float]:
+    """Compute per-feature VIF from a feature matrix.
+
+    VIF_j = diag((corr)⁻¹)_j where corr is the column-normalized X'X.
+    Uses the same eligible-only data the regression was fitted on.
+
+    Returns [VIF_0, ..., VIF_{n-1}].  All inf if matrix is singular.
+    """
+    if n_obs < 2 or n_features < 2:
+        return [1.0] * n_features
+
+    n = n_features
+    # Build X'X
+    xtx = [[0.0] * n for _ in range(n)]
+    for k in range(n_obs):
+        row = X[k]
+        for i in range(min(len(row), n)):
+            for j in range(min(len(row), n)):
+                xtx[i][j] += row[i] * row[j]
+
+    # Column-normalize to correlation matrix
+    diag_sqrt = [
+        math.sqrt(xtx[i][i]) if xtx[i][i] > 1e-15 else 1.0
+        for i in range(n)
+    ]
+    corr = [
+        [xtx[i][j] / (diag_sqrt[i] * diag_sqrt[j]) for j in range(n)]
+        for i in range(n)
+    ]
+
+    # Invert correlation matrix (reuse DiversityAwareBuffer's implementation)
+    corr_inv = DiversityAwareBuffer._invert_matrix(corr, n)
+    if corr_inv is None:
+        return [float('inf')] * n
+
+    return [max(corr_inv[i][i], 1.0) for i in range(n)]
 
 
 def _diagonal_of_inverse(A: list[list[float]], n: int) -> list[float] | None:
@@ -1454,7 +1562,9 @@ def analyze_residuals_by_hour(
     hour_residuals: dict[int, list[float]] = {h: [] for h in range(24)}
 
     for o in observations:
-        if o.clamped_reason in ("no_output", "clamped") or abs(o.room_rate) >= room_rate_threshold:
+        if o.clamped_reason in ("no_output", "clamped") or o.hp_setpoint is None:
+            continue
+        if abs(o.room_rate) >= room_rate_threshold:
             continue
         # Derive wall hour from wall_time (UTC epoch → local hour)
         wall_hour = _dt.datetime.fromtimestamp(o.wall_time).hour if o.wall_time > 0 else -1

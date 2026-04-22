@@ -249,6 +249,12 @@ async def async_setup_entry(
             entry_id=entry.entry_id,
         )
     )
+    sensors.append(
+        TasmotaIrhvacLearningSensor(
+            climate_entity=climate_entity,
+            entry_id=entry.entry_id,
+        )
+    )
     async_add_entities(sensors)
 
 
@@ -355,6 +361,79 @@ class TasmotaIrhvacHealthSensor(SensorEntity):
         attrs = dict(status)
         # Join alerts as semicolon-separated string for HA display
         attrs["alerts"] = "; ".join(status["alerts"]) if status["alerts"] else ""
+        return attrs
+
+    @property
+    def available(self) -> bool:
+        """Sensor is available when the climate entity is available."""
+        return bool(self._climate.available)
+
+    async def async_added_to_hass(self) -> None:
+        """Subscribe to dispatcher signal for state updates."""
+
+        @callback
+        def _update_sensor() -> None:
+            self.async_write_ha_state()
+
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                SIGNAL_PI_UPDATE.format(self._entry_id),
+                _update_sensor,
+            )
+        )
+
+
+class TasmotaIrhvacLearningSensor(SensorEntity):
+    """Sensor that reports learning state of the PI controller."""
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = ["Learning", "Optimizing", "Optimized"]
+    _attr_translation_key = "learning"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self,
+        climate_entity: TasmotaIrhvac,
+        entry_id: str,
+    ) -> None:
+        """Initialize the learning sensor."""
+        self._climate = climate_entity
+        self._entry_id = entry_id
+        self._attr_unique_id = f"{climate_entity.unique_id}_learning"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device info to group sensor with climate entity."""
+        return self._climate.device_info
+
+    @property
+    def _pi(self) -> PIController | None:
+        """Return the PI controller, narrowed from the union type."""
+        from .pi import PIController
+        pi = self._climate._pi
+        return pi if isinstance(pi, PIController) else None
+
+    @property
+    def native_value(self) -> str | None:
+        """Return current learning state."""
+        pi = self._pi
+        if pi is None:
+            return None
+        return str(pi.get_learning_state()["state"])
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return learning details as attributes."""
+        pi = self._pi
+        if pi is None:
+            return {}
+        state = pi.get_learning_state()
+        attrs = dict(state)
+        attrs["frozen_features"] = ", ".join(state["frozen_features"]) if state["frozen_features"] else ""
+        attrs["active_features"] = ", ".join(state["active_features"]) if state["active_features"] else ""
         return attrs
 
     @property

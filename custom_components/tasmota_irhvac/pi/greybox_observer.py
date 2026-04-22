@@ -192,7 +192,7 @@ def fit_greybox(
     n_hp_on = 0
     n_hp_off = 0
     for o in eligible:
-        if o.clamped_reason == "no_output":
+        if o.clamped_reason == "no_output" or o.hp_setpoint is None:
             hp_offset.append(0.0)
             n_hp_off += 1
         else:

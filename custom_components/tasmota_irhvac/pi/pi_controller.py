@@ -15,7 +15,7 @@ import dataclasses
 import logging
 import time
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -368,6 +368,13 @@ class PIController:
             feature_scales=self._feature_scales,
         )
 
+        # Cold start: freeze model input features (index 2+) until batch
+        # WLS establishes per-feature confidence.  Intercept (0) and
+        # outdoor_delta (1) are always identifiable from base regression.
+        for i in range(2, self._rls_heat.n):
+            self._rls_heat.frozen[i] = True
+            self._rls_cool.frozen[i] = True
+
         # Model input runtime state (values, lag filters, outdoor temp)
         self._inputs = ModelInputManager(
             model_inputs=self._model_inputs,
@@ -447,6 +454,22 @@ class PIController:
         self._rls_cool_mature: bool = False
         self._tuning_alert_counters: dict[str, int] = {}
         self._tuning_alert_snapshots: dict[str, float] = {}
+
+        # Track last active mode for passive tick buffer selection
+        self._last_active_heating: bool = True
+
+        # ── Per-feature confidence gating ───────────────────────────
+        # Three-state manual override per coefficient:
+        #   None = auto-gating decides (default)
+        #   True = force unfrozen (user manually unfroze)
+        #   False = force frozen (user manually froze)
+        # Auto-gating skips features where override is not None.
+        self._manual_override_heat: list[bool | None] = [None] * (self._n_model_inputs + 1)
+        self._manual_override_cool: list[bool | None] = [None] * (self._n_model_inputs + 1)
+        # κ-gated lambda: original lambda_base cached for restoration
+        self._original_lambda_base_heat: float = self._rls_heat.lambda_base
+        self._original_lambda_base_cool: float = self._rls_cool.lambda_base
+        self._cached_kappa: float | None = None
 
         # ── CUSUM anomaly detection state ───────────────────────────
         self._residual_history: deque[float] = deque(maxlen=60)
@@ -624,11 +647,15 @@ class PIController:
         coeff_dict = rls.get_coefficients()
         current_phys = [coeff_dict[i] for i in range(rls.n)]
 
+        # Partial model: frozen features held — matches online RLS.
+        # Coefficients from this run get applied via compute_blended_update.
+        frozen_set = self._get_frozen_feature_set(rls)
         result = weighted_least_squares(
             observations, n_features=rls.n, current_beta=current_phys,
             room_rate_threshold=0.02, min_observations=20,
             feature_order=self._feature_order,
             model_inputs=self._inputs.model_inputs,
+            frozen_features=frozen_set,
         )
         if result is None:
             _LOGGER.debug(
@@ -636,6 +663,20 @@ class PIController:
                 self._log_prefix,
             )
             return
+
+        # Full model: all features estimated — for unlock evaluation only.
+        # Coefficients are discarded; only std_err, held_features, and the
+        # buffer VIF are used to decide if frozen features are identifiable.
+        full_result: BatchResult | None = None
+        if frozen_set:
+            full_result = weighted_least_squares(
+                observations, n_features=rls.n, current_beta=current_phys,
+                room_rate_threshold=0.02, min_observations=20,
+                feature_order=self._feature_order,
+                model_inputs=self._inputs.model_inputs,
+                # No frozen_features → estimates everything
+            )
+
         coeff_names = ["intercept", "outdoor_delta"]
         for m in self._model_inputs:
             coeff_names.append(m.get("name", "input"))
@@ -670,7 +711,7 @@ class PIController:
         if greybox is not None:
             log_greybox_result(greybox, log_prefix=self._log_prefix)
             self._last_greybox_result = greybox
-            self._last_greybox_timestamp_iso = datetime.utcnow().isoformat() + "Z"
+            self._last_greybox_timestamp_iso = datetime.now(tz=timezone.utc).isoformat()
 
             # Bridge: convert rate coefficients to WLS-compatible β
             bridge = greybox_to_beta(
@@ -719,24 +760,30 @@ class PIController:
 
         compute_blended_update(result, prior_std=1.0, max_step=1.0)
 
+        # Compute and cache κ for both the κ gate and per-feature unlock.
+        n_eligible = sum(
+            1 for o in buffer.get_all()
+            if o.clamped_reason not in ("no_output", "clamped")
+            and abs(o.room_rate) < 0.02
+        )
+        if n_eligible >= 2 * buffer.n_features:
+            kappa = buffer.compute_condition_number()
+            self._cached_kappa = kappa if not math.isinf(kappa) else None
+        else:
+            kappa = float("inf")
+            self._cached_kappa = None
+
         # κ gate: reject batch recommendation when condition number indicates
         # severe multicollinearity.  The coefficients may look different from
         # current values but the data geometry can't reliably separate them.
         if result.recommend_update:
-            n_eligible = sum(
-                1 for o in buffer.get_all()
-                if o.clamped_reason not in ("no_output", "clamped")
-                and abs(o.room_rate) < 0.02
-            )
-            if n_eligible >= 2 * buffer.n_features:
-                kappa = buffer.compute_condition_number()
-                if not math.isinf(kappa) and kappa > 100:
-                    _LOGGER.warning(
-                        "%sBatch WLS: κ=%.0f (severe) — rejecting recommendation "
-                        "until data geometry improves",
-                        self._log_prefix, kappa,
-                    )
-                    result.recommend_update = False
+            if not math.isinf(kappa) and kappa > 100:
+                _LOGGER.warning(
+                    "%sBatch WLS: κ=%.0f (severe) — rejecting recommendation "
+                    "until data geometry improves",
+                    self._log_prefix, kappa,
+                )
+                result.recommend_update = False
 
         if result.recommend_update and result.beta_blended:
             for i, val in enumerate(result.beta_blended):
@@ -798,6 +845,19 @@ class PIController:
                 "%sBatch WLS: applied blended update to %s model",
                 self._log_prefix, "heat" if is_heating else "cool",
             )
+
+        # ── Per-feature confidence gating ──
+        # Evaluate unlock conditions using the full-model result (all features
+        # estimated).  The full result's std_err, held_features, and VIF tell
+        # us whether each frozen feature is identifiable from current data.
+        if full_result is not None:
+            self._evaluate_feature_unlocks(full_result, rls, is_heating)
+
+        # ── κ-gated learning rate ──
+        # When condition number is elevated, slow online RLS by pushing
+        # λ toward 1.0 (no forgetting).  Linear blend: κ≤30 → no change,
+        # κ≥100 → λ=1.0.  Cached per batch cycle.
+        self._apply_kappa_gated_lambda(rls, is_heating)
 
         self._last_batch_result = result
         self._last_batch_timestamp = time.monotonic()
@@ -979,6 +1039,8 @@ class PIController:
             hp_deadband_estimate_cool=self._hp_deadband_estimate_cool,
             exclusion_count=self._exclusion_count,
             auto_perturb_state=self._auto_perturb.as_dict(),
+            manual_override_heat=list(self._manual_override_heat),
+            manual_override_cool=list(self._manual_override_cool),
         )
 
     def restore_extra_stored_data(self, data: PIExtraStoredData) -> None:
@@ -1065,6 +1127,25 @@ class PIController:
         # Restore auto-perturbation counters
         if data.auto_perturb_state:
             self._auto_perturb.restore(data.auto_perturb_state)
+
+        # Restore manual override state (three-state: None/True/False).
+        # Empty list means pre-override data → all None (auto-gating).
+        n = self._rls_heat.n
+        if data.manual_override_heat:
+            self._manual_override_heat = [
+                v if v is not None and isinstance(v, bool) else None
+                for v in data.manual_override_heat
+            ]
+            # Pad if model grew
+            while len(self._manual_override_heat) < n:
+                self._manual_override_heat.append(None)
+        if data.manual_override_cool:
+            self._manual_override_cool = [
+                v if v is not None and isinstance(v, bool) else None
+                for v in data.manual_override_cool
+            ]
+            while len(self._manual_override_cool) < n:
+                self._manual_override_cool.append(None)
 
         # Restore drift detection history
         if data.drift_correction_signs:
@@ -1351,6 +1432,203 @@ class PIController:
         for m in self._model_inputs:
             names.append(m.get("name", "input"))
         return names
+
+    def _coeff_role(self, index: int) -> str:
+        """Map coefficient index to its input_role string.
+
+        Returns "intercept" (0), "outdoor_delta" (1), or the model input's
+        input_role config value (2+).  Default role is "other".
+        """
+        if index == 0:
+            return "intercept"
+        if index == 1:
+            return "outdoor_delta"
+        m_idx = index - 2
+        if m_idx < len(self._model_inputs):
+            return str(self._model_inputs[m_idx].get("input_role", "other"))
+        return "other"
+
+    def _get_frozen_feature_set(self, rls: RLSModel) -> set[int]:
+        """Return the set of frozen coefficient indices for batch WLS."""
+        return {i for i in range(rls.n) if rls.frozen[i]}
+
+    def _evaluate_feature_unlocks(
+        self,
+        full_result: BatchResult,
+        rls: RLSModel,
+        is_heating: bool,
+    ) -> None:
+        """Evaluate per-feature unlock conditions using the full-model result.
+
+        Args:
+            full_result: BatchResult from WLS with ALL features estimated
+                (no frozen_features held).  Coefficients are discarded —
+                only std_err, held_features, and VIF are used as evidence
+                for whether each frozen feature is identifiable.
+
+        Each frozen coefficient independently unfreezes when ALL of:
+        1. Feature not in full_result.held_features (sufficient variance)
+        2. full_result.beta_std_err[i] is finite (feature estimable)
+        3. Per-feature VIF < 10 (Belsley 1980)
+        4. For adjacent_zone inputs: additionally κ < 100
+        Auto-gating skips features with a manual override (not None).
+        """
+        n = rls.n
+        coeff_names = self._coeff_names()
+        manual_override = (
+            self._manual_override_heat if is_heating
+            else self._manual_override_cool
+        )
+        mode = "heat" if is_heating else "cool"
+
+        # VIF from the full-model regression (eligible-only data)
+        vif = full_result.feature_vif
+
+        # Compute κ once for adjacent_zone gate
+        kappa = self._cached_kappa
+
+        unlocked_any = False
+        for i in range(n):
+            if not rls.frozen[i]:
+                continue  # Already unfrozen
+            if i < len(manual_override) and manual_override[i] is not None:
+                continue  # Manual override — auto-gating doesn't touch
+
+            name = coeff_names[i] if i < len(coeff_names) else f"β{i}"
+
+            # 1. Not held in full model (sufficient variance in data)
+            if i in full_result.held_features:
+                _LOGGER.debug(
+                    "%sFeature unlock: %s[%d] — held (insufficient variance)",
+                    self._log_prefix, name, i,
+                )
+                continue
+
+            # 2. Finite std_err in full model (feature is estimable)
+            se = (
+                full_result.beta_std_err[i]
+                if i < len(full_result.beta_std_err)
+                else float("inf")
+            )
+            if not math.isfinite(se):
+                _LOGGER.debug(
+                    "%sFeature unlock: %s[%d] — infinite std_err",
+                    self._log_prefix, name, i,
+                )
+                continue
+
+            # 3. VIF < 10 (per-feature multicollinearity check)
+            feat_vif = vif[i] if i < len(vif) else float("inf")
+            if feat_vif >= 10.0:
+                _LOGGER.debug(
+                    "%sFeature unlock: %s[%d] — VIF=%.1f (≥10, collinear)",
+                    self._log_prefix, name, i, feat_vif,
+                )
+                continue
+
+            # 4. Adjacent zone: additionally require κ < 100
+            if self._coeff_role(i) == "adjacent_zone":
+                if kappa is not None and kappa >= 100:
+                    _LOGGER.debug(
+                        "%sFeature unlock: %s[%d] — adjacent_zone gated by κ=%.0f",
+                        self._log_prefix, name, i, kappa,
+                    )
+                    continue
+
+            # All conditions met — unfreeze
+            self.set_frozen(mode, i, frozen=False, manual=False)
+            unlocked_any = True
+            _LOGGER.info(
+                "%sFeature unlock: %s[%d] unfrozen (σ=%.4f, VIF=%.1f)",
+                self._log_prefix, name, i, se, feat_vif,
+            )
+
+        # Mark RLS as mature when first feature unlocks
+        if unlocked_any:
+            if is_heating:
+                self._rls_heat_mature = True
+            else:
+                self._rls_cool_mature = True
+
+    def _apply_kappa_gated_lambda(self, rls: RLSModel, is_heating: bool) -> None:
+        """Adjust RLS forgetting factor based on cached condition number.
+
+        κ ≤ 30: no change (original λ_base).
+        30 < κ < 100: linear interpolation toward λ=1.0.
+        κ ≥ 100: λ=1.0 (no forgetting, maximum stability).
+        """
+        kappa = self._cached_kappa
+        original = (
+            self._original_lambda_base_heat if is_heating
+            else self._original_lambda_base_cool
+        )
+        if kappa is None or kappa <= 30:
+            rls.lambda_base = original
+            return
+
+        blend = min((kappa - 30) / 70.0, 1.0)
+        new_lambda = original + blend * (1.0 - original)
+        if abs(new_lambda - rls.lambda_base) > 0.001:
+            _LOGGER.info(
+                "%sκ-gated λ: κ=%.0f → λ=%.4f (original=%.4f, blend=%.0f%%)",
+                self._log_prefix, kappa, new_lambda, original, blend * 100,
+            )
+        rls.lambda_base = new_lambda
+
+    def get_learning_state(self) -> dict[str, Any]:
+        """Return learning state for the learning sensor.
+
+        Returns dict with:
+        - state: "Learning" | "Optimizing" | "Optimized"
+        - frozen_features: list of frozen feature names
+        - active_features: list of unfrozen feature names
+        - observation_count: total observations (heat + cool)
+        - ff_confidence: current FF confidence value
+        - condition_number: cached κ
+        - batch_cycles: count of batch cycles since reset
+        """
+        coeff_names = self._coeff_names()
+        # Use whichever RLS matches the current mode, default to heat
+        e = self._entity
+        is_heating = e._attr_hvac_mode != HVACMode.COOL
+        rls = self._rls_heat if is_heating else self._rls_cool
+        n = rls.n
+
+        frozen_names = []
+        active_names = []
+        # Only track model inputs (2+) for learning state; intercept and
+        # outdoor_delta are never frozen by auto-gating.
+        for i in range(2, n):
+            name = coeff_names[i] if i < len(coeff_names) else f"β{i}"
+            if rls.frozen[i]:
+                frozen_names.append(name)
+            else:
+                active_names.append(name)
+
+        n_model = n - 2  # Model input features only
+        n_frozen = len(frozen_names)
+        if n_model == 0:
+            state = "Optimized"  # No model inputs → nothing to learn
+        elif n_frozen == n_model:
+            state = "Learning"
+        elif n_frozen == 0:
+            state = "Optimized"
+        else:
+            state = "Optimizing"
+
+        obs_count = len(self._observation_buffer_heat) + len(self._observation_buffer_cool)
+
+        return {
+            "state": state,
+            "frozen_features": frozen_names,
+            "active_features": active_names,
+            "observation_count": obs_count,
+            "ff_confidence": round(self._ff_confidence, 3),
+            "condition_number": (
+                round(self._cached_kappa, 1) if self._cached_kappa is not None
+                else None
+            ),
+        }
 
     def get_diagnostic_dump(self) -> dict[str, Any]:
         """Return full diagnostic state for offline analysis (debug bundles)."""
@@ -1775,16 +2053,26 @@ class PIController:
             return False
         return rls.frozen[index]
 
-    def set_frozen(self, mode: str, index: int, frozen: bool) -> None:
+    def set_frozen(self, mode: str, index: int, frozen: bool, *, manual: bool = True) -> None:
         """Set freeze state for a coefficient.
 
         When freezing, snapshots the current batch residual RMS so
         check_freeze_impact_repair can detect degradation.
+
+        Args:
+            manual: If True (default for user calls), sets a manual override
+                so auto-gating skips this feature entirely.  Internal calls
+                from _evaluate_feature_unlocks pass manual=False.
         """
         rls = self._rls_for_mode(mode)
         if index >= rls.n:
             return
         rls.frozen[index] = frozen
+        # Three-state manual override: None=auto, True=force unfrozen, False=force frozen
+        if manual:
+            override = self._manual_override_heat if mode == "heat" else self._manual_override_cool
+            if index < len(override):
+                override[index] = not frozen  # True=unfrozen, False=frozen
         snapshot_key = f"freeze_rms_{mode}_{index}"
         counter_key = f"freeze_impact_{mode}_{index}"
         if frozen:
@@ -2575,6 +2863,10 @@ class PIController:
                     self._rls_heat.P[i * n + j] = DEFAULT_RLS_P_INIT if i == j else 0.0
             self._rls_heat.observation_count = 0
             self._rls_heat_mature = False
+            # Seed reset re-freezes model input features (confidence invalidated)
+            for i in range(2, n):
+                self._rls_heat.frozen[i] = True
+            self._manual_override_heat = [None] * n
 
         if mode in (None, "cool"):
             cool_seeds = [0.0, -self._ff_cool_slope]
@@ -2590,6 +2882,10 @@ class PIController:
                     self._rls_cool.P[i * n + j] = DEFAULT_RLS_P_INIT if i == j else 0.0
             self._rls_cool.observation_count = 0
             self._rls_cool_mature = False
+            # Seed reset re-freezes model input features (confidence invalidated)
+            for i in range(2, n):
+                self._rls_cool.frozen[i] = True
+            self._manual_override_cool = [None] * n
 
         self._pi_integral = 0.0
         label = mode or "heat+cool"
@@ -2926,15 +3222,81 @@ class PIController:
         finally:
             self._pi_tick_running = False
 
+    def _passive_tick(self) -> bool:
+        """Observation-only tick when hvac_mode=OFF.
+
+        Runs the observation path (temp tracking, model inputs, plant ID)
+        without active control.  Keeps sensor filters warm and enables
+        passive learning of building dynamics (natural cooling curves → τ).
+
+        NOTE: Does NOT buffer observations.  The observation buffer
+        architecture needs redesign before passive data can be stored —
+        WLS and grey-box have fundamentally different data needs
+        (see project_buffer_architecture.md).
+        """
+        e = self._entity
+
+        # Zero control state but preserve observation state
+        self._pi_integral = 0.0
+        if self._smith is not None:
+            self._smith._initialized = False
+
+        # Need a valid temperature reading
+        if e._attr_current_temperature is None:
+            return False
+
+        now_mono = time.monotonic()
+        if self._pi_last_tick_time > 0:
+            dt_seconds = min(now_mono - self._pi_last_tick_time, self._pi_min_interval * 2)
+        else:
+            dt_seconds = float(self._pi_min_interval)
+        self._pi_last_tick_time = now_mono
+
+        # Convert to °C
+        raw_c = TemperatureConverter.convert(
+            e._attr_current_temperature,
+            e.temperature_unit,
+            UnitOfTemperature.CELSIUS,
+        )
+
+        # Sensor filter (same as active path)
+        if self._sensor_filter_tau > 0 and dt_seconds > 0:
+            if self._sensor_filtered is None:
+                self._sensor_filtered = raw_c
+            alpha = 1.0 - math.exp(-dt_seconds / self._sensor_filter_tau)
+            self._sensor_filtered = alpha * raw_c + (1.0 - alpha) * self._sensor_filtered
+            current_c = self._sensor_filtered
+        else:
+            current_c = raw_c
+
+        # Track room temperature rate of change (same as active path)
+        self._room_temp_history.append((now_mono, raw_c))
+        if len(self._room_temp_history) > 5:
+            self._room_temp_history.pop(0)
+        if len(self._room_temp_history) >= 2:
+            t0, temp0 = self._room_temp_history[0]
+            t1, temp1 = self._room_temp_history[-1]
+            elapsed_min = (t1 - t0) / 60.0
+            if elapsed_min > 0:
+                self._room_temp_rate = (temp1 - temp0) / elapsed_min
+
+        # Plant ID: continue observations — natural cooling curves give τ
+        self._plant_id.check_observation(
+            now_mono, raw_c, 0.0,
+            hp_setpoint_c=None,
+        )
+
+        # Read model inputs and update lag filters (keeps filters warm)
+        self._read_model_input_values(current_c)
+        self._inputs.update_lag_filters(dt_seconds)
+
+        return False  # No IR command
+
     async def _pi_tick_inner(self, now: datetime | None = None) -> bool:
         """PI + feedforward controller tick implementation. Returns True if send needed."""
         e = self._entity
         if e._attr_hvac_mode == HVACMode.OFF:
-            self._pi_integral = 0.0
-            self._plant_id.cancel_observation()
-            if self._smith is not None:
-                self._smith._initialized = False
-            return False
+            return self._passive_tick()
         if self._desired_temp is None or self._hp_setpoint is None:
             return False
         if e._attr_current_temperature is None:
@@ -3090,6 +3452,7 @@ class PIController:
         is_cooling = e._attr_hvac_mode in (HVACMode.COOL, HVACMode.DRY)
         if not is_heating and not is_cooling:
             return False
+        self._last_active_heating = is_heating
 
         # Read model input values and update lag filters
         self._read_model_input_values(current_c)
@@ -3492,7 +3855,12 @@ class PIController:
             self._supplemental.tracking_mode or self._supplemental.assist_active
         )
 
-        # Record observation for batch learning (every tick, regardless of gate)
+        # Record observation for batch learning.
+        # Only buffer observations that WLS can use — HP-off observations
+        # (clamped_reason="no_output") are zero-value for regression and
+        # waste diversity buffer slots that should capture the full year's
+        # operating range.  Saturated observations are kept (HP is still
+        # producing output, just at a limit).
         if hp_no_output:
             obs_clamped = True
             obs_clamped_reason = "no_output"
@@ -3505,20 +3873,22 @@ class PIController:
         else:
             obs_clamped = False
             obs_clamped_reason = ""
-        active_buffer = self._observation_buffer_heat if is_heating else self._observation_buffer_cool
-        active_buffer.add(Observation(
-            timestamp=now_mono,
-            wall_time=time.time(),
-            hp_setpoint=float(self._hp_setpoint),
-            current_c=current_c,
-            desired_c=desired_c,
-            outdoor_temp_c=self._inputs.outdoor_temp,
-            room_rate=self._room_temp_rate,
-            raw_readings=self._inputs.build_raw_readings(),
-            clamped=obs_clamped,
-            clamped_reason=obs_clamped_reason,
-            supplemental_active=obs_supplemental_active,
-        ))
+
+        if obs_clamped_reason != "no_output":
+            active_buffer = self._observation_buffer_heat if is_heating else self._observation_buffer_cool
+            active_buffer.add(Observation(
+                timestamp=now_mono,
+                wall_time=time.time(),
+                hp_setpoint=float(self._hp_setpoint),
+                current_c=current_c,
+                desired_c=desired_c,
+                outdoor_temp_c=self._inputs.outdoor_temp,
+                room_rate=self._room_temp_rate,
+                raw_readings=self._inputs.build_raw_readings(),
+                clamped=obs_clamped,
+                clamped_reason=obs_clamped_reason,
+                supplemental_active=obs_supplemental_active,
+            ))
 
         # CUSUM anomaly detection — runs on every unclamped observation.
         # TODO: Consider running on saturated observations too (obs_clamped_reason

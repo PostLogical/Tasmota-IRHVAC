@@ -3667,23 +3667,22 @@ class TestHPNoOutput:
         )
 
     @pytest.mark.asyncio
-    async def test_observation_clamped_when_no_output(self):
-        """Observation should have clamped=True when HP has no output."""
+    async def test_no_output_observation_not_buffered(self):
+        """HP-off observations are not buffered (zero-value for WLS regression)."""
         config = make_pi_config()
         entity = FakePIEntity(config)
         pi = entity._pi
         pi._desired_temp = 21.0
-        pi._hp_setpoint = 17  # below room
+        pi._hp_setpoint = 17  # below room → HP has no output
         entity._attr_hvac_mode = HVACMode.HEAT
         entity._attr_current_temperature = 24.0
         pi._pi_integral = -5.0
+        before = len(pi._observation_buffer_heat)
 
         await pi._pi_tick()
 
-        obs = pi._observation_buffer_heat.get_all()
-        assert len(obs) > 0
-        assert obs[-1].clamped is True, (
-            "Observation should be clamped when HP has no output"
+        assert len(pi._observation_buffer_heat) == before, (
+            "HP-off observations should not be added to the WLS buffer"
         )
 
     @pytest.mark.asyncio
@@ -4149,8 +4148,8 @@ class TestHPDeadbandLearning:
         )
 
     @pytest.mark.asyncio
-    async def test_observation_still_clamped_with_override(self):
-        """Batch observations marked clamped even when integration override is active."""
+    async def test_no_output_not_buffered_even_with_override(self):
+        """HP-off observations not buffered even when integration override is active."""
         config = make_pi_config()
         entity = FakePIEntity(config)
         pi = entity._pi
@@ -4159,13 +4158,12 @@ class TestHPDeadbandLearning:
         entity._attr_hvac_mode = HVACMode.HEAT
         entity._attr_current_temperature = 21.3
         pi._pi_integral = -1.0
+        before = len(pi._observation_buffer_heat)
 
         await pi._pi_tick()
 
-        obs = pi._observation_buffer_heat.get_all()
-        assert len(obs) > 0
-        assert obs[-1].clamped is True, (
-            "Observation should be clamped during hp_no_output even with override"
+        assert len(pi._observation_buffer_heat) == before, (
+            "HP-off observations should not be buffered even with deadband override"
         )
 
     # ── Persistence ───────────────────────────────────────────────────
