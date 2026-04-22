@@ -663,6 +663,66 @@ class TestComputeBlendedUpdate:
         assert abs(diag[1] - 0.5) < 1e-9
 
 
+class TestExtractFeatureVectorDeltaFromRoom:
+    """Tests for build_feature_vector_from_raw with delta_from_room inputs."""
+
+    def _obs(self, raw_readings, current_c=20.0):
+        return Observation(
+            timestamp=0.0, wall_time=time.time(),
+            hp_setpoint=22.0, current_c=current_c, desired_c=20.0,
+            outdoor_temp_c=10.0, room_rate=0.005,
+            raw_readings=raw_readings, clamped=False,
+        )
+
+    def test_delta_from_room_subtracts_current_c(self):
+        """raw_readings stores °C absolute temp; batch subtracts current_c."""
+        from custom_components.tasmota_irhvac.pi.batch_learning import build_feature_vector_from_raw
+
+        # Adjacent zone at 22°C, room at 20°C → delta should be 2°C
+        obs = self._obs({"sensor.adjacent": 22.0})
+        model_inputs = [
+            {"entity_id": "sensor.adjacent", "name": "adj", "delta_from_room": True},
+        ]
+        feature_order = ["intercept", "outdoor_delta", "adj"]
+        result = build_feature_vector_from_raw(obs, model_inputs, feature_order)
+
+        assert result is not None
+        assert result[0] == 1.0  # intercept
+        assert abs(result[1] - (-10.0)) < 0.01  # outdoor_delta = 10 - 20
+        assert abs(result[2] - 2.0) < 0.01  # delta = 22 - 20
+
+    def test_non_delta_input_used_directly(self):
+        """Non-delta inputs pass through without subtraction."""
+        from custom_components.tasmota_irhvac.pi.batch_learning import build_feature_vector_from_raw
+
+        obs = self._obs({"sensor.solar": 0.75})
+        model_inputs = [{"entity_id": "sensor.solar", "name": "solar"}]
+        feature_order = ["intercept", "outdoor_delta", "solar"]
+        result = build_feature_vector_from_raw(obs, model_inputs, feature_order)
+
+        assert result is not None
+        assert result[2] == 0.75
+
+    def test_delta_from_room_config_toggle(self):
+        """Same raw reading produces different features based on delta_from_room flag."""
+        from custom_components.tasmota_irhvac.pi.batch_learning import build_feature_vector_from_raw
+
+        obs = self._obs({"sensor.zone": 22.0})
+        feature_order = ["intercept", "outdoor_delta", "zone"]
+
+        # With delta_from_room=True: 22 - 20 = 2
+        mi_delta = [{"entity_id": "sensor.zone", "name": "zone", "delta_from_room": True}]
+        result = build_feature_vector_from_raw(obs, mi_delta, feature_order)
+        assert result is not None
+        assert abs(result[2] - 2.0) < 0.01
+
+        # With delta_from_room=False: 22.0 used directly
+        mi_raw = [{"entity_id": "sensor.zone", "name": "zone"}]
+        result = build_feature_vector_from_raw(obs, mi_raw, feature_order)
+        assert result is not None
+        assert result[2] == 22.0
+
+
 class TestFuseBatchGreybox:
     """Tests for inverse-variance fusion of WLS and grey-box β."""
 

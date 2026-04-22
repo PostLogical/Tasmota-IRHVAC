@@ -60,7 +60,7 @@ class TestReadValues:
         mgr = ModelInputManager(model_inputs=[STOVE_INPUT], outdoor_temp_sensor=None)
         mgr.values[0] = 1.0
 
-        mgr.read_values({"input_boolean.stove": ("unavailable", False)})
+        mgr.read_values({"input_boolean.stove": ("unavailable", False, None)})
         assert mgr.values[0] == 1.0
 
     def test_missing_entity_keeps_last_value(self):
@@ -74,24 +74,24 @@ class TestReadValues:
     def test_numeric_entity_parsed(self):
         """Numeric state string is parsed to float."""
         mgr = ModelInputManager(model_inputs=[STOVE_INPUT], outdoor_temp_sensor=None)
-        mgr.read_values({"input_boolean.stove": ("23.5", True)})
+        mgr.read_values({"input_boolean.stove": ("23.5", True, None)})
         assert mgr.values[0] == 23.5
 
     def test_binary_entity_mapped(self):
         """Non-numeric state mapped: 'on'→1.0, 'off'→0.0."""
         mgr = ModelInputManager(model_inputs=[STOVE_INPUT], outdoor_temp_sensor=None)
 
-        mgr.read_values({"input_boolean.stove": ("on", True)})
+        mgr.read_values({"input_boolean.stove": ("on", True, None)})
         assert mgr.values[0] == 1.0
 
-        mgr.read_values({"input_boolean.stove": ("off", True)})
+        mgr.read_values({"input_boolean.stove": ("off", True, None)})
         assert mgr.values[0] == 0.0
 
     def test_climate_states_mapped(self):
         """Climate states like 'heat', 'cool' map to 1.0."""
         mgr = ModelInputManager(model_inputs=[STOVE_INPUT], outdoor_temp_sensor=None)
         for state in ("heat", "cool", "heating", "cooling", "burning"):
-            mgr.read_values({"input_boolean.stove": (state, True)})
+            mgr.read_values({"input_boolean.stove": (state, True, None)})
             assert mgr.values[0] == 1.0, f"'{state}' should map to 1.0"
 
 
@@ -106,11 +106,11 @@ class TestAnyUnavailable:
 
     def test_unavailable_entity_returns_true(self):
         mgr = ModelInputManager(model_inputs=[STOVE_INPUT], outdoor_temp_sensor=None)
-        assert mgr.any_unavailable({"input_boolean.stove": ("", False)}) is True
+        assert mgr.any_unavailable({"input_boolean.stove": ("", False, None)}) is True
 
     def test_available_entity_returns_false(self):
         mgr = ModelInputManager(model_inputs=[STOVE_INPUT], outdoor_temp_sensor=None)
-        assert mgr.any_unavailable({"input_boolean.stove": ("off", True)}) is False
+        assert mgr.any_unavailable({"input_boolean.stove": ("off", True, None)}) is False
 
     def test_missing_entity_returns_true(self):
         mgr = ModelInputManager(model_inputs=[STOVE_INPUT], outdoor_temp_sensor=None)
@@ -171,10 +171,9 @@ class TestDeltaFromRoom:
     def test_delta_celsius(self):
         """delta_from_room computes (entity_c − room_c) when unit is °C."""
         mgr = ModelInputManager(model_inputs=[DELTA_INPUT], outdoor_temp_sensor=None)
-        mgr.set_temp_unit(0, "°C")
 
         mgr.read_values(
-            {"sensor.living_room_temp": ("22.0", True)},
+            {"sensor.living_room_temp": ("22.0", True, "°C")},
             room_temp_c=20.0,
         )
         assert abs(mgr.values[0] - 2.0) < 0.01
@@ -182,11 +181,10 @@ class TestDeltaFromRoom:
     def test_delta_fahrenheit(self):
         """delta_from_room converts °F entity to °C before subtracting."""
         mgr = ModelInputManager(model_inputs=[DELTA_INPUT], outdoor_temp_sensor=None)
-        mgr.set_temp_unit(0, "°F")
 
         # 71.6°F = 22°C, room = 20°C → delta = 2°C
         mgr.read_values(
-            {"sensor.living_room_temp": ("71.6", True)},
+            {"sensor.living_room_temp": ("71.6", True, "°F")},
             room_temp_c=20.0,
         )
         assert abs(mgr.values[0] - 2.0) < 0.1
@@ -194,32 +192,61 @@ class TestDeltaFromRoom:
     def test_delta_no_room_temp_skips(self):
         """When room_temp_c is None, delta_from_room keeps raw value."""
         mgr = ModelInputManager(model_inputs=[DELTA_INPUT], outdoor_temp_sensor=None)
-        mgr.set_temp_unit(0, "°C")
 
         mgr.read_values(
-            {"sensor.living_room_temp": ("22.0", True)},
+            {"sensor.living_room_temp": ("22.0", True, "°C")},
             room_temp_c=None,
         )
         # Raw value stored, no delta
         assert mgr.values[0] == 22.0
 
-    def test_delta_default_unit_celsius(self):
-        """When no unit cached, defaults to °C."""
+    def test_delta_unknown_unit_keeps_previous(self):
+        """When unit is None (sensor had no unit attribute), keep previous value."""
         mgr = ModelInputManager(model_inputs=[DELTA_INPUT], outdoor_temp_sensor=None)
-        # Don't call set_temp_unit — _temp_units[0] is None
+        mgr.values[0] = 1.5  # Previous good delta
 
         mgr.read_values(
-            {"sensor.living_room_temp": ("22.0", True)},
+            {"sensor.living_room_temp": ("73.5", True, None)},
             room_temp_c=20.0,
         )
-        assert abs(mgr.values[0] - 2.0) < 0.01
+        # Should keep previous value, NOT treat 73.5 as °C
+        assert mgr.values[0] == 1.5
+
+    def test_delta_unrecognized_unit_keeps_previous(self):
+        """When unit is unrecognized (not °C or °F), keep previous value."""
+        mgr = ModelInputManager(model_inputs=[DELTA_INPUT], outdoor_temp_sensor=None)
+        mgr.values[0] = 2.0
+
+        mgr.read_values(
+            {"sensor.living_room_temp": ("22.0", True, "K")},
+            room_temp_c=20.0,
+        )
+        assert mgr.values[0] == 2.0
+
+    def test_delta_unit_resolved_on_each_call(self):
+        """Unit is read fresh each tick — no stale cache."""
+        mgr = ModelInputManager(model_inputs=[DELTA_INPUT], outdoor_temp_sensor=None)
+
+        # First call: unit unavailable, keeps default 0.0
+        mgr.read_values(
+            {"sensor.living_room_temp": ("71.6", True, None)},
+            room_temp_c=20.0,
+        )
+        assert mgr.values[0] == 0.0  # Previous default
+
+        # Second call: unit now available as °F
+        mgr.read_values(
+            {"sensor.living_room_temp": ("71.6", True, "°F")},
+            room_temp_c=20.0,
+        )
+        assert abs(mgr.values[0] - 2.0) < 0.1
 
     def test_non_delta_input_ignores_room_temp(self):
         """Normal inputs are unaffected by room_temp_c parameter."""
         mgr = ModelInputManager(model_inputs=[STOVE_INPUT], outdoor_temp_sensor=None)
 
         mgr.read_values(
-            {"input_boolean.stove": ("on", True)},
+            {"input_boolean.stove": ("on", True, None)},
             room_temp_c=20.0,
         )
         assert mgr.values[0] == 1.0
@@ -227,10 +254,9 @@ class TestDeltaFromRoom:
     def test_delta_negative_when_room_warmer(self):
         """Delta is negative when room is warmer than adjacent zone."""
         mgr = ModelInputManager(model_inputs=[DELTA_INPUT], outdoor_temp_sensor=None)
-        mgr.set_temp_unit(0, "°C")
 
         mgr.read_values(
-            {"sensor.living_room_temp": ("18.0", True)},
+            {"sensor.living_room_temp": ("18.0", True, "°C")},
             room_temp_c=20.0,
         )
         assert abs(mgr.values[0] - (-2.0)) < 0.01
@@ -238,38 +264,21 @@ class TestDeltaFromRoom:
     def test_delta_unavailable_keeps_last(self):
         """Unavailable delta input keeps its last computed delta."""
         mgr = ModelInputManager(model_inputs=[DELTA_INPUT], outdoor_temp_sensor=None)
-        mgr.set_temp_unit(0, "°C")
 
         # First read: compute delta
         mgr.read_values(
-            {"sensor.living_room_temp": ("22.0", True)},
+            {"sensor.living_room_temp": ("22.0", True, "°C")},
             room_temp_c=20.0,
         )
         assert abs(mgr.values[0] - 2.0) < 0.01
 
         # Second read: unavailable
         mgr.read_values(
-            {"sensor.living_room_temp": ("", False)},
+            {"sensor.living_room_temp": ("", False, None)},
             room_temp_c=19.0,
         )
         # Should keep 2.0, not recompute
         assert abs(mgr.values[0] - 2.0) < 0.01
-
-    def test_set_temp_unit(self):
-        """set_temp_unit caches unit at correct index."""
-        mgr = ModelInputManager(
-            model_inputs=[STOVE_INPUT, DELTA_INPUT],
-            outdoor_temp_sensor=None,
-        )
-        mgr.set_temp_unit(1, "°F")
-        assert mgr._temp_units[0] is None
-        assert mgr._temp_units[1] == "°F"
-
-    def test_set_temp_unit_out_of_range(self):
-        """set_temp_unit with invalid index is a no-op."""
-        mgr = ModelInputManager(model_inputs=[DELTA_INPUT], outdoor_temp_sensor=None)
-        mgr.set_temp_unit(5, "°F")  # Should not raise
-        assert mgr._temp_units[0] is None
 
     def test_mixed_inputs(self):
         """Delta and non-delta inputs coexist correctly."""
@@ -277,12 +286,11 @@ class TestDeltaFromRoom:
             model_inputs=[STOVE_INPUT, DELTA_INPUT],
             outdoor_temp_sensor=None,
         )
-        mgr.set_temp_unit(1, "°C")
 
         mgr.read_values(
             {
-                "input_boolean.stove": ("on", True),
-                "sensor.living_room_temp": ("23.0", True),
+                "input_boolean.stove": ("on", True, None),
+                "sensor.living_room_temp": ("23.0", True, "°C"),
             },
             room_temp_c=20.0,
         )
@@ -308,12 +316,11 @@ class TestGateEntity:
     def test_gate_on_passes_value(self):
         """When gate entity is on (active), value passes through."""
         mgr = ModelInputManager(model_inputs=[GATED_INPUT], outdoor_temp_sensor=None)
-        mgr.set_temp_unit(0, "°C")
 
         mgr.read_values(
             {
-                "sensor.hallway_temp": ("22.0", True),
-                "binary_sensor.bunkroom_door": ("on", True),
+                "sensor.hallway_temp": ("22.0", True, "°C"),
+                "binary_sensor.bunkroom_door": ("on", True, None),
             },
             room_temp_c=20.0,
         )
@@ -323,12 +330,11 @@ class TestGateEntity:
     def test_gate_off_zeros_value(self):
         """When gate entity is off (inactive), value forced to zero."""
         mgr = ModelInputManager(model_inputs=[GATED_INPUT], outdoor_temp_sensor=None)
-        mgr.set_temp_unit(0, "°C")
 
         mgr.read_values(
             {
-                "sensor.hallway_temp": ("22.0", True),
-                "binary_sensor.bunkroom_door": ("off", True),
+                "sensor.hallway_temp": ("22.0", True, "°C"),
+                "binary_sensor.bunkroom_door": ("off", True, None),
             },
             room_temp_c=20.0,
         )
@@ -338,12 +344,11 @@ class TestGateEntity:
         """With gate_invert=True, gate ON forces value to zero."""
         m_input = {**GATED_INPUT, "gate_invert": True}
         mgr = ModelInputManager(model_inputs=[m_input], outdoor_temp_sensor=None)
-        mgr.set_temp_unit(0, "°C")
 
         mgr.read_values(
             {
-                "sensor.hallway_temp": ("22.0", True),
-                "binary_sensor.bunkroom_door": ("on", True),
+                "sensor.hallway_temp": ("22.0", True, "°C"),
+                "binary_sensor.bunkroom_door": ("on", True, None),
             },
             room_temp_c=20.0,
         )
@@ -353,12 +358,11 @@ class TestGateEntity:
         """With gate_invert=True, gate OFF passes value through."""
         m_input = {**GATED_INPUT, "gate_invert": True}
         mgr = ModelInputManager(model_inputs=[m_input], outdoor_temp_sensor=None)
-        mgr.set_temp_unit(0, "°C")
 
         mgr.read_values(
             {
-                "sensor.hallway_temp": ("22.0", True),
-                "binary_sensor.bunkroom_door": ("off", True),
+                "sensor.hallway_temp": ("22.0", True, "°C"),
+                "binary_sensor.bunkroom_door": ("off", True, None),
             },
             room_temp_c=20.0,
         )
@@ -367,13 +371,12 @@ class TestGateEntity:
     def test_gate_unavailable_keeps_last_value(self):
         """Unavailable gate entity keeps last value (doesn't zero)."""
         mgr = ModelInputManager(model_inputs=[GATED_INPUT], outdoor_temp_sensor=None)
-        mgr.set_temp_unit(0, "°C")
 
         # First read: gate on, value set
         mgr.read_values(
             {
-                "sensor.hallway_temp": ("22.0", True),
-                "binary_sensor.bunkroom_door": ("on", True),
+                "sensor.hallway_temp": ("22.0", True, "°C"),
+                "binary_sensor.bunkroom_door": ("on", True, None),
             },
             room_temp_c=20.0,
         )
@@ -382,8 +385,8 @@ class TestGateEntity:
         # Second read: gate unavailable, keeps 2.0
         mgr.read_values(
             {
-                "sensor.hallway_temp": ("22.0", True),
-                "binary_sensor.bunkroom_door": ("", False),
+                "sensor.hallway_temp": ("22.0", True, "°C"),
+                "binary_sensor.bunkroom_door": ("", False, None),
             },
             room_temp_c=20.0,
         )
@@ -395,20 +398,18 @@ class TestGateEntity:
         mgr.values[0] = 1.5
 
         mgr.read_values(
-            {"sensor.hallway_temp": ("22.0", True)},
+            {"sensor.hallway_temp": ("22.0", True, "°C")},
             room_temp_c=20.0,
         )
         # Gate entity missing → keeps value (delta was recomputed but gate
         # unavailable path preserves it)
-        # Actually the value gets recomputed from delta, but gate missing
-        # means we keep whatever was computed — let's check the actual behavior
         # The delta is computed (22-20=2), then gate is missing → keep value
         assert abs(mgr.values[0] - 2.0) < 0.01
 
     def test_no_gate_entity_passes_value(self):
         """Input without gate_entity is unaffected."""
         mgr = ModelInputManager(model_inputs=[STOVE_INPUT], outdoor_temp_sensor=None)
-        mgr.read_values({"input_boolean.stove": ("on", True)})
+        mgr.read_values({"input_boolean.stove": ("on", True, None)})
         assert mgr.values[0] == 1.0
 
     def test_gate_with_numeric_input_no_delta(self):
@@ -427,8 +428,8 @@ class TestGateEntity:
         # Gate off → zero
         mgr.read_values(
             {
-                "sensor.solar_proxy": ("0.7", True),
-                "input_boolean.solar_gate": ("off", True),
+                "sensor.solar_proxy": ("0.7", True, None),
+                "input_boolean.solar_gate": ("off", True, None),
             },
         )
         assert mgr.values[0] == 0.0
@@ -436,8 +437,8 @@ class TestGateEntity:
         # Gate on → passes
         mgr.read_values(
             {
-                "sensor.solar_proxy": ("0.7", True),
-                "input_boolean.solar_gate": ("on", True),
+                "sensor.solar_proxy": ("0.7", True, None),
+                "input_boolean.solar_gate": ("on", True, None),
             },
         )
         assert mgr.values[0] == 0.7
@@ -449,13 +450,12 @@ class TestGateEntity:
         mgr = ModelInputManager(
             model_inputs=[ungated, gated], outdoor_temp_sensor=None
         )
-        mgr.set_temp_unit(1, "°C")
 
         mgr.read_values(
             {
-                "input_boolean.stove": ("on", True),
-                "sensor.hallway_temp": ("22.0", True),
-                "binary_sensor.bunkroom_door": ("off", True),
+                "input_boolean.stove": ("on", True, None),
+                "sensor.hallway_temp": ("22.0", True, "°C"),
+                "binary_sensor.bunkroom_door": ("off", True, None),
             },
             room_temp_c=20.0,
         )
@@ -485,7 +485,7 @@ class TestEnabledToggle:
         m_input = {**STOVE_INPUT, "input_enabled": False}
         mgr = ModelInputManager(model_inputs=[m_input], outdoor_temp_sensor=None)
         mgr.read_values(
-            {"input_boolean.stove": ("on", True)},
+            {"input_boolean.stove": ("on", True, None)},
         )
         assert mgr.values[0] == 0.0
 
@@ -493,7 +493,7 @@ class TestEnabledToggle:
         """Enabled input (default) reads the entity value."""
         mgr = ModelInputManager(model_inputs=[STOVE_INPUT], outdoor_temp_sensor=None)
         mgr.read_values(
-            {"input_boolean.stove": ("on", True)},
+            {"input_boolean.stove": ("on", True, None)},
         )
         assert mgr.values[0] == 1.0
 
@@ -501,7 +501,7 @@ class TestEnabledToggle:
         """Missing 'enabled' key defaults to True."""
         mgr = ModelInputManager(model_inputs=[STOVE_INPUT], outdoor_temp_sensor=None)
         mgr.read_values(
-            {"input_boolean.stove": ("on", True)},
+            {"input_boolean.stove": ("on", True, None)},
         )
         assert mgr.values[0] == 1.0  # not zeroed
 

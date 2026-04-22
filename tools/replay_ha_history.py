@@ -121,7 +121,7 @@ def interpolate_at(ts_points, target_epoch):
 
 def replay_with_params(climate_ts, outdoor_ts, model_input_ts_list,
                        config_overrides, tick_interval_s=900,
-                       room_sensor_ts=None):
+                       room_sensor_ts=None, temp_unit=None):
     """Replay real-world history through PI controller with given params.
 
     Instead of using a thermal model, we feed real room temperatures directly.
@@ -207,15 +207,19 @@ def replay_with_params(climate_ts, outdoor_ts, model_input_ts_list,
             if i < len(pi._inputs.values):
                 val = interpolate_at(mi_ts, current_epoch)
                 if val is not None:
-                    # delta_from_room: convert raw entity temp to delta
+                    # delta_from_room: convert to °C, store raw for obs, then delta
                     m_input = pi._inputs.model_inputs[i] if i < len(pi._inputs.model_inputs) else {}
                     if m_input.get("delta_from_room") and room_temp_c is not None:
                         from homeassistant.util.unit_conversion import TemperatureConverter
                         from homeassistant.const import UnitOfTemperature
-                        unit = pi._inputs._temp_units[i] or UnitOfTemperature.CELSIUS
-                        val = TemperatureConverter.convert(
+                        unit = temp_unit or UnitOfTemperature.CELSIUS
+                        val_c = TemperatureConverter.convert(
                             val, unit, UnitOfTemperature.CELSIUS
-                        ) - room_temp_c
+                        )
+                        pi._inputs._raw_for_obs[i] = val_c
+                        val = val_c - room_temp_c
+                    else:
+                        pi._inputs._raw_for_obs[i] = val
                     pi._inputs.values[i] = val
 
         # Set timing for PI tick

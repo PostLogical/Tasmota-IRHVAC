@@ -4338,7 +4338,7 @@ class TestPIControllerPropertyGaps:
         await hass.async_block_till_done()
 
         states = pi._resolve_model_input_states()
-        assert states["sensor.pellet_stove"] == ("", False)
+        assert states["sensor.pellet_stove"] == ("", False, None)
 
     @pytest.mark.asyncio
     async def test_resolve_model_input_states_available(self, hass, setup_pi_integration):
@@ -4356,7 +4356,7 @@ class TestPIControllerPropertyGaps:
         await hass.async_block_till_done()
 
         states = pi._resolve_model_input_states()
-        assert states["sensor.pellet_stove"] == ("on", True)
+        assert states["sensor.pellet_stove"] == ("on", True, None)
 
     @pytest.mark.asyncio
     async def test_resolve_model_input_no_entity_id(self, hass, setup_pi_integration):

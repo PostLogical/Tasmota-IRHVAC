@@ -114,7 +114,8 @@ def build_feature_vector_from_raw(
     - "intercept": always 1.0
     - "outdoor_delta": obs.outdoor_temp_c - obs.current_c (requires outdoor_temp_c)
     - model inputs: raw_readings[entity_id], with delta_from_room adjustment
-      if configured (entity_value - current_c)
+      if configured (entity_temp_c - current_c).  raw_readings stores °C
+      absolute temps; the delta is computed here at batch time.
 
     No EMA is applied — batch WLS operates on raw instantaneous values.
     The online RLS uses EMA for tick-by-tick smoothing, but the batch
@@ -134,7 +135,8 @@ def build_feature_vector_from_raw(
         if not entity_id or entity_id not in obs.raw_readings:
             return None  # incomplete — skip this observation for this feature set
         value = obs.raw_readings[entity_id]
-        # Apply delta_from_room if configured (same transform as live path)
+        # Apply delta_from_room: raw_readings stores the °C absolute temp;
+        # subtract the observation's room temp to get the delta.
         if m_input.get("delta_from_room"):
             value = value - obs.current_c
         features[name] = value

@@ -550,15 +550,6 @@ class PIController:
                 track_ids,
                 self._async_model_input_changed,
             )
-        # Cache temperature units for delta_from_room inputs.
-        for i, m_input in enumerate(self._model_inputs):
-            if m_input.get("delta_from_room"):
-                state = self._hass.states.get(m_input.get("entity_id", ""))
-                if state is not None:
-                    unit = state.attributes.get(
-                        "unit_of_measurement", UnitOfTemperature.CELSIUS
-                    )
-                    self._inputs.set_temp_unit(i, unit)
         # Read initial model input values
         self._read_model_input_values()
 
@@ -1584,6 +1575,34 @@ class PIController:
                 }
                 for p in self._last_residual_patterns
             ]
+
+        # FF decomposition: per-feature breakdown of current ff_offset.
+        ff_contribs: dict[str, Any] = {}
+        for i, name in enumerate(coeff_names):
+            coef = round(heat_phys[i], 4) if i < len(heat_phys) else 0.0
+            if i == 0:
+                filtered_val = 1.0  # intercept
+            elif i == 1:
+                # outdoor_delta: reconstruct from current outdoor_temp
+                if self._inputs.outdoor_temp is not None:
+                    filtered_val = round(max(0.0, self._ff_heat_reference - self._inputs.outdoor_temp), 4)
+                else:
+                    filtered_val = 0.0
+            else:
+                input_idx = i - 2
+                filtered_val = round(self._inputs.filtered[input_idx], 4) if input_idx < len(self._inputs.filtered) else 0.0
+            contribution = round(coef * filtered_val, 4)
+            ff_contribs[name] = {
+                "coef": coef,
+                "filtered": filtered_val,
+                "contribution": contribution,
+            }
+        ff_sum = round(sum(v["contribution"] for v in ff_contribs.values()), 4)
+        ff_contribs["_sum"] = ff_sum
+        ff_contribs["_blended_offset"] = round(
+            self._ff_offset / self._ff_confidence, 4
+        ) if self._ff_confidence > 0.001 else None
+        result["ff_contributions"] = ff_contribs
 
         return result
 
@@ -2725,9 +2744,9 @@ class PIController:
 
     # ── PI Internals ──────────────────────────────────────────────────
 
-    def _resolve_model_input_states(self) -> dict[str, tuple[str, bool]]:
+    def _resolve_model_input_states(self) -> dict[str, tuple[str, bool, str | None]]:
         """Resolve all model input and gate entity states from HA."""
-        states: dict[str, tuple[str, bool]] = {}
+        states: dict[str, tuple[str, bool, str | None]] = {}
         for m_input in self._model_inputs:
             for key in ("entity_id", "gate_entity"):
                 eid = m_input.get(key, "")
@@ -2735,9 +2754,10 @@ class PIController:
                     continue
                 state = self._hass.states.get(eid)
                 if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
-                    states[eid] = ("", False)
+                    states[eid] = ("", False, None)
                 else:
-                    states[eid] = (state.state, True)
+                    unit = state.attributes.get("unit_of_measurement")
+                    states[eid] = (state.state, True, unit)
         return states
 
     def _read_model_input_values(self, room_temp_c: float | None = None) -> None:

@@ -37,9 +37,12 @@ class ModelInputManager:
         self._outdoor_temp_sensor: str | None = outdoor_temp_sensor
         self.values: list[float] = [0.0] * len(model_inputs)
         self.filtered: list[float] = [0.0] * len(model_inputs)
+        # Pre-delta sensor readings in °C for observation storage.
+        # For delta_from_room inputs this is the °C-converted absolute temp;
+        # for all others it mirrors self.values.  Batch WLS applies
+        # delta_from_room at regression time using the observation's current_c.
+        self._raw_for_obs: list[float] = [0.0] * len(model_inputs)
         self.outdoor_temp: float | None = None
-        # Cached temperature units for delta_from_room inputs (resolved at init).
-        self._temp_units: list[str | None] = [None] * len(model_inputs)
 
     @property
     def model_inputs(self) -> list[dict[str, Any]]:
@@ -55,11 +58,6 @@ class ModelInputManager:
         """Total feature count: 1 (outdoor_delta) + len(model_inputs)."""
         return 1 + len(self._model_inputs)
 
-    def set_temp_unit(self, index: int, unit: str) -> None:
-        """Cache the temperature unit for a delta_from_room input."""
-        if 0 <= index < len(self._temp_units):
-            self._temp_units[index] = unit
-
     def update_outdoor_temp(self, state_value: str, unit: str) -> None:
         """Update outdoor temperature from a sensor reading, converting to °C."""
         try:
@@ -72,15 +70,16 @@ class ModelInputManager:
 
     def read_values(
         self,
-        entity_states: dict[str, tuple[str, bool]],
+        entity_states: dict[str, tuple[str, bool, str | None]],
         room_temp_c: float | None = None,
     ) -> None:
         """Update model input values from resolved entity states.
 
         Args:
-            entity_states: Map of entity_id → (state_string, is_available).
+            entity_states: Map of entity_id → (state_string, is_available, unit).
                 PIController resolves these from hass.states before calling.
                 Also includes gate entity states when gate_entity is configured.
+                ``unit`` is the ``unit_of_measurement`` attribute (may be None).
             room_temp_c: Current room temperature in °C.  Required for
                 delta_from_room inputs — the stored value becomes
                 (entity_temp_c − room_temp_c).
@@ -96,18 +95,34 @@ class ModelInputManager:
                 )
                 continue
             state_str = entity_states[entity_id][0]
+            prev_value = self.values[i]
             try:
                 self.values[i] = float(state_str)
             except (ValueError, TypeError):
                 self.values[i] = 1.0 if state_str in _ACTIVE_STATES else 0.0
 
             # Delta-from-room: convert entity temp to °C and subtract room temp.
+            # _raw_for_obs gets the °C absolute temp (for batch WLS);
+            # self.values gets the delta (for online RLS / lag filter).
             if m_input.get("delta_from_room") and room_temp_c is not None:
-                unit = self._temp_units[i] or UnitOfTemperature.CELSIUS
+                unit = entity_states[entity_id][2]
+                if unit not in (UnitOfTemperature.CELSIUS, UnitOfTemperature.FAHRENHEIT):
+                    # Unit unknown — keep previous value rather than corrupt
+                    # with a wrong-unit subtraction.
+                    self.values[i] = prev_value
+                    _LOGGER.warning(
+                        "Model input '%s' (%s): delta_from_room skipped — "
+                        "unit_of_measurement is %r",
+                        m_input.get("name", "?"), entity_id, unit,
+                    )
+                    continue
                 entity_temp_c = TemperatureConverter.convert(
                     self.values[i], unit, UnitOfTemperature.CELSIUS
                 )
+                self._raw_for_obs[i] = entity_temp_c
                 self.values[i] = entity_temp_c - room_temp_c
+            else:
+                self._raw_for_obs[i] = self.values[i]
 
             # Enabled toggle: force value to zero when disabled.
             if not m_input.get("input_enabled", True):
@@ -134,7 +149,7 @@ class ModelInputManager:
 
     def any_unavailable(
         self,
-        entity_states: dict[str, tuple[str, bool]],
+        entity_states: dict[str, tuple[str, bool, str | None]],
     ) -> bool:
         """Check if any model input entity is currently unavailable."""
         for m_input in self._model_inputs:
@@ -182,17 +197,18 @@ class ModelInputManager:
         return features
 
     def build_raw_readings(self) -> dict[str, float]:
-        """Build raw sensor readings dict: entity_id → current raw value.
+        """Build raw sensor readings dict: entity_id → current value in °C.
 
-        Returns pre-EMA, pre-gate values for each model input, keyed by
-        entity_id.  Used by Observation storage so batch WLS can rebuild
-        features from raw data + current config at regression time.
+        Returns pre-EMA, pre-delta values for each model input, keyed by
+        entity_id.  For delta_from_room inputs this is the °C-converted
+        absolute temperature — batch WLS applies the delta transform at
+        regression time using the observation's current_c.
         """
         readings: dict[str, float] = {}
         for i, m_input in enumerate(self._model_inputs):
             entity_id = m_input.get("entity_id", "")
             if entity_id:
-                readings[entity_id] = self.values[i]
+                readings[entity_id] = self._raw_for_obs[i]
         return readings
 
     def get_lag_states(self) -> dict[str, float]:
