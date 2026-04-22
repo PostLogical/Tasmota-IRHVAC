@@ -440,6 +440,7 @@ class PIController:
         self._last_residual_patterns: list[HourlyResidualPattern] = []
         self._has_had_stable_batch: bool = False
         self._tuning_alert_counters: dict[str, int] = {}
+        self._tuning_alert_snapshots: dict[str, float] = {}
 
         # ── CUSUM anomaly detection state ───────────────────────────
         self._residual_history: deque[float] = deque(maxlen=60)
@@ -688,8 +689,8 @@ class PIController:
 
             # Feed τ_eff to plant ID as a grey-box τ_slow estimate
             if bridge.gates_passed and self._plant_id.enabled:
-                se = greybox.param_std_err
-                ua_c_cv = se.get("ua_c", float("inf")) / max(abs(greybox.ua_c), 1e-12)
+                gb_se = greybox.param_std_err
+                ua_c_cv = gb_se.get("ua_c", float("inf")) / max(abs(greybox.ua_c), 1e-12)
                 gain_update = self._plant_id.update_from_greybox(
                     tau_eff=bridge.tau_eff,
                     ua_c_cv=ua_c_cv,
@@ -936,8 +937,9 @@ class PIController:
             last_batch_wallclock=self._last_batch_wallclock,
             tuning_alert_counters={
                 **self._tuning_alert_counters,
-                "had_stable_batch": self._has_had_stable_batch,
+                "had_stable_batch": int(self._has_had_stable_batch),
             },
+            tuning_alert_snapshots=dict(self._tuning_alert_snapshots),
             hp_deadband_estimate_heat=self._hp_deadband_estimate_heat,
             hp_deadband_estimate_cool=self._hp_deadband_estimate_cool,
             exclusion_count=self._exclusion_count,
@@ -1026,12 +1028,21 @@ class PIController:
         # Restore drift detection history
         if data.drift_correction_signs:
             self._drift_correction_signs = data.drift_correction_signs
-        # Restore tuning alert counters
+        # Restore tuning alert counters and snapshots
         if data.tuning_alert_counters:
-            self._tuning_alert_counters = data.tuning_alert_counters
+            # Migration from pre39: filter out snapshot keys from old combined dict.
+            # Remove this filter once all installs have restarted on pre39+.
+            self._tuning_alert_counters = {
+                k: int(v) for k, v in data.tuning_alert_counters.items()
+                if not k.startswith("freeze_rms_")
+            }
             self._has_had_stable_batch = bool(
                 self._tuning_alert_counters.get("had_stable_batch", False)
             )
+        if data.tuning_alert_snapshots:
+            self._tuning_alert_snapshots = {
+                k: float(v) for k, v in data.tuning_alert_snapshots.items()
+            }
         # Restore last batch result for diagnostics continuity
         if data.last_batch_result is not None:
             br = data.last_batch_result
@@ -1181,6 +1192,7 @@ class PIController:
         config migration) that would let the PI send impossible temps.
         """
         assert self._hp_setpoint is not None
+        # TODO: round() assumes 1°C vendor resolution; use vendor setpoint_step
         return max(0, min(50, round(self._hp_setpoint)))
 
     def get_extra_state_attributes(self) -> dict[str, Any]:
@@ -1710,10 +1722,10 @@ class PIController:
             # Snapshot current batch RMS for later comparison
             current_rms = self._metrics.batch_model_rms
             if current_rms is not None:
-                self._tuning_alert_counters[snapshot_key] = current_rms
+                self._tuning_alert_snapshots[snapshot_key] = current_rms
         else:
             # Clear snapshot and sustained counter on unfreeze
-            self._tuning_alert_counters.pop(snapshot_key, None)
+            self._tuning_alert_snapshots.pop(snapshot_key, None)
             self._tuning_alert_counters.pop(counter_key, None)
         name = self._coeff_names()[index] if index < len(self._coeff_names()) else f"β{index}"
         _LOGGER.info(
@@ -1752,6 +1764,7 @@ class PIController:
         self._drift_correction_signs = []
         self._has_had_stable_batch = False
         self._tuning_alert_counters = {}
+        self._tuning_alert_snapshots = {}
         label = mode or "heat+cool"
         _LOGGER.info("Observation buffer (%s) flushed — batch learning will restart from scratch", label)
 
@@ -2145,8 +2158,8 @@ class PIController:
                     if not rls_model.frozen[i]:
                         continue
                     snapshot_key = f"freeze_rms_{mode_label}_{i}"
-                    rms_at_freeze = self._tuning_alert_counters.get(snapshot_key)
-                    if rms_at_freeze is None or not isinstance(rms_at_freeze, (int, float)):
+                    rms_at_freeze = self._tuning_alert_snapshots.get(snapshot_key)
+                    if rms_at_freeze is None:
                         continue
                     counter_key = f"freeze_impact_{mode_label}_{i}"
                     increase_pct = ((current_rms - rms_at_freeze) / rms_at_freeze) * 100.0 if rms_at_freeze > 0 else 0.0
@@ -2161,7 +2174,7 @@ class PIController:
                     result = check_freeze_impact_repair(
                         coeff_name=name,
                         mode=mode_label,
-                        rms_at_freeze=float(rms_at_freeze),
+                        rms_at_freeze=rms_at_freeze,
                         current_rms=current_rms,
                         sustained_cycles=self._tuning_alert_counters.get(counter_key, 0),
                     )
@@ -2388,7 +2401,7 @@ class PIController:
 
     def start_plant_test(
         self,
-        amplitude_c: int = 2,
+        amplitude_c: float = 2.0,
         comfort_min_c: float | None = None,
         comfort_max_c: float | None = None,
         n_cycles: int = 4,
@@ -3447,6 +3460,7 @@ class PIController:
             new_setpoint = round(clamped_setpoint)
         elif clamped_setpoint < self._hp_setpoint - 0.5:
             new_setpoint = round(clamped_setpoint)
+        # TODO: int() assumes 1°C vendor resolution; use vendor setpoint_step
         new_setpoint = int(max(self._min_temp_c, min(self._max_temp_c, new_setpoint)))
 
         if new_setpoint != self._hp_setpoint:

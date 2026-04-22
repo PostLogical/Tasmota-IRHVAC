@@ -749,9 +749,14 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         # Controller: PIController when enabled, NullController otherwise.
         # All calls are unconditional — no `if self._pi:` guards needed.
         from .pi import NullController
-        self._controller = PIController(self, raw_config) if cfg.pi_enabled else NullController()
-        # Legacy alias for tests that reference self._pi directly
-        self._pi = self._controller if cfg.pi_enabled else None
+        self._controller: PIController | NullController
+        if cfg.pi_enabled:
+            pi = PIController(self, raw_config)
+            self._controller = pi
+            self._pi: PIController | None = pi
+        else:
+            self._controller = NullController()
+            self._pi = None
 
         # Echo classification state (only active when PI is active)
         self._has_sent_once: bool = False

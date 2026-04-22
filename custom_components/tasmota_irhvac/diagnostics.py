@@ -10,7 +10,7 @@ from homeassistant.core import HomeAssistant
 from .const import DATA_KEY
 from .pi import PIController
 
-REDACT_KEYS = {"unique_id", "topic", "state_topic", "availability_topic"}
+REDACT_KEYS = {"unique_id", "command_topic", "state_topic", "state_topic_2", "availability_topic"}
 
 
 async def async_get_config_entry_diagnostics(

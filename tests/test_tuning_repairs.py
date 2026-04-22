@@ -1016,7 +1016,7 @@ class TestFreezeImpactOrchestration:
         # Freeze outdoor_delta with RMS snapshot
         pi._metrics.batch_model_rms = 1.0
         pi.set_frozen("heat", 1, True)
-        assert pi._tuning_alert_counters.get("freeze_rms_heat_1") == 1.0
+        assert pi._tuning_alert_snapshots.get("freeze_rms_heat_1") == 1.0
 
         # Simulate RMS increasing over batch cycles
         pi._metrics.batch_model_rms = 1.5  # 50% increase
@@ -1043,7 +1043,7 @@ class TestFreezeImpactOrchestration:
         pi._tuning_alert_counters["freeze_impact_heat_1"] = 5
 
         pi.set_frozen("heat", 1, False)
-        assert "freeze_rms_heat_1" not in pi._tuning_alert_counters
+        assert "freeze_rms_heat_1" not in pi._tuning_alert_snapshots
         assert "freeze_impact_heat_1" not in pi._tuning_alert_counters
 
     @pytest.mark.asyncio

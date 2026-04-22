@@ -717,7 +717,7 @@ def _solve_joint(
     for j in range(ctx.n_base):
         joint_cols.append([ctx.X_base[k][j] for k in ctx.complete_indices])
     for fi in ctx.active_input_indices:
-        joint_cols.append([ctx.input_values_by_obs[k][fi] for k in ctx.complete_indices])
+        joint_cols.append([ctx.input_values_by_obs[k][fi] for k in ctx.complete_indices])  # type: ignore[misc]  # complete_indices guarantees not-None
 
     # Column normalization
     col_scales = [1.0] * n_joint
@@ -801,7 +801,7 @@ def _solve_fwl(
     for fi in ctx.active_input_indices:
         coeff_idx = fi + 2
         subset_indices = [k for k in range(ctx.m_base) if ctx.input_values_by_obs[k][fi] is not None]
-        subset_values = [ctx.input_values_by_obs[k][fi] for k in subset_indices]
+        subset_values: list[float] = [ctx.input_values_by_obs[k][fi] for k in subset_indices]  # type: ignore[misc]  # filtered not-None via subset_indices
         m_sub = len(subset_indices)
         w_sub = [ctx.w_base[k] for k in subset_indices]
         y_sub = [residuals_base[k] for k in subset_indices]
@@ -845,8 +845,9 @@ def _solve_fwl(
     for k in range(ctx.m_base):
         for fi in ctx.active_input_indices:
             coeff_idx = fi + 2
-            if coeff_idx not in held and ctx.input_values_by_obs[k][fi] is not None:
-                y_adj[k] -= beta[coeff_idx] * ctx.input_values_by_obs[k][fi]
+            val = ctx.input_values_by_obs[k][fi]
+            if coeff_idx not in held and val is not None:
+                y_adj[k] -= beta[coeff_idx] * val
     XtWX_adj = [[0.0] * ctx.n_base for _ in range(ctx.n_base)]
     XtWy_adj = [0.0] * ctx.n_base
     for k in range(ctx.m_base):
@@ -922,7 +923,7 @@ def weighted_least_squares(
     m_base = len(base_eligible)
     y_base = [o.hp_setpoint - o.current_c for o in base_eligible]
     w_base = [1.0 / (1.0 + (o.room_rate / room_rate_threshold) ** 2) for o in base_eligible]
-    X_base = [[1.0, o.outdoor_temp_c - o.current_c] for o in base_eligible]
+    X_base: list[list[float]] = [[1.0, o.outdoor_temp_c - o.current_c] for o in base_eligible]  # type: ignore[operator]  # filtered not-None above
 
     # Scale outdoor_delta column
     n_base = 2
@@ -983,7 +984,7 @@ def weighted_least_squares(
         if feature_obs_counts[coeff_idx] < max(min_observations, 10):
             held.add(coeff_idx)
             continue
-        vals = [input_values_by_obs[k][feat_idx]
+        vals: list[float] = [input_values_by_obs[k][feat_idx]  # type: ignore[misc]  # filtered not-None
                 for k in range(m_base) if input_values_by_obs[k][feat_idx] is not None]
         w_vals = [w_base[k] for k in range(m_base) if input_values_by_obs[k][feat_idx] is not None]
         if _weighted_variance(vals, w_vals) < min_feature_variance:

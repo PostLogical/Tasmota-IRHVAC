@@ -478,7 +478,7 @@ def check_model_drift_repair(
     Suppresses drift alerts until at least one batch cycle has had
     recommend_update=False (system stabilized at least once).
     """
-    results = []
+    results: list[tuple[str, dict[str, str], bool]] = []
     if not has_had_stable_batch:
         return results
 

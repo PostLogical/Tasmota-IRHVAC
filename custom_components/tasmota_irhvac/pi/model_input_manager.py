@@ -1,9 +1,9 @@
 """Model input sensor management: reading, lag filtering, feature vector building.
 
-Pure computation — no Home Assistant dependencies.  Callers resolve HA entity
-states and pass them in.  Owns the runtime state (current values, filtered
-values, outdoor temp) but not the config-derived RLS setup (seeds, clamps,
-feature scales stay in PIController for RLS init).
+Callers resolve HA entity states and pass them in.  Uses HA temperature
+conversion utilities but no HA runtime state.  Owns the runtime state
+(current values, filtered values, outdoor temp) but not the config-derived
+RLS setup (seeds, clamps, feature scales stay in PIController for RLS init).
 """
 
 from __future__ import annotations

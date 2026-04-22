@@ -109,7 +109,7 @@ class PlantTestCommand:
     telling the controller what HP setpoint to send.
     """
 
-    setpoint_c: int  # integer °C HP setpoint to send
+    setpoint_c: float  # °C HP setpoint to send
     phase: str  # "relay_high" | "relay_low" | "step_hold" | "complete" | "aborted"
 
 
@@ -126,3 +126,4 @@ class GainUpdate:
     tau_fast: float
     tau_slow: float
     lag: float
+    imc_lambda: float

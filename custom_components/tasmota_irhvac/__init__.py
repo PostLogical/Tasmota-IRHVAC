@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
+import asyncio  # TODO: unused after async_write_ha_state migration; keep for upstream compat
 import logging
 from datetime import datetime
 from typing import Any
@@ -257,18 +257,12 @@ def _register_services(hass: HomeAssistant) -> None:
         else:  # pragma: no cover — schema requires entity_id, defensive only
             devices = list(hass.data[DATA_KEY].values())
 
-        update_tasks: list[asyncio.Task[None]] = []
         method_name: str = method_info["method"]
         for device in devices:
             if not hasattr(device, method_name):  # pragma: no cover — defensive for vendor subclasses
                 continue
             await getattr(device, method_name)(**params)
-            update_tasks.append(
-                asyncio.create_task(device.async_update_ha_state(True))
-            )
-
-        if update_tasks:
-            await asyncio.wait(update_tasks)
+            device.async_write_ha_state()
 
     for irhvac_service in SERVICE_TO_METHOD:
         svc_schema = SERVICE_TO_METHOD[irhvac_service].get("schema", IRHVAC_SERVICE_SCHEMA)

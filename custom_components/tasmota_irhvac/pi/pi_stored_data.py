@@ -47,6 +47,7 @@ class PIExtraStoredData(ExtraStoredData):
     last_batch_result: dict | None = None
     last_batch_wallclock: str = ""  # ISO-8601 wall-clock time of last batch run
     tuning_alert_counters: dict = dataclasses.field(default_factory=dict)
+    tuning_alert_snapshots: dict = dataclasses.field(default_factory=dict)
     hp_deadband_estimate_heat: float = 0.5
     hp_deadband_estimate_cool: float = 0.5
     exclusion_count: int = 0
@@ -82,6 +83,7 @@ class PIExtraStoredData(ExtraStoredData):
             "last_batch_result": self.last_batch_result,
             "last_batch_wallclock": self.last_batch_wallclock,
             "tuning_alert_counters": self.tuning_alert_counters,
+            "tuning_alert_snapshots": self.tuning_alert_snapshots,
             "hp_deadband_estimate_heat": self.hp_deadband_estimate_heat,
             "hp_deadband_estimate_cool": self.hp_deadband_estimate_cool,
             "exclusion_count": self.exclusion_count,
@@ -124,6 +126,12 @@ class PIExtraStoredData(ExtraStoredData):
                 last_batch_result=restored.get("last_batch_result"),
                 last_batch_wallclock=str(restored.get("last_batch_wallclock", "")),
                 tuning_alert_counters=restored.get("tuning_alert_counters", {}),
+                # Migration from pre39: extract snapshots from old combined dict.
+                # Remove fallback once all installs have restarted on pre39+.
+                tuning_alert_snapshots=restored.get("tuning_alert_snapshots", {
+                    k: v for k, v in restored.get("tuning_alert_counters", {}).items()
+                    if k.startswith("freeze_rms_")
+                }),
                 hp_deadband_estimate_heat=float(restored.get("hp_deadband_estimate_heat", 0.5)),
                 hp_deadband_estimate_cool=float(restored.get("hp_deadband_estimate_cool", 0.5)),
                 exclusion_count=int(restored.get("exclusion_count", 0)),

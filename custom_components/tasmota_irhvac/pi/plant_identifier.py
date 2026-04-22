@@ -360,8 +360,8 @@ class PlantIdentifier:
 
     def start_plant_test(
         self,
-        baseline_setpoint_c: int,
-        amplitude_c: int,
+        baseline_setpoint_c: float,
+        amplitude_c: float,
         current_c: float,
         comfort_min_c: float,
         comfort_max_c: float,
@@ -476,7 +476,8 @@ class PlantIdentifier:
         ki = kp / ti
 
         return GainUpdate(
-            kp=kp, ki=ki, tau_fast=tau_fast, tau_slow=tau_slow, lag=lag
+            kp=kp, ki=ki, tau_fast=tau_fast, tau_slow=tau_slow, lag=lag,
+            imc_lambda=lam,
         )
 
     # ── Persistence ──────────────────────────────────────────────────

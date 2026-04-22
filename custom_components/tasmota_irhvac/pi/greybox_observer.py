@@ -185,7 +185,7 @@ def fit_greybox(
     m = len(eligible)
     room_rate = [o.room_rate for o in eligible]
     t_air = [o.current_c for o in eligible]
-    t_out = [o.outdoor_temp_c for o in eligible]
+    t_out: list[float] = [o.outdoor_temp_c for o in eligible]  # type: ignore[misc]  # filtered not-None above
 
     # HP offset: setpoint - room temp when HP is on, 0 when off.
     hp_offset: list[float] = []

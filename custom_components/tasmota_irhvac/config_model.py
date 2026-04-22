@@ -207,5 +207,5 @@ class IrhvacConfig:
             power_sensor=config.get(CONF_POWER_SENSOR) or None,
             # PI
             pi_enabled=config.get(CONF_PI_ENABLED, False),
-            pi_raw_config=config,
+            pi_raw_config=dict(config),
         )

@@ -50,8 +50,8 @@ class PlantTestProvider:
 
     def __init__(self) -> None:
         # Configuration (set by start())
-        self._baseline_c: int = 0
-        self._amplitude_c: int = 2
+        self._baseline_c: float = 0.0
+        self._amplitude_c: float = 2.0
         self._comfort_min_c: float = 0.0
         self._comfort_max_c: float = 50.0
         self._n_cycles: int = 4
@@ -95,8 +95,8 @@ class PlantTestProvider:
 
     def start(
         self,
-        baseline_setpoint_c: int,
-        amplitude_c: int,
+        baseline_setpoint_c: float,
+        amplitude_c: float,
         current_c: float,
         comfort_min_c: float,
         comfort_max_c: float,
@@ -226,7 +226,7 @@ class PlantTestProvider:
             return None
 
         # K_u = 4h/(πa) where h = amplitude_c (relay half-amplitude in °C)
-        h = float(self._amplitude_c)
+        h = self._amplitude_c
         k_u = 4.0 * h / (math.pi * a)
 
         n_cycles = len(periods)
@@ -352,8 +352,8 @@ class PlantTestProvider:
         self._step_hold_ctx = ObservationContext(
             start_time=now_mono,
             baseline_temp=current_c,
-            target_temp=current_c + float(self._amplitude_c),
-            step_magnitude=float(self._amplitude_c),
+            target_temp=current_c + self._amplitude_c,
+            step_magnitude=self._amplitude_c,
             ff_offset=0.0,  # No FF during test
         )
 

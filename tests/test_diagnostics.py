@@ -21,13 +21,19 @@ def test_redact_sensitive_keys():
     """Sensitive keys should be redacted."""
     data = {
         "unique_id": "abc123",
-        "topic": "cmnd/device/irhvac",
+        "command_topic": "cmnd/device/irhvac",
+        "state_topic": "tele/device/RESULT",
+        "state_topic_2": "tele/device/STATE",
+        "availability_topic": "tele/device/LWT",
         "name": "Living Room",
         "vendor": "FUJITSU_AC",
     }
     redacted = _redact(data)
     assert redacted["unique_id"] == "**REDACTED**"
-    assert redacted["topic"] == "**REDACTED**"
+    assert redacted["command_topic"] == "**REDACTED**"
+    assert redacted["state_topic"] == "**REDACTED**"
+    assert redacted["state_topic_2"] == "**REDACTED**"
+    assert redacted["availability_topic"] == "**REDACTED**"
     assert redacted["name"] == "Living Room"
     assert redacted["vendor"] == "FUJITSU_AC"
 
