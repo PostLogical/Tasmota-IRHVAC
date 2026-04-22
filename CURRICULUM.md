@@ -160,17 +160,17 @@ custom_components/tasmota_irhvac/
 ├── climate.py           (2029 lines)  — Base climate entity: MQTT, state, IR commands
 ├── config_flow.py       (1481 lines)  — Setup wizard + options flow UI
 ├── repairs.py            (306 lines)  — HA Repairs fix flows (fixable repairs)
-├── sensor.py             (378 lines)  — 18 PI diagnostic sensors + health sensor
+├── sensor.py             (465 lines)  — 18 PI diagnostic sensors + health + learning sensor
 ├── binary_sensor.py      (194 lines)  — FF learning suppression status
 ├── button.py             (281 lines)  — Vane buttons + user-defined IR action buttons
 ├── diagnostics.py         (59 lines)  — HA diagnostics dump
 ├── pi/                                — PI + feedforward + plant ID subpackage
 │   ├── __init__.py                    — Public API: PIController, NullController, BatchResult
-│   ├── pi_controller.py (3503 lines)  — Core PI tick, anti-windup, learning, CUSUM
+│   ├── pi_controller.py (3950 lines)  — Core PI tick, anti-windup, learning, CUSUM, per-feature gating
 │   ├── pi_stored_data.py  (133 lines) — ExtraStoredData for cross-restart persistence
 │   ├── controller_protocol.py (201)   — Protocol class + NullController stub
 │   ├── rls_model.py       (315 lines) — Recursive Least Squares with forgetting + ridge
-│   ├── batch_learning.py (1523 lines) — Diversity-aware buffer, WLS, residual analysis
+│   ├── batch_learning.py (1645 lines) — Diversity-aware buffer, WLS (+ VIF), residual analysis
 │   ├── greybox_observer.py (589 lines)— 1R1C energy balance observer + β bridge
 │   ├── smith_predictor.py (113 lines) — FOPDT Smith predictor (delay compensation)
 │   ├── plant_identifier.py (584 lines)— Multi-provider plant ID orchestrator (replaces tau_estimator)
@@ -596,7 +596,7 @@ Sets up all PI state:
 - Plant ID: `_plant_id` (multi-provider SOPDT estimation + IMC gain scheduling)
 - Auto-perturbation: `_auto_perturb` (Layer 2.5 state machine)
 - Grey-box: `_greybox` (1R1C energy balance observer, runs alongside batch WLS)
-- Learning: `_ff_settled_ticks`, `_stable_oodb_ticks`, `_observation_buffer`
+- Learning: `_ff_settled_ticks`, `_stable_oodb_ticks`, `_observation_buffer`, per-feature frozen state
 - Metrics: `_itae_accumulator`, `_comfort_violation_hours`, `_ff_load_fraction`
 
 ### The Tick Function (`_pi_tick_inner`)
@@ -609,8 +609,13 @@ Here's the flow, simplified:
 
 ```python
 def _pi_tick_inner(self):
+    # 0. Passive tick (hvac_mode=OFF)
+    if off:
+        run _passive_tick()  # temp tracking, plant ID, lag filters — no buffering
+        return
+
     # 1. Bail if we shouldn't run
-    if off or paused or no_desired_temp or no_current_temp:
+    if paused or no_desired_temp or no_current_temp:
         return
 
     # 2. Time normalization
@@ -893,6 +898,15 @@ errors that the real-time learning gates might miss:
 - **Grey-box fusion:** After WLS, the grey-box 1R1C observer runs on the
   same buffer (see Lesson 9). Its β estimates are optionally fused with
   WLS β via inverse-variance weighting.
+- **Dual WLS for per-feature gating:** Each batch cycle runs two WLS solves:
+  a *partial model* (frozen features held, matching online RLS) for coefficient
+  application, and a *full model* (all features estimated) for unlock evidence.
+  The full model's std_err, held_features, and per-feature VIF determine whether
+  each frozen feature is identifiable. VIF is computed inside WLS from the
+  eligible-only regression data.
+- **κ-gated lambda:** When the condition number κ > 30, the online RLS forgetting
+  factor λ is pushed toward 1.0 to slow adaptation under multicollinearity.
+  Linear blend: κ=30 → no change, κ≥100 → λ=1.0.
 
 Each observation records a `wall_hour` (0-23) for time-of-day analysis and
 an `outdoor_temp_c` for grey-box energy balance fitting.
@@ -1329,6 +1343,12 @@ states OK / Warning / Critical / Disabled. It runs multiple checks (comfort,
 integral magnitude, FF confidence, intercept drift, slope drift, model drift,
 feature diversity) and reports the worst status with detailed attributes.
 
+The **learning sensor** (`sensor.{device}_learning`) reports the staged learning
+state as Learning / Optimizing / Optimized. Attributes include frozen/active
+feature lists, observation count, FF confidence, and condition number κ. Model
+input features start frozen at cold start and independently unlock when batch
+WLS evidence (std_err, VIF, held status) confirms they're identifiable.
+
 **HA Repairs recommendations** (`health_checks.py`, `repairs.py`) — tuning
 diagnostics that surface as actionable items in the HA Repairs panel. Three
 repairs are **fixable** (the user clicks "Fix" and the integration applies the
@@ -1646,4 +1666,4 @@ topic. The integration marks the entity as unavailable when offline.
 
 ---
 
-*Updated April 2026 from the `architecture-rework` branch (pre38). ~15,000 lines of Python across 34 files, 1746 tests.*
+*Updated April 2026 from the `architecture-rework` branch (pre41). ~16,000 lines of Python across 34 files, 1812 tests.*
