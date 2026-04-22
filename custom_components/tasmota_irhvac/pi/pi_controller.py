@@ -439,6 +439,12 @@ class PIController:
         self._last_batch_wallclock: str = ""  # ISO-8601 wall-clock time
         self._last_residual_patterns: list[HourlyResidualPattern] = []
         self._has_had_stable_batch: bool = False
+        # Batch-first gate: RLS online updates are frozen until the first
+        # batch WLS cycle has run and recommended an update.  Until then,
+        # observations are buffered for batch but rls.update() is not called.
+        # PI + seed-based FF handles comfort in the interim.
+        self._rls_heat_mature: bool = False
+        self._rls_cool_mature: bool = False
         self._tuning_alert_counters: dict[str, int] = {}
         self._tuning_alert_snapshots: dict[str, float] = {}
 
@@ -712,6 +718,26 @@ class PIController:
             )
 
         compute_blended_update(result, prior_std=1.0, max_step=1.0)
+
+        # κ gate: reject batch recommendation when condition number indicates
+        # severe multicollinearity.  The coefficients may look different from
+        # current values but the data geometry can't reliably separate them.
+        if result.recommend_update:
+            n_eligible = sum(
+                1 for o in buffer.get_all()
+                if o.clamped_reason not in ("no_output", "clamped")
+                and abs(o.room_rate) < 0.02
+            )
+            if n_eligible >= 2 * buffer.n_features:
+                kappa = buffer.compute_condition_number()
+                if not math.isinf(kappa) and kappa > 100:
+                    _LOGGER.warning(
+                        "%sBatch WLS: κ=%.0f (severe) — rejecting recommendation "
+                        "until data geometry improves",
+                        self._log_prefix, kappa,
+                    )
+                    result.recommend_update = False
+
         if result.recommend_update and result.beta_blended:
             for i, val in enumerate(result.beta_blended):
                 if i < rls.n:
@@ -749,6 +775,24 @@ class PIController:
                         if j != i:
                             rls.P[i * rls.n + j] = 0.0
                             rls.P[j * rls.n + i] = 0.0
+
+            # Mark RLS as mature — batch has validated the data geometry
+            # and provided a well-conditioned baseline.  Online RLS tracking
+            # is now safe to run.
+            if is_heating:
+                if not self._rls_heat_mature:
+                    _LOGGER.info(
+                        "%sBatch-first gate: heat RLS now mature",
+                        self._log_prefix,
+                    )
+                self._rls_heat_mature = True
+            else:
+                if not self._rls_cool_mature:
+                    _LOGGER.info(
+                        "%sBatch-first gate: cool RLS now mature",
+                        self._log_prefix,
+                    )
+                self._rls_cool_mature = True
 
             _LOGGER.info(
                 "%sBatch WLS: applied blended update to %s model",
@@ -973,6 +1017,10 @@ class PIController:
                 coeff_clamps=self._rls_heat_clamps,
                 feature_scales=self._feature_scales,
             )
+            # If the restored model had observations, it was past the
+            # batch-first gate before restart — restore that state.
+            if self._rls_heat.observation_count > 0:
+                self._rls_heat_mature = True
         if data.rls_cool_model:
             self._rls_cool = RLSModel.from_dict(
                 data.rls_cool_model, self._n_model_inputs,
@@ -980,6 +1028,8 @@ class PIController:
                 coeff_clamps=self._rls_cool_clamps,
                 feature_scales=self._feature_scales,
             )
+            if self._rls_cool.observation_count > 0:
+                self._rls_cool_mature = True
         # Restore per-mode observation buffers for batch learning.
         _n_buf_features = len(self._feature_order)
         _model_inputs_cfg = self._inputs.model_inputs
@@ -2524,6 +2574,7 @@ class PIController:
                 for j in range(n):
                     self._rls_heat.P[i * n + j] = DEFAULT_RLS_P_INIT if i == j else 0.0
             self._rls_heat.observation_count = 0
+            self._rls_heat_mature = False
 
         if mode in (None, "cool"):
             cool_seeds = [0.0, -self._ff_cool_slope]
@@ -2538,6 +2589,7 @@ class PIController:
                 for j in range(n):
                     self._rls_cool.P[i * n + j] = DEFAULT_RLS_P_INIT if i == j else 0.0
             self._rls_cool.observation_count = 0
+            self._rls_cool_mature = False
 
         self._pi_integral = 0.0
         label = mode or "heat+cool"
@@ -3294,7 +3346,8 @@ class PIController:
                 and output_change < 0.045
                 and abs(self._room_temp_rate) < 0.02
             )
-            if branch_ready and self._rls_shared_gate_open(learning_suppressed):
+            rls_mature = self._rls_heat_mature if is_heating else self._rls_cool_mature
+            if branch_ready and rls_mature and self._rls_shared_gate_open(learning_suppressed):
                 # Observe hp_setpoint - desired_c: what offset maintained target
                 self._rls_learn_observation(
                     rls, x, float(self._hp_setpoint) - desired_c, "RLS update",
@@ -3352,7 +3405,8 @@ class PIController:
                 self._stable_oodb_ticks = 0
 
             branch_ready = self._stable_oodb_ticks >= min_oodb_ticks
-            if branch_ready and self._rls_shared_gate_open(learning_suppressed):
+            rls_mature = self._rls_heat_mature if is_heating else self._rls_cool_mature
+            if branch_ready and rls_mature and self._rls_shared_gate_open(learning_suppressed):
                 # Observe hp_setpoint - current_c: what offset maintains equilibrium
                 self._rls_learn_observation(
                     rls, x, float(self._hp_setpoint) - current_c, "RLS oodb",

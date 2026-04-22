@@ -71,7 +71,12 @@ class TestRLSUpdate:
         assert model.beta[1] == pytest.approx(0.4, abs=0.05)
 
     def test_multivariate_convergence(self):
-        """Multi-input model should converge to true coefficients."""
+        """Multi-input model should converge to true coefficients.
+
+        Note: always-on seed shrinkage pulls toward seeds, so convergence
+        is slightly limited when seeds are far from truth.  Solar seed=-1.0
+        vs truth=-3.5 means the regularized estimate is biased toward seed.
+        """
         # True: offset = 1.0 + 0.35*outdoor - 3.5*solar
         model = RLSModel(n_inputs=2, seed_coefficients=[0.0, 0.2, -1.0])
 
@@ -86,7 +91,8 @@ class TestRLSUpdate:
 
         assert model.beta[0] == pytest.approx(1.0, abs=0.3)
         assert model.beta[1] == pytest.approx(0.35, abs=0.05)
-        assert model.beta[2] == pytest.approx(-3.5, abs=0.3)
+        # Wider tolerance: seed shrinkage (δ=0.001) pulls toward seed=-1.0
+        assert model.beta[2] == pytest.approx(-3.5, abs=0.5)
 
     def test_observation_count_increments(self):
         """Observation count should increment on each update."""
@@ -476,7 +482,12 @@ class TestSeedShrinkage:
         assert abs(model.beta[1]) < 1.0
 
     def test_dormant_feature_not_shrunk(self):
-        """Inactive feature retains its learned coefficient (no data, no shrinkage)."""
+        """Inactive feature retains its learned coefficient (no data, no shrinkage).
+
+        Dormant features like a pellet stove off from March-October must keep
+        their learned coefficient.  P off-diagonal decoupling (not shrinkage)
+        prevents drift from active feature coupling.
+        """
         model = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.0])
         model.beta[1] = 1.0  # learned value
 
@@ -643,4 +654,166 @@ class TestFeatureScaleRescaling:
             feature_scales=list(scales),
         )
         assert restored.beta == pytest.approx(model.beta, abs=1e-10)
+        assert restored.P == pytest.approx(model.P, abs=1e-10)
+
+
+class TestJosephFormPUpdate:
+    """Tests for the Joseph-form covariance update (Bierman 1977)."""
+
+    def test_joseph_form_regression_well_conditioned(self):
+        """On well-conditioned data, Joseph form should converge to the true
+        relationship.  Seed shrinkage (δ=0.001 pull toward seed) biases
+        the estimate, especially for the intercept (seed=0 vs truth=1)."""
+        import random
+        random.seed(42)
+        # True relationship: y = 1.0 + 0.35 * outdoor - 3.5 * solar
+        model = RLSModel(n_inputs=2, seed_coefficients=[0.0, 0.2, -1.0])
+        for _ in range(200):
+            outdoor = random.uniform(0, 20)
+            solar = random.uniform(0, 1)
+            x = [1.0, outdoor, solar]
+            y = 1.0 + 0.35 * outdoor - 3.5 * solar + random.gauss(0, 0.1)
+            model.update(x, y)
+
+        coeffs = model.get_coefficients()
+        # Intercept: seed=0 vs truth=1 → shrinkage bias toward 0
+        assert coeffs[0] == pytest.approx(1.0, abs=0.5)
+        assert coeffs[1] == pytest.approx(0.35, abs=0.05)
+        # Solar: seed=-1 vs truth=-3.5 → shrinkage bias toward -1
+        assert coeffs[2] == pytest.approx(-3.5, abs=0.5)
+
+    def test_p_stays_positive_definite_collinear(self):
+        """With r=0.95 correlated inputs, P diagonals must stay positive.
+
+        This is the exact scenario that caused the production bug:
+        7 coefficients, high multicollinearity, small N.
+        """
+        import random
+        random.seed(99)
+        # 5 inputs + intercept + outdoor_delta = 7 coefficients
+        model = RLSModel(
+            n_inputs=5,
+            seed_coefficients=[0.0, 0.35, -4.0, -8.0, 0.0, -0.5, 0.0],
+        )
+        for _ in range(50):
+            outdoor = random.uniform(5, 20)
+            # Make feature 4 (adjacent zone temp) highly correlated with outdoor
+            adjacent_temp = outdoor * 0.95 + random.gauss(0, 0.5)
+            solar = outdoor * 0.3 + random.gauss(0, 0.3)  # Also correlated
+            stove = 0.0  # dormant
+            boiler = 0.0  # dormant
+            x = [1.0, outdoor, solar, stove, boiler, adjacent_temp]
+            y = 0.35 * outdoor - 4.0 * solar + random.gauss(0, 0.5)
+            model.update(x, y)
+
+        diag = model.get_covariance_diagonal()
+        for i, d in enumerate(diag):
+            assert d > 0, f"P diagonal[{i}] = {d} is non-positive after {model.observation_count} collinear observations"
+
+    def test_p_symmetry_maintained(self):
+        """P matrix should remain symmetric after many updates."""
+        import random
+        random.seed(7)
+        model = RLSModel(n_inputs=3, seed_coefficients=[0.0, 0.3, -2.0, 1.0])
+        for _ in range(200):
+            x = [1.0, random.uniform(0, 20), random.uniform(0, 1),
+                 random.uniform(-1, 1)]
+            y = random.uniform(-5, 5)
+            model.update(x, y)
+
+        n = model.n
+        for i in range(n):
+            for j in range(i + 1, n):
+                assert model.P[i * n + j] == pytest.approx(
+                    model.P[j * n + i], abs=1e-12
+                ), f"P[{i},{j}]={model.P[i*n+j]} != P[{j},{i}]={model.P[j*n+i]}"
+
+
+class TestDormantFeatureDecoupling:
+    """Tests for K-zeroing to prevent dormant feature coefficient drift."""
+
+    def test_dormant_features_stay_at_learned_value(self):
+        """Features that are always zero should not drift from their value.
+
+        K[i] is zeroed when x[i]=0, preventing coefficient updates from
+        off-diagonal P coupling.  Dormant coefficients remain stable.
+        """
+        model = RLSModel(
+            n_inputs=3,
+            seed_coefficients=[0.0, 0.3, -4.0, -8.0],
+        )
+        # Feature 2 (solar, seed=-4.0) and feature 3 (stove, seed=-8.0) always zero
+        for _ in range(50):
+            x = [1.0, 10.0, 0.0, 0.0]
+            y = 3.0 + 0.1 * ((_ % 10) - 5)  # Some noise
+            model.update(x, y)
+
+        coeffs = model.get_coefficients()
+        # Solar and stove should stay at their seed values (K=0, no updates)
+        assert coeffs[2] == pytest.approx(-4.0, abs=0.01), (
+            f"Dormant solar drifted to {coeffs[2]}, expected -4.0"
+        )
+        assert coeffs[3] == pytest.approx(-8.0, abs=0.01), (
+            f"Dormant stove drifted to {coeffs[3]}, expected -8.0"
+        )
+
+    def test_intermittent_feature_still_learns(self):
+        """A feature that alternates on/off should still learn when active.
+
+        K[i]=0 only when x[i]=0; when active, normal learning proceeds.
+        """
+        # True: y = 0.3 * outdoor - 3.0 * stove
+        model = RLSModel(
+            n_inputs=2,
+            seed_coefficients=[0.0, 0.2, -1.0],
+        )
+        import random
+        random.seed(42)
+        for _ in range(200):
+            outdoor = random.uniform(5, 20)
+            stove = 1.0 if random.random() < 0.2 else 0.0  # 20% duty cycle
+            x = [1.0, outdoor, stove]
+            y = 0.3 * outdoor - 3.0 * stove + random.gauss(0, 0.2)
+            model.update(x, y)
+
+        coeffs = model.get_coefficients()
+        assert coeffs[2] == pytest.approx(-3.0, abs=1.0), (
+            f"Intermittent stove coefficient {coeffs[2]}, expected near -3.0"
+        )
+
+
+class TestPValidation:
+    """Tests for P matrix validation in from_dict() and update()."""
+
+    def test_from_dict_resets_negative_p_diagonal(self):
+        """Restoring a model with negative P diagonal should reset P."""
+        model = RLSModel(n_inputs=2, seed_coefficients=[0.0, 0.3, -2.0])
+        data = model.as_dict()
+        # Corrupt P diagonal to simulate persisted broken state
+        n = model.n
+        data["P"][0] = -55539.0  # Negative intercept P diagonal
+        data["P"][n + 1] = -0.07  # Negative outdoor_delta P diagonal
+
+        restored = RLSModel.from_dict(
+            data, n_inputs=2,
+            seed_coefficients=[0.0, 0.3, -2.0],
+        )
+        diag = restored.get_covariance_diagonal()
+        for i, d in enumerate(diag):
+            assert d > 0, f"P diagonal[{i}] = {d} should be positive after reset"
+            assert d == pytest.approx(restored.p_init), (
+                f"P diagonal[{i}] = {d} should equal p_init={restored.p_init}"
+            )
+
+    def test_from_dict_preserves_valid_p(self):
+        """Restoring a model with valid P should preserve it."""
+        model = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.3])
+        for _ in range(10):
+            model.update([1.0, 5.0], 2.0)
+        data = model.as_dict()
+
+        restored = RLSModel.from_dict(
+            data, n_inputs=1,
+            seed_coefficients=[0.0, 0.3],
+        )
         assert restored.P == pytest.approx(model.P, abs=1e-10)

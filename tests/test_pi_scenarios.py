@@ -463,6 +463,7 @@ class TestSunnyDayVsColdNight:
         entity = SimEntity(config)
         entity._pi._desired_temp = 20.5
         entity._pi._rls_warmup_done = True
+        entity._pi._rls_heat_mature = True
         thermal = ThermalModel(initial_temp=20.5, outdoor_temp=6.0,
                               time_constant_min=time_constant)
 

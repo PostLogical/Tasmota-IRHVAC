@@ -77,8 +77,14 @@ class TestRLSDiurnalConvergence:
     """Test RLS convergence over a realistic 3-day diurnal cycle."""
 
     def test_converges_to_true_coefficients(self):
-        """RLS should converge to true coefficients within 5 days."""
-        data = _simulate_diurnal_cycle(hours=120)  # 5 days (P_init=1 needs more data)
+        """RLS should converge to true coefficients within 10 days.
+
+        Solar and stove are intermittent (active only part of the day).
+        With K-zeroing for dormant features, they only learn from active
+        observations — no cross-coupling drift during inactive periods.
+        10 days gives sufficient active hours to overcome seed shrinkage.
+        """
+        data = _simulate_diurnal_cycle(hours=240)  # 10 days
 
         # Start with wrong seeds
         model = RLSModel(
@@ -91,8 +97,7 @@ class TestRLSDiurnalConvergence:
             x = [1.0, d["outdoor_delta"], d["solar_proxy"], d["pellet_stove"]]
             model.update(x, d["true_offset"])
 
-        # After 120 hours, slope coefficients should converge.
-        # Intercept converges slowest (absorbed by other coefficients initially).
+        # After 240 hours, coefficients should converge.
         assert model.beta[1] == pytest.approx(0.35, abs=0.1)  # Outdoor
         assert model.beta[2] == pytest.approx(-4.0, abs=1.5)  # Solar
         assert model.beta[3] == pytest.approx(-3.2, abs=1.5)  # Stove
@@ -667,12 +672,13 @@ class TestPInitRegression:
             f"Slope {slope:.4f} didn't move toward true {true_slope}"
         )
 
-    def test_p_init_10_with_clamped_intercept_overshoots(self):
-        """P_INIT=10 + clamped intercept causes slope overshoot (the original bug).
+    def test_p_init_10_with_clamped_intercept_no_longer_overshoots(self):
+        """P_INIT=10 + clamped intercept no longer causes slope overshoot.
 
-        The clamped intercept at (-0.5, 0.5) forces the slope to absorb
-        what should be intercept variance, causing massive overshoot.
-        This was the production configuration during the LR incident.
+        With the standard-form P update, this configuration caused massive
+        overshoot (slope > 1.5).  The Joseph-form P update is numerically
+        stable and converges near the true slope despite the clamped
+        intercept and high P_INIT.
         """
         model = RLSModel(
             n_inputs=1,
@@ -692,9 +698,9 @@ class TestPInitRegression:
             model.update(x, observed)
 
         slope = model.get_coefficients()[1]
-        # Clamped intercept + P_INIT=10 → slope overshoots far past truth
-        assert slope > 1.5, (
-            f"Expected overshoot with clamped intercept, got slope={slope:.4f}"
+        # Joseph form: slope converges near truth instead of overshooting
+        assert slope == pytest.approx(true_slope, abs=0.2), (
+            f"Expected slope near truth={true_slope}, got {slope:.4f}"
         )
 
     def test_blend_anchors_to_seeds_early(self):

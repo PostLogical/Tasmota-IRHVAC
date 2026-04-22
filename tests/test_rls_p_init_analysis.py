@@ -174,9 +174,12 @@ class TestScenarioA:
         print(f"  Drift from seed: {abs(slope - 0.35) / 0.35 * 100:.0f}%")
         print(f"  Overshoot past true: {slope - 0.6:.4f}")
 
-        # With P_INIT=10, slope should overshoot significantly past 0.6
-        assert slope > 1.0, (
-            f"Expected slope overshoot > 1.0, got {slope:.4f}"
+        # With Joseph form, P_INIT=10 no longer causes the catastrophic
+        # overshoot past 1.0 seen with the standard form.  The quadratic
+        # structure keeps the update numerically stable, so the slope
+        # converges near the true value instead of overshooting.
+        assert slope == pytest.approx(true_slope, abs=0.15), (
+            f"Expected slope near truth={true_slope}, got {slope:.4f}"
         )
 
     def test_lr_failure_sweep_p_init(self):

@@ -522,6 +522,7 @@ class TestFeedforward:
         pi._hp_setpoint = 22.0
         pi._ff_settled_ticks = 10  # Well settled
         pi._rls_warmup_done = True
+        pi._rls_heat_mature = True
         pi_entity._attr_current_temperature = 22.0  # In deadband
         pi_entity._attr_hvac_mode = HVACMode.HEAT
 
@@ -552,6 +553,8 @@ class TestFeedforward:
         pi._prev_integral_for_rls = 0.5
         pi._ff_settled_ticks = 10
         pi._rls_warmup_done = True
+        pi._rls_heat_mature = True
+        pi._rls_heat_mature = True  # Batch-first gate satisfied
         pi_entity._attr_current_temperature = 22.0  # In deadband
         pi_entity._attr_hvac_mode = HVACMode.HEAT
 
@@ -1904,6 +1907,7 @@ class TestLearningGateDebugLogging:
 
         pi._inputs.outdoor_temp = None
         pi._rls_warmup_done = True
+        pi._rls_heat_mature = True
         entity._attr_current_temperature = 22.0  # Within deadband of 22.0
         pi._desired_temp = 22.0
         pi._hp_setpoint = 22.0
@@ -1921,6 +1925,7 @@ class TestLearningGateDebugLogging:
 
         pi._inputs.outdoor_temp = 5.0
         pi._rls_warmup_done = True
+        pi._rls_heat_mature = True
         pi._manual_ff_suppress = True
         entity._attr_current_temperature = 22.0
         pi._desired_temp = 22.0
@@ -1947,6 +1952,7 @@ class TestLearningGateDebugLogging:
 
         pi._inputs.outdoor_temp = 5.0
         pi._rls_warmup_done = True
+        pi._rls_heat_mature = True
         entity._attr_current_temperature = 22.0
         pi._desired_temp = 22.0
         pi._hp_setpoint = 22.0

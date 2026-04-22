@@ -167,9 +167,15 @@ class RLSModel:
             return residual
         K = [Px[i] / denom for i in range(n)]
 
-        # Zero Kalman gain for frozen coefficients so beta and P are unchanged.
+        # Zero Kalman gain for frozen or dormant coefficients.
+        # Frozen: user/system locked this coefficient.
+        # Dormant (x ≈ 0): no information about this feature in the current
+        # observation.  Without zeroing, off-diagonal P coupling causes
+        # K[i] ≠ 0 even when x[i] = 0, leading to coefficient drift
+        # without data.  Zeroing K[i] also prevents the Joseph-form P
+        # update from modifying this dimension's covariance.
         for i in range(n):
-            if self.frozen[i]:
+            if self.frozen[i] or abs(x_norm[i]) < 1e-6:
                 K[i] = 0.0
 
         # Update coefficients with Bayesian seed shrinkage.
@@ -204,16 +210,60 @@ class RLSModel:
                         self.P[j * n + i] = 0.0
                     self.P[i * n + i] = self.delta
 
-        # Update covariance: P = (P - K·x'·P) / λ + δ·I
+        # Joseph-form covariance update (Bierman 1977, Haykin 2002):
+        #   P = (I - K·x') · P · (I - K·x')' / λ
+        #
+        # Algebraically equivalent to the standard form (P - K·x'·P)/λ but
+        # the quadratic structure A·P·A' guarantees symmetry and positive-
+        # definiteness when P is PD — unlike the standard form which
+        # accumulates floating-point cancellation errors and can lose PD
+        # under multicollinearity.
+
+        # Step 1: compute (I - K·x') · P  →  IKxP[i][j]
+        #   IKxP[i][j] = P[i,j] - K[i] · Σ_k x[k]·P[k,j]
+        IKxP = [0.0] * (n * n)
+        for i in range(n):
+            for j in range(n):
+                xP_j = sum(x_norm[k] * self.P[k * n + j] for k in range(n))
+                IKxP[i * n + j] = self.P[i * n + j] - K[i] * xP_j
+
+        # Step 2: multiply by (I - K·x')' from the right → A·P·A'
         new_P = [0.0] * (n * n)
         for i in range(n):
             for j in range(n):
-                col_j = sum(x_norm[k] * self.P[k * n + j] for k in range(n))
-                new_P[i * n + j] = (self.P[i * n + j] - K[i] * col_j) / lam
+                # IKxP · (I - K·x')'  =  Σ_k IKxP[i,k] · (δ_kj - x[k]·K[j])
+                val = IKxP[i * n + j] - sum(
+                    IKxP[i * n + k] * x_norm[k] for k in range(n)
+                ) * K[j]
+                new_P[i * n + j] = val / lam
 
-        # Regularization: prevent covariance windup by adding δ·I each step
+        # Symmetrize — eliminate any residual floating-point asymmetry.
         for i in range(n):
+            for j in range(i + 1, n):
+                avg = (new_P[i * n + j] + new_P[j * n + i]) * 0.5
+                new_P[i * n + j] = avg
+                new_P[j * n + i] = avg
+
+        # Diagonal floor + regularization.
+        # Floor prevents negative diagonals (defense-in-depth, Joseph form
+        # should guarantee PD).  No upper cap — with Joseph form, P growth
+        # is self-limiting through the quadratic structure and forgetting
+        # factor steady state.
+        for i in range(n):
+            if new_P[i * n + i] < self.delta:
+                new_P[i * n + i] = self.delta
             new_P[i * n + i] += self.delta
+
+        # Emergency P reset — should be unreachable after Joseph form + floor,
+        # but defense-in-depth against unforeseen numerical edge cases.
+        if any(new_P[i * n + i] <= 0 for i in range(n)):
+            _LOGGER.error(
+                "RLS P matrix has non-positive diagonal after Joseph update "
+                "— resetting to initial P"
+            )
+            new_P = [0.0] * (n * n)
+            for i in range(n):
+                new_P[i * n + i] = self.p_init
 
         self.P = new_P
         self.observation_count += 1
@@ -291,6 +341,16 @@ class RLSModel:
             P = data["P"]
             if len(P) == model.n * model.n:
                 model.P = [float(v) for v in P]
+                # Validate P diagonals — a persisted non-PD matrix perpetuates
+                # coefficient divergence across restarts.
+                if any(model.P[i * model.n + i] <= 0 for i in range(model.n)):
+                    _LOGGER.warning(
+                        "RLS restore: negative P diagonal detected, "
+                        "resetting to initial P"
+                    )
+                    model.P = [0.0] * (model.n * model.n)
+                    for i in range(model.n):
+                        model.P[i * model.n + i] = model.p_init
             else:
                 _LOGGER.info("RLS restore: covariance matrix size mismatch, using initial P")
         if "observation_count" in data:

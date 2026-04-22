@@ -89,6 +89,7 @@ class TestManualSuppress:
         pi._hp_setpoint = 22.0
         pi._ff_settled_ticks = 10
         pi._rls_warmup_done = True
+        pi._rls_heat_mature = True
         pi._pi_integral = 0.5
         pi._prev_integral_for_rls = 0.5
         entity._attr_current_temperature = 22.0
