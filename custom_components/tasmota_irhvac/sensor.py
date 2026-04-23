@@ -48,6 +48,16 @@ PI_SENSOR_DESCRIPTIONS: tuple[TasmotaIrhvacPISensorDescription, ...] = (
         suggested_display_precision=1,
     ),
     TasmotaIrhvacPISensorDescription(
+        key="user_setpoint",
+        translation_key="user_setpoint",
+        climate_attr="desired_temp_celsius",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=None,
+        suggested_display_precision=1,
+    ),
+    TasmotaIrhvacPISensorDescription(
         key="pi_integral",
         translation_key="pi_integral",
         climate_attr="_pi_integral",
@@ -216,6 +226,16 @@ PI_SENSOR_DESCRIPTIONS: tuple[TasmotaIrhvacPISensorDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
         suggested_display_precision=0,
+    ),
+    TasmotaIrhvacPISensorDescription(
+        key="tau_estimate",
+        translation_key="tau_estimate",
+        climate_attr="tau_estimate",
+        device_class=SensorDeviceClass.DURATION,
+        native_unit_of_measurement=UnitOfTime.MINUTES,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        suggested_display_precision=1,
     ),
 )
 

@@ -517,6 +517,25 @@ class PIController:
         self._desired_temp = value
 
     @property
+    def desired_temp_celsius(self) -> float | None:
+        if self._desired_temp is None:
+            return None
+        return round(
+            TemperatureConverter.convert(
+                self._desired_temp,
+                self._entity.temperature_unit,
+                UnitOfTemperature.CELSIUS,
+            ),
+            1,
+        )
+
+    @property
+    def tau_estimate(self) -> float | None:
+        if not self._plant_id.enabled:
+            return None
+        return round(self._plant_id.tau, 1)
+
+    @property
     def is_tick_running(self) -> bool:
         return self._pi_tick_running
 
