@@ -51,13 +51,10 @@ class ScenarioConfig:
     noise_sigma: float = 0.1  # realistic sensor noise
     noise_seed: int = 42
     # Batch at which to manually unlock model input features.
-    # In production, the VIF<10 gate handles this automatically, but
-    # bench simulations with limited diversity often can't pass VIF<10
-    # for features with a non-negative structure (solar, binary sources)
-    # due to collinearity with the constant intercept.
-    # Set to 0 to leave features frozen (auto-unlock only).
+    # With the intercept-excluded VIF fix, auto-unlock often works.
+    # Set to 0 to rely on auto-unlock only.
     # Set to N to manually unlock all model input features after batch N.
-    manual_unlock_after_batch: int = 2
+    manual_unlock_after_batch: int = 0
 
     # Model inputs: each entry defines a disturbance with ground-truth coef.
     # The thermal model applies the physical effect; the PI controller
@@ -226,13 +223,18 @@ def run_full_system(
         adapter._entity._attr_current_temperature = sensor_reading
         pi._inputs.outdoor_temp = model.outdoor_temp
 
-        # Set model input values on the PI controller
-        for i, mi in enumerate(config.model_inputs):
-            if i < len(pi._inputs.values):
-                val = input_values[mi.name]
-                if mi.delta_from_room:
-                    val = val - sensor_reading
-                pi._inputs.values[i] = val
+        # Set model input values via mock HA entity states so that
+        # _resolve_model_input_states → read_values → _raw_for_obs
+        # picks up the actual schedule values (not MagicMock defaults).
+        _mock_states: dict = {}
+        for mi in config.model_inputs:
+            val = input_values[mi.name]
+            ms = type("MockState", (), {
+                "state": str(val),
+                "attributes": {"unit_of_measurement": None},
+            })()
+            _mock_states[mi.entity_id] = ms
+        pi._hass.states.get = lambda eid: _mock_states.get(eid)
 
         import time as _time
         original = _time.monotonic
@@ -275,13 +277,19 @@ def run_full_system(
 
         # Trigger batch at regular intervals
         if tick > 0 and tick % BATCH_INTERVAL_TICKS == 0:
+            if not adaptive_cap:
+                # Disable adaptive cap by clearing unlock tracking
+                # BEFORE the batch so _build_per_feature_step_caps sees
+                # no recently-unlocked features.
+                pi._unlock_batch_cycle = [None] * len(pi._unlock_batch_cycle)
+
             pi._run_batch_analysis()
             batch_count += 1
 
             # Manual unlock: after N batches, unfreeze model input features
             # (indices 2+) so batch learning can start converging them.
-            # This simulates what production's VIF gate does automatically
-            # when data diversity is sufficient.
+            # With the intercept-excluded VIF fix, auto-unlock usually
+            # handles this.  Set manual_unlock_after_batch > 0 to override.
             if (
                 config.manual_unlock_after_batch > 0
                 and batch_count == config.manual_unlock_after_batch
@@ -290,15 +298,10 @@ def run_full_system(
                 for i in range(2, rls.n):
                     if rls.frozen[i]:
                         pi.set_frozen("heat", i, frozen=False, manual=False)
-                        # Record unlock for adaptive cap tracking
                         if i < len(pi._unlock_batch_cycle):
                             pi._unlock_batch_cycle[i] = pi._batch_cycle_count
                 if not pi._rls_heat_mature:
                     pi._rls_heat_mature = True
-
-            if not adaptive_cap:
-                # Disable adaptive cap by clearing unlock tracking
-                pi._unlock_batch_cycle = [None] * len(pi._unlock_batch_cycle)
 
             # Snapshot coefficients
             coef_dict = pi._rls_heat.get_coefficients()
@@ -385,17 +388,17 @@ def _solar_schedule(tick: int) -> float:
 SCENARIO_1_CONFIG = ScenarioConfig(
     name="clean_solar_unlock",
     n_days=6,
-    outdoor_base_c=0.0,
-    outdoor_diurnal_c=5.0,
+    outdoor_base_c=-10.0,  # cold: HP stays active even with solar gain
+    outdoor_diurnal_c=3.0,  # small diurnal swing
     model_inputs=[
         ModelInputSpec(
             name="Solar Proxy",
             entity_id="sensor.solar_proxy",
             input_role="solar",
-            true_thermal_effect=0.02,  # °C/min per unit solar — strong effect
-            # At peak solar=0.8: 0.02 * 0.8 * 15 = 0.24°C/tick.
-            # Over 6h of solar: ~0.24 * 24 = 5.8°C total warming.
-            # This is realistic for a zone with direct solar exposure.
+            true_thermal_effect=0.015,  # °C/min per unit solar
+            # At peak solar=0.8: 0.015 * 0.8 * 15 = 0.18°C/tick.
+            # Over 6h: ~2.2°C total.  On a -10°C day the HP still needs
+            # to push hard, so observations stay eligible (not clamped).
             true_ff_coef=-3.5,  # HP backs off 3.5°C when solar is at 1.0
             seed_heat=0.0,  # starts at zero — must learn
             schedule=_solar_schedule,
