@@ -364,8 +364,22 @@ def _compare_adaptive_vs_normal(
 
 
 def _solar_schedule(tick: int) -> float:
-    """Standard diurnal solar: 0 at night, peaks ~0.8 at noon."""
-    return _diurnal_solar(tick, peak=0.8)
+    """Solar with variable cloud cover to decorrelate from outdoor_delta.
+
+    Real solar varies day-to-day (clouds, haze) while outdoor_delta
+    follows a smooth multi-day weather pattern.  Adding cloud variation
+    breaks the diurnal correlation that inflates VIF.
+    """
+    hour = (tick * TICK_MINUTES / 60.0) % 24.0
+    day = tick / TICKS_PER_DAY
+    if hour < 6 or hour > 18:
+        return 0.0
+    base = 0.8 * math.sin(math.pi * (hour - 6) / 12)
+    # Cloud factor: varies by day, sometimes cloudy, sometimes clear
+    # Uses a different period than the outdoor weather drift (5 days)
+    # to ensure solar and outdoor are decorrelated across days
+    cloud = 0.5 + 0.5 * math.cos(2 * math.pi * day / 3.0 + 1.0)
+    return base * cloud
 
 
 SCENARIO_1_CONFIG = ScenarioConfig(
@@ -378,7 +392,10 @@ SCENARIO_1_CONFIG = ScenarioConfig(
             name="Solar Proxy",
             entity_id="sensor.solar_proxy",
             input_role="solar",
-            true_thermal_effect=0.003,  # °C/min per unit solar at peak
+            true_thermal_effect=0.02,  # °C/min per unit solar — strong effect
+            # At peak solar=0.8: 0.02 * 0.8 * 15 = 0.24°C/tick.
+            # Over 6h of solar: ~0.24 * 24 = 5.8°C total warming.
+            # This is realistic for a zone with direct solar exposure.
             true_ff_coef=-3.5,  # HP backs off 3.5°C when solar is at 1.0
             seed_heat=0.0,  # starts at zero — must learn
             schedule=_solar_schedule,
