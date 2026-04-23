@@ -38,7 +38,7 @@ from homeassistant.util.unit_conversion import TemperatureConverter
 
 import math
 
-from .batch_learning import BatchResult, DiversityAwareBuffer, HourlyResidualPattern, MAX_STEP_ABS, Observation, UNLOCK_FIRST_STEP, analyze_residuals_by_hour, fuse_batch_greybox, weighted_least_squares, compare_and_report, compute_blended_update
+from .batch_learning import BatchResult, CollinearGroup, DiversityAwareBuffer, HourlyResidualPattern, MAX_STEP_ABS, Observation, UNLOCK_FIRST_STEP, analyze_residuals_by_hour, build_feature_vector_from_raw, compute_belsley_diagnostics, fuse_batch_greybox, weighted_least_squares, compare_and_report, compute_blended_update
 from .greybox_buffer import GreyboxBuffer
 from .greybox_observer import (
     GreyboxBridgeResult,
@@ -483,6 +483,7 @@ class PIController:
         self._original_lambda_base_heat: float = self._rls_heat.lambda_base
         self._original_lambda_base_cool: float = self._rls_cool.lambda_base
         self._cached_kappa: float | None = None
+        self._cached_collinear_groups: list[CollinearGroup] = []
         # Adaptive batch step cap: track when each feature was unlocked
         # so we can allow an enlarged first step.  None = never unlocked
         # or unlocked long enough ago that normal cap applies.
@@ -944,6 +945,42 @@ class PIController:
                     self._log_prefix, p.start_hour, p.end_hour,
                     p.mean_residual, p.n_observations,
                 )
+
+        # ── Belsley VDP collinearity diagnostic ──
+        # Compute per-variable variance decomposition to identify which
+        # features share ill-conditioned components.  Cached for the
+        # multicollinearity repair check.
+        coeff_names_vdp = ["intercept", "outdoor_delta"]
+        for m in self._model_inputs:
+            coeff_names_vdp.append(m.get("name", "input"))
+        eligible = [
+            o for o in observations
+            if o.clamped_reason not in ("no_output", "clamped")
+            and abs(o.room_rate) < 0.02
+            and o.hp_setpoint is not None
+        ]
+        if len(eligible) >= 2 * rls.n:
+            vdp_X: list[list[float]] = []
+            for o in eligible:
+                vec = build_feature_vector_from_raw(
+                    o, self._inputs.model_inputs, self._feature_order,
+                )
+                if vec is not None:
+                    vdp_X.append(vec)
+            if len(vdp_X) >= 2 * rls.n:
+                self._cached_collinear_groups = compute_belsley_diagnostics(
+                    vdp_X, n_features=rls.n, n_obs=len(vdp_X),
+                    feature_names=coeff_names_vdp,
+                )
+                for g in self._cached_collinear_groups:
+                    _LOGGER.info(
+                        "%sBelsley VDP: %s share ill-conditioned component (CI=%.0f)",
+                        self._log_prefix,
+                        " and ".join(g.features),
+                        g.condition_index,
+                    )
+        else:
+            self._cached_collinear_groups = []
 
         # ── Drift detection: track per-coefficient correction direction ──
         if result.beta_blended and result.beta_current:
@@ -1554,11 +1591,16 @@ class PIController:
         """Build per-feature step caps for recently-unlocked features.
 
         Returns None (all features use default cap) unless at least one
-        feature qualifies for the enlarged cap.  Quality gates:
+        feature qualifies for the enlarged cap.  Quality gates per
+        Belsley (1980): diagnose collinearity per-variable, not globally.
+
+        Global gate:
         - n_eligible ≥ 40 (2× minimum — more data for a larger step)
-        - κ < 30 (no multicollinearity concern)
-        - Per-feature VIF < 5 (stricter than unlock threshold of 10)
-        - Per-feature σ_batch < 1.0 (reasonably tight estimate)
+
+        Per-feature gates:
+        - VIF < 5 (feature not confounded with others; stricter than
+          unlock threshold of 10)
+        - σ_batch < 1.0 (empirical confirmation estimate is precise)
         - Feature was unlocked within the last 2 batch cycles
         """
         cycle = self._batch_cycle_count
@@ -1566,10 +1608,8 @@ class PIController:
         if n == 0:
             return None
 
-        # Global quality gates — if any fail, no enlarged caps
+        # Global quality gate
         if n_eligible < 40:
-            return None
-        if math.isinf(kappa) or kappa >= 30:
             return None
 
         # Per-feature VIF from the buffer
@@ -2725,6 +2765,7 @@ class PIController:
                 condition_number=cond_num,
                 correlated_pairs=corr_pairs,
                 sustained_cycles=self._tuning_alert_counters.get(counter_key, 0),
+                collinear_groups=self._cached_collinear_groups or None,
             )
             if result is not None:
                 key, placeholders, should_create = result

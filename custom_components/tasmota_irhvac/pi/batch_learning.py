@@ -506,41 +506,15 @@ class DiversityAwareBuffer:
             return float('inf')
         m = len(corr)
 
-        # Power iteration for λ_max of correlation matrix
-        v = [1.0 / math.sqrt(m)] * m
-        lambda_max = 0.0
-        for _ in range(50):
-            w = [sum(corr[i][j] * v[j] for j in range(m)) for i in range(m)]
-            lambda_max = sum(v[i] * w[i] for i in range(m))
-            norm = math.sqrt(sum(wi * wi for wi in w))
-            if norm < 1e-15:
-                return float('inf')
-            v = [wi / norm for wi in w]
-
-        # Inverse iteration for λ_min: need inverse of corr matrix
-        corr_copy = [row[:] for row in corr]
-        corr_inv = self._invert_matrix(corr_copy, m)
-        if corr_inv is None:
+        # Compute eigenvalues of the m×m correlation matrix.
+        # For small m (typical: 1-6 features after excluding intercept),
+        # use QR iteration or direct formula.
+        eigenvalues = self._eigenvalues_symmetric(corr, m)
+        if eigenvalues is None:
             return float('inf')
 
-        v = [1.0 / math.sqrt(m)] * m
-        v[0] += 0.1
-        norm = math.sqrt(sum(vi * vi for vi in v))
-        v = [vi / norm for vi in v]
-
-        inv_lambda_min = 0.0
-        for _ in range(50):
-            w = [sum(corr_inv[i][j] * v[j] for j in range(m)) for i in range(m)]
-            inv_lambda_min = sum(v[i] * w[i] for i in range(m))
-            norm = math.sqrt(sum(wi * wi for wi in w))
-            if norm < 1e-15:
-                return float('inf')
-            v = [wi / norm for wi in w]
-
-        if inv_lambda_min < 1e-15:
-            return float('inf')
-
-        lambda_min = 1.0 / inv_lambda_min
+        lambda_max = max(eigenvalues)
+        lambda_min = min(eigenvalues)
         if lambda_min < 1e-15:
             return float('inf')
 
@@ -739,6 +713,70 @@ class DiversityAwareBuffer:
 
         # Extract inverse from right half
         return [M[i][n:] for i in range(n)]
+
+    @staticmethod
+    def _eigenvalues_symmetric(
+        A: list[list[float]], n: int,
+    ) -> list[float] | None:
+        """Compute eigenvalues of an n×n symmetric matrix.
+
+        Uses numpy when available (LAPACK, exact).  Falls back to direct
+        formula (n≤2) or power/inverse iteration with random start (n>2).
+        Returns None if computation fails.
+        """
+        if _NUMPY_AVAILABLE:
+            try:
+                return np.linalg.eigvalsh(np.array(A)).tolist()
+            except np.linalg.LinAlgError:
+                return None
+
+        if n == 1:
+            return [A[0][0]]
+        if n == 2:
+            tr = A[0][0] + A[1][1]
+            det = A[0][0] * A[1][1] - A[0][1] * A[1][0]
+            disc = max(0.0, tr * tr - 4 * det)
+            sd = math.sqrt(disc)
+            return [(tr + sd) / 2, (tr - sd) / 2]
+
+        # n > 2 without numpy: power iteration with random start for
+        # λ_max, inverse iteration for λ_min.  Random start avoids the
+        # uniform-vector pitfall where [1/√n, ...] aligns with an
+        # eigenvector of correlation matrices.
+        import random as _rng
+        rng = _rng.Random(42)
+
+        v = [rng.gauss(0, 1) for _ in range(n)]
+        norm = math.sqrt(sum(vi * vi for vi in v))
+        v = [vi / norm for vi in v]
+        lam_max = 0.0
+        for _ in range(100):
+            w = [sum(A[i][j] * v[j] for j in range(n)) for i in range(n)]
+            lam_max = sum(v[i] * w[i] for i in range(n))
+            norm = math.sqrt(sum(wi * wi for wi in w))
+            if norm < 1e-15:
+                return None
+            v = [wi / norm for wi in w]
+
+        A_inv = DiversityAwareBuffer._invert_matrix([row[:] for row in A], n)
+        if A_inv is None:
+            return None
+        v = [rng.gauss(0, 1) for _ in range(n)]
+        norm = math.sqrt(sum(vi * vi for vi in v))
+        v = [vi / norm for vi in v]
+        inv_lam_min = 0.0
+        for _ in range(100):
+            w = [sum(A_inv[i][j] * v[j] for j in range(n)) for i in range(n)]
+            inv_lam_min = sum(v[i] * w[i] for i in range(n))
+            norm = math.sqrt(sum(wi * wi for wi in w))
+            if norm < 1e-15:
+                return None
+            v = [wi / norm for wi in w]
+
+        if inv_lam_min < 1e-15:
+            return None
+        lam_min = 1.0 / inv_lam_min
+        return [lam_max, lam_min]
 
 
 @dataclass
@@ -1291,6 +1329,116 @@ def _compute_vif_from_features(
     for i in range(m):
         result.append(max(corr_inv[i][i], 1.0))
     return result
+
+
+@dataclass
+class CollinearGroup:
+    """A group of features sharing an ill-conditioned component.
+
+    Belsley (1980): a collinearity problem exists when a component with
+    condition index ≥ 30 has variance decomposition proportion ≥ 0.5 for
+    two or more features simultaneously.
+    """
+
+    condition_index: float
+    features: list[str]  # names of involved features
+    feature_indices: list[int]  # indices into the feature vector
+    proportions: list[float]  # VDP values for each involved feature
+
+
+def compute_belsley_diagnostics(
+    X: list[list[float]],
+    n_features: int,
+    n_obs: int,
+    feature_names: list[str] | None = None,
+    ci_threshold: float = 30.0,
+    vdp_threshold: float = 0.5,
+) -> list[CollinearGroup]:
+    """Compute Belsley (1980) collinearity diagnostics via SVD.
+
+    Identifies groups of features that share ill-conditioned components
+    in the design matrix — the proper per-variable collinearity diagnostic
+    that tells you *which* features are confounded with *which*.
+
+    A feature is degraded by collinearity only when:
+    1. A condition index is ≥ ci_threshold (default 30), AND
+    2. That same component has VDP ≥ vdp_threshold for 2+ features
+
+    Requires numpy.  Returns empty list if numpy is unavailable or
+    if no collinearity groups are detected.
+
+    Args:
+        X: Feature matrix (m × n), including intercept at column 0.
+        n_features: Number of features (columns in X).
+        n_obs: Number of observations (rows in X).
+        feature_names: Human-readable names, one per feature.
+        ci_threshold: Condition index threshold (Belsley: 30).
+        vdp_threshold: Variance decomposition proportion threshold (Belsley: 0.5).
+
+    Returns:
+        List of CollinearGroup, one per ill-conditioned component that
+        involves 2+ features.  Empty if no problems detected.
+    """
+    if not _NUMPY_AVAILABLE:
+        return []
+    if n_obs < n_features or n_features < 2:
+        return []
+
+    names = feature_names or [f"feature_{i}" for i in range(n_features)]
+
+    X_np = np.array(X[:n_obs])
+    if X_np.shape != (n_obs, n_features):
+        X_np = X_np[:, :n_features]
+
+    # Column-normalize to unit length (Belsley 1991 §3.3 recommendation).
+    # Do NOT center columns — centering obscures intercept dependencies.
+    norms = np.linalg.norm(X_np, axis=0)
+    norms[norms < 1e-15] = 1.0
+    X_scaled = X_np / norms
+
+    # SVD: X = U Σ Vᵀ
+    try:
+        _U, s, Vt = np.linalg.svd(X_scaled, full_matrices=False)
+    except np.linalg.LinAlgError:
+        return []
+
+    V = Vt.T  # (n, n) — columns are right singular vectors
+
+    # Condition indices: CI_j = σ_max / σ_j
+    if s[-1] < 1e-15:
+        # Singular matrix — can't decompose
+        return []
+    cond_indices = s[0] / s
+
+    # Variance decomposition proportions.
+    # φ[k, j] = V[k,j]² / σ_j²  (unnormalized contribution of component j
+    #                               to Var(β_k))
+    # VDP[j, k] = φ[k,j] / Σ_j φ[k,j]  (proportion, summing to 1 over j
+    #                                      for each feature k)
+    phi = V ** 2 / (s ** 2)  # (n_features, n_components)
+    row_sums = phi.sum(axis=1, keepdims=True)
+    row_sums[row_sums < 1e-15] = 1.0
+    vdp = (phi / row_sums).T  # (n_components, n_features)
+
+    # Identify collinear groups: components where CI ≥ threshold AND
+    # 2+ features have VDP ≥ vdp_threshold.
+    groups: list[CollinearGroup] = []
+    for j in range(len(cond_indices)):
+        if cond_indices[j] < ci_threshold:
+            continue
+        involved = []
+        for k in range(n_features):
+            if vdp[j, k] >= vdp_threshold:
+                involved.append(k)
+        if len(involved) >= 2:
+            groups.append(CollinearGroup(
+                condition_index=float(cond_indices[j]),
+                features=[names[k] for k in involved],
+                feature_indices=involved,
+                proportions=[float(vdp[j, k]) for k in involved],
+            ))
+
+    return groups
 
 
 def _diagonal_of_inverse(A: list[list[float]], n: int) -> list[float] | None:

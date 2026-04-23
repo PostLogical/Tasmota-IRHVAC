@@ -646,6 +646,7 @@ def check_multicollinearity_repair(
     create_threshold: float = 30.0,
     clear_threshold: float = 20.0,
     min_sustained_cycles: int = 3,
+    collinear_groups: list[Any] | None = None,
 ) -> tuple[str, dict[str, str], bool] | None:
     """Check if features are multicollinear (condition number too high).
 
@@ -654,6 +655,7 @@ def check_multicollinearity_repair(
 
     Args:
         condition_number: spectral condition number √(λ_max/λ_min) of X^T X + λI.
+            Excludes intercept (Belsley 1980 §3.3).
         correlated_pairs: (name_i, name_j, r) for pairs with |r| > 0.7.
         sustained_cycles: how many consecutive batch cycles above threshold.
         create_threshold: condition number above which to create issue.
@@ -661,6 +663,9 @@ def check_multicollinearity_repair(
         clear_threshold: condition number below which to clear issue.
             κ < 20 = weak dependencies, coefficients reliable.
         min_sustained_cycles: minimum sustained cycles before creating.
+        collinear_groups: Belsley VDP groups from compute_belsley_diagnostics().
+            When available, provides per-variable diagnosis of which features
+            share ill-conditioned components — more precise than pairwise r.
 
     Reference: Belsley, Kuh & Welsch, "Regression Diagnostics" (1980), Ch. 3.
     """
@@ -670,14 +675,21 @@ def check_multicollinearity_repair(
     if condition_number < create_threshold or sustained_cycles < min_sustained_cycles:
         return None  # hysteresis band
 
-    # Build human-readable pair list
-    if correlated_pairs:
+    # Build human-readable description of the collinearity.
+    # Prefer Belsley VDP groups (identifies multivariate dependencies)
+    # over pairwise correlations (only captures bivariate).
+    if collinear_groups:
+        group_strs = []
+        for g in collinear_groups[:3]:
+            names = " and ".join(g.features)
+            group_strs.append(f"{names} (CI={g.condition_index:.0f})")
+        pairs_text = "; ".join(group_strs)
+    elif correlated_pairs:
         above_threshold = [p for p in correlated_pairs if abs(p[2]) > 0.7]
         pair_strs = [f"{a} and {b} (r={r:.2f})" for a, b, r in correlated_pairs[:3]]
         if above_threshold:
             pairs_text = "; ".join(pair_strs)
         else:
-            # Top pair included but below 0.7 — distributed multicollinearity
             pairs_text = (
                 f"distributed across inputs (highest: {pair_strs[0]})"
             )
