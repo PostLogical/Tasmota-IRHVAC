@@ -255,6 +255,12 @@ async def async_setup_entry(
             entry_id=entry.entry_id,
         )
     )
+    sensors.append(
+        TasmotaIrhvacGreyboxSensor(
+            climate_entity=climate_entity,
+            entry_id=entry.entry_id,
+        )
+    )
     async_add_entities(sensors)
 
 
@@ -361,6 +367,82 @@ class TasmotaIrhvacHealthSensor(SensorEntity):
         attrs = dict(status)
         # Join alerts as semicolon-separated string for HA display
         attrs["alerts"] = "; ".join(status["alerts"]) if status["alerts"] else ""
+        return attrs
+
+    @property
+    def available(self) -> bool:
+        """Sensor is available when the climate entity is available."""
+        return bool(self._climate.available)
+
+    async def async_added_to_hass(self) -> None:
+        """Subscribe to dispatcher signal for state updates."""
+
+        @callback
+        def _update_sensor() -> None:
+            self.async_write_ha_state()
+
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                SIGNAL_PI_UPDATE.format(self._entry_id),
+                _update_sensor,
+            )
+        )
+
+
+class TasmotaIrhvacGreyboxSensor(SensorEntity):
+    """Sensor that reports grey-box model identification state."""
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = ["Failed", "Learning", "Adequate", "Good", "Degraded"]
+    _attr_translation_key = "greybox"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self,
+        climate_entity: TasmotaIrhvac,
+        entry_id: str,
+    ) -> None:
+        """Initialize the grey-box sensor."""
+        self._climate = climate_entity
+        self._entry_id = entry_id
+        self._attr_unique_id = f"{climate_entity.unique_id}_greybox"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device info to group sensor with climate entity."""
+        return self._climate.device_info
+
+    @property
+    def _pi(self) -> PIController | None:
+        """Return the PI controller, narrowed from the union type."""
+        from .pi import PIController
+        pi = self._climate._pi
+        return pi if isinstance(pi, PIController) else None
+
+    @property
+    def native_value(self) -> str | None:
+        """Return current grey-box model state."""
+        pi = self._pi
+        if pi is None:
+            return None
+        return str(pi.get_greybox_state()["state"])
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return grey-box model details as attributes."""
+        pi = self._pi
+        if pi is None:
+            return {}
+        state = pi.get_greybox_state()
+        attrs = dict(state)
+        # Convert gate_details dict to semicolon-separated string for HA display.
+        if "gate_details" in attrs and isinstance(attrs["gate_details"], dict):
+            attrs["gate_details"] = "; ".join(
+                f"{k}={v}" for k, v in attrs["gate_details"].items()
+            )
         return attrs
 
     @property

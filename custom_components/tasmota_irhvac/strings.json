@@ -40,6 +40,16 @@
       "batch_model_rms": {
         "name": "Batch Model RMS"
       },
+      "greybox": {
+        "name": "Grey-box Model",
+        "state": {
+          "Failed": "Failed",
+          "Learning": "Learning",
+          "Adequate": "Adequate",
+          "Good": "Good",
+          "Degraded": "Degraded"
+        }
+      },
       "health": {
         "name": "Health",
         "state": {

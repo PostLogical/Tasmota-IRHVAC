@@ -19,7 +19,7 @@ from custom_components.tasmota_irhvac.pi.greybox_observer import (
     GreyboxResult,
     _check_quality_gates,
     _delta_method_ratio_std,
-    _find_solar_entity,
+    find_solar_entity,
     fit_greybox,
     greybox_to_beta,
     log_greybox_result,
@@ -38,14 +38,14 @@ class TestFindSolarEntity:
             {"name": "stove", "entity_id": "sensor.stove", "input_role": "heat_source"},
             {"name": "Solar Proxy", "entity_id": "sensor.solar_proxy", "input_role": "solar"},
         ]
-        assert _find_solar_entity(inputs) == "sensor.solar_proxy"
+        assert find_solar_entity(inputs) == "sensor.solar_proxy"
 
     def test_no_solar_returns_none(self):
         inputs = [{"name": "stove", "entity_id": "sensor.stove", "input_role": "heat_source"}]
-        assert _find_solar_entity(inputs) is None
+        assert find_solar_entity(inputs) is None
 
     def test_empty_inputs(self):
-        assert _find_solar_entity([]) is None
+        assert find_solar_entity([]) is None
 
 
 class TestFitGreybox:

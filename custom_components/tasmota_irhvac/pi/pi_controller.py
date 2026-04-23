@@ -39,9 +39,12 @@ from homeassistant.util.unit_conversion import TemperatureConverter
 import math
 
 from .batch_learning import BatchResult, DiversityAwareBuffer, HourlyResidualPattern, Observation, analyze_residuals_by_hour, fuse_batch_greybox, weighted_least_squares, compare_and_report, compute_blended_update
+from .greybox_buffer import GreyboxBuffer
 from .greybox_observer import (
     GreyboxBridgeResult,
     GreyboxResult,
+    SCIPY_AVAILABLE,
+    find_solar_entity,
     fit_greybox,
     greybox_to_beta,
     log_greybox_result,
@@ -437,11 +440,21 @@ class PIController:
             feature_order=self._feature_order,
             model_inputs=self._model_inputs,
         )
+        # Grey-box buffer: mode-agnostic, admits HP-off, temp-quantile-stratified.
+        self._greybox_buffer = GreyboxBuffer(
+            solar_entity=find_solar_entity(self._model_inputs),
+        )
+        # Cached serializations — refreshed only at batch time (every 12h) to
+        # avoid serializing thousands of observations on every state write (60s).
+        self._obs_buffer_heat_cache: list[dict[str, Any]] = []
+        self._obs_buffer_cool_cache: list[dict[str, Any]] = []
+        self._greybox_buffer_cache: list[dict[str, Any]] = []
         self._batch_analysis_timer: CALLBACK_TYPE | None = None
         self._last_batch_result: BatchResult | None = None
         self._last_greybox_result: GreyboxResult | None = None
         self._last_greybox_bridge: GreyboxBridgeResult | None = None
         self._last_greybox_timestamp_iso: str | None = None
+        self._greybox_has_been_good: bool = False
         self._last_batch_timestamp: float | None = None
         self._last_batch_wallclock: str = ""  # ISO-8601 wall-clock time
         self._last_residual_patterns: list[HourlyResidualPattern] = []
@@ -702,8 +715,18 @@ class PIController:
         # ── Grey-box 1R1C energy balance + steady-state bridge ──
         # Run BEFORE fusion+blend so this cycle's grey-box can inform
         # the coefficient update (no one-cycle lag).
+        # Grey-box uses its own buffer (includes HP-off observations).
+        greybox_observations = self._greybox_buffer.get_all()
+        gb_diag = self._greybox_buffer.get_diagnostics()
+        _LOGGER.info(
+            "%sGrey-box buffer: %d/%d obs, hp_off=%.1f%%, min_leverage=%s",
+            self._log_prefix,
+            gb_diag["total"], gb_diag["max_size"],
+            gb_diag.get("hp_off_pct") or 0.0,
+            gb_diag.get("min_leverage"),
+        )
         greybox = fit_greybox(
-            observations,
+            greybox_observations,
             model_inputs=self._model_inputs,
             plant_tau_slow=plant.tau_slow.value if plant.tau_slow.confidence > 0 else None,
             plant_tau_slow_confidence=plant.tau_slow.confidence,
@@ -720,6 +743,8 @@ class PIController:
                 log_prefix=self._log_prefix,
             )
             self._last_greybox_bridge = bridge
+            if bridge.gates_passed:
+                self._greybox_has_been_good = True
 
             # Cross-validation: compare grey-box β against WLS β
             if result.beta_batch:
@@ -863,6 +888,12 @@ class PIController:
         self._last_batch_timestamp = time.monotonic()
         self._last_batch_wallclock = datetime.now().isoformat(timespec="seconds")
         self._metrics.batch_model_rms = result.residual_rms
+
+        # Refresh buffer serialization caches (avoids re-serializing thousands
+        # of observations on every 60s state write — only at batch time).
+        self._obs_buffer_heat_cache = self._observation_buffer_heat.as_list()
+        self._obs_buffer_cool_cache = self._observation_buffer_cool.as_list()
+        self._greybox_buffer_cache = self._greybox_buffer.as_list()
 
         # ── Residual time-of-day analysis ──
         beta_for_residuals = result.beta_blended if result.beta_blended else result.beta_batch
@@ -1018,8 +1049,9 @@ class PIController:
             tau_estimate=self._plant_id.tau,  # backward compat
             tau_observations=self._plant_id.observations,  # backward compat
             plant_identifier_state=self._plant_id.as_dict(),
-            observation_buffer_heat=self._observation_buffer_heat.as_list(),
-            observation_buffer_cool=self._observation_buffer_cool.as_list(),
+            observation_buffer_heat=self._obs_buffer_heat_cache,
+            observation_buffer_cool=self._obs_buffer_cool_cache,
+            greybox_buffer=self._greybox_buffer_cache,
             drift_correction_signs=self._drift_correction_signs,
             last_batch_result=(
                 {
@@ -1033,6 +1065,7 @@ class PIController:
             tuning_alert_counters={
                 **self._tuning_alert_counters,
                 "had_stable_batch": int(self._has_had_stable_batch),
+                "greybox_has_been_good": int(self._greybox_has_been_good),
             },
             tuning_alert_snapshots=dict(self._tuning_alert_snapshots),
             hp_deadband_estimate_heat=self._hp_deadband_estimate_heat,
@@ -1102,6 +1135,7 @@ class PIController:
                 feature_order=self._feature_order,
                 model_inputs=_model_inputs_cfg,
             )
+            self._obs_buffer_heat_cache = data.observation_buffer_heat
         if data.observation_buffer_cool:
             self._observation_buffer_cool = DiversityAwareBuffer.from_list(
                 data.observation_buffer_cool,
@@ -1109,6 +1143,15 @@ class PIController:
                 feature_order=self._feature_order,
                 model_inputs=_model_inputs_cfg,
             )
+            self._obs_buffer_cool_cache = data.observation_buffer_cool
+
+        # Restore grey-box observation buffer.
+        if data.greybox_buffer:
+            self._greybox_buffer = GreyboxBuffer.from_list(
+                data.greybox_buffer,
+                solar_entity=find_solar_entity(self._model_inputs),
+            )
+            self._greybox_buffer_cache = data.greybox_buffer
 
         # Restore learned HP thermostat deadband estimates
         self._hp_deadband_estimate_heat = data.hp_deadband_estimate_heat
@@ -1160,6 +1203,9 @@ class PIController:
             }
             self._has_had_stable_batch = bool(
                 self._tuning_alert_counters.get("had_stable_batch", False)
+            )
+            self._greybox_has_been_good = bool(
+                self._tuning_alert_counters.get("greybox_has_been_good", False)
             )
         if data.tuning_alert_snapshots:
             self._tuning_alert_snapshots = {
@@ -1388,6 +1434,7 @@ class PIController:
                 round(self._last_greybox_bridge.k_eff, 3)
                 if self._last_greybox_bridge is not None else None
             ),
+            "greybox_buffer_size": len(self._greybox_buffer),
         }
 
     def _log_greybox_wls_comparison(
@@ -1630,6 +1677,71 @@ class PIController:
             ),
         }
 
+    def get_greybox_state(self) -> dict[str, Any]:
+        """Return grey-box model state for the greybox statistics sensor.
+
+        Returns dict with:
+        - state: "Failed" | "Learning" | "Adequate" | "Good" | "Degraded"
+        - Plus model outputs and buffer diagnostics as attributes.
+        """
+        # Unconditional failures.
+        if not SCIPY_AVAILABLE:
+            return {"state": "Failed", "reason": "scipy unavailable"}
+        if len(self._greybox_buffer) == 0:
+            return {"state": "Failed", "reason": "buffer empty"}
+
+        # No fit yet.
+        if self._last_greybox_result is None:
+            return {
+                "state": "Learning",
+                "buffer_total": len(self._greybox_buffer),
+                "buffer_max": self._greybox_buffer.max_size,
+            }
+
+        result = self._last_greybox_result
+        bridge = self._last_greybox_bridge
+
+        # Determine state from gates + history.
+        gates_passed = bridge is not None and bridge.gates_passed
+        if gates_passed:
+            state = "Good"
+        elif self._greybox_has_been_good:
+            state = "Degraded"
+        else:
+            state = "Adequate"
+
+        # Build attributes.
+        gb_diag = self._greybox_buffer.get_diagnostics()
+        attrs: dict[str, Any] = {
+            "state": state,
+            "tau_eff": round(result.tau_eff, 1),
+            "ua_c": round(result.ua_c, 6),
+            "k_c": round(result.k_c, 6),
+            "alpha_c": round(result.alpha_c, 6),
+            "residual_rms": round(result.residual_rms, 5),
+            "n_observations": result.n_observations,
+            "n_hp_on": result.n_hp_on,
+            "n_hp_off": result.n_hp_off,
+            "last_fit": self._last_greybox_timestamp_iso,
+            "buffer_total": gb_diag["total"],
+            "buffer_max": gb_diag["max_size"],
+            "buffer_hp_off_pct": gb_diag.get("hp_off_pct"),
+        }
+        if bridge is not None:
+            attrs["k_eff"] = round(bridge.k_eff, 3)
+            attrs["gates_passed"] = bridge.gates_passed
+            attrs["gate_details"] = {
+                k: "pass" if v else "fail"
+                for k, v in bridge.gate_details.items()
+            }
+        if result.tau_agreement_pct is not None:
+            attrs["tau_agreement_pct"] = round(result.tau_agreement_pct, 1)
+        if result.param_std_err:
+            attrs["param_std_err"] = {
+                k: round(v, 6) for k, v in result.param_std_err.items()
+            }
+        return attrs
+
     def get_diagnostic_dump(self) -> dict[str, Any]:
         """Return full diagnostic state for offline analysis (debug bundles)."""
         coeff_names = self._coeff_names()
@@ -1703,6 +1815,7 @@ class PIController:
             self._last_greybox_bridge.as_dict()
             if self._last_greybox_bridge is not None else None
         )
+        dump["greybox_buffer"] = self._greybox_buffer.get_diagnostics()
         # Model input configs (roles, names, flags for interpreting feature vectors)
         dump["model_input_configs"] = [
             {
@@ -1891,6 +2004,7 @@ class PIController:
 
         result["observation_buffer_heat"] = _buf_stats(self._observation_buffer_heat)
         result["observation_buffer_cool"] = _buf_stats(self._observation_buffer_cool)
+        result["greybox_buffer"] = self._greybox_buffer.get_diagnostics()
 
         # Residual time-of-day patterns — under batch_learning
         if result.get("batch_learning") is not None:
@@ -2120,6 +2234,12 @@ class PIController:
         self._last_batch_wallclock = ""
         self._drift_correction_signs = []
         self._has_had_stable_batch = False
+        self._greybox_has_been_good = False
+        self._greybox_buffer.clear()
+        self._greybox_buffer_cache = []
+        self._last_greybox_result = None
+        self._last_greybox_bridge = None
+        self._last_greybox_timestamp_iso = None
         self._tuning_alert_counters = {}
         self._tuning_alert_snapshots = {}
         label = mode or "heat+cool"
@@ -3290,6 +3410,22 @@ class PIController:
         self._read_model_input_values(current_c)
         self._inputs.update_lag_filters(dt_seconds)
 
+        # Feed grey-box buffer (HP-off passive observations are critical
+        # for isolating ua_c — WLS buffer does NOT get these).
+        self._greybox_buffer.add(Observation(
+            timestamp=now_mono,
+            wall_time=time.time(),
+            hp_setpoint=None,
+            current_c=current_c,
+            desired_c=self._desired_temp or current_c,
+            outdoor_temp_c=self._inputs.outdoor_temp,
+            room_rate=self._room_temp_rate,
+            raw_readings=self._inputs.build_raw_readings(),
+            clamped=True,
+            clamped_reason="no_output",
+            supplemental_active=False,
+        ))
+
         return False  # No IR command
 
     async def _pi_tick_inner(self, now: datetime | None = None) -> bool:
@@ -3874,21 +4010,25 @@ class PIController:
             obs_clamped = False
             obs_clamped_reason = ""
 
+        # Build observation once, feed to both buffers as appropriate.
+        obs = Observation(
+            timestamp=now_mono,
+            wall_time=time.time(),
+            hp_setpoint=float(self._hp_setpoint) if obs_clamped_reason != "no_output" else None,
+            current_c=current_c,
+            desired_c=desired_c,
+            outdoor_temp_c=self._inputs.outdoor_temp,
+            room_rate=self._room_temp_rate,
+            raw_readings=self._inputs.build_raw_readings(),
+            clamped=obs_clamped,
+            clamped_reason=obs_clamped_reason,
+            supplemental_active=obs_supplemental_active,
+        )
         if obs_clamped_reason != "no_output":
             active_buffer = self._observation_buffer_heat if is_heating else self._observation_buffer_cool
-            active_buffer.add(Observation(
-                timestamp=now_mono,
-                wall_time=time.time(),
-                hp_setpoint=float(self._hp_setpoint),
-                current_c=current_c,
-                desired_c=desired_c,
-                outdoor_temp_c=self._inputs.outdoor_temp,
-                room_rate=self._room_temp_rate,
-                raw_readings=self._inputs.build_raw_readings(),
-                clamped=obs_clamped,
-                clamped_reason=obs_clamped_reason,
-                supplemental_active=obs_supplemental_active,
-            ))
+            active_buffer.add(obs)
+        # Grey-box buffer gets ALL observations (including HP-off).
+        self._greybox_buffer.add(obs)
 
         # CUSUM anomaly detection — runs on every unclamped observation.
         # TODO: Consider running on saturated observations too (obs_clamped_reason

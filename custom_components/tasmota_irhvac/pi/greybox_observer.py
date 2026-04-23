@@ -126,7 +126,7 @@ class GreyboxResult:
         }
 
 
-def _find_solar_entity(model_inputs: list[dict[str, Any]]) -> str | None:
+def find_solar_entity(model_inputs: list[dict[str, Any]]) -> str | None:
     """Find the entity_id of the solar proxy input, or None."""
     for m in model_inputs:
         if m.get("input_role") == "solar":
@@ -166,7 +166,7 @@ def fit_greybox(
         )
         return None
 
-    solar_entity = _find_solar_entity(model_inputs)
+    solar_entity = find_solar_entity(model_inputs)
 
     # Filter to observations with valid outdoor temperature.
     eligible = [

@@ -58,6 +58,7 @@ class PIExtraStoredData(ExtraStoredData):
     auto_perturb_state: dict[str, Any] = dataclasses.field(default_factory=dict)  # AutoPerturbation.as_dict()
     manual_override_heat: list[bool | None] = dataclasses.field(default_factory=list)
     manual_override_cool: list[bool | None] = dataclasses.field(default_factory=list)
+    greybox_buffer: list[dict[str, Any]] = dataclasses.field(default_factory=list)  # Observation.as_dict()
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize to JSON-compatible dict."""
@@ -96,6 +97,7 @@ class PIExtraStoredData(ExtraStoredData):
             "auto_perturb_state": self.auto_perturb_state,
             "manual_override_heat": self.manual_override_heat,
             "manual_override_cool": self.manual_override_cool,
+            "greybox_buffer": self.greybox_buffer,
         }
 
     @classmethod
@@ -146,6 +148,7 @@ class PIExtraStoredData(ExtraStoredData):
                 auto_perturb_state=restored.get("auto_perturb_state", {}),
                 manual_override_heat=restored.get("manual_override_heat", []),
                 manual_override_cool=restored.get("manual_override_cool", []),
+                greybox_buffer=restored.get("greybox_buffer", []),
             )
         except (KeyError, ValueError, TypeError, AttributeError):
             return None
