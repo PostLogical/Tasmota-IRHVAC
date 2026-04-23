@@ -443,16 +443,53 @@ class DiversityAwareBuffer:
         if self._xtx_matrix is None and len(self._buffer) > 0:
             self.recompute_info_matrix()
 
-    def compute_condition_number(self) -> float:
-        """Compute the spectral condition number of the column-normalized X'X.
+    def _corr_matrix_no_intercept(self) -> list[list[float]] | None:
+        """Build column-normalized correlation matrix, excluding the intercept.
 
-        Column-normalizes X'X by dividing each entry (i,j) by
-        √(diag[i]) · √(diag[j]), converting it to a correlation matrix.
-        This removes scale-induced conditioning and reports only true
-        multicollinearity.
+        Belsley, Kuh & Welsch (1980) recommend excluding the constant
+        column when diagnosing multicollinearity.  The intercept creates
+        "essential ill-conditioning" — a structural artifact that inflates
+        κ and VIF without reflecting actual feature-to-feature collinearity.
+
+        Returns an (n-1)×(n-1) correlation matrix for features 1..n-1,
+        or None if the matrix cannot be computed.
+        """
+        self._ensure_xtx_matrix()
+        if self._xtx_matrix is None:
+            return None
+        n = self._n_features
+        if n < 3:
+            # With only intercept + 1 feature, no feature-feature κ to compute
+            return None
+
+        # Extract the (n-1)×(n-1) sub-matrix excluding row/col 0 (intercept)
+        sub = [
+            [self._xtx_matrix[i][j] for j in range(1, n)]
+            for i in range(1, n)
+        ]
+        m = n - 1
+
+        # Column-normalize to correlation matrix
+        diag_sqrt = [
+            math.sqrt(sub[i][i]) if sub[i][i] > 1e-15 else 1.0
+            for i in range(m)
+        ]
+        corr = [
+            [sub[i][j] / (diag_sqrt[i] * diag_sqrt[j]) for j in range(m)]
+            for i in range(m)
+        ]
+        return corr
+
+    def compute_condition_number(self) -> float:
+        """Compute the spectral condition number, excluding the intercept.
+
+        Operates on the column-normalized correlation matrix of features
+        1..n-1 (excluding the constant intercept at index 0).  This
+        measures true feature-to-feature multicollinearity without the
+        structural inflation from the intercept column (Belsley 1980).
 
         κ = √(λ_max / λ_min) where λ are eigenvalues of the correlation
-        matrix + λI regularization.
+        matrix.
 
         Thresholds (Belsley, Kuh & Welsch, "Regression Diagnostics", 1980):
         - κ > 30: moderate multicollinearity, coefficients becoming unreliable
@@ -461,32 +498,20 @@ class DiversityAwareBuffer:
         Uses power iteration for λ_max and inverse iteration for λ_min.
         Returns inf if the matrix cannot be computed (empty buffer).
         """
-        self._ensure_xtx_matrix()
-        if self._xtx_matrix is None:
+        corr = self._corr_matrix_no_intercept()
+        if corr is None:
+            n = self._n_features
+            if n == 2:
+                return 1.0  # intercept + 1 feature → no collinearity
             return float('inf')
-        n = self._n_features
-        if n < 2:
-            return 1.0
-
-        # Column-normalize X'X → correlation matrix.
-        # corr[i][j] = xtx[i][j] / (√xtx[i][i] · √xtx[j][j])
-        diag_sqrt = [
-            math.sqrt(self._xtx_matrix[i][i])
-            if self._xtx_matrix[i][i] > 1e-15 else 1.0
-            for i in range(n)
-        ]
-        corr = [
-            [self._xtx_matrix[i][j] / (diag_sqrt[i] * diag_sqrt[j])
-             for j in range(n)]
-            for i in range(n)
-        ]
+        m = len(corr)
 
         # Power iteration for λ_max of correlation matrix
-        v = [1.0 / math.sqrt(n)] * n
+        v = [1.0 / math.sqrt(m)] * m
         lambda_max = 0.0
         for _ in range(50):
-            w = [sum(corr[i][j] * v[j] for j in range(n)) for i in range(n)]
-            lambda_max = sum(v[i] * w[i] for i in range(n))
+            w = [sum(corr[i][j] * v[j] for j in range(m)) for i in range(m)]
+            lambda_max = sum(v[i] * w[i] for i in range(m))
             norm = math.sqrt(sum(wi * wi for wi in w))
             if norm < 1e-15:
                 return float('inf')
@@ -494,19 +519,19 @@ class DiversityAwareBuffer:
 
         # Inverse iteration for λ_min: need inverse of corr matrix
         corr_copy = [row[:] for row in corr]
-        corr_inv = self._invert_matrix(corr_copy, n)
+        corr_inv = self._invert_matrix(corr_copy, m)
         if corr_inv is None:
             return float('inf')
 
-        v = [1.0 / math.sqrt(n)] * n
+        v = [1.0 / math.sqrt(m)] * m
         v[0] += 0.1
         norm = math.sqrt(sum(vi * vi for vi in v))
         v = [vi / norm for vi in v]
 
         inv_lambda_min = 0.0
         for _ in range(50):
-            w = [sum(corr_inv[i][j] * v[j] for j in range(n)) for i in range(n)]
-            inv_lambda_min = sum(v[i] * w[i] for i in range(n))
+            w = [sum(corr_inv[i][j] * v[j] for j in range(m)) for i in range(m)]
+            inv_lambda_min = sum(v[i] * w[i] for i in range(m))
             norm = math.sqrt(sum(wi * wi for wi in w))
             if norm < 1e-15:
                 return float('inf')
@@ -522,39 +547,35 @@ class DiversityAwareBuffer:
         return math.sqrt(lambda_max / lambda_min)
 
     def compute_vif(self) -> list[float]:
-        """Compute per-feature Variance Inflation Factor from (X'X)⁻¹.
+        """Compute per-feature Variance Inflation Factor, excluding intercept.
 
-        VIF_j = diag((corr)⁻¹)_j where corr is the column-normalized X'X
-        (correlation matrix).  VIF > 10 indicates the feature is too
-        collinear with others for reliable estimation (Belsley 1980).
+        VIF_j = diag((corr)⁻¹)_j where corr is the correlation matrix of
+        features 1..n-1 (excluding the constant intercept at index 0).
+        VIF > 10 indicates the feature is too collinear with other features
+        for reliable estimation (Belsley 1980).
 
-        Returns a list of VIF values, one per feature.  Returns all inf
-        if the matrix cannot be computed (empty buffer) or is not invertible.
+        Returns a list of n_features VIF values.  Index 0 (intercept) is
+        always 1.0.  Returns all inf if the matrix cannot be computed.
         """
-        self._ensure_xtx_matrix()
-        if self._xtx_matrix is None:
-            return [float('inf')] * self._n_features
         n = self._n_features
-        if n < 2:
+        if n < 3:
+            # intercept + ≤1 feature → no feature-feature collinearity
             return [1.0] * n
 
-        # Column-normalize to correlation matrix (same as condition number)
-        diag_sqrt = [
-            math.sqrt(self._xtx_matrix[i][i])
-            if self._xtx_matrix[i][i] > 1e-15 else 1.0
-            for i in range(n)
-        ]
-        corr = [
-            [self._xtx_matrix[i][j] / (diag_sqrt[i] * diag_sqrt[j])
-             for j in range(n)]
-            for i in range(n)
-        ]
+        corr = self._corr_matrix_no_intercept()
+        if corr is None:
+            return [float('inf')] * n
+        m = len(corr)  # n - 1
 
-        corr_inv = self._invert_matrix([row[:] for row in corr], n)
+        corr_inv = self._invert_matrix([row[:] for row in corr], m)
         if corr_inv is None:
             return [float('inf')] * n
 
-        return [max(corr_inv[i][i], 1.0) for i in range(n)]
+        # Build result: intercept VIF = 1.0, rest from corr_inv diagonal
+        result = [1.0]  # index 0 = intercept
+        for i in range(m):
+            result.append(max(corr_inv[i][i], 1.0))
+        return result
 
     def get_pairwise_correlations(
         self, feature_names: list[str] | None = None,
@@ -1222,41 +1243,54 @@ def weighted_least_squares(
 def _compute_vif_from_features(
     X: list[list[float]], n_features: int, n_obs: int,
 ) -> list[float]:
-    """Compute per-feature VIF from a feature matrix.
+    """Compute per-feature VIF from a feature matrix, excluding intercept.
 
-    VIF_j = diag((corr)⁻¹)_j where corr is the column-normalized X'X.
+    VIF_j = diag((corr)⁻¹)_j where corr is the correlation matrix of
+    features 1..n-1 (excluding the constant intercept at index 0).
     Uses the same eligible-only data the regression was fitted on.
 
-    Returns [VIF_0, ..., VIF_{n-1}].  All inf if matrix is singular.
+    Returns [VIF_0, ..., VIF_{n-1}] where VIF_0 = 1.0 (intercept).
+    All inf if matrix is singular.
     """
-    if n_obs < 2 or n_features < 2:
-        return [1.0] * n_features
-
     n = n_features
-    # Build X'X
-    xtx = [[0.0] * n for _ in range(n)]
+    if n_obs < 2 or n < 3:
+        return [1.0] * n
+
+    # Build X'X for features 1..n-1 (exclude intercept at index 0)
+    m = n - 1
+    xtx = [[0.0] * m for _ in range(m)]
     for k in range(n_obs):
         row = X[k]
-        for i in range(min(len(row), n)):
-            for j in range(min(len(row), n)):
-                xtx[i][j] += row[i] * row[j]
+        for i in range(m):
+            ri = i + 1  # skip intercept
+            if ri >= len(row):
+                continue
+            for j in range(m):
+                rj = j + 1
+                if rj >= len(row):
+                    continue
+                xtx[i][j] += row[ri] * row[rj]
 
     # Column-normalize to correlation matrix
     diag_sqrt = [
         math.sqrt(xtx[i][i]) if xtx[i][i] > 1e-15 else 1.0
-        for i in range(n)
+        for i in range(m)
     ]
     corr = [
-        [xtx[i][j] / (diag_sqrt[i] * diag_sqrt[j]) for j in range(n)]
-        for i in range(n)
+        [xtx[i][j] / (diag_sqrt[i] * diag_sqrt[j]) for j in range(m)]
+        for i in range(m)
     ]
 
-    # Invert correlation matrix (reuse DiversityAwareBuffer's implementation)
-    corr_inv = DiversityAwareBuffer._invert_matrix(corr, n)
+    # Invert correlation matrix
+    corr_inv = DiversityAwareBuffer._invert_matrix(corr, m)
     if corr_inv is None:
         return [float('inf')] * n
 
-    return [max(corr_inv[i][i], 1.0) for i in range(n)]
+    # Build result: intercept VIF = 1.0, rest from corr_inv diagonal
+    result = [1.0]  # index 0 = intercept
+    for i in range(m):
+        result.append(max(corr_inv[i][i], 1.0))
+    return result
 
 
 def _diagonal_of_inverse(A: list[list[float]], n: int) -> list[float] | None:
@@ -1421,10 +1455,16 @@ MAX_STEP_ABS = 1.0
 DEFAULT_PRIOR_STD = 1.0
 
 
+# Enlarged step cap for recently-unfrozen features.  Applied only when
+# batch quality gates pass (n_eligible ≥ 40, κ < 30, VIF < 5, σ < 1.0).
+UNLOCK_FIRST_STEP = 3.0
+
+
 def compute_blended_update(
     result: BatchResult,
     prior_std: float = DEFAULT_PRIOR_STD,
     max_step: float = MAX_STEP_ABS,
+    max_step_per_feature: list[float] | None = None,
 ) -> BatchResult:
     """Compute a safe blended update via covariance-weighted fusion.
 
@@ -1437,6 +1477,8 @@ def compute_blended_update(
     get K = 0.
 
     Safety net: per-coefficient step cap of ±max_step regardless of gain.
+    If *max_step_per_feature* is provided, each coefficient uses its own
+    cap (e.g. enlarged for recently-unfrozen features).
 
     Populates result.beta_blended and result.blend_gains.
     """
@@ -1457,30 +1499,42 @@ def compute_blended_update(
         else:
             gains[i] = prior_var / (prior_var + batch_var)
 
+        step_cap = (
+            max_step_per_feature[i]
+            if max_step_per_feature is not None and i < len(max_step_per_feature)
+            else max_step
+        )
         delta = gains[i] * (batch[i] - current[i])
-        if abs(delta) > max_step:
-            delta = max_step if delta > 0 else -max_step
+        if abs(delta) > step_cap:
+            delta = step_cap if delta > 0 else -step_cap
         blended[i] = current[i] + delta
 
     result.beta_blended = blended
     result.blend_gains = gains
 
     _LOGGER.info(
-        "Batch blend: prior_std=%.2f, max_step=%.1f",
+        "Batch blend: prior_std=%.2f, max_step=%.1f%s",
         prior_std, max_step,
+        f", per-feature caps active" if max_step_per_feature else "",
     )
     for i in range(n):
         se = std_err[i] if i < len(std_err) else float("inf")
+        step_cap = (
+            max_step_per_feature[i]
+            if max_step_per_feature is not None and i < len(max_step_per_feature)
+            else max_step
+        )
         if math.isinf(se):
             _LOGGER.info(
                 "  β%d: held (no batch uncertainty estimate)",
                 i,
             )
         elif current[i] != blended[i]:
+            cap_note = f", cap={step_cap:.1f}" if step_cap != max_step else ""
             _LOGGER.info(
-                "  β%d: %.4f → %.4f (K=%.3f, σ_batch=%.4f, Δ=%.4f)",
+                "  β%d: %.4f → %.4f (K=%.3f, σ_batch=%.4f, Δ=%.4f%s)",
                 i, current[i], blended[i], gains[i], se,
-                blended[i] - current[i],
+                blended[i] - current[i], cap_note,
             )
         else:
             _LOGGER.debug(

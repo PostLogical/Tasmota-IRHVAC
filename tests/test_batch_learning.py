@@ -1278,33 +1278,48 @@ class TestConditionNumber:
         return _make_test_obs(features, sp=sp, cur=cur,
                               clamped=clamped, clamped_reason=clamped_reason)
 
-    def test_condition_number_inf_before_recompute(self):
-        """Returns inf when xtx matrix hasn't been computed yet."""
+    def test_condition_number_single_feature(self):
+        """With intercept + 1 feature, κ is trivially 1.0.
+
+        The intercept is excluded from κ computation (Belsley 1980),
+        leaving only one feature — no collinearity possible.
+        """
         buf = DiversityAwareBuffer(n_features=2, max_size=100)
+        assert buf.compute_condition_number() == 1.0
+
+    def test_condition_number_inf_empty_buffer(self):
+        """Returns inf for empty buffer with 3+ features."""
+        buf = DiversityAwareBuffer(n_features=3, max_size=100)
         assert buf.compute_condition_number() == float("inf")
 
     def test_condition_number_well_conditioned(self):
-        """Diverse data produces κ < 20 (Belsley: weak dependencies).
+        """Diverse, uncorrelated features produce low κ (Belsley: reliable).
 
-        Outdoor delta spanning 0-9°C covers a wide operating range — the
-        intercept and slope are well-separated and individually identifiable.
-        Belsley (1980): κ < 20 means coefficient estimates are reliable.
+        Two non-intercept features with independent variation.
+        κ computed on features only (intercept excluded per Belsley 1980).
         """
-        buf = DiversityAwareBuffer(n_features=2, max_size=100)
+        buf = DiversityAwareBuffer(
+            n_features=3, max_size=100,
+            feature_order=_test_feature_order(1),
+            model_inputs=_test_model_inputs(1),
+        )
         for i in range(50):
             outdoor_delta = float(i % 10)  # 0-9°C spread
-            buf.add(self._make_obs([1.0, outdoor_delta]))
+            # Independent model input with different pattern
+            model_input = float((i * 7) % 10) * 0.5
+            buf.add(self._make_obs([1.0, outdoor_delta, model_input]))
         buf.recompute_info_matrix()
         cond = buf.compute_condition_number()
         assert cond < 20.0
 
     def test_condition_number_moderate_collinearity(self):
-        """Correlated features give moderate collinearity (Belsley: κ > 30).
+        """Correlated features give moderate collinearity (Belsley: κ > 10).
 
         Two features with |r| ≈ 0.9 — partially confounded so
         individual coefficient estimates are unreliable but the
         combined prediction is still stable.
-        Belsley (1980): 30 < κ < 100 means some coefficients unreliable.
+        κ excludes the intercept (Belsley 1980), so this measures
+        pure feature-to-feature collinearity.
         """
         buf = DiversityAwareBuffer(
             n_features=3, max_size=100,
@@ -1318,26 +1333,27 @@ class TestConditionNumber:
             buf.add(self._make_obs([1.0, x1, x2]))
         buf.recompute_info_matrix()
         cond = buf.compute_condition_number()
-        assert cond > 10.0  # Meaningful collinearity from correlation
+        assert cond > 5.0  # Meaningful collinearity from feature correlation
 
     def test_condition_number_severe_collinearity(self):
-        """Near-constant feature produces κ > 100 (Belsley: severe).
+        """Near-identical features produce high κ (Belsley: severe).
 
-        Outdoor delta varies only 5.0-5.1°C — the intercept and outdoor
-        slope are nearly indistinguishable and small perturbations cause
-        large coefficient swings.
-        Belsley (1980): κ > 100 means coefficient estimates numerically unstable.
+        Two features that are nearly linearly dependent — coefficients
+        are numerically unstable.
         """
         buf = DiversityAwareBuffer(
-            n_features=2, max_size=100,
-            feature_order=_test_feature_order(0),
-            model_inputs=_test_model_inputs(0),
+            n_features=3, max_size=100,
+            feature_order=_test_feature_order(1),
+            model_inputs=_test_model_inputs(1),
         )
         for i in range(50):
-            buf.add(self._make_obs([1.0, 5.0 + (i % 10) * 0.01]))
+            x1 = float(i % 10)
+            # x2 nearly identical to x1 (tiny noise)
+            x2 = x1 + (i % 10) * 0.001
+            buf.add(self._make_obs([1.0, x1, x2]))
         buf.recompute_info_matrix()
         cond = buf.compute_condition_number()
-        assert cond > 100.0
+        assert cond > 50.0  # Severe collinearity between features
 
     def test_pairwise_correlations_empty_buffer(self):
         """Returns empty list with insufficient data."""

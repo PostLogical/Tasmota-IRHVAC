@@ -59,6 +59,8 @@ class PIExtraStoredData(ExtraStoredData):
     manual_override_heat: list[bool | None] = dataclasses.field(default_factory=list)
     manual_override_cool: list[bool | None] = dataclasses.field(default_factory=list)
     greybox_buffer: list[dict[str, Any]] = dataclasses.field(default_factory=list)  # Observation.as_dict()
+    batch_cycle_count: int = 0
+    unlock_batch_cycle: list[int | None] = dataclasses.field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize to JSON-compatible dict."""
@@ -98,6 +100,8 @@ class PIExtraStoredData(ExtraStoredData):
             "manual_override_heat": self.manual_override_heat,
             "manual_override_cool": self.manual_override_cool,
             "greybox_buffer": self.greybox_buffer,
+            "batch_cycle_count": self.batch_cycle_count,
+            "unlock_batch_cycle": self.unlock_batch_cycle,
         }
 
     @classmethod
@@ -149,6 +153,8 @@ class PIExtraStoredData(ExtraStoredData):
                 manual_override_heat=restored.get("manual_override_heat", []),
                 manual_override_cool=restored.get("manual_override_cool", []),
                 greybox_buffer=restored.get("greybox_buffer", []),
+                batch_cycle_count=int(restored.get("batch_cycle_count", 0)),
+                unlock_batch_cycle=restored.get("unlock_batch_cycle", []),
             )
         except (KeyError, ValueError, TypeError, AttributeError):
             return None
