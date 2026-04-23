@@ -95,14 +95,10 @@ from .const import (
     CONF_OUTDOOR_TEMP_SENSOR,
     CONF_PI_DEADBAND,
     CONF_PI_ENABLED,
-    CONF_PI_FF_COOL_REFERENCE,
-    CONF_PI_FF_COOL_SLOPE,
-    CONF_PI_FF_HEAT_REFERENCE,
-    CONF_PI_FF_HEAT_SLOPE,
-    CONF_PI_OUTDOOR_DELTA_CLAMP_COOL_MAX,
-    CONF_PI_OUTDOOR_DELTA_CLAMP_COOL_MIN,
-    CONF_PI_OUTDOOR_DELTA_CLAMP_HEAT_MAX,
-    CONF_PI_OUTDOOR_DELTA_CLAMP_HEAT_MIN,
+    CONF_PI_OUTDOOR_SEED_COOL,
+    CONF_PI_OUTDOOR_SEED_HEAT,
+    CONF_PI_OUTDOOR_SEED_CLAMP_MAX,
+    CONF_PI_OUTDOOR_SEED_CLAMP_MIN,
     CONF_PI_KD,
     CONF_PI_KD_FILTER_N,
     CONF_PI_IMC_LAMBDA,
@@ -148,14 +144,10 @@ from .const import (
     DEFAULT_MAX_TEMP,
     DEFAULT_PI_DEADBAND,
     DEFAULT_PI_ENABLED,
-    DEFAULT_PI_FF_COOL_REFERENCE,
-    DEFAULT_PI_FF_COOL_SLOPE,
-    DEFAULT_PI_FF_HEAT_REFERENCE,
-    DEFAULT_PI_FF_HEAT_SLOPE,
-    DEFAULT_PI_OUTDOOR_DELTA_CLAMP_COOL_MAX,
-    DEFAULT_PI_OUTDOOR_DELTA_CLAMP_COOL_MIN,
-    DEFAULT_PI_OUTDOOR_DELTA_CLAMP_HEAT_MAX,
-    DEFAULT_PI_OUTDOOR_DELTA_CLAMP_HEAT_MIN,
+    DEFAULT_PI_OUTDOOR_SEED_COOL,
+    DEFAULT_PI_OUTDOOR_SEED_HEAT,
+    DEFAULT_PI_OUTDOOR_SEED_CLAMP_MAX,
+    DEFAULT_PI_OUTDOOR_SEED_CLAMP_MIN,
     DEFAULT_PI_KD,
     DEFAULT_PI_KD_FILTER_N,
     DEFAULT_PI_IMC_LAMBDA,
@@ -431,29 +423,17 @@ OPTIONS_PI_CONTROLLER_SCHEMA = vol.Schema(
         vol.Optional(CONF_OUTDOOR_TEMP_SENSOR): EntitySelector(
             EntitySelectorConfig(domain="sensor")
         ),
-        vol.Optional(CONF_PI_FF_HEAT_REFERENCE, default=DEFAULT_PI_FF_HEAT_REFERENCE): NumberSelector(
-            NumberSelectorConfig(min=-20, max=120, step=0.5, unit_of_measurement="°C", mode=NumberSelectorMode.BOX)
-        ),
-        vol.Optional(CONF_PI_FF_HEAT_SLOPE, default=DEFAULT_PI_FF_HEAT_SLOPE): NumberSelector(
+        vol.Optional(CONF_PI_OUTDOOR_SEED_HEAT, default=DEFAULT_PI_OUTDOOR_SEED_HEAT): NumberSelector(
             NumberSelectorConfig(min=0, max=5, step=0.01, mode=NumberSelectorMode.BOX)
         ),
-        vol.Optional(CONF_PI_FF_COOL_REFERENCE, default=DEFAULT_PI_FF_COOL_REFERENCE): NumberSelector(
-            NumberSelectorConfig(min=0, max=140, step=0.5, unit_of_measurement="°C", mode=NumberSelectorMode.BOX)
-        ),
-        vol.Optional(CONF_PI_FF_COOL_SLOPE, default=DEFAULT_PI_FF_COOL_SLOPE): NumberSelector(
+        vol.Optional(CONF_PI_OUTDOOR_SEED_COOL, default=DEFAULT_PI_OUTDOOR_SEED_COOL): NumberSelector(
             NumberSelectorConfig(min=0, max=5, step=0.01, mode=NumberSelectorMode.BOX)
         ),
-        vol.Optional(CONF_PI_OUTDOOR_DELTA_CLAMP_HEAT_MIN, default=DEFAULT_PI_OUTDOOR_DELTA_CLAMP_HEAT_MIN): NumberSelector(
-            NumberSelectorConfig(min=-5, max=5, step=0.1, mode=NumberSelectorMode.BOX)
+        vol.Optional(CONF_PI_OUTDOOR_SEED_CLAMP_MIN, default=DEFAULT_PI_OUTDOOR_SEED_CLAMP_MIN): NumberSelector(
+            NumberSelectorConfig(min=0, max=10, step=0.1, mode=NumberSelectorMode.BOX)
         ),
-        vol.Optional(CONF_PI_OUTDOOR_DELTA_CLAMP_HEAT_MAX, default=DEFAULT_PI_OUTDOOR_DELTA_CLAMP_HEAT_MAX): NumberSelector(
-            NumberSelectorConfig(min=-5, max=5, step=0.1, mode=NumberSelectorMode.BOX)
-        ),
-        vol.Optional(CONF_PI_OUTDOOR_DELTA_CLAMP_COOL_MIN, default=DEFAULT_PI_OUTDOOR_DELTA_CLAMP_COOL_MIN): NumberSelector(
-            NumberSelectorConfig(min=-5, max=5, step=0.1, mode=NumberSelectorMode.BOX)
-        ),
-        vol.Optional(CONF_PI_OUTDOOR_DELTA_CLAMP_COOL_MAX, default=DEFAULT_PI_OUTDOOR_DELTA_CLAMP_COOL_MAX): NumberSelector(
-            NumberSelectorConfig(min=-5, max=5, step=0.1, mode=NumberSelectorMode.BOX)
+        vol.Optional(CONF_PI_OUTDOOR_SEED_CLAMP_MAX, default=DEFAULT_PI_OUTDOOR_SEED_CLAMP_MAX): NumberSelector(
+            NumberSelectorConfig(min=0, max=10, step=0.1, mode=NumberSelectorMode.BOX)
         ),
         vol.Optional(CONF_PI_SETPOINT_WEIGHT, default=DEFAULT_PI_SETPOINT_WEIGHT): NumberSelector(
             NumberSelectorConfig(min=0, max=1, step=0.05, mode=NumberSelectorMode.BOX)
@@ -493,7 +473,7 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Tasmota IRHVAC."""
 
     VERSION = 1
-    MINOR_VERSION = 2  # v1.2: temp unit conversion + toggle normalization
+    MINOR_VERSION = 3  # v1.3: thermal effect sign convention
 
     @classmethod
     @callback
@@ -808,36 +788,20 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         EntitySelectorConfig(domain="sensor")
                     ),
                     vol.Optional(
-                        CONF_PI_FF_HEAT_REFERENCE, default=DEFAULT_PI_FF_HEAT_REFERENCE
-                    ): NumberSelector(
-                        NumberSelectorConfig(min=-20, max=120, step=0.5, unit_of_measurement="°C", mode=NumberSelectorMode.BOX)
-                    ),
-                    vol.Optional(
-                        CONF_PI_FF_HEAT_SLOPE, default=DEFAULT_PI_FF_HEAT_SLOPE
+                        CONF_PI_OUTDOOR_SEED_HEAT, default=DEFAULT_PI_OUTDOOR_SEED_HEAT
                     ): NumberSelector(
                         NumberSelectorConfig(min=0, max=5, step=0.01, mode=NumberSelectorMode.BOX)
                     ),
                     vol.Optional(
-                        CONF_PI_FF_COOL_REFERENCE, default=DEFAULT_PI_FF_COOL_REFERENCE
-                    ): NumberSelector(
-                        NumberSelectorConfig(min=0, max=140, step=0.5, unit_of_measurement="°C", mode=NumberSelectorMode.BOX)
-                    ),
-                    vol.Optional(
-                        CONF_PI_FF_COOL_SLOPE, default=DEFAULT_PI_FF_COOL_SLOPE
+                        CONF_PI_OUTDOOR_SEED_COOL, default=DEFAULT_PI_OUTDOOR_SEED_COOL
                     ): NumberSelector(
                         NumberSelectorConfig(min=0, max=5, step=0.01, mode=NumberSelectorMode.BOX)
                     ),
-                    vol.Optional(CONF_PI_OUTDOOR_DELTA_CLAMP_HEAT_MIN, default=DEFAULT_PI_OUTDOOR_DELTA_CLAMP_HEAT_MIN): NumberSelector(
-                        NumberSelectorConfig(min=-5, max=5, step=0.1, mode=NumberSelectorMode.BOX)
+                    vol.Optional(CONF_PI_OUTDOOR_SEED_CLAMP_MIN, default=DEFAULT_PI_OUTDOOR_SEED_CLAMP_MIN): NumberSelector(
+                        NumberSelectorConfig(min=0, max=10, step=0.1, mode=NumberSelectorMode.BOX)
                     ),
-                    vol.Optional(CONF_PI_OUTDOOR_DELTA_CLAMP_HEAT_MAX, default=DEFAULT_PI_OUTDOOR_DELTA_CLAMP_HEAT_MAX): NumberSelector(
-                        NumberSelectorConfig(min=-5, max=5, step=0.1, mode=NumberSelectorMode.BOX)
-                    ),
-                    vol.Optional(CONF_PI_OUTDOOR_DELTA_CLAMP_COOL_MIN, default=DEFAULT_PI_OUTDOOR_DELTA_CLAMP_COOL_MIN): NumberSelector(
-                        NumberSelectorConfig(min=-5, max=5, step=0.1, mode=NumberSelectorMode.BOX)
-                    ),
-                    vol.Optional(CONF_PI_OUTDOOR_DELTA_CLAMP_COOL_MAX, default=DEFAULT_PI_OUTDOOR_DELTA_CLAMP_COOL_MAX): NumberSelector(
-                        NumberSelectorConfig(min=-5, max=5, step=0.1, mode=NumberSelectorMode.BOX)
+                    vol.Optional(CONF_PI_OUTDOOR_SEED_CLAMP_MAX, default=DEFAULT_PI_OUTDOOR_SEED_CLAMP_MAX): NumberSelector(
+                        NumberSelectorConfig(min=0, max=10, step=0.1, mode=NumberSelectorMode.BOX)
                     ),
                     vol.Optional(CONF_PI_SETPOINT_WEIGHT, default=DEFAULT_PI_SETPOINT_WEIGHT): NumberSelector(
                         NumberSelectorConfig(min=0, max=1, step=0.05, mode=NumberSelectorMode.BOX)
@@ -1261,11 +1225,11 @@ class ModelInputSubentryFlow(ConfigSubentryFlow):
                     vol.Optional("seed_cool", default=0.0): NumberSelector(
                         NumberSelectorConfig(min=-20, max=20, step=0.01, unit_of_measurement="°C", mode=NumberSelectorMode.BOX)
                     ),
-                    vol.Optional("clamp_min"): NumberSelector(
-                        NumberSelectorConfig(min=-50, max=50, step=0.1, unit_of_measurement="°C", mode=NumberSelectorMode.BOX)
+                    vol.Optional("clamp_min", default=0.0): NumberSelector(
+                        NumberSelectorConfig(min=0, max=50, step=0.1, unit_of_measurement="°C", mode=NumberSelectorMode.BOX)
                     ),
                     vol.Optional("clamp_max"): NumberSelector(
-                        NumberSelectorConfig(min=-50, max=50, step=0.1, unit_of_measurement="°C", mode=NumberSelectorMode.BOX)
+                        NumberSelectorConfig(min=0, max=50, step=0.1, unit_of_measurement="°C", mode=NumberSelectorMode.BOX)
                     ),
                     vol.Optional("lag_tau", default=0): NumberSelector(
                         NumberSelectorConfig(min=0, max=7200, step=60, mode=NumberSelectorMode.BOX)
@@ -1320,16 +1284,16 @@ class ModelInputSubentryFlow(ConfigSubentryFlow):
                             EntitySelectorConfig(domain=["sensor", "binary_sensor", "input_boolean", "input_number", "climate"])
                         ),
                         vol.Optional("seed_heat", default=0.0): NumberSelector(
-                            NumberSelectorConfig(min=-40, max=40, step=0.01, unit_of_measurement="°C", mode=NumberSelectorMode.BOX)
+                            NumberSelectorConfig(min=-20, max=20, step=0.01, unit_of_measurement="°C", mode=NumberSelectorMode.BOX)
                         ),
                         vol.Optional("seed_cool", default=0.0): NumberSelector(
-                            NumberSelectorConfig(min=-40, max=40, step=0.01, unit_of_measurement="°C", mode=NumberSelectorMode.BOX)
+                            NumberSelectorConfig(min=-20, max=20, step=0.01, unit_of_measurement="°C", mode=NumberSelectorMode.BOX)
                         ),
-                        vol.Optional("clamp_min"): NumberSelector(
-                            NumberSelectorConfig(min=-50, max=50, step=0.1, unit_of_measurement="°C", mode=NumberSelectorMode.BOX)
+                        vol.Optional("clamp_min", default=0.0): NumberSelector(
+                            NumberSelectorConfig(min=0, max=50, step=0.1, unit_of_measurement="°C", mode=NumberSelectorMode.BOX)
                         ),
                         vol.Optional("clamp_max"): NumberSelector(
-                            NumberSelectorConfig(min=-50, max=50, step=0.1, unit_of_measurement="°C", mode=NumberSelectorMode.BOX)
+                            NumberSelectorConfig(min=0, max=50, step=0.1, unit_of_measurement="°C", mode=NumberSelectorMode.BOX)
                         ),
                         vol.Optional("lag_tau", default=0): NumberSelector(
                             NumberSelectorConfig(min=0, max=7200, step=60, mode=NumberSelectorMode.BOX)
@@ -1398,7 +1362,7 @@ class SupplementalSourceSubentryFlow(ConfigSubentryFlow):
                         NumberSelectorConfig(min=-20, max=20, step=0.1, unit_of_measurement="°C", mode=NumberSelectorMode.BOX)
                     ),
                     vol.Optional(
-                        CONF_SUPPLEMENTAL_SEED_COOL, default=0.0
+                        CONF_SUPPLEMENTAL_SEED_COOL, default=DEFAULT_SUPPLEMENTAL_SEED
                     ): NumberSelector(
                         NumberSelectorConfig(min=-20, max=20, step=0.1, unit_of_measurement="°C", mode=NumberSelectorMode.BOX)
                     ),
@@ -1454,7 +1418,7 @@ class SupplementalSourceSubentryFlow(ConfigSubentryFlow):
                             NumberSelectorConfig(min=-40, max=40, step=0.1, unit_of_measurement="°C", mode=NumberSelectorMode.BOX)
                         ),
                         vol.Optional(
-                            CONF_SUPPLEMENTAL_SEED_COOL, default=0.0
+                            CONF_SUPPLEMENTAL_SEED_COOL, default=DEFAULT_SUPPLEMENTAL_SEED
                         ): NumberSelector(
                             NumberSelectorConfig(min=-40, max=40, step=0.1, unit_of_measurement="°C", mode=NumberSelectorMode.BOX)
                         ),

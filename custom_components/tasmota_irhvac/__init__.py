@@ -77,7 +77,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 
-MINOR_VERSION = 2
+MINOR_VERSION = 3
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Migrate config entry to current version."""
@@ -135,8 +135,83 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         hass.config_entries.async_update_entry(
             entry, data=new_data, options=new_options,
+            minor_version=2, version=1,
+        )
+
+    if entry.minor_version < 3:
+        new_options = {**entry.options}
+
+        # Rename outdoor slope keys (values stay positive — same convention)
+        for old_key, new_key in [
+            ("pi_ff_heat_slope", "pi_outdoor_seed_heat"),
+            ("pi_ff_cool_slope", "pi_outdoor_seed_cool"),
+        ]:
+            if old_key in new_options:
+                new_options[new_key] = new_options.pop(old_key)
+
+        # Remove reference temperatures (no longer used)
+        new_options.pop("pi_ff_heat_reference", None)
+        new_options.pop("pi_ff_cool_reference", None)
+
+        # Merge outdoor clamps: keep heat values as shared, drop cool-specific
+        for old_key, new_key in [
+            ("pi_outdoor_delta_clamp_heat_min", "pi_outdoor_seed_clamp_min"),
+            ("pi_outdoor_delta_clamp_heat_max", "pi_outdoor_seed_clamp_max"),
+        ]:
+            if old_key in new_options:
+                new_options[new_key] = new_options.pop(old_key)
+        new_options.pop("pi_outdoor_delta_clamp_cool_min", None)
+        new_options.pop("pi_outdoor_delta_clamp_cool_max", None)
+
+        # Negate model input seeds: old convention was "effect on setpoint"
+        # (negative = warms room), new convention is "thermal effect on room"
+        # (positive = warms room). Key names stay seed_heat/seed_cool.
+        model_inputs = new_options.get("pi_model_inputs", [])
+        if model_inputs:
+            migrated_inputs = []
+            for m_input in model_inputs:
+                m = dict(m_input)
+                if "seed_heat" in m:
+                    m["seed_heat"] = -m["seed_heat"]
+                if "seed_cool" in m:
+                    m["seed_cool"] = -m["seed_cool"]
+                # Negate clamps from old internal β space to seed space
+                if "clamp_min" in m and "clamp_max" in m:
+                    old_min = m["clamp_min"]
+                    old_max = m["clamp_max"]
+                    m["clamp_min"] = -old_max
+                    m["clamp_max"] = -old_min
+                migrated_inputs.append(m)
+            new_options["pi_model_inputs"] = migrated_inputs
+
+        hass.config_entries.async_update_entry(
+            entry, options=new_options,
             minor_version=MINOR_VERSION, version=1,
         )
+
+        # Migrate subentry data (model inputs and supplemental sources)
+        if hasattr(entry, "subentries"):
+            for subentry in entry.subentries.values():
+                sub_data = dict(subentry.data)
+                changed = False
+                if "seed_heat" in sub_data:
+                    sub_data["seed_heat"] = -sub_data["seed_heat"]
+                    changed = True
+                if "seed_cool" in sub_data:
+                    sub_data["seed_cool"] = -sub_data["seed_cool"]
+                    changed = True
+                if "clamp_min" in sub_data and "clamp_max" in sub_data:
+                    old_min = sub_data["clamp_min"]
+                    old_max = sub_data["clamp_max"]
+                    sub_data["clamp_min"] = -old_max
+                    sub_data["clamp_max"] = -old_min
+                    changed = True
+                if changed:
+                    hass.config_entries.async_update_subentry(
+                        entry, subentry, data=sub_data,
+                    )
+
+        _LOGGER.info("Migrated to positive-warms-room sign convention (v1.3)")
 
     return True
 

@@ -73,18 +73,18 @@ class SaveSeedsRepairFlow(RepairsFlow):
                 return self.async_abort(reason="pi_not_available")
 
             from .const import (
-                CONF_PI_FF_COOL_SLOPE,
-                CONF_PI_FF_HEAT_SLOPE,
+                CONF_PI_OUTDOOR_SEED_COOL,
+                CONF_PI_OUTDOOR_SEED_HEAT,
                 CONF_PI_MODEL_INPUTS,
             )
 
             learned = pi.get_learned_seed_config()
             new_options = dict(entry.options)
 
-            if "heat_slope" in learned:
-                new_options[CONF_PI_FF_HEAT_SLOPE] = learned["heat_slope"]
-            if "cool_slope" in learned:
-                new_options[CONF_PI_FF_COOL_SLOPE] = learned["cool_slope"]
+            if "outdoor_seed_heat" in learned:
+                new_options[CONF_PI_OUTDOOR_SEED_HEAT] = learned["outdoor_seed_heat"]
+            if "outdoor_seed_cool" in learned:
+                new_options[CONF_PI_OUTDOOR_SEED_COOL] = learned["outdoor_seed_cool"]
 
             model_inputs = list(new_options.get(CONF_PI_MODEL_INPUTS, []))
             for i, seeds in enumerate(learned.get("input_seeds", [])):
@@ -137,11 +137,11 @@ class SlopeDivergenceRepairFlow(RepairsFlow):
             if entry is None:
                 return self.async_abort(reason="entry_not_found")
 
-            from .const import CONF_PI_FF_COOL_SLOPE, CONF_PI_FF_HEAT_SLOPE
+            from .const import CONF_PI_OUTDOOR_SEED_COOL, CONF_PI_OUTDOOR_SEED_HEAT
 
             conf_key = (
-                CONF_PI_FF_HEAT_SLOPE if self._mode == "heat"
-                else CONF_PI_FF_COOL_SLOPE
+                CONF_PI_OUTDOOR_SEED_HEAT if self._mode == "heat"
+                else CONF_PI_OUTDOOR_SEED_COOL
             )
             new_options = {**entry.options, conf_key: round(self._learned, 4)}
             self.hass.config_entries.async_update_entry(entry, options=new_options)

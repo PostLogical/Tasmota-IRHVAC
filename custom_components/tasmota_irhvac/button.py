@@ -27,8 +27,9 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
-    CONF_HAS_SET_H, CONF_HAS_SET_V, CONF_IR_ACTIONS, CONF_PI_FF_COOL_SLOPE,
-    CONF_PI_FF_HEAT_SLOPE, CONF_PI_MODEL_INPUTS, DATA_KEY,
+    CONF_HAS_SET_H, CONF_HAS_SET_V, CONF_IR_ACTIONS,
+    CONF_PI_OUTDOOR_SEED_COOL,
+    CONF_PI_OUTDOOR_SEED_HEAT, CONF_PI_MODEL_INPUTS, DATA_KEY,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -255,10 +256,10 @@ class SaveLearnedSeedsButton(ButtonEntity):
         learned = pi.get_learned_seed_config()
         new_options = dict(self._entry.options)
 
-        if "heat_slope" in learned:
-            new_options[CONF_PI_FF_HEAT_SLOPE] = learned["heat_slope"]
-        if "cool_slope" in learned:
-            new_options[CONF_PI_FF_COOL_SLOPE] = learned["cool_slope"]
+        if "outdoor_seed_heat" in learned:
+            new_options[CONF_PI_OUTDOOR_SEED_HEAT] = learned["outdoor_seed_heat"]
+        if "outdoor_seed_cool" in learned:
+            new_options[CONF_PI_OUTDOOR_SEED_COOL] = learned["outdoor_seed_cool"]
 
         model_inputs = list(new_options.get(CONF_PI_MODEL_INPUTS, []))
         for i, seeds in enumerate(learned.get("input_seeds", [])):
@@ -274,8 +275,8 @@ class SaveLearnedSeedsButton(ButtonEntity):
         pi.apply_saved_seeds()
 
         _LOGGER.info(
-            "Saved learned seeds: heat_slope=%.4f, cool_slope=%.4f, inputs=%s",
-            new_options.get(CONF_PI_FF_HEAT_SLOPE, 0),
-            new_options.get(CONF_PI_FF_COOL_SLOPE, 0),
+            "Saved learned seeds: outdoor_heat=%.4f, outdoor_cool=%.4f, inputs=%s",
+            new_options.get(CONF_PI_OUTDOOR_SEED_HEAT, 0),
+            new_options.get(CONF_PI_OUTDOOR_SEED_COOL, 0),
             [(m.get("name"), m.get("seed_heat"), m.get("seed_cool")) for m in model_inputs],
         )
