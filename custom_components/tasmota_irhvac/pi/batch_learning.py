@@ -118,7 +118,9 @@ def build_feature_vector_from_raw(
 
     Feature construction:
     - "intercept": always 1.0
-    - "outdoor_delta": obs.outdoor_temp_c - obs.current_c (requires outdoor_temp_c)
+    - "outdoor_delta": obs.outdoor_temp_c - obs.desired_c (requires outdoor_temp_c)
+      References desired temp (exogenous), not room temp, to match the online
+      model and prevent endogeneity in the regressor (Ljung, System Identification).
     - model inputs: raw_readings[entity_id], with delta_from_room adjustment
       if configured (entity_temp_c - current_c).  raw_readings stores °C
       absolute temps; the delta is computed here at batch time.
@@ -132,7 +134,7 @@ def build_feature_vector_from_raw(
 
     features: dict[str, float] = {
         "intercept": 1.0,
-        "outdoor_delta": obs.outdoor_temp_c - obs.current_c,
+        "outdoor_delta": obs.outdoor_temp_c - obs.desired_c,
     }
 
     for m_input in model_inputs:
@@ -394,7 +396,7 @@ class DiversityAwareBuffer:
         if self._n_features > 0:
             partial[0] = 1.0  # intercept
         if self._n_features > 1 and obs.outdoor_temp_c is not None:
-            partial[1] = obs.outdoor_temp_c - obs.current_c
+            partial[1] = obs.outdoor_temp_c - obs.desired_c
         return partial
 
     def recompute_info_matrix(self) -> None:
@@ -1074,7 +1076,7 @@ def weighted_least_squares(
         assert o.hp_setpoint is not None
         y_base.append(o.hp_setpoint - o.current_c)
     w_base = [1.0 / (1.0 + (o.room_rate / room_rate_threshold) ** 2) for o in base_eligible]
-    X_base: list[list[float]] = [[1.0, o.outdoor_temp_c - o.current_c] for o in base_eligible]  # type: ignore[operator]  # filtered not-None above
+    X_base: list[list[float]] = [[1.0, o.outdoor_temp_c - o.desired_c] for o in base_eligible]  # type: ignore[operator]  # filtered not-None above
 
     # Scale outdoor_delta column
     n_base = 2

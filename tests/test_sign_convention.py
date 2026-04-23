@@ -362,13 +362,13 @@ class TestBatchOnlineAgreement:
     """Verify batch and online use same outdoor_delta convention."""
 
     def test_batch_outdoor_delta_matches_online(self):
-        """Both compute outdoor_temp - room_temp."""
+        """Both compute outdoor_temp - desired_temp (exogenous reference)."""
         from custom_components.tasmota_irhvac.pi.batch_learning import (
             Observation, build_feature_vector_from_raw,
         )
 
         outdoor_temp = -5.0
-        room_temp = 20.0
+        desired_temp = 22.0
 
         # Batch convention
         obs = Observation(
@@ -376,8 +376,8 @@ class TestBatchOnlineAgreement:
             wall_time=0.0,
             hp_setpoint=22.0,
             outdoor_temp_c=outdoor_temp,
-            current_c=room_temp,
-            desired_c=22.0,
+            current_c=20.0,
+            desired_c=desired_temp,
             room_rate=0.0,
             raw_readings={},
             clamped=False,
@@ -387,11 +387,11 @@ class TestBatchOnlineAgreement:
         assert features is not None
         batch_delta = features[1]  # outdoor_delta is index 1
 
-        # Online convention
-        online_delta = outdoor_temp - room_temp
+        # Online convention: outdoor - desired (exogenous, no PV coupling)
+        online_delta = outdoor_temp - desired_temp
 
         assert batch_delta == pytest.approx(online_delta)
-        assert batch_delta == pytest.approx(-25.0)
+        assert batch_delta == pytest.approx(-27.0)
 
     def test_greybox_outdoor_delta_matches(self):
         """Greybox buffer uses same convention."""

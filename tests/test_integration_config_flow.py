@@ -314,7 +314,7 @@ class TestDisturbanceInputsSubentryFlow:
             user_input={
                 "name": "Test Stove",
                 "entity_id": "input_boolean.stove",
-                "seed_heat": -3.2,
+                "seed_heat": 3.2,
                 "seed_cool": 0.0,
             },
         )
@@ -325,7 +325,7 @@ class TestDisturbanceInputsSubentryFlow:
         ]
         assert len(model_subs) >= 1
         assert model_subs[-1].title == "Test Stove"
-        assert model_subs[-1].data["seed_heat"] == -3.2
+        assert model_subs[-1].data["seed_heat"] == 3.2
 
 
 class TestIRActionsFlow:

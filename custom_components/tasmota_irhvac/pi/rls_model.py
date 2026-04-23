@@ -270,9 +270,27 @@ class RLSModel:
 
         return residual
 
+    def get_coefficient_physical(self, index: int) -> float:
+        """Return single coefficient in physical (de-normalized) units."""
+        return self.beta[index] / self.feature_scales[index]
+
     def get_coefficients(self) -> dict[int, float]:
         """Return coefficient dict in physical units: {index: value}."""
-        return {i: self.beta[i] / self.feature_scales[i] for i in range(self.n)}
+        return {i: self.get_coefficient_physical(i) for i in range(self.n)}
+
+    def beta_to_seed(self, index: int) -> float:
+        """Convert internal β to seed convention (positive = warms room).
+
+        Seed = -β_physical. Everything funnels through get_coefficient_physical.
+        """
+        return -self.get_coefficient_physical(index)
+
+    def seed_to_beta(self, index: int, seed: float) -> float:
+        """Convert seed (positive = warms room) to internal normalized β.
+
+        β_normalized = -seed * feature_scale.
+        """
+        return -seed * self.feature_scales[index]
 
     def get_covariance_diagonal(self) -> list[float]:
         """Return diagonal of P (uncertainty per coefficient)."""

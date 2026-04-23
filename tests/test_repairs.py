@@ -74,7 +74,7 @@ class TestCheckConfigIssues:
             "pi_model_inputs": [{
                 "name": "Test Door",
                 "entity_id": "binary_sensor.nonexistent",
-                "seed_heat": -1.5,
+                "seed_heat": 1.5,
                 "seed_cool": 0.0,
                 "lag_tau": 0,
             }],
@@ -228,9 +228,9 @@ class TestSaveSeedsRepairFlow:
         # Verify config was updated
         updated_entry = hass.config_entries.async_get_entry(entry.entry_id)
         assert updated_entry is not None
-        from custom_components.tasmota_irhvac.const import CONF_PI_FF_HEAT_SLOPE
+        from custom_components.tasmota_irhvac.const import CONF_PI_OUTDOOR_SEED_HEAT
         # The learned slope should now be in config
-        assert CONF_PI_FF_HEAT_SLOPE in updated_entry.options
+        assert CONF_PI_OUTDOOR_SEED_HEAT in updated_entry.options
 
     @pytest.mark.asyncio
     async def test_confirm_aborts_no_pi(self, hass):
@@ -364,7 +364,7 @@ class TestSlopeDivergenceRepairFlow:
 
     @pytest.mark.asyncio
     async def test_confirm_updates_heat_slope(self, hass, setup_pi_integration):
-        """Confirm updates pi_ff_heat_slope in config entry."""
+        """Confirm updates pi_outdoor_seed_heat in config entry."""
         entry = await setup_pi_integration()
 
         flow = SlopeDivergenceRepairFlow({
@@ -379,12 +379,12 @@ class TestSlopeDivergenceRepairFlow:
         assert result["type"] == "create_entry"
 
         updated = hass.config_entries.async_get_entry(entry.entry_id)
-        from custom_components.tasmota_irhvac.const import CONF_PI_FF_HEAT_SLOPE
-        assert updated.options[CONF_PI_FF_HEAT_SLOPE] == 0.42
+        from custom_components.tasmota_irhvac.const import CONF_PI_OUTDOOR_SEED_HEAT
+        assert updated.options[CONF_PI_OUTDOOR_SEED_HEAT] == 0.42
 
     @pytest.mark.asyncio
     async def test_confirm_updates_cool_slope(self, hass, setup_pi_integration):
-        """Confirm updates pi_ff_cool_slope for cool mode."""
+        """Confirm updates pi_outdoor_seed_cool for cool mode."""
         entry = await setup_pi_integration()
 
         flow = SlopeDivergenceRepairFlow({
@@ -399,8 +399,8 @@ class TestSlopeDivergenceRepairFlow:
         assert result["type"] == "create_entry"
 
         updated = hass.config_entries.async_get_entry(entry.entry_id)
-        from custom_components.tasmota_irhvac.const import CONF_PI_FF_COOL_SLOPE
-        assert updated.options[CONF_PI_FF_COOL_SLOPE] == 0.25
+        from custom_components.tasmota_irhvac.const import CONF_PI_OUTDOOR_SEED_COOL
+        assert updated.options[CONF_PI_OUTDOOR_SEED_COOL] == 0.25
 
     @pytest.mark.asyncio
     async def test_confirm_aborts_missing_entry(self, hass):
@@ -515,7 +515,7 @@ class TestHighIntegralTuningRepairFlow:
         pi._metrics.uncontrollable_cvh = 0.0
         pi._metrics.comfort_violation_hours = 1.0
         # Align learned slope to configured to avoid sub-case 2 (slope_gap)
-        pi._rls_heat.beta[1] = pi._ff_heat_slope * pi._rls_heat.feature_scales[1]
+        pi._rls_heat.beta[1] = -pi._outdoor_seed_heat * pi._rls_heat.feature_scales[1]
 
         issues = pi._check_tuning_health(from_batch=True)
         integral_issues = [i for i in issues if "high_integral" in i[0]]

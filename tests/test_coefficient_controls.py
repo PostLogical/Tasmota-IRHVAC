@@ -157,8 +157,8 @@ class TestPIControllerCoefficientAPI:
 
         val = pi.get_coefficient("heat", 1)
         assert val is not None
-        # Should match the configured heat slope seed
-        assert val == pytest.approx(0.3, abs=0.01)
+        # Internal β = -seed (positive seed → negative β)
+        assert val == pytest.approx(-0.25, abs=0.01)
 
     @pytest.mark.asyncio
     async def test_set_coefficient(self, hass, setup_pi_integration):

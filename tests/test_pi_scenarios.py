@@ -210,16 +210,18 @@ def _run_simulation(entity, thermal, n_ticks, outdoor_schedule=None,
 
 
 def _make_sim_config(seed_factor=1.0, **overrides):
-    """Make config with outdoor_delta seed scaled by seed_factor."""
-    true_slope = 0.35
+    """Make config with outdoor_delta seed scaled by seed_factor.
+
+    true_slope matches the ThermalModel physics: 1/(τ × hp_gain) = 1/3.9 ≈ 0.256.
+    With outdoor_delta = outdoor - desired, FF = seed × (desired - outdoor).
+    """
+    true_slope = 1.0 / 3.9  # matches ThermalModel hp_gain = 3.9/τ
     config = {
         "pi_kp": 1.0,
         "pi_ki": 0.15,
         "pi_deadband": 0.5,
-        "pi_ff_heat_slope": true_slope * seed_factor,
-        "pi_ff_cool_slope": true_slope * seed_factor,
-        "pi_ff_heat_reference": 15.0,
-        "pi_ff_cool_reference": 25.0,
+        "pi_outdoor_seed_heat": true_slope * seed_factor,
+        "pi_outdoor_seed_cool": true_slope * seed_factor,
         "pi_ff_learn_night_only": False,
         "pi_model_inputs": [],
     }
@@ -476,7 +478,8 @@ class TestSunnyDayVsColdNight:
         history = _run_simulation(entity, thermal, n_ticks=72, solar_schedule=solar)
 
         coeff = entity._pi._rls_heat.beta[1]
-        assert coeff > 0.15, (
+        # β_internal = -seed; negative means "cold outdoor pushes HP harder"
+        assert coeff < -0.15, (
             f"outdoor_delta coefficient collapsed to {coeff:.3f} (τ={time_constant})"
         )
 
@@ -507,7 +510,7 @@ class TestStoveOnOff:
         config = _make_sim_config(seed_factor, pi_model_inputs=[{
             "name": "Stove",
             "entity_id": "sensor.stove",
-            "seed_heat": -3.0,
+            "seed_heat": 3.0,
             "seed_cool": 0.0,
             "lag_tau": 0,
         }])

@@ -230,8 +230,8 @@ DEFAULT_PI_KD = 0.0              # Literature + 72h replay: D contraindicated fo
 DEFAULT_PI_KD_FILTER_N = 8       # Derivative filter coefficient: Tf = Td/N. Higher N = less filtering.
 DEFAULT_PI_MIN_INTERVAL = 900
 DEFAULT_PI_DEADBAND = 0.5
-DEFAULT_PI_OUTDOOR_SEED_HEAT = 0.3
-DEFAULT_PI_OUTDOOR_SEED_COOL = 0.3
+DEFAULT_PI_OUTDOOR_SEED_HEAT = 0.25
+DEFAULT_PI_OUTDOOR_SEED_COOL = 0.25
 DEFAULT_PI_OUTDOOR_SEED_CLAMP_MIN = 0.0
 DEFAULT_PI_OUTDOOR_SEED_CLAMP_MAX = 2.0
 DEFAULT_PI_SETPOINT_WEIGHT = 0.3  # 2-DOF: p_term = kp * b * error. Lower b reduces overshoot.

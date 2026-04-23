@@ -8,7 +8,7 @@ from custom_components.tasmota_irhvac.pi.model_input_manager import ModelInputMa
 STOVE_INPUT = {
     "name": "Stove",
     "entity_id": "input_boolean.stove",
-    "seed_heat": -3.0,
+    "seed_heat": 3.0,
     "seed_cool": 0.0,
     "lag_tau": 0,
 }
@@ -158,7 +158,7 @@ class TestOutdoorTemp:
 DELTA_INPUT = {
     "name": "LR Delta",
     "entity_id": "sensor.living_room_temp",
-    "seed_heat": -1.0,
+    "seed_heat": 1.0,
     "seed_cool": 0.0,
     "lag_tau": 0,
     "delta_from_room": True,
@@ -417,7 +417,7 @@ class TestGateEntity:
         m_input = {
             "name": "Solar Gated",
             "entity_id": "sensor.solar_proxy",
-            "seed_heat": -2.0,
+            "seed_heat": 2.0,
             "seed_cool": 0.0,
             "lag_tau": 0,
             "gate_entity": "input_boolean.solar_gate",

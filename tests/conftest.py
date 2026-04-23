@@ -58,10 +58,8 @@ def make_config(overrides=None):
         "pi_min_interval": 900,
         "pi_deadband": 0.5,
         "outdoor_temp_sensor": "",
-        "pi_ff_heat_reference": 15.0,
-        "pi_ff_heat_slope": 0.3,
-        "pi_ff_cool_reference": 25.0,
-        "pi_ff_cool_slope": 0.3,
+        "pi_outdoor_seed_heat": 0.25,
+        "pi_outdoor_seed_cool": 0.25,
         "pi_model_inputs": [],
         "pi_setpoint_weight": 0.3,
     }

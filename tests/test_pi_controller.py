@@ -511,7 +511,7 @@ class TestFeedforward:
         pi._model_inputs = [{
             "name": "pellet_stove",
             "entity_id": "sensor.stove",
-            "seed_heat": -3.0,
+            "seed_heat": 3.0,
             "seed_cool": 0.0,
             "suppress_learning": True,
         }]
@@ -540,7 +540,7 @@ class TestFeedforward:
         pi._model_inputs = [{
             "name": "pellet_stove",
             "entity_id": "sensor.stove",
-            "seed_heat": -3.0,
+            "seed_heat": 3.0,
             "seed_cool": 0.0,
             "suppress_learning": True,
         }]
@@ -1213,7 +1213,7 @@ class TestFullRateIntegrationRegression:
     def test_dynamic_small_offset_oscillation_risk(self):
         """Closed-loop: room at target, small perturbation.  Does full-rate oscillate?
 
-        Start at 22°C (at target). The HP is at 24°C (FF-compensated).
+        Start at 22°C (at target). The HP is at FF steady-state setpoint.
         Outdoor = 5°C. Room is stable. The PI should hold — not hunt.
 
         This is the scenario where variable-rate might prevent oscillation:
@@ -1221,9 +1221,10 @@ class TestFullRateIntegrationRegression:
         potentially crossing the hysteresis threshold and triggering a setpoint
         change that overshoots.
         """
+        # hp_setpoint at FF steady state: desired + seed*(desired-outdoor) = 22 + 0.25*17 ≈ 26
         full_traj, var_traj = self._run_ab_dynamic(
             22.0, 80, outdoor_c=5.0, tau_minutes=60.0, hp_gain=0.8,
-            hp_setpoint=24,
+            hp_setpoint=26,
         )
 
         var_changes = self._count_setpoint_changes(var_traj)
@@ -1629,10 +1630,10 @@ class TestModelInputClamps:
             "pi_model_inputs": [{
                 "name": "Stove",
                 "entity_id": "input_boolean.stove",
-                "seed_heat": -3.0,
+                "seed_heat": 3.0,
                 "seed_cool": 0.0,
-                "clamp_min": -5.0,
-                "clamp_max": 0.0,
+                "clamp_min": 0.0,
+                "clamp_max": 5.0,
                 "lag_tau": 0,
             }],
         })
@@ -1647,7 +1648,7 @@ class TestModelInputClamps:
             "pi_model_inputs": [{
                 "name": "Stove",
                 "entity_id": "input_boolean.stove",
-                "seed_heat": -3.0,
+                "seed_heat": 3.0,
                 "seed_cool": 0.0,
                 "lag_tau": 0,
             }],
@@ -1662,9 +1663,9 @@ class TestModelInputClamps:
             "pi_model_inputs": [{
                 "name": "Stove",
                 "entity_id": "input_boolean.stove",
-                "seed_heat": -3.0,
+                "seed_heat": 3.0,
                 "seed_cool": 0.0,
-                "clamp_min": -5.0,
+                "clamp_min": 0.0,
                 "lag_tau": 0,
             }],
         })
@@ -1716,7 +1717,7 @@ class TestExtraStoredDataFullRestore:
             "pi_model_inputs": [{
                 "name": "Stove",
                 "entity_id": "input_boolean.stove",
-                "seed_heat": -3.0,
+                "seed_heat": 3.0,
                 "seed_cool": 0.0,
                 "lag_tau": 1800,
             }],
@@ -1792,8 +1793,8 @@ class TestResetFFSeedsRLS:
             "pi_model_inputs": [{
                 "name": "Stove",
                 "entity_id": "input_boolean.stove",
-                "seed_heat": -3.0,
-                "seed_cool": 1.5,
+                "seed_heat": 3.0,
+                "seed_cool": -1.5,
                 "lag_tau": 0,
             }],
         })
@@ -1812,7 +1813,7 @@ class TestResetFFSeedsRLS:
         heat_coeffs = pi._rls_heat.get_coefficients()
         cool_coeffs = pi._rls_cool.get_coefficients()
         assert heat_coeffs[0] == pytest.approx(0.0)  # intercept
-        assert heat_coeffs[1] == pytest.approx(pi._ff_heat_slope)  # outdoor
+        assert heat_coeffs[1] == pytest.approx(-pi._outdoor_seed_heat)  # outdoor (β = -seed)
         assert heat_coeffs[2] == pytest.approx(-3.0)  # model input seed
         assert cool_coeffs[2] == pytest.approx(1.5)
         assert pi._rls_heat.observation_count == 0
@@ -1834,7 +1835,7 @@ class TestModelInputChanged:
             "pi_model_inputs": [{
                 "name": "Stove",
                 "entity_id": "input_boolean.stove",
-                "seed_heat": -3.0,
+                "seed_heat": 3.0,
                 "seed_cool": 0.0,
                 "lag_tau": 0,
             }],
@@ -1942,7 +1943,7 @@ class TestLearningGateDebugLogging:
             "pi_model_inputs": [{
                 "name": "Stove",
                 "entity_id": "input_boolean.stove",
-                "seed_heat": -3.0,
+                "seed_heat": 3.0,
                 "seed_cool": 0.0,
                 "lag_tau": 0,
             }],
@@ -1979,7 +1980,7 @@ class TestSupplementalAutoModelInputs:
             "pi_supplemental_sources": [{
                 "name": "Pellet Stove",
                 "entity_id": "climate.pellet_stove",
-                "seed_heat": -4.0,
+                "seed_heat": 4.0,
                 "seed_cool": 0.0,
             }],
         })
@@ -1992,7 +1993,7 @@ class TestSupplementalAutoModelInputs:
         auto = auto_inputs[0]
         assert auto["name"] == "Pellet Stove (auto)"
         assert auto["entity_id"] == "climate.pellet_stove"
-        assert auto["seed_heat"] == -4.0
+        assert auto["seed_heat"] == 4.0
         assert auto["seed_cool"] == 0.0
         assert auto["lag_tau"] == 0
         assert auto["suppress_learning"] is True
@@ -2017,7 +2018,7 @@ class TestSupplementalAutoModelInputs:
             "pi_model_inputs": [{
                 "name": "Stove Manual",
                 "entity_id": "climate.pellet_stove",
-                "seed_heat": -2.0,
+                "seed_heat": 2.0,
                 "seed_cool": 0.0,
                 "lag_tau": 0,
             }],
@@ -2045,8 +2046,8 @@ class TestSupplementalAutoModelInputs:
         entity = FakePIEntity(config)
         auto = [m for m in entity._pi._model_inputs if m.get("_auto_supplemental")][0]
 
-        assert auto["seed_heat"] == -3.0
-        assert auto["seed_cool"] == 0.0
+        assert auto["seed_heat"] == 3.0
+        assert auto["seed_cool"] == 3.0
 
     def test_n_model_inputs_includes_auto(self):
         """_n_model_inputs counts outdoor_delta + all model inputs including auto."""
@@ -2054,7 +2055,7 @@ class TestSupplementalAutoModelInputs:
             "pi_model_inputs": [{
                 "name": "Manual",
                 "entity_id": "input_boolean.manual",
-                "seed_heat": -1.0,
+                "seed_heat": 1.0,
                 "seed_cool": 0.0,
                 "lag_tau": 0,
             }],

@@ -83,7 +83,7 @@ class TestSeedUnitConversion:
             "pi_model_inputs": [{
                 "name": "stove",
                 "entity_id": "input_boolean.stove",
-                "seed_heat": -3.0,  # This is °C in the config
+                "seed_heat": 3.0,  # This is °C in the config (positive = warms room)
                 "seed_cool": 0.0,
                 "lag_tau": 0,
             }],
@@ -91,7 +91,7 @@ class TestSeedUnitConversion:
         entity = FakePIEntity(config)
         pi = entity._pi
 
-        # The RLS seed for the stove input should be -3.0 °C
+        # Internal β = -seed (HP backs off when source warms room)
         # Index 0=intercept, 1=outdoor_delta, 2=first model input
         assert pi._heat_seeds[2] == -3.0
 
@@ -189,12 +189,12 @@ class TestControlParamsAlwaysCelsius:
         entity = _make_f_entity(config)
         assert entity._pi._pi_deadband == 0.5
 
-    def test_ff_references_stored_in_celsius(self):
-        """FF references are stored in °C regardless of system unit."""
+    def test_outdoor_seeds_stored_in_celsius(self):
+        """Outdoor seeds are stored in °C regardless of system unit."""
         config = make_pi_config({
-            "pi_ff_heat_reference": 15.0,
-            "pi_ff_cool_reference": 25.0,
+            "pi_outdoor_seed_heat": 0.35,
+            "pi_outdoor_seed_cool": 0.25,
         })
         entity = _make_f_entity(config)
-        assert entity._pi._ff_heat_reference == 15.0
-        assert entity._pi._ff_cool_reference == 25.0
+        assert entity._pi._outdoor_seed_heat == 0.35
+        assert entity._pi._outdoor_seed_cool == 0.25

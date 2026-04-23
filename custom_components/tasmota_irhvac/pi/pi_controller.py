@@ -346,9 +346,11 @@ class PIController:
             self._rls_heat_clamps.append(clamp)
             self._rls_cool_clamps.append(clamp)
 
-        # Feature scales for balanced P initialization.
-        # intercept=1.0, outdoor_delta typical ~10, model inputs ~0.5
-        self._feature_scales = [1.0, 10.0]
+        # Feature scales = expected σ of each feature (van der Sluis 1969,
+        # Haykin Adaptive Filter Theory §13). Normalizes features to O(1)
+        # for balanced P-matrix conditioning and learning rates.
+        # intercept=1.0, outdoor_delta σ ≈ range/4 ≈ 50/4 ≈ 13, model inputs ~0.5
+        self._feature_scales = [1.0, 13.0]
         for m_input in self._model_inputs:
             self._feature_scales.append(float(m_input.get("typical_value", 0.5)))
 
@@ -615,12 +617,13 @@ class PIController:
         # Read initial model input values
         self._read_model_input_values()
 
-        # Compute initial feedforward offset (requires both outdoor and room temp)
-        if self._inputs.outdoor_temp is not None and e._attr_current_temperature is not None:
+        # Compute initial feedforward offset (requires outdoor temp and desired temp)
+        # outdoor_delta references desired temp, not room temp, to keep FF
+        # exogenous — prevents positive feedback during transients (Åström §5).
+        desired_c = self.desired_temp_celsius
+        if self._inputs.outdoor_temp is not None and desired_c is not None:
             is_heating = e._attr_hvac_mode in (HVACMode.HEAT, HVACMode.HEAT_COOL, None)
-            room_c = TemperatureConverter.convert(
-                e._attr_current_temperature, e.temperature_unit, UnitOfTemperature.CELSIUS)
-            outdoor_delta = self._inputs.outdoor_temp - room_c
+            outdoor_delta = self._inputs.outdoor_temp - desired_c
             x = self._inputs.build_feature_vector(outdoor_delta)
             rls = self._rls_heat if is_heating else self._rls_cool
             self._ff_offset = rls.predict(x)
@@ -2177,9 +2180,10 @@ class PIController:
             if i == 0:
                 filtered_val = 1.0  # intercept
             elif i == 1:
-                # outdoor_delta = outdoor_temp - room_temp (signed)
-                if self._inputs.outdoor_temp is not None and self._sensor_filtered is not None:
-                    filtered_val = round(self._inputs.outdoor_temp - self._sensor_filtered, 4)
+                # outdoor_delta = outdoor_temp - desired_temp (exogenous)
+                desired_c = self.desired_temp_celsius
+                if self._inputs.outdoor_temp is not None and desired_c is not None:
+                    filtered_val = round(self._inputs.outdoor_temp - desired_c, 4)
                 else:
                     filtered_val = 0.0
             else:
@@ -2217,26 +2221,23 @@ class PIController:
         """Return current learned coefficients as seed values for config.
 
         Used by the 'save learned seeds' button to write back to config.
-        Internal β is negated back to seed convention (positive = warms room).
+        Uses beta_to_seed() for consistent β→seed conversion.
         """
-        heat_coeffs = self._rls_heat.get_coefficients()
-        cool_coeffs = self._rls_cool.get_coefficients()
         result: dict[str, Any] = {}
 
-        # β_physical = -seed, so seed = -β_physical
-        if 1 in heat_coeffs:
-            result["outdoor_seed_heat"] = round(-heat_coeffs[1], 4)
-        if 1 in cool_coeffs:
-            result["outdoor_seed_cool"] = round(-cool_coeffs[1], 4)
+        if self._rls_heat.n > 1:
+            result["outdoor_seed_heat"] = round(self._rls_heat.beta_to_seed(1), 4)
+        if self._rls_cool.n > 1:
+            result["outdoor_seed_cool"] = round(self._rls_cool.beta_to_seed(1), 4)
 
         input_seeds: list[dict[str, float]] = []
         for i in range(len(self._model_inputs)):
             beta_idx = i + 2  # 0=intercept, 1=outdoor_delta, 2+=model inputs
             seeds: dict[str, float] = {}
-            if beta_idx in heat_coeffs:
-                seeds["seed_heat"] = round(-heat_coeffs[beta_idx], 4)
-            if beta_idx in cool_coeffs:
-                seeds["seed_cool"] = round(-cool_coeffs[beta_idx], 4)
+            if beta_idx < self._rls_heat.n:
+                seeds["seed_heat"] = round(self._rls_heat.beta_to_seed(beta_idx), 4)
+            if beta_idx < self._rls_cool.n:
+                seeds["seed_cool"] = round(self._rls_cool.beta_to_seed(beta_idx), 4)
             input_seeds.append(seeds)
         result["input_seeds"] = input_seeds
 
@@ -2435,9 +2436,7 @@ class PIController:
         ]:
             if rls.observation_count == 0:
                 continue
-            coeffs = rls.get_coefficients()
-            # Convert internal β back to seed convention for comparison
-            learned = -coeffs.get(1, -configured)
+            learned = rls.beta_to_seed(1) if rls.n > 1 else configured
 
             counter_key = f"slope_div_{mode}"
             # Check if currently drifting
@@ -2529,8 +2528,7 @@ class PIController:
         active_mode = "heat" if is_heating else "cool"
         rls = self._rls_heat if is_heating else self._rls_cool
         configured_seed = self._outdoor_seed_heat if is_heating else self._outdoor_seed_cool
-        active_coeffs = rls.get_coefficients()
-        learned_slope = -active_coeffs.get(1, -configured_seed)  # β → seed convention
+        learned_slope = rls.beta_to_seed(1) if rls.n > 1 else configured_seed
 
         ki_correction = abs(self._pi_ki * self._metrics.integral_convergence)
 
@@ -2546,7 +2544,7 @@ class PIController:
             sustained_cycles=self._tuning_alert_counters.get(counter_key, 0),
             observation_count=rls.observation_count,
             learned_slope=learned_slope,
-            configured_slope=configured_slope,
+            configured_slope=configured_seed,
             uncontrollable_cvh=self._metrics.uncontrollable_cvh,
             total_cvh=self._metrics.comfort_violation_hours,
             pi_ki=self._pi_ki,
@@ -3451,10 +3449,10 @@ class PIController:
         is_heating = e._attr_hvac_mode == HVACMode.HEAT
         if not is_heating and e._attr_hvac_mode not in (HVACMode.COOL, HVACMode.DRY):
             return False
-        # Use RLS model for FF-only fallback (sensor unavailable — use last filtered or desired as room proxy)
+        # Use RLS model for FF-only fallback (sensor unavailable)
+        # outdoor_delta references desired temp (exogenous, no PV coupling)
         if self._inputs.outdoor_temp is not None:
-            room_proxy = self._sensor_filtered if self._sensor_filtered is not None else desired_c
-            outdoor_delta = self._inputs.outdoor_temp - room_proxy
+            outdoor_delta = self._inputs.outdoor_temp - desired_c
             self._read_model_input_values()
             x = self._inputs.build_feature_vector(outdoor_delta)
             rls = self._rls_heat if is_heating else self._rls_cool
@@ -3741,9 +3739,12 @@ class PIController:
         self._read_model_input_values(current_c)
         self._inputs.update_lag_filters(dt_seconds)
 
-        # Compute outdoor delta: outdoor_temp - room_temp (signed, same formula both modes)
+        # Compute outdoor delta: outdoor_temp - desired_temp (signed, same formula both modes)
+        # References desired temp (exogenous), not room temp, to prevent positive
+        # feedback during transients. Matches industry-standard heating curve
+        # formulation: Q_loss = UA × (T_setpoint - T_outdoor).
         if self._inputs.outdoor_temp is not None:
-            outdoor_delta = self._inputs.outdoor_temp - current_c
+            outdoor_delta = self._inputs.outdoor_temp - desired_c
         else:
             outdoor_delta = 0.0
 

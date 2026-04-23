@@ -1730,7 +1730,7 @@ class TestServiceHandlerEdgeCases:
         options = {"pi_model_inputs": [{
             "name": "Stove",
             "entity_id": "input_boolean.stove",
-            "seed_heat": -3.2,
+            "seed_heat": 3.2,
             "seed_cool": 0.0,
             "lag_tau": 0,
         }]}
@@ -2108,8 +2108,8 @@ class TestConfigFlowEmptyRedirects:
             user_input={
                 "name": "Test Solar",
                 "entity_id": "sensor.solar_proxy",
-                "seed_heat": -2.0,
-                "seed_cool": 1.0,
+                "seed_heat": 2.0,
+                "seed_cool": -1.0,
             },
         )
         assert result["type"] == FlowResultType.CREATE_ENTRY
@@ -2134,7 +2134,7 @@ class TestConfigFlowEmptyRedirects:
             user_input={
                 "name": "Solar Proxy",
                 "entity_id": "sensor.solar_proxy",
-                "seed_heat": -4.0,
+                "seed_heat": 4.0,
                 "input_role": "solar",
             },
         )
@@ -2394,10 +2394,10 @@ class TestConfigFlowGaps:
             user_input={
                 "name": "Solar",
                 "entity_id": "sensor.solar_power",
-                "seed_heat": -2.0,
+                "seed_heat": 2.0,
                 "seed_cool": 0.0,
-                "clamp_min": -5.0,
-                "clamp_max": 0.0,
+                "clamp_min": 0.0,
+                "clamp_max": 5.0,
             },
         )
         assert result["type"] == FlowResultType.CREATE_ENTRY
@@ -2406,8 +2406,8 @@ class TestConfigFlowGaps:
             if s.subentry_type == "model_input"
         ]
         assert len(model_subs) >= 1
-        assert model_subs[-1].data["clamp_min"] == -5.0
-        assert model_subs[-1].data["clamp_max"] == 0.0
+        assert model_subs[-1].data["clamp_min"] == 0.0
+        assert model_subs[-1].data["clamp_max"] == 5.0
 
 
 # ── Migration v1.4 with non-1.0 gain (lines 108-109) ────────────────
@@ -2432,7 +2432,7 @@ class TestDiagnosticsModelInputs:
         options = {"pi_model_inputs": [{
             "name": "Stove",
             "entity_id": "input_boolean.stove",
-            "seed_heat": -3.0,
+            "seed_heat": 3.0,
             "seed_cool": 0.0,
             "lag_tau": 0,
         }]}
@@ -2469,7 +2469,7 @@ class TestExtraStoredDataViaAsyncAdded:
             "pi_model_inputs": [{
                 "name": "Stove",
                 "entity_id": "input_boolean.stove",
-                "seed_heat": -3.0,
+                "seed_heat": 3.0,
                 "seed_cool": 0.0,
                 "lag_tau": 1800,
             }],
@@ -2525,7 +2525,7 @@ class TestModelInputChangedIntegration:
         options = {"pi_model_inputs": [{
             "name": "Stove",
             "entity_id": "input_boolean.stove",
-            "seed_heat": -3.0,
+            "seed_heat": 3.0,
             "seed_cool": 0.0,
             "lag_tau": 0,
         }]}
@@ -2604,7 +2604,7 @@ class TestSaveLearnedSeedsButton:
             "pi_model_inputs": [{
                 "name": "solar",
                 "entity_id": "sensor.solar",
-                "seed_heat": -1.0,
+                "seed_heat": 1.0,
                 "seed_cool": 0.0,
                 "lag_tau": 0,
             }],
@@ -2620,8 +2620,8 @@ class TestSaveLearnedSeedsButton:
 
         pi = entity._pi
         # Simulate learned coefficients different from seeds
-        pi._rls_heat.beta = [0.1, 0.42, -3.5]
-        pi._rls_cool.beta = [0.0, -0.42, 0.0]
+        pi._rls_heat.beta = [0.1, -0.42, -3.5]
+        pi._rls_cool.beta = [0.0, 0.42, 0.0]
         pi._rls_heat.observation_count = 100
 
         # Find and press the button via entity_platform registry
@@ -2645,10 +2645,10 @@ class TestSaveLearnedSeedsButton:
 
         # Check config was updated
         updated = entry.options
-        assert updated.get("pi_ff_heat_slope") == 0.42
+        assert updated.get("pi_outdoor_seed_heat") == 0.42
         inputs = updated.get("pi_model_inputs", [])
         if inputs:
-            assert inputs[0].get("seed_heat") == -3.5
+            assert inputs[0].get("seed_heat") == 3.5
 
 
 class TestSeedChangeDetection:
@@ -2898,8 +2898,12 @@ class TestSaveLearnedSeedsButton:
         # Verify config entry options were updated with learned slopes
         updated_options = entry.options
         if len(pi._rls_heat.beta) > 1:
-            assert "pi_ff_heat_slope" in updated_options
-            assert updated_options["pi_ff_heat_slope"] == round(pi._rls_heat.beta[1], 4)
+            assert "pi_outdoor_seed_heat" in updated_options
+            # seed = -(beta / feature_scale); outdoor_delta scale = 10.0
+            scale = pi._rls_heat.feature_scales[1]
+            assert updated_options["pi_outdoor_seed_heat"] == round(
+                -pi._rls_heat.beta[1] / scale, 4
+            )
 
     @pytest.mark.asyncio
     async def test_save_unavailable_without_observations(self, hass, setup_pi_integration):
@@ -3032,8 +3036,8 @@ class TestMigrationV1Integration:
         await hass.async_block_till_done()
         assert result is True
 
-        # Migration should have updated minor_version
-        assert entry.minor_version == 2
+        # Migration should have updated to current MINOR_VERSION
+        assert entry.minor_version == 3
 
         # Temps should be converted from °C to °F
         assert entry.data["min_temp"] == pytest.approx(60.8, abs=0.1)
@@ -3068,7 +3072,7 @@ class TestSubentryLoading:
             user_input={
                 "name": "Stove",
                 "entity_id": "input_boolean.stove",
-                "seed_heat": -3.0,
+                "seed_heat": 3.0,
                 "seed_cool": 0.0,
             },
         )
@@ -3097,7 +3101,7 @@ class TestSubentryLoading:
             user_input={
                 "name": "Pellet Stove",
                 "entity_id": "climate.pellet_stove",
-                "seed_heat": -3.0,
+                "seed_heat": 3.0,
                 "seed_cool": 0.0,
                 "failure_threshold": 900,
                 "recovery_margin": 0.3,
@@ -3398,7 +3402,7 @@ class TestModelInputSubentryDuplicate:
             user_input={
                 "name": "Stove",
                 "entity_id": "input_boolean.stove",
-                "seed_heat": -3.0,
+                "seed_heat": 3.0,
                 "seed_cool": 0.0,
             },
         )
@@ -3414,7 +3418,7 @@ class TestModelInputSubentryDuplicate:
             user_input={
                 "name": "Stove Again",
                 "entity_id": "input_boolean.stove",
-                "seed_heat": -2.0,
+                "seed_heat": 2.0,
                 "seed_cool": 0.0,
             },
         )
@@ -3521,7 +3525,7 @@ class TestModelInputReconfigure:
             user_input={
                 "name": "Stove",
                 "entity_id": "input_boolean.stove",
-                "seed_heat": -3.0,
+                "seed_heat": 3.0,
                 "seed_cool": 0.0,
             },
         )
@@ -3547,8 +3551,8 @@ class TestModelInputReconfigure:
             user_input={
                 "name": "Updated Stove",
                 "entity_id": "input_boolean.stove",
-                "seed_heat": -5.0,
-                "seed_cool": 1.0,
+                "seed_heat": 5.0,
+                "seed_cool": -1.0,
             },
         )
         # async_update_reload_and_abort returns ABORT type
@@ -3578,7 +3582,7 @@ class TestSupplementalSourceSubentry:
             user_input={
                 "name": "Pellet Stove",
                 "entity_id": "climate.pellet_stove",
-                "seed_heat": -3.0,
+                "seed_heat": 3.0,
                 "seed_cool": 0.0,
                 "failure_threshold": 900,
                 "recovery_margin": 0.3,
@@ -3593,7 +3597,7 @@ class TestSupplementalSourceSubentry:
         ]
         assert len(supp_subs) == 1
         assert supp_subs[0].data["entity_id"] == "climate.pellet_stove"
-        assert supp_subs[0].data["seed_heat"] == -3.0
+        assert supp_subs[0].data["seed_heat"] == 3.0
         assert supp_subs[0].data["failure_threshold"] == 900
 
     @pytest.mark.asyncio
@@ -3611,7 +3615,7 @@ class TestSupplementalSourceSubentry:
             user_input={
                 "name": "Pellet Stove",
                 "entity_id": "climate.pellet_stove",
-                "seed_heat": -3.0,
+                "seed_heat": 3.0,
                 "seed_cool": 0.0,
                 "failure_threshold": 900,
                 "recovery_margin": 0.3,
@@ -3630,7 +3634,7 @@ class TestSupplementalSourceSubentry:
             user_input={
                 "name": "Pellet Stove Again",
                 "entity_id": "climate.pellet_stove",
-                "seed_heat": -2.0,
+                "seed_heat": 2.0,
                 "seed_cool": 0.0,
                 "failure_threshold": 900,
                 "recovery_margin": 0.3,
@@ -3661,7 +3665,7 @@ class TestSupplementalSourceReconfigure:
             user_input={
                 "name": "Pellet Stove",
                 "entity_id": "climate.pellet_stove",
-                "seed_heat": -3.0,
+                "seed_heat": 3.0,
                 "seed_cool": 0.0,
                 "failure_threshold": 900,
                 "recovery_margin": 0.3,
@@ -3690,8 +3694,8 @@ class TestSupplementalSourceReconfigure:
             user_input={
                 "name": "Updated Stove",
                 "entity_id": "climate.pellet_stove",
-                "seed_heat": -5.0,
-                "seed_cool": 1.0,
+                "seed_heat": 5.0,
+                "seed_cool": -1.0,
                 "failure_threshold": 1800,
                 "recovery_margin": 0.5,
                 "auto_model_input": False,
@@ -3772,8 +3776,11 @@ class TestSaveLearnedSeedsWithModelInputs:
         )
 
         # Give RLS enough betas: intercept, outdoor_delta, model_input
-        pi._rls_heat.beta = [0.5, 0.3, -2.5]
-        pi._rls_cool.beta = [0.5, -0.3, 1.5]
+        # Model input feature_scale defaults to 0.5 (binary input).
+        # seed = -(beta / scale), so to get seed_heat=2.5: beta = -2.5*0.5 = -1.25
+        # seed_cool=-1.5: beta = 1.5*0.5 = 0.75
+        pi._rls_heat.beta = [0.5, -0.3, -1.25]
+        pi._rls_cool.beta = [0.5, 0.3, 0.75]
         pi._rls_heat.observation_count = 10
 
         # Find and press the save button
@@ -3784,8 +3791,8 @@ class TestSaveLearnedSeedsWithModelInputs:
         # Verify model input seeds were updated in options
         updated = entry.options.get(CONF_PI_MODEL_INPUTS, [])
         assert len(updated) == 1
-        assert updated[0]["seed_heat"] == round(-2.5, 4)
-        assert updated[0]["seed_cool"] == round(1.5, 4)
+        assert updated[0]["seed_heat"] == round(2.5, 4)
+        assert updated[0]["seed_cool"] == round(-1.5, 4)
 
 
 # ── climate.py: _send_raw_ir with mqtt_delay (L1099) ────────────────

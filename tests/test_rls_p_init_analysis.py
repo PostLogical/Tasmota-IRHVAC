@@ -19,12 +19,16 @@ from custom_components.tasmota_irhvac.pi.rls_model import RLSModel
 
 def _make_rls(seed_slope: float, p_init: float, n_inputs: int = 1,
               feature_scales: list[float] | None = None) -> RLSModel:
-    """Create an RLS model with given seed slope and P_INIT."""
-    seeds = [0.0, seed_slope]  # intercept=0, outdoor_delta=seed_slope
+    """Create an RLS model with given seed slope and P_INIT.
+
+    Seeds are in "thermal effect" convention (positive = warms room).
+    Internal β = -seed. Clamps in seed space (0, 2) → β space (-2, 0).
+    """
+    seeds = [0.0, -seed_slope]  # intercept=0, β = -seed for outdoor_delta
     for _ in range(n_inputs - 1):
         seeds.append(0.0)
-    scales = feature_scales or [1.0, 10.0] + [0.5] * (n_inputs - 1)
-    clamps = [(-0.5, 0.5), (0.0, 2.0)] + [None] * (n_inputs - 1)
+    scales = feature_scales or [1.0, 13.0] + [0.5] * (n_inputs - 1)
+    clamps = [(-0.5, 0.5), (-2.0, 0.0)] + [None] * (n_inputs - 1)
     return RLSModel(
         n_inputs=n_inputs,
         seed_coefficients=seeds,
@@ -78,8 +82,8 @@ def _simulate_closed_loop_with_blend(
         outdoor = outdoor_schedule(tick) if outdoor_schedule else 5.0
         disturbance = disturbance_schedule(tick) if disturbance_schedule else 0.0
 
-        outdoor_delta = max(0, 15.0 - outdoor)
-        true_offset = true_slope * outdoor_delta + disturbance
+        outdoor_delta = outdoor - desired  # signed, exogenous reference
+        true_offset = true_slope * -outdoor_delta + disturbance
 
         excess = (hp_setpoint - desired) - true_offset
         room_temp += thermal_tc * excess + random.gauss(0, 0.05)
@@ -158,28 +162,35 @@ class TestScenarioA:
         rng = random.Random(42)
 
         # Varying outdoor conditions (realistic diurnal variation)
+        # outdoor_delta = outdoor - desired (negative in heating)
+        # outdoor varies ~5-13°C, desired=20.5 → delta ≈ -15.5 to -7.5
         true_slope = 0.6  # Seed 0.35 is too low
+        desired = 20.5
         for i in range(21):
-            outdoor_delta = 8.0 + 4.0 * math.sin(i * 0.3) + rng.gauss(0, 1.0)
-            outdoor_delta = max(0, outdoor_delta)
+            outdoor = 8.0 + 4.0 * math.sin(i * 0.3) + rng.gauss(0, 1.0)
+            outdoor_delta = outdoor - desired  # negative
             x = [1.0, outdoor_delta]
-            observed = true_slope * outdoor_delta + rng.gauss(0, 1.5)
+            # observed = hp_offset needed = true_slope × (desired - outdoor)
+            observed = true_slope * -outdoor_delta + rng.gauss(0, 1.5)
             rls.update(x, observed)
 
-        slope = rls.beta[1] / rls.feature_scales[1]
+        # β_physical is negative (β = -seed convention)
+        slope_phys = rls.beta[1] / rls.feature_scales[1]
+        slope_seed = rls.beta_to_seed(1)  # back to seed convention
         intercept = rls.beta[0] / rls.feature_scales[0]
         print(f"\nScenario A: P_INIT=10, seed=0.35, true=0.6, varying outdoor")
-        print(f"  Final slope: {slope:.4f} (seed: 0.35, clamp: 2.0)")
+        print(f"  Final β_physical: {slope_phys:.4f} (expected: {-true_slope:.4f})")
+        print(f"  Final seed: {slope_seed:.4f} (expected: {true_slope:.4f})")
         print(f"  Final intercept: {intercept:.4f}")
-        print(f"  Drift from seed: {abs(slope - 0.35) / 0.35 * 100:.0f}%")
-        print(f"  Overshoot past true: {slope - 0.6:.4f}")
+        print(f"  Drift from seed: {abs(slope_seed - 0.35) / 0.35 * 100:.0f}%")
+        print(f"  Overshoot past true: {slope_seed - 0.6:.4f}")
 
         # With Joseph form, P_INIT=10 no longer causes the catastrophic
         # overshoot past 1.0 seen with the standard form.  The quadratic
         # structure keeps the update numerically stable, so the slope
         # converges near the true value instead of overshooting.
-        assert slope == pytest.approx(true_slope, abs=0.15), (
-            f"Expected slope near truth={true_slope}, got {slope:.4f}"
+        assert slope_seed == pytest.approx(true_slope, abs=0.15), (
+            f"Expected seed near truth={true_slope}, got {slope_seed:.4f}"
         )
 
     def test_lr_failure_sweep_p_init(self):
@@ -188,19 +199,20 @@ class TestScenarioA:
         print(f"{'P_INIT':>8} {'Slope@21':>9} {'Intercept':>10} "
               f"{'Overshoot':>10} {'Drift%':>7}")
 
+        desired = 20.5
         for p_init in [10.0, 5.0, 2.0, 1.0, 0.5, 0.1, 0.05]:
             rls = _make_rls(seed_slope=0.35, p_init=p_init)
             rng = random.Random(42)
 
             true_slope = 0.6
             for i in range(21):
-                outdoor_delta = 8.0 + 4.0 * math.sin(i * 0.3) + rng.gauss(0, 1.0)
-                outdoor_delta = max(0, outdoor_delta)
+                outdoor = 8.0 + 4.0 * math.sin(i * 0.3) + rng.gauss(0, 1.0)
+                outdoor_delta = outdoor - desired
                 x = [1.0, outdoor_delta]
-                observed = true_slope * outdoor_delta + rng.gauss(0, 1.5)
+                observed = true_slope * -outdoor_delta + rng.gauss(0, 1.5)
                 rls.update(x, observed)
 
-            slope = rls.beta[1] / rls.feature_scales[1]
+            slope = rls.beta_to_seed(1)  # seed convention
             intercept = rls.beta[0] / rls.feature_scales[0]
             drift = abs(slope - 0.35) / 0.35 * 100
             overshoot = slope - 0.6
@@ -223,21 +235,24 @@ class TestScenarioB:
         print(f"{'P_INIT':>8} {'True':>6} {'@21obs':>8} {'@50obs':>8} "
               f"{'@100obs':>8} {'drift21%':>9}")
 
+        desired = 20.5
+        outdoor = 10.0  # fixed outdoor for this sweep
+        outdoor_delta = outdoor - desired  # -10.5
+
         for p_init in self.P_INIT_VALUES:
             for true_slope in self.TRUE_SLOPES:
                 rls = _make_rls(seed_slope=0.35, p_init=p_init)
                 rng = random.Random(42)
 
-                outdoor_delta = 10.0
                 x = [1.0, outdoor_delta]
                 slopes_at = {}
 
                 for i in range(100):
-                    observed = true_slope * outdoor_delta + rng.gauss(0, 1.5)
+                    observed = true_slope * -outdoor_delta + rng.gauss(0, 1.5)
                     rls.update(x, observed)
                     obs_n = i + 1
                     if obs_n in (21, 50, 100):
-                        slopes_at[obs_n] = rls.beta[1] / rls.feature_scales[1]
+                        slopes_at[obs_n] = rls.beta_to_seed(1)
 
                 drift_21 = abs(slopes_at[21] - 0.35) / 0.35 * 100
                 print(f"{p_init:8.2f} {true_slope:6.2f} {slopes_at[21]:8.4f} "
@@ -246,39 +261,41 @@ class TestScenarioB:
 
     def test_p_init_prevents_runaway_at_low_values(self):
         """With P_INIT <= 0.5, slope shouldn't hit the clamp from noise alone."""
+        desired = 20.5
+        outdoor_delta = 10.0 - desired  # -10.5
         for p_init in [0.5, 0.1, 0.05]:
             rls = _make_rls(seed_slope=0.35, p_init=p_init)
             rng = random.Random(42)
-            outdoor_delta = 10.0
             x = [1.0, outdoor_delta]
 
             # True slope matches seed — any drift is pure noise
             for i in range(21):
-                observed = 0.35 * outdoor_delta + rng.gauss(0, 2.0)
+                observed = 0.35 * (desired - 10.0) + rng.gauss(0, 2.0)
                 rls.update(x, observed)
 
-            slope = rls.beta[1] / rls.feature_scales[1]
-            assert slope < 1.5, (
-                f"P_INIT={p_init}: slope={slope:.4f} hit near-clamp from noise"
+            slope_seed = rls.beta_to_seed(1)
+            assert slope_seed < 1.5, (
+                f"P_INIT={p_init}: seed={slope_seed:.4f} hit near-clamp from noise"
             )
 
     def test_wrong_seed_eventually_corrects(self):
         """Even with conservative P_INIT, slope should approach truth by 100 obs."""
+        desired = 20.5
+        outdoor_delta = 10.0 - desired  # -10.5
         for p_init in [0.5, 0.1, 0.05]:
             rls = _make_rls(seed_slope=0.35, p_init=p_init)
             rng = random.Random(42)
-            outdoor_delta = 10.0
             x = [1.0, outdoor_delta]
 
             true_slope = 0.8  # Seed is significantly wrong
             for i in range(100):
-                observed = true_slope * outdoor_delta + rng.gauss(0, 1.0)
+                observed = true_slope * (desired - 10.0) + rng.gauss(0, 1.0)
                 rls.update(x, observed)
 
-            slope = rls.beta[1] / rls.feature_scales[1]
+            slope_seed = rls.beta_to_seed(1)
             # Should be moving toward 0.8, even if not there yet
-            assert slope > 0.5, (
-                f"P_INIT={p_init}: slope={slope:.4f} didn't move toward "
+            assert slope_seed > 0.5, (
+                f"P_INIT={p_init}: seed={slope_seed:.4f} didn't move toward "
                 f"true={true_slope} after 100 obs"
             )
 

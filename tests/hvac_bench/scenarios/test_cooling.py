@@ -19,7 +19,7 @@ SEED_FACTORS = [0.0, 0.5, 1.0, 1.5]
 def _make_controller(seed_factor=1.0, **overrides):
     true_slope = 0.35
     config = {
-        "pi_ff_heat_slope": true_slope * seed_factor,
+        "pi_outdoor_seed_heat": true_slope * seed_factor,
         "pi_ff_cool_slope": true_slope * seed_factor,
         **overrides,
     }
