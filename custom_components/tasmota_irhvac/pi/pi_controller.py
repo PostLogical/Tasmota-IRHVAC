@@ -230,7 +230,7 @@ class PIController:
         self._pi_deadband: float = config.get(CONF_PI_DEADBAND, DEFAULT_PI_DEADBAND)
         self._pi_setpoint_weight: float = config.get(CONF_PI_SETPOINT_WEIGHT, DEFAULT_PI_SETPOINT_WEIGHT)
 
-        # Feedforward config — "thermal effect on room" convention (positive = warms room)
+        # Feedforward config — seeds are positive = warms room, negated to internal β
         self._outdoor_seed_heat: float = config.get(
             CONF_PI_OUTDOOR_SEED_HEAT, DEFAULT_PI_OUTDOOR_SEED_HEAT)
         self._outdoor_seed_cool: float = config.get(
