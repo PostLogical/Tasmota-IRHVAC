@@ -2219,24 +2219,24 @@ class PIController:
         Used by the 'save learned seeds' button to write back to config.
         Internal β is negated back to seed convention (positive = warms room).
         """
-        heat_beta = self._rls_heat.beta
-        cool_beta = self._rls_cool.beta
+        heat_coeffs = self._rls_heat.get_coefficients()
+        cool_coeffs = self._rls_cool.get_coefficients()
         result: dict[str, Any] = {}
 
-        # β_internal = -seed, so seed = -β
-        if len(heat_beta) > 1:
-            result["outdoor_seed_heat"] = round(-heat_beta[1], 4)
-        if len(cool_beta) > 1:
-            result["outdoor_seed_cool"] = round(-cool_beta[1], 4)
+        # β_physical = -seed, so seed = -β_physical
+        if 1 in heat_coeffs:
+            result["outdoor_seed_heat"] = round(-heat_coeffs[1], 4)
+        if 1 in cool_coeffs:
+            result["outdoor_seed_cool"] = round(-cool_coeffs[1], 4)
 
         input_seeds: list[dict[str, float]] = []
         for i in range(len(self._model_inputs)):
             beta_idx = i + 2  # 0=intercept, 1=outdoor_delta, 2+=model inputs
             seeds: dict[str, float] = {}
-            if beta_idx < len(heat_beta):
-                seeds["seed_heat"] = round(-heat_beta[beta_idx], 4)
-            if beta_idx < len(cool_beta):
-                seeds["seed_cool"] = round(-cool_beta[beta_idx], 4)
+            if beta_idx in heat_coeffs:
+                seeds["seed_heat"] = round(-heat_coeffs[beta_idx], 4)
+            if beta_idx in cool_coeffs:
+                seeds["seed_cool"] = round(-cool_coeffs[beta_idx], 4)
             input_seeds.append(seeds)
         result["input_seeds"] = input_seeds
 
