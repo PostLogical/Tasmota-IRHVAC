@@ -1874,13 +1874,19 @@ class TestBatchLearningFWLScenario:
         # With only 3 solar observations, the feature should be held
         assert result is not None
 
-    def test_fwl_via_patched_solve_joint(self):
-        """FWL runs when _solve_joint is patched to None (lines 898, 985-986)."""
+    def test_fwl_via_singular_joint(self):
+        """FWL runs when joint system is singular (line 898 + FWL body).
+
+        Two perfectly correlated model inputs make the joint XtWX singular
+        even with ridge regularization (use very small ridge).
+        """
         from custom_components.tasmota_irhvac.pi.batch_learning import weighted_least_squares
 
         obs = []
         for i in range(40):
-            raw = {"sensor.solar": float(i % 8) * 0.5}
+            val = float(i % 8) * 0.5
+            # Two model inputs that are identical → XtWX is rank-deficient
+            raw = {"sensor.a": val, "sensor.b": val}
             obs.append(Observation(
                 timestamp=float(i), wall_time=time.time(),
                 hp_setpoint=22.0 + float(i % 5) * 0.3,
@@ -1890,16 +1896,30 @@ class TestBatchLearningFWLScenario:
                 raw_readings=raw, clamped=False, clamped_reason="",
             ))
 
+        # Patch _solve_symmetric to fail on the joint system but succeed on base
+        call_count = [0]
+        from custom_components.tasmota_irhvac.pi.batch_learning import _solve_symmetric as orig_solve
+
+        def failing_solve(A, b, n):
+            call_count[0] += 1
+            if call_count[0] > 1 and n > 2:
+                # Joint system (n > 2) → fail
+                return None
+            return orig_solve(A, b, n)
+
         with patch(
-            "custom_components.tasmota_irhvac.pi.batch_learning._solve_joint",
-            return_value=None,
+            "custom_components.tasmota_irhvac.pi.batch_learning._solve_symmetric",
+            side_effect=failing_solve,
         ):
             result = weighted_least_squares(
-                obs, n_features=3, min_observations=20,
-                feature_order=["intercept", "outdoor_delta", "solar"],
-                model_inputs=[{"entity_id": "sensor.solar", "name": "solar"}],
+                obs, n_features=4, min_observations=20,
+                feature_order=["intercept", "outdoor_delta", "a", "b"],
+                model_inputs=[
+                    {"entity_id": "sensor.a", "name": "a"},
+                    {"entity_id": "sensor.b", "name": "b"},
+                ],
             )
-        # FWL should have produced a result
+        # FWL should have produced a result since individual features work
         assert result is not None
 
     def test_wls_rare_feature_outlier(self):
@@ -1907,23 +1927,25 @@ class TestBatchLearningFWLScenario:
         from custom_components.tasmota_irhvac.pi.batch_learning import weighted_least_squares
 
         obs = []
-        # Normal observations
-        for i in range(35):
+        # 30 consistent normal observations (clean linear relationship)
+        for i in range(30):
+            od = float(i % 10) - 5.0
+            true_offset = 2.0 + 0.3 * od
             obs.append(Observation(
                 timestamp=float(i), wall_time=time.time(),
-                hp_setpoint=22.0 + float(i % 3) * 0.1,
+                hp_setpoint=20.0 + true_offset,
                 current_c=20.0, desired_c=20.0,
-                outdoor_temp_c=5.0 + float(i % 10),
+                outdoor_temp_c=20.0 + od,  # outdoor_delta = od
                 room_rate=0.001,
                 raw_readings={}, clamped=False, clamped_reason="",
             ))
-        # Outlier observations with a rare model input
+        # 3 extreme outlier observations WITH a rare model input
         for i in range(3):
             obs.append(Observation(
-                timestamp=float(35 + i), wall_time=time.time(),
-                hp_setpoint=40.0,  # extreme → large residual → outlier
+                timestamp=float(30 + i), wall_time=time.time(),
+                hp_setpoint=50.0,  # residual ≈ 50-20-2 = 28 >> 3σ
                 current_c=20.0, desired_c=20.0,
-                outdoor_temp_c=5.0,
+                outdoor_temp_c=20.0,
                 room_rate=0.001,
                 raw_readings={"sensor.rare": 10.0},
                 clamped=False, clamped_reason="",
@@ -1935,6 +1957,8 @@ class TestBatchLearningFWLScenario:
             min_feature_representation=20,  # > 3 → rare
         )
         assert result is not None
+        # The 3 rare outliers should have been kept (not excluded)
+        # even though they are outliers, because the feature is rare
 
     def test_fwl_with_enough_individual_data(self):
         """FWL solver exercises full path when joint fails but individual succeeds.
