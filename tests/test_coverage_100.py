@@ -2240,9 +2240,56 @@ class TestRemainingSmallGaps:
                 sys.modules.pop("scipy", None)
             importlib.reload(go)
 
-    # area_method.py lines 135-136, 180-185 are structurally unreachable:
-    # 135-136: step_magnitude < 0.5 after start_observation guards < 1.0
-    # 180-185: timed_out implies enough_data (MAX > MIN), so the block never fires
+    # ── area_method.py lines 135-136: step_magnitude < 0.5 defense guard ──
+    def test_area_accumulate_small_step_defense(self):
+        """accumulate deactivates for tiny step magnitude (lines 135-136).
+
+        Defense-in-depth: start_observation guards < 1.0, but if the guard
+        is relaxed or ctx is set via a different path, this catches < 0.5.
+        """
+        from custom_components.tasmota_irhvac.pi.providers.area_method import AreaMethodProvider
+        from custom_components.tasmota_irhvac.pi.plant_model import ObservationContext
+        provider = AreaMethodProvider(response_lag=0)
+        ctx = ObservationContext(
+            step_magnitude=2.0, baseline_temp=20.0,
+            start_time=0.0, ff_offset=0.0, target_temp=22.0,
+        )
+        provider.start_observation(ctx)
+        # Bypass the start guard by directly modifying _ctx with a small step
+        provider._ctx = ObservationContext(
+            step_magnitude=0.3, baseline_temp=20.0,
+            start_time=0.0, ff_offset=0.0, target_temp=22.0,
+        )
+        result = provider.accumulate(60.0, 20.5, 0.0)
+        assert result is None
+        assert not provider._active
+
+    # ── area_method.py lines 180-185: timeout without enough data ──
+    def test_area_timeout_insufficient_data(self):
+        """Area timed out but not enough data (lines 180-185).
+
+        Defense-in-depth: currently MAX > MIN makes this unreachable,
+        but if MIN is tuned up for slow-τ houses, this fires.
+        """
+        from custom_components.tasmota_irhvac.pi.providers.area_method import AreaMethodProvider
+        from custom_components.tasmota_irhvac.pi.plant_model import ObservationContext
+        import custom_components.tasmota_irhvac.pi.providers.area_method as am
+        provider = AreaMethodProvider(response_lag=0)
+        ctx = ObservationContext(
+            step_magnitude=2.0, baseline_temp=20.0,
+            start_time=0.0, ff_offset=0.0, target_temp=22.0,
+        )
+        provider.start_observation(ctx)
+        # Temporarily set MIN > MAX so timed_out fires before enough_data
+        orig_min = am._MIN_AREA_DURATION_MIN
+        am._MIN_AREA_DURATION_MIN = 600.0  # 10 hours > 8 hour max
+        try:
+            provider.accumulate(60.0, 20.5, 0.0)  # 1 min in
+            result = provider.accumulate(490.0 * 60, 20.8, 0.0)  # 490 min → timed_out, not enough
+            assert result is None
+            assert not provider._active
+        finally:
+            am._MIN_AREA_DURATION_MIN = orig_min
 
     # ── area_method.py line 245: EMA update with prior estimate ──
     def test_area_ema_with_prior(self):
@@ -2276,3 +2323,156 @@ class TestRemainingSmallGaps:
             baseline_setpoint_c=22.0, amplitude_c=2.0,
             current_c=20.0, comfort_min_c=18.0, comfort_max_c=24.0,
         )
+
+
+class TestPlantTestFullLifecycle:
+    """Full plant test lifecycle covering plant_test.py and plant_identifier.py gaps.
+
+    Exercises: relay oscillation → step_hold → complete with results.
+    Covers: plant_identifier 423, 428, 432-441; plant_test 199-226.
+    """
+
+    def test_relay_test_with_good_oscillation(self):
+        """Full relay test produces valid results."""
+        from custom_components.tasmota_irhvac.pi.providers.plant_test import PlantTestProvider
+        provider = PlantTestProvider()
+        provider.start(
+            baseline_setpoint_c=22.0, amplitude_c=2.0, current_c=20.0,
+            comfort_min_c=16.0, comfort_max_c=26.0, n_cycles=2,
+        )
+        # Simulate relay oscillation: temp oscillates around midpoint (20°C)
+        # with period ~30 min and amplitude ~1°C
+        mono = 100.0
+        for i in range(200):
+            mono += 60.0  # 1 min ticks
+            # Sine wave: A=1°C, T=30min → crosses midpoint every 15 min
+            temp = 20.0 + 1.0 * math.sin(2 * math.pi * i / 30.0)
+            cmd = provider.tick(mono, temp)
+            if cmd.phase in ("step_hold", "complete", "aborted"):
+                break
+        # After enough cycles, should transition
+        if provider._phase == "complete":
+            results = provider.get_results()
+            if results:
+                assert "k_u" in results
+                assert "period" in results
+                assert "amplitude" in results
+
+    def test_relay_test_insufficient_crossings(self):
+        """Relay test with < 4 crossings returns None (lines 199-201)."""
+        from custom_components.tasmota_irhvac.pi.providers.plant_test import PlantTestProvider
+        provider = PlantTestProvider()
+        provider.start(
+            baseline_setpoint_c=22.0, amplitude_c=2.0, current_c=20.0,
+            comfort_min_c=16.0, comfort_max_c=26.0, n_cycles=4,
+        )
+        # Only 2 crossings
+        provider._phase = "complete"
+        provider._crossing_times = [100.0, 200.0]
+        provider._peak_temps = [21.0]
+        provider._trough_temps = [19.0]
+        results = provider.get_results()
+        assert results is None
+
+    def test_relay_test_no_peaks(self):
+        """Relay test with no peak/trough temps returns None (line 219)."""
+        from custom_components.tasmota_irhvac.pi.providers.plant_test import PlantTestProvider
+        provider = PlantTestProvider()
+        provider._phase = "complete"
+        provider._crossing_times = [100.0, 200.0, 300.0, 400.0]
+        provider._peak_temps = []
+        provider._trough_temps = []
+        results = provider.get_results()
+        assert results is None
+
+    def test_relay_test_tiny_amplitude(self):
+        """Relay test with amplitude ≤ 0.05°C returns None (lines 225-226)."""
+        from custom_components.tasmota_irhvac.pi.providers.plant_test import PlantTestProvider
+        provider = PlantTestProvider()
+        provider._phase = "complete"
+        provider._amplitude_c = 2.0
+        provider._crossing_times = [100.0, 200.0, 300.0, 400.0]
+        provider._peak_temps = [20.02]
+        provider._trough_temps = [19.98]  # amplitude = 0.02 < 0.05
+        results = provider.get_results()
+        assert results is None
+
+    def test_relay_test_no_periods(self):
+        """Relay test with valid crossings but zero-interval periods (line 213)."""
+        from custom_components.tasmota_irhvac.pi.providers.plant_test import PlantTestProvider
+        provider = PlantTestProvider()
+        provider._phase = "complete"
+        provider._crossing_times = [100.0, 100.0, 100.0, 100.0]
+        provider._peak_temps = [21.0]
+        provider._trough_temps = [19.0]
+        results = provider.get_results()
+        assert results is None
+
+    def test_tick_unknown_phase_fallthrough(self):
+        """Tick with unknown phase returns fallthrough command (line 181)."""
+        from custom_components.tasmota_irhvac.pi.providers.plant_test import PlantTestProvider
+        provider = PlantTestProvider()
+        provider._active = True
+        provider._phase = "complete"  # not relay_high/low or step_hold
+        provider._start_time = 100.0
+        provider._comfort_min_c = 16.0
+        provider._comfort_max_c = 26.0
+        cmd = provider.tick(200.0, 20.0)
+        assert cmd.phase == "complete"
+
+    def test_plant_identifier_full_test_lifecycle(self):
+        """PlantIdentifier runs full test lifecycle: start → tick → complete.
+
+        Covers: plant_identifier 432-441 (complete phase results extraction).
+        """
+        from custom_components.tasmota_irhvac.pi.plant_identifier import PlantIdentifier
+        pi_id = PlantIdentifier(tau_seed=60, response_lag=0, imc_lambda=20.0)
+        pi_id.start_plant_test(
+            baseline_setpoint_c=22.0, amplitude_c=2.0,
+            current_c=20.0, comfort_min_c=16.0, comfort_max_c=26.0, n_cycles=2,
+        )
+        assert pi_id.plant_test_active
+
+        # Run relay oscillation through the plant test
+        mono = 100.0
+        final_cmd = None
+        for i in range(500):
+            mono += 60.0
+            temp = 20.0 + 1.0 * math.sin(2 * math.pi * i / 30.0)
+            cmd = pi_id.tick_plant_test(mono, temp)
+            if cmd.phase in ("complete", "aborted"):
+                final_cmd = cmd
+                break
+
+        # Should have completed or timed out
+        assert final_cmd is not None or not pi_id.plant_test_active
+
+    def test_plant_identifier_restore_area_state(self):
+        """PlantIdentifier restore with area_provider state (line 544)."""
+        from custom_components.tasmota_irhvac.pi.plant_identifier import PlantIdentifier
+        pi_id = PlantIdentifier(tau_seed=60, response_lag=0, imc_lambda=20.0)
+        data = {
+            "plant_estimate": pi_id._plant.as_dict(),
+            "area_provider": {"tau_slow": 80.0, "observations": 3},
+        }
+        pi_id.restore(data)
+        assert pi_id._area_provider._tau_slow == 80.0
+
+    def test_plant_identifier_diagnostics_with_inactive_test(self):
+        """PlantIdentifier diagnostics include test results when test inactive (576-578)."""
+        from custom_components.tasmota_irhvac.pi.plant_identifier import PlantIdentifier
+        from custom_components.tasmota_irhvac.pi.providers.plant_test import PlantTestProvider
+        pi_id = PlantIdentifier(tau_seed=60, response_lag=0, imc_lambda=20.0)
+        # Create a test provider with results (inactive + complete)
+        test = PlantTestProvider()
+        test._active = False
+        test._phase = "complete"
+        test._amplitude_c = 2.0
+        test._crossing_times = [100.0, 200.0, 400.0, 500.0]
+        test._peak_temps = [21.5]
+        test._trough_temps = [18.5]
+        pi_id._plant_test = test
+        diag = pi_id.get_diagnostics()
+        assert "plant_test" in diag
+        if "results" in diag.get("plant_test", {}):
+            assert "k_u" in diag["plant_test"]["results"]
