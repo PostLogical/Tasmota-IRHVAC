@@ -73,14 +73,18 @@ class TestLearningReset:
 
     @pytest.mark.asyncio
     async def test_reset_seeds_only(self, hass, setup_pi_integration):
-        """Seeds target resets RLS but leaves integral untouched."""
+        """Seeds target resets RLS beta/P/frozen but leaves integral untouched."""
         entry = await setup_pi_integration()
         entity = get_climate_entity(hass, entry)
         pi = entity._pi
+        n = pi._rls_heat.n
 
         pi._pi_integral = 25.0
         pi._rls_heat.beta[0] = 99.0
         pi._rls_heat.observation_count = 100
+        pi._rls_heat_mature = True
+        # Corrupt P off-diagonal
+        pi._rls_heat.P[1] = 5.0
 
         await hass.services.async_call(
             DOMAIN, "learning_reset",
@@ -90,7 +94,15 @@ class TestLearningReset:
 
         assert pi._rls_heat.beta[0] == 0.0
         assert pi._rls_heat.observation_count == 0
+        assert pi._rls_heat_mature is False
         assert pi._pi_integral == 25.0  # Untouched
+        # P should be reset to diagonal
+        from custom_components.tasmota_irhvac.pi.pi_controller import DEFAULT_RLS_P_INIT
+        assert pi._rls_heat.P[0] == DEFAULT_RLS_P_INIT  # diagonal
+        assert pi._rls_heat.P[1] == 0.0  # off-diagonal cleared
+        # Model input features should be re-frozen (indices 2+)
+        for i in range(2, n):
+            assert pi._rls_heat.frozen[i] is True
 
     @pytest.mark.asyncio
     async def test_reset_integral_only(self, hass, setup_pi_integration):
@@ -132,14 +144,17 @@ class TestLearningReset:
 
     @pytest.mark.asyncio
     async def test_reset_buffers_without_greybox(self, hass, setup_pi_integration):
-        """Buffers target clears observation buffers but not greybox."""
+        """Buffers target clears observation buffers and batch state but not greybox."""
         entry = await setup_pi_integration()
         entity = get_climate_entity(hass, entry)
         pi = entity._pi
 
-        # Seed some state
+        # Seed buffer and batch state
         pi._observation_buffer_heat._buffer.append({"dummy": True})
         pi._greybox_buffer._buffer.append({"dummy": True})
+        pi._last_batch_result = {"rms": 0.5}
+        pi._drift_correction_signs = [[1, -1]]
+        pi._tuning_alert_counters = {"test": 1}
 
         await hass.services.async_call(
             DOMAIN, "learning_reset",
@@ -148,17 +163,24 @@ class TestLearningReset:
         )
 
         assert len(pi._observation_buffer_heat._buffer) == 0
-        assert len(pi._greybox_buffer._buffer) == 1  # Untouched
+        assert pi._last_batch_result is None
+        assert pi._drift_correction_signs == []
+        assert pi._tuning_alert_counters == {}
+        # Greybox untouched
+        assert len(pi._greybox_buffer._buffer) == 1
 
     @pytest.mark.asyncio
     async def test_reset_greybox_without_buffers(self, hass, setup_pi_integration):
-        """Greybox target clears greybox but not observation buffers."""
+        """Greybox target clears greybox buffer and results but not observation buffers."""
         entry = await setup_pi_integration()
         entity = get_climate_entity(hass, entry)
         pi = entity._pi
 
         pi._observation_buffer_heat._buffer.append({"dummy": True})
         pi._greybox_buffer._buffer.append({"dummy": True})
+        pi._last_greybox_result = {"tau_eff": 60.0}
+        pi._last_greybox_bridge = {"outdoor_delta": -0.3}
+        pi._greybox_has_been_good = True
 
         await hass.services.async_call(
             DOMAIN, "learning_reset",
@@ -168,6 +190,9 @@ class TestLearningReset:
 
         assert len(pi._observation_buffer_heat._buffer) == 1  # Untouched
         assert len(pi._greybox_buffer._buffer) == 0
+        assert pi._last_greybox_result is None
+        assert pi._last_greybox_bridge is None
+        assert pi._greybox_has_been_good is False
 
     @pytest.mark.asyncio
     async def test_reset_plant_id(self, hass, setup_pi_integration):
@@ -244,19 +269,49 @@ class TestLearningReset:
         assert pi._rls_cool.beta[0] == 88.0  # Untouched
 
 
+    @pytest.mark.asyncio
+    async def test_reset_buffers_mode_cool(self, hass, setup_pi_integration):
+        """Mode=cool on buffers only clears cool buffer, leaves heat."""
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        pi._observation_buffer_heat._buffer.append({"dummy": True})
+        pi._observation_buffer_cool._buffer.append({"dummy": True})
+
+        await hass.services.async_call(
+            DOMAIN, "learning_reset",
+            {"entity_id": entity.entity_id, "targets": ["buffers"], "mode": "cool"},
+            blocking=True,
+        )
+
+        assert len(pi._observation_buffer_heat._buffer) == 1  # Untouched
+        assert len(pi._observation_buffer_cool._buffer) == 0
+
+
 class TestLearningSnapshots:
     """Tests for learning_save and learning_restore services."""
 
     @pytest.mark.asyncio
     async def test_save_and_restore_round_trip(self, hass, setup_pi_integration):
-        """Save and restore preserves RLS beta, integral."""
+        """Save and restore preserves RLS beta, P, frozen, obs count, integral."""
         entry = await setup_pi_integration()
         entity = get_climate_entity(hass, entry)
         pi = entity._pi
+        n = pi._rls_heat.n
 
-        # Set known state
+        # Set known state across both models
         pi._rls_heat.beta[0] = 42.0
+        pi._rls_heat.beta[1] = -3.5
+        pi._rls_cool.beta[0] = 17.0
+        pi._rls_cool.beta[1] = -2.0
+        pi._rls_heat.observation_count = 55
+        pi._rls_cool.observation_count = 30
+        pi._rls_heat.frozen[0] = True
         pi._pi_integral = 15.0
+        pi._manual_override_heat[1] = True
+        # Set a non-default P diagonal value
+        pi._rls_heat.P[0] = 999.0
 
         await hass.services.async_call(
             DOMAIN, "learning_save",
@@ -264,9 +319,17 @@ class TestLearningSnapshots:
             blocking=True,
         )
 
-        # Modify state
+        # Trash everything
         pi._rls_heat.beta[0] = 0.0
+        pi._rls_heat.beta[1] = 0.0
+        pi._rls_cool.beta[0] = 0.0
+        pi._rls_cool.beta[1] = 0.0
+        pi._rls_heat.observation_count = 0
+        pi._rls_cool.observation_count = 0
+        pi._rls_heat.frozen[0] = False
         pi._pi_integral = 0.0
+        pi._manual_override_heat[1] = None
+        pi._rls_heat.P[0] = 1.0
 
         await hass.services.async_call(
             DOMAIN, "learning_restore",
@@ -274,8 +337,49 @@ class TestLearningSnapshots:
             blocking=True,
         )
 
+        # Verify full round-trip
         assert pi._rls_heat.beta[0] == 42.0
+        assert pi._rls_heat.beta[1] == -3.5
+        assert pi._rls_cool.beta[0] == 17.0
+        assert pi._rls_cool.beta[1] == -2.0
+        assert pi._rls_heat.observation_count == 55
+        assert pi._rls_cool.observation_count == 30
+        assert pi._rls_heat.frozen[0] is True
         assert pi._pi_integral == 15.0
+        assert pi._manual_override_heat[1] is True
+        assert pi._rls_heat.P[0] == 999.0
+        # Maturity gate restored from observation count
+        assert pi._rls_heat_mature is True
+        assert pi._rls_cool_mature is True
+
+    @pytest.mark.asyncio
+    async def test_restore_immature_model(self, hass, setup_pi_integration):
+        """Restoring a snapshot with zero observations keeps model immature."""
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        # Save with no observations (fresh model)
+        pi._rls_heat.observation_count = 0
+        await hass.services.async_call(
+            DOMAIN, "learning_save",
+            {"entity_id": entity.entity_id, "slot": "fresh"},
+            blocking=True,
+        )
+
+        # Make it mature
+        pi._rls_heat.observation_count = 100
+        pi._rls_heat_mature = True
+
+        # Restore the fresh snapshot
+        await hass.services.async_call(
+            DOMAIN, "learning_restore",
+            {"entity_id": entity.entity_id, "slot": "fresh"},
+            blocking=True,
+        )
+
+        assert pi._rls_heat.observation_count == 0
+        assert pi._rls_heat_mature is False
 
     @pytest.mark.asyncio
     async def test_max_three_slots(self, hass, setup_pi_integration):
