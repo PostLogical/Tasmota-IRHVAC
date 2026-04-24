@@ -650,7 +650,8 @@ class PIController:
         # outdoor_delta references desired temp, not room temp, to keep FF
         # exogenous — prevents positive feedback during transients (Åström §5).
         desired_c = self.desired_temp_celsius
-        if self._inputs.outdoor_temp is not None and desired_c is not None:
+        if (self._pi_ff_enabled
+                and self._inputs.outdoor_temp is not None and desired_c is not None):
             is_heating = e._attr_hvac_mode in (HVACMode.HEAT, HVACMode.HEAT_COOL, None)
             outdoor_delta = self._inputs.outdoor_temp - desired_c
             x = self._inputs.build_feature_vector(outdoor_delta)
@@ -3570,14 +3571,15 @@ class PIController:
             return False
         # Use RLS model for FF-only fallback (sensor unavailable)
         # outdoor_delta references desired temp (exogenous, no PV coupling)
-        if self._inputs.outdoor_temp is not None:
+        if self._pi_ff_enabled and self._inputs.outdoor_temp is not None:
             outdoor_delta = self._inputs.outdoor_temp - desired_c
             self._read_model_input_values()
             x = self._inputs.build_feature_vector(outdoor_delta)
             rls = self._rls_heat if is_heating else self._rls_cool
             self._ff_offset = rls.predict(x)
-        else:
+        elif not self._pi_ff_enabled:
             self._ff_offset = 0.0
+        # else: ff_enabled but outdoor_temp None → keep frozen offset
         self._pi_integral = 0.0
         new_setpoint = round(max(self._min_temp_c, min(self._max_temp_c, desired_c + self._ff_offset)))
         if new_setpoint != self._hp_setpoint:
@@ -3858,61 +3860,76 @@ class PIController:
         self._read_model_input_values(current_c)
         self._inputs.update_lag_filters(dt_seconds)
 
-        # Compute outdoor delta: outdoor_temp - desired_temp (signed, same formula both modes)
-        # References desired temp (exogenous), not room temp, to prevent positive
-        # feedback during transients. Matches industry-standard heating curve
-        # formulation: Q_loss = UA × (T_setpoint - T_outdoor).
-        if self._inputs.outdoor_temp is not None:
-            outdoor_delta = self._inputs.outdoor_temp - desired_c
-        else:
-            outdoor_delta = 0.0
-
-        # Build feature vector and predict FF offset via RLS model
-        x = self._inputs.build_feature_vector(outdoor_delta)
+        # ── Feedforward computation ──────────────────────────────────
+        # Three branches:
+        #   ff_enabled + outdoor_temp available → full FF computation
+        #   ff_enabled + outdoor_temp None → freeze offset at last valid value
+        #   ff_disabled → zero offset, no feature vector
         rls = self._rls_heat if is_heating else self._rls_cool
-        seeds = self._heat_seeds if is_heating else self._cool_seeds
+        x: list[float] | None = None  # None = no valid feature vector
 
-        # Blend seed prediction with RLS prediction based on observation count.
-        # With few observations the RLS may have learned from narrow conditions
-        # (e.g. only mild weather) and extrapolation can be wrong. The blend
-        # anchors predictions to seeds until enough observations have covered
-        # a representative range of conditions (~1-2 weeks at ~6 obs/day).
-        MIN_RLS_OBS = 50
-        seed_offset = sum(s * xi for s, xi in zip(seeds, x))
-        rls_offset = rls.predict(x)
-        alpha = min(rls.observation_count / MIN_RLS_OBS, 1.0)
-        blended_offset = (1.0 - alpha) * seed_offset + alpha * rls_offset
+        if self._pi_ff_enabled and self._inputs.outdoor_temp is not None:
+            # Compute outdoor delta: outdoor_temp - desired_temp (signed, same formula both modes)
+            # References desired temp (exogenous), not room temp, to prevent positive
+            # feedback during transients. Matches industry-standard heating curve
+            # formulation: Q_loss = UA × (T_setpoint - T_outdoor).
+            outdoor_delta = self._inputs.outdoor_temp - desired_c
 
-        # Integral-based FF confidence: when the integral opposes the FF
-        # offset direction, the model prediction is wrong in sign/magnitude
-        # and the feedback loop is fighting it.  Scale FF down so the
-        # integral has less to correct, accelerating convergence.
-        #
-        # Only activates when integral OPPOSES FF — meaning FF predicts
-        # an offset the integral is trying to undo.  When they agree
-        # (both wanting more/less heat), the model direction is right
-        # and reducing FF would worsen an undersized-HP situation.
-        #
-        # Threshold of 3°C: below this, full FF trust (the integral is
-        # handling normal residuals).  Above, FF scales smoothly toward
-        # the integral-corrected value.  EMA-smoothed to prevent
-        # limit cycling at integer setpoint boundaries.
-        FF_CONFIDENCE_THRESHOLD = 3.0
-        integral_opposes_ff = (self._pi_integral * blended_offset) < 0
-        if integral_opposes_ff:
-            model_error = abs(self._pi_ki * self._pi_integral)
-            raw_confidence = 1.0 / (1.0 + max(0.0, model_error - FF_CONFIDENCE_THRESHOLD) / FF_CONFIDENCE_THRESHOLD)
-        else:
-            raw_confidence = 1.0
-        # EMA smoothing (~10 ticks ≈ 2.5h) prevents tick-to-tick jitter
-        self._ff_confidence += 0.1 * (raw_confidence - self._ff_confidence)
-        self._ff_offset = blended_offset * self._ff_confidence
+            # Build feature vector and predict FF offset via RLS model
+            x = self._inputs.build_feature_vector(outdoor_delta)
+            seeds = self._heat_seeds if is_heating else self._cool_seeds
 
-        # Learning suppression: manual service + per-input suppress_learning flag
-        learning_suppressed = self._manual_ff_suppress
-        active_suppressors = []
+            # Blend seed prediction with RLS prediction based on observation count.
+            # With few observations the RLS may have learned from narrow conditions
+            # (e.g. only mild weather) and extrapolation can be wrong. The blend
+            # anchors predictions to seeds until enough observations have covered
+            # a representative range of conditions (~1-2 weeks at ~6 obs/day).
+            MIN_RLS_OBS = 50
+            seed_offset = sum(s * xi for s, xi in zip(seeds, x))
+            rls_offset = rls.predict(x)
+            alpha = min(rls.observation_count / MIN_RLS_OBS, 1.0)
+            blended_offset = (1.0 - alpha) * seed_offset + alpha * rls_offset
+
+            # Integral-based FF confidence: when the integral opposes the FF
+            # offset direction, the model prediction is wrong in sign/magnitude
+            # and the feedback loop is fighting it.  Scale FF down so the
+            # integral has less to correct, accelerating convergence.
+            #
+            # Only activates when integral OPPOSES FF — meaning FF predicts
+            # an offset the integral is trying to undo.  When they agree
+            # (both wanting more/less heat), the model direction is right
+            # and reducing FF would worsen an undersized-HP situation.
+            #
+            # Threshold of 3°C: below this, full FF trust (the integral is
+            # handling normal residuals).  Above, FF scales smoothly toward
+            # the integral-corrected value.  EMA-smoothed to prevent
+            # limit cycling at integer setpoint boundaries.
+            FF_CONFIDENCE_THRESHOLD = 3.0
+            integral_opposes_ff = (self._pi_integral * blended_offset) < 0
+            if integral_opposes_ff:
+                model_error = abs(self._pi_ki * self._pi_integral)
+                raw_confidence = 1.0 / (1.0 + max(0.0, model_error - FF_CONFIDENCE_THRESHOLD) / FF_CONFIDENCE_THRESHOLD)
+            else:
+                raw_confidence = 1.0
+            # EMA smoothing (~10 ticks ≈ 2.5h) prevents tick-to-tick jitter
+            self._ff_confidence += 0.1 * (raw_confidence - self._ff_confidence)
+            self._ff_offset = blended_offset * self._ff_confidence
+        elif not self._pi_ff_enabled:
+            # FF disabled: pure PI, zero offset
+            self._ff_offset = 0.0
+        # else: ff_enabled but outdoor_temp None → freeze offset at last value
+
+        # Learning suppression: manual service + per-input suppress_learning flag.
+        # Also suppress when FF is disabled or feature vector unavailable —
+        # RLS needs a valid feature vector to learn from.
+        learning_suppressed = self._manual_ff_suppress or x is None
+        active_suppressors: list[str] = []
         if self._manual_ff_suppress:
             active_suppressors.append("manual")
+        if not self._pi_ff_enabled:
+            active_suppressors.append("ff_disabled")
+        elif self._inputs.outdoor_temp is None:
+            active_suppressors.append("outdoor_temp_unavailable")
         for i, m_input in enumerate(self._model_inputs):
             if m_input.get("suppress_learning") and self._inputs.values[i] > 0.5:
                 learning_suppressed = True
@@ -4239,28 +4256,16 @@ class PIController:
             if 0.3 < abs(q_error) <= 0.5:
                 self._pi_integral += (q_error / self._pi_ki) * 0.4
 
-        # Compute observation metadata for batch diagnostics.
-        # integral_settled matches the IDB learning gate criteria.
-        obs_integral_change = abs(self._pi_integral - self._prev_integral_for_rls)
-        obs_output_change = obs_integral_change * self._pi_ki
-        obs_integral_settled = (
-            obs_output_change < 0.045
-            and abs(self._room_temp_rate) < 0.02
-        )
-        obs_seconds_since_sp = (
-            now_mono - self._last_setpoint_change_time
-            if self._last_setpoint_change_time > 0 else 0.0
-        )
-        obs_supplemental_active = (
-            self._supplemental.tracking_mode or self._supplemental.assist_active
+        # ── Observation recording ────────────────────────────────────
+        # Gate on data quality: don't record observations with stale or
+        # missing input data.  Good observations are plentiful when all
+        # sensors are working; no reason to accept degraded data.
+        data_complete = (
+            self._inputs.outdoor_temp is not None
+            and not self._any_model_input_unavailable()
         )
 
-        # Record observation for batch learning.
-        # Only buffer observations that WLS can use — HP-off observations
-        # (clamped_reason="no_output") are zero-value for regression and
-        # waste diversity buffer slots that should capture the full year's
-        # operating range.  Saturated observations are kept (HP is still
-        # producing output, just at a limit).
+        # Clamped status computed unconditionally (used by hysteresis below)
         if hp_no_output:
             obs_clamped = True
             obs_clamped_reason = "no_output"
@@ -4274,31 +4279,48 @@ class PIController:
             obs_clamped = False
             obs_clamped_reason = ""
 
-        # Build observation once, feed to both buffers as appropriate.
-        obs = Observation(
-            timestamp=now_mono,
-            wall_time=time.time(),
-            hp_setpoint=float(self._hp_setpoint) if obs_clamped_reason != "no_output" else None,
-            current_c=current_c,
-            desired_c=desired_c,
-            outdoor_temp_c=self._inputs.outdoor_temp,
-            room_rate=self._room_temp_rate,
-            raw_readings=self._inputs.build_raw_readings(),
-            clamped=obs_clamped,
-            clamped_reason=obs_clamped_reason,
-            supplemental_active=obs_supplemental_active,
-        )
-        if obs_clamped_reason != "no_output":
-            active_buffer = self._observation_buffer_heat if is_heating else self._observation_buffer_cool
-            active_buffer.add(obs)
-        # Grey-box buffer gets ALL observations (including HP-off).
-        self._greybox_buffer.add(obs)
+        if data_complete:
+            # Observation metadata for batch diagnostics.
+            obs_integral_change = abs(self._pi_integral - self._prev_integral_for_rls)
+            obs_output_change = obs_integral_change * self._pi_ki
+            obs_integral_settled = (
+                obs_output_change < 0.045
+                and abs(self._room_temp_rate) < 0.02
+            )
+            obs_seconds_since_sp = (
+                now_mono - self._last_setpoint_change_time
+                if self._last_setpoint_change_time > 0 else 0.0
+            )
+            obs_supplemental_active = (
+                self._supplemental.tracking_mode or self._supplemental.assist_active
+            )
 
-        # CUSUM anomaly detection — runs on every unclamped observation.
-        # TODO: Consider running on saturated observations too (obs_clamped_reason
-        # != "no_output") — currently excludes all clamped including actuator
-        # saturation, which misses anomalies during strong disturbance events.
-        if not obs_clamped:
+            obs = Observation(
+                timestamp=now_mono,
+                wall_time=time.time(),
+                hp_setpoint=float(self._hp_setpoint) if obs_clamped_reason != "no_output" else None,
+                current_c=current_c,
+                desired_c=desired_c,
+                outdoor_temp_c=self._inputs.outdoor_temp,
+                room_rate=self._room_temp_rate,
+                raw_readings=self._inputs.build_raw_readings(),
+                clamped=obs_clamped,
+                clamped_reason=obs_clamped_reason,
+                supplemental_active=obs_supplemental_active,
+            )
+            # RLS observation buffer: only when we have a valid feature vector
+            # (ff_enabled + outdoor temp available).  HP-off observations are
+            # zero-value for regression and waste diversity buffer slots.
+            if x is not None and obs_clamped_reason != "no_output":
+                active_buffer = self._observation_buffer_heat if is_heating else self._observation_buffer_cool
+                active_buffer.add(obs)
+            # Grey-box buffer gets ALL observations (including HP-off) when
+            # data is complete — greybox learns from room_rate + outdoor temp
+            # independently of FF.
+            self._greybox_buffer.add(obs)
+
+        # CUSUM anomaly detection — requires valid feature vector (x).
+        if x is not None and not obs_clamped:
             cusum_residual = (float(self._hp_setpoint) - desired_c) - rls.predict(x)
             self._update_cusum(cusum_residual, now_mono, is_heating)
 

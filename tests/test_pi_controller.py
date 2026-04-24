@@ -3784,6 +3784,7 @@ class TestHPNoOutput:
         entity._attr_hvac_mode = HVACMode.HEAT
         entity._attr_current_temperature = 20.0
         pi._pi_integral = 0.0
+        pi._inputs.outdoor_temp = 5.0  # Required for observation recording
 
         await pi._pi_tick()
 
@@ -5360,3 +5361,154 @@ class TestSubsystemToggles:
         entity = FakePIEntity(make_pi_config())
         attrs = entity._pi.get_extra_state_attributes()
         assert attrs["ff_enabled"] is True
+
+    # ── FF gating tests ──────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_ff_disabled_zero_offset(self):
+        """With ff_enabled=False, FF offset is always zero."""
+        config = make_pi_config({"pi_ff_enabled": False})
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._inputs.outdoor_temp = 0.0
+        entity._attr_current_temperature = 20.0
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22.0
+
+        await pi._pi_tick()
+
+        assert pi._ff_offset == 0.0
+
+    @pytest.mark.asyncio
+    async def test_ff_disabled_pi_still_integrates(self):
+        """PI integral accumulates even when FF is disabled."""
+        config = make_pi_config({"pi_ff_enabled": False})
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._inputs.outdoor_temp = 0.0
+        entity._attr_current_temperature = 20.0
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22.0
+        pi._pi_integral = 0.0
+
+        await pi._pi_tick()
+
+        assert pi._pi_integral != 0.0, "Integral should accumulate with error"
+
+    @pytest.mark.asyncio
+    async def test_ff_disabled_no_rls_buffer_growth(self):
+        """With ff_enabled=False, RLS observation buffers don't grow."""
+        config = make_pi_config({"pi_ff_enabled": False})
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._inputs.outdoor_temp = 5.0
+        entity._attr_current_temperature = 20.0
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22.0
+
+        heat_before = len(pi._observation_buffer_heat.get_all())
+        await pi._pi_tick()
+        assert len(pi._observation_buffer_heat.get_all()) == heat_before
+
+    @pytest.mark.asyncio
+    async def test_ff_disabled_greybox_buffer_grows(self):
+        """With ff_enabled=False but outdoor temp available, greybox buffer still grows."""
+        config = make_pi_config({"pi_ff_enabled": False})
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._inputs.outdoor_temp = 5.0
+        entity._attr_current_temperature = 20.0
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22.0
+
+        gb_before = len(pi._greybox_buffer.get_all())
+        await pi._pi_tick()
+        assert len(pi._greybox_buffer.get_all()) > gb_before
+
+    @pytest.mark.asyncio
+    async def test_ff_enabled_outdoor_none_freezes_offset(self):
+        """FF enabled but outdoor temp None freezes offset at last value."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        entity._attr_current_temperature = 20.0
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22.0
+
+        # First tick with valid outdoor temp → compute FF offset
+        pi._inputs.outdoor_temp = 0.0
+        await pi._pi_tick()
+        offset_after_valid = pi._ff_offset
+
+        # Second tick with outdoor temp None → offset should freeze
+        pi._inputs.outdoor_temp = None
+        await pi._pi_tick()
+        assert pi._ff_offset == offset_after_valid, (
+            "FF offset should freeze when outdoor temp unavailable"
+        )
+
+    @pytest.mark.asyncio
+    async def test_ff_enabled_outdoor_none_no_buffer_growth(self):
+        """No observations recorded when outdoor temp is None."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        entity._attr_current_temperature = 20.0
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22.0
+        pi._inputs.outdoor_temp = None
+
+        heat_before = len(pi._observation_buffer_heat.get_all())
+        gb_before = len(pi._greybox_buffer.get_all())
+        await pi._pi_tick()
+        assert len(pi._observation_buffer_heat.get_all()) == heat_before
+        assert len(pi._greybox_buffer.get_all()) == gb_before
+
+    @pytest.mark.asyncio
+    async def test_ff_enabled_default_behavior_unchanged(self):
+        """Default ff_enabled=True with outdoor temp produces nonzero FF offset."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._inputs.outdoor_temp = 0.0  # Cold outside → large delta
+        entity._attr_current_temperature = 20.0
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22.0
+
+        await pi._pi_tick()
+
+        # With outdoor_temp=0 and desired=22, outdoor_delta=-22
+        # Seeds should produce nonzero FF offset
+        assert pi._ff_offset != 0.0
+
+    @pytest.mark.asyncio
+    async def test_learning_suppressed_when_ff_disabled(self):
+        """Learning suppression is active when FF is disabled."""
+        config = make_pi_config({"pi_ff_enabled": False})
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._inputs.outdoor_temp = 5.0
+        entity._attr_current_temperature = 20.0
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22.0
+
+        await pi._pi_tick()
+
+        assert pi._disturbance_suppress_active is True
+        assert "ff_disabled" in pi._disturbance_active_suppressors
+
+    @pytest.mark.asyncio
+    async def test_learning_suppressed_when_outdoor_none(self):
+        """Learning suppression includes outdoor_temp_unavailable reason."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._inputs.outdoor_temp = None
+        entity._attr_current_temperature = 20.0
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22.0
+
+        await pi._pi_tick()
+
+        assert pi._disturbance_suppress_active is True
+        assert "outdoor_temp_unavailable" in pi._disturbance_active_suppressors
