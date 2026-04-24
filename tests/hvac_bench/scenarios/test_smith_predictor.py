@@ -32,13 +32,14 @@ def _make_imc_controller(profile: HouseProfile):
     Uses the same IMC gains as the Smith controller would compute (λ=L/3)
     but sets them manually so tau_seed stays 0 and Smith is not created.
     """
+    seed = profile.true_seed
     lag = HP_LAG
     lam = lag / 3.0  # matches actual default λ=L/3
     kp = profile.tau_minutes / (lam + lag)
     ki = 3.0 * kp / profile.tau_minutes
     return TasmotaPIAdapter({
-        "pi_ff_heat_slope": 0.35,
-        "pi_ff_cool_slope": 0.35,
+        "pi_outdoor_seed_heat": seed,
+        "pi_outdoor_seed_cool": seed,
         "pi_kp": kp,
         "pi_ki": ki,
     })
@@ -46,21 +47,22 @@ def _make_imc_controller(profile: HouseProfile):
 
 def _make_smith_controller(profile: HouseProfile):
     """IMC + Smith predictor controller."""
+    seed = profile.true_seed
     return TasmotaPIAdapter({
-        "pi_ff_heat_slope": 0.35,
-        "pi_ff_cool_slope": 0.35,
+        "pi_outdoor_seed_heat": seed,
+        "pi_outdoor_seed_cool": seed,
         "pi_tau_estimate": float(profile.tau_minutes),
         "pi_response_lag": HP_LAG,
-        # lambda=0 → uses default L/3
     })
 
 
 def _make_smith_mismatched(profile: HouseProfile, tau_factor: float = 1.0,
                            lag_factor: float = 1.0):
     """Smith controller with intentionally mismatched model parameters."""
+    seed = profile.true_seed
     return TasmotaPIAdapter({
-        "pi_ff_heat_slope": 0.35,
-        "pi_ff_cool_slope": 0.35,
+        "pi_outdoor_seed_heat": seed,
+        "pi_outdoor_seed_cool": seed,
         "pi_tau_estimate": float(profile.tau_minutes) * tau_factor,
         "pi_response_lag": HP_LAG * lag_factor,
     })
@@ -227,10 +229,17 @@ class TestSmithNeutralOnFastProfiles:
 
         history = run_scenario(ctrl, model, n_ticks=32, mode="heat")
         max_smith = max(abs(h.get("smith_correction", 0.0)) for h in history)
-        print(f"\n  drafty_bungalow max |smith_correction| = {max_smith:.3f}°C")
-        # For fast-τ profiles, correction should be moderate
-        # (L/τ = 0.6 for drafty, so correction is non-trivial)
-        assert max_smith < 5.0
+        # FOPDT peak correction bound (Åström §7.3):
+        #   |correction| ≤ k_eff × ΔSP_max × (1 - e^(-L/τ_fast))
+        # ΔSP_max = setpoint range (30-16=14°C), k_eff=1.0
+        import math
+        tau_fast = profile.tau_minutes
+        bound = 1.0 * 14.0 * (1.0 - math.exp(-HP_LAG / tau_fast))
+        print(f"\n  drafty_bungalow max |smith_correction| = {max_smith:.3f}°C "
+              f"(bound={bound:.1f}°C, L/τ={HP_LAG/tau_fast:.2f})")
+        assert max_smith < bound, (
+            f"Smith correction {max_smith:.1f}°C exceeds FOPDT bound {bound:.1f}°C"
+        )
 
 
 # ── Robustness to model mismatch ────────────────────────────────────────

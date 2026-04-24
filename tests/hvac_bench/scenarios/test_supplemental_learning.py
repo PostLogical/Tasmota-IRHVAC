@@ -183,7 +183,7 @@ class TestTrackedSetpointPhases:
         coincidence rather than controller behavior.
         """
         profile = PROFILES["standard_residential"]
-        ctrl = TasmotaPIAdapter({"pi_ff_heat_slope": 0.35})
+        ctrl = TasmotaPIAdapter({"pi_outdoor_seed_heat": PROFILES["standard_residential"].true_seed})
         ctrl.set_desired_temp(20.5)
         model = ThermalModel(profile=profile, initial_temp=20.5, outdoor_temp=2.0)
         stove = StoveCycleModel(setpoint_c=21.0, heat_rate_c_per_min=0.15)
@@ -222,10 +222,15 @@ class TestBeforeAfterEstimation:
     """Can we estimate the stove coefficient from before vs during tracking?"""
 
     def test_before_after_gives_reasonable_coefficient(self):
-        """The difference in tracked setpoint before and during stove operation
-        should approximate the stove's thermal contribution."""
+        """The difference in raw (pre-quantization) setpoint before and during
+        stove operation should approximate the stove's thermal contribution.
+
+        Uses raw_setpoint rather than quantized hp_setpoint because the stove
+        effect can be sub-degree — invisible through 1°C integer quantization
+        but measurable in the raw PI output.
+        """
         profile = PROFILES["standard_residential"]
-        ctrl = TasmotaPIAdapter({"pi_ff_heat_slope": 0.35})
+        ctrl = TasmotaPIAdapter({"pi_outdoor_seed_heat": PROFILES["standard_residential"].true_seed})
         ctrl.set_desired_temp(20.5)
         model = ThermalModel(profile=profile, initial_temp=20.5, outdoor_temp=2.0)
         stove = StoveCycleModel(setpoint_c=21.0, heat_rate_c_per_min=0.15)
@@ -235,26 +240,25 @@ class TestBeforeAfterEstimation:
         history = run_with_stove(ctrl, model, stove, n_ticks=48,
                                  stove_on_ticks=(16, None))
 
-        # Capture HP state before stove
+        # Capture HP state before stove (use raw setpoint)
         pre_stove = [h for h in history if 12 <= h["tick"] <= 15]
-        avg_pre_setpoint = sum(h["hp_setpoint"] for h in pre_stove) / len(pre_stove)
+        avg_pre_raw = sum(h["raw_setpoint"] for h in pre_stove) / len(pre_stove)
         avg_pre_integral = sum(h["integral"] for h in pre_stove) / len(pre_stove)
 
         # Capture HP tracked state during stove (settled period)
         during_stove = [h for h in history if 32 <= h["tick"] <= 47]
-        avg_during_setpoint = sum(h["hp_setpoint"] for h in during_stove) / len(during_stove)
+        avg_during_raw = sum(h["raw_setpoint"] for h in during_stove) / len(during_stove)
         avg_during_integral = sum(h["integral"] for h in during_stove) / len(during_stove)
 
-        diff = avg_during_setpoint - avg_pre_setpoint
-        print(f"\n  Before stove: setpoint={avg_pre_setpoint:.1f}, integral={avg_pre_integral:.1f}")
-        print(f"  During stove: setpoint={avg_during_setpoint:.1f}, integral={avg_during_integral:.1f}")
-        print(f"  Setpoint difference: {diff:+.1f}")
-        print(f"  Estimated stove coefficient: {diff:.1f}")
+        diff = avg_during_raw - avg_pre_raw
+        print(f"\n  Before stove: raw_sp={avg_pre_raw:.2f}, integral={avg_pre_integral:.2f}")
+        print(f"  During stove: raw_sp={avg_during_raw:.2f}, integral={avg_during_integral:.2f}")
+        print(f"  Raw setpoint difference: {diff:+.2f}")
 
-        # Stove should reduce the needed HP setpoint
-        assert diff < 0, f"Expected negative diff (stove reduces HP need), got {diff:+.1f}"
+        # Stove should reduce the needed HP setpoint (raw)
+        assert diff < 0, f"Expected negative diff (stove reduces HP need), got {diff:+.2f}"
         # Should be roughly in the -1 to -5 range for a moderate stove
-        assert -8 < diff < 0, f"Coefficient {diff:.1f} seems out of range"
+        assert -8 < diff < 0, f"Coefficient {diff:.2f} seems out of range"
 
 
 # ── Question 3: Session-average vs phase-aware ────────────────────────────
@@ -266,7 +270,7 @@ class TestSessionVsPhaseCoefficient:
     def test_phase_aware_is_more_accurate(self):
         """Phase-aware estimation should better predict HP need during each phase."""
         profile = PROFILES["standard_residential"]
-        ctrl = TasmotaPIAdapter({"pi_ff_heat_slope": 0.35})
+        ctrl = TasmotaPIAdapter({"pi_outdoor_seed_heat": PROFILES["standard_residential"].true_seed})
         ctrl.set_desired_temp(20.5)
         model = ThermalModel(profile=profile, initial_temp=20.5, outdoor_temp=2.0)
         stove = StoveCycleModel(setpoint_c=21.0, heat_rate_c_per_min=0.15)
@@ -322,7 +326,7 @@ class TestOutdoorVariation:
         profile = PROFILES["standard_residential"]
 
         for outdoor_change, label in [(0, "constant"), (-5, "dropping"), (+3, "rising")]:
-            ctrl = TasmotaPIAdapter({"pi_ff_heat_slope": 0.35})
+            ctrl = TasmotaPIAdapter({"pi_outdoor_seed_heat": PROFILES["standard_residential"].true_seed})
             ctrl.set_desired_temp(20.5)
             model = ThermalModel(profile=profile, initial_temp=20.5, outdoor_temp=5.0)
             stove = StoveCycleModel(setpoint_c=21.0, heat_rate_c_per_min=0.15)
@@ -354,7 +358,7 @@ class TestStoveOffResume:
     def test_hp_resumes_correctly_after_stove(self):
         """After stove session ends, HP should quickly reach a correct setpoint."""
         profile = PROFILES["standard_residential"]
-        ctrl = TasmotaPIAdapter({"pi_ff_heat_slope": 0.35})
+        ctrl = TasmotaPIAdapter({"pi_outdoor_seed_heat": PROFILES["standard_residential"].true_seed})
         ctrl.set_desired_temp(20.5)
         model = ThermalModel(profile=profile, initial_temp=20.5, outdoor_temp=2.0)
         stove = StoveCycleModel(setpoint_c=21.0, heat_rate_c_per_min=0.15)

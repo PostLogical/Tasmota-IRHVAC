@@ -151,8 +151,8 @@ def replay_with_params(climate_ts, outdoor_ts, model_input_ts_list,
     seed_slope = config_overrides.pop("seed_slope", 0.35)
     config = _make_sim_config(seed_factor=1.0)
     config.update(config_overrides)
-    config["pi_ff_heat_slope"] = seed_slope
-    config["pi_ff_cool_slope"] = seed_slope
+    config["pi_outdoor_seed_heat"] = seed_slope
+    config["pi_outdoor_seed_cool"] = seed_slope
 
     entity = SimEntity(config)
     pi = entity._pi

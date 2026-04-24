@@ -16,13 +16,13 @@ from tests.hvac_bench.metrics import compute_all_metrics
 KD_VALUES = [0.0, 0.5, 1.0, 2.0, 5.0]
 
 
-def _make_controller(kd, seed_factor=1.0, **overrides):
-    true_slope = 0.35
+def _make_controller(kd, profile, seed_factor=1.0, **overrides):
+    seed = profile.true_seed
     config = {
         "pi_kd": kd,
         "pi_kd_filter_n": 8,
-        "pi_ff_heat_slope": true_slope * seed_factor,
-        "pi_ff_cool_slope": true_slope * seed_factor,
+        "pi_outdoor_seed_heat": seed * seed_factor,
+        "pi_outdoor_seed_cool": seed * seed_factor,
         **overrides,
     }
     return TasmotaPIAdapter(config)
@@ -45,7 +45,7 @@ class TestDerivativeColdStart:
         results = {}
 
         for kd in KD_VALUES:
-            ctrl = _make_controller(kd)
+            ctrl = _make_controller(kd, profile)
             ctrl.set_desired_temp(20.5)
             model = _make_model(profile, initial_temp=17.0, outdoor=2.0)
 
@@ -99,7 +99,7 @@ class TestDerivativeColdSnap:
             return max(-5.0, 10.0 - tick * 1.25)
 
         for kd in KD_VALUES:
-            ctrl = _make_controller(kd)
+            ctrl = _make_controller(kd, profile)
             ctrl.set_desired_temp(20.5)
             model = _make_model(profile, initial_temp=20.5, outdoor=10.0)
 
@@ -146,7 +146,7 @@ class TestDerivativeSteadyStateNoise:
         results = {}
 
         for kd in KD_VALUES:
-            ctrl = _make_controller(kd)
+            ctrl = _make_controller(kd, profile)
             ctrl.set_desired_temp(20.5)
             model = _make_model(profile, initial_temp=20.5, outdoor=5.0,
                                 sensor_noise_sigma=0.15,
@@ -194,7 +194,7 @@ class TestDerivativeSetpointStep:
         results = {}
 
         for kd in KD_VALUES:
-            ctrl = _make_controller(kd)
+            ctrl = _make_controller(kd, profile)
             ctrl.set_desired_temp(20.5)
             model = _make_model(profile, initial_temp=20.5, outdoor=5.0)
 
@@ -261,7 +261,7 @@ class TestDerivativeOscillation:
 
         for kd in KD_VALUES:
             # Aggressive PI to provoke oscillation
-            ctrl = _make_controller(kd, pi_kp=3.0, pi_ki=0.3)
+            ctrl = _make_controller(kd, profile, pi_kp=3.0, pi_ki=0.3)
             ctrl.set_desired_temp(20.5)
             model = _make_model(profile, initial_temp=17.0, outdoor=0.0)
 

@@ -13,10 +13,11 @@ from tests.hvac_bench.runner import run_scenario
 from tests.hvac_bench.metrics import compute_all_metrics
 
 
-def _make_controller(seed_factor=1.0):
+def _make_controller(profile, seed_factor=1.0):
+    seed = profile.true_seed
     return TasmotaPIAdapter({
-        "pi_ff_heat_slope": 0.35 * seed_factor,
-        "pi_ff_cool_slope": 0.35 * seed_factor,
+        "pi_outdoor_seed_heat": seed * seed_factor,
+        "pi_outdoor_seed_cool": seed * seed_factor,
     })
 
 
@@ -29,7 +30,7 @@ class TestMildNoise:
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
     def test_cold_start_with_noise(self, profile_name):
         profile = QUICK_PROFILES[profile_name]
-        ctrl = _make_controller(seed_factor=1.0)
+        ctrl = _make_controller(profile, seed_factor=1.0)
         ctrl.set_desired_temp(20.5)
         model = ThermalModel(
             profile=profile, initial_temp=17.0, outdoor_temp=2.0,
@@ -47,7 +48,7 @@ class TestMildNoise:
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
     def test_steady_state_with_noise(self, profile_name):
         profile = QUICK_PROFILES[profile_name]
-        ctrl = _make_controller(seed_factor=1.0)
+        ctrl = _make_controller(profile, seed_factor=1.0)
         ctrl.set_desired_temp(20.5)
         model = ThermalModel(
             profile=profile, initial_temp=20.5, outdoor_temp=5.0,
@@ -72,7 +73,7 @@ class TestHeavyNoise:
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
     def test_cold_start_heavy_noise(self, profile_name):
         profile = QUICK_PROFILES[profile_name]
-        ctrl = _make_controller(seed_factor=1.0)
+        ctrl = _make_controller(profile, seed_factor=1.0)
         ctrl.set_desired_temp(20.5)
         model = ThermalModel(
             profile=profile, initial_temp=17.0, outdoor_temp=2.0,
@@ -91,7 +92,7 @@ class TestHeavyNoise:
     def test_steady_state_heavy_noise(self, profile_name):
         """Heavy noise shouldn't cause runaway or crash."""
         profile = QUICK_PROFILES[profile_name]
-        ctrl = _make_controller(seed_factor=1.0)
+        ctrl = _make_controller(profile, seed_factor=1.0)
         ctrl.set_desired_temp(20.5)
         model = ThermalModel(
             profile=profile, initial_temp=20.5, outdoor_temp=5.0,

@@ -54,7 +54,7 @@ def _make_controller(hold_seconds):
     shifting _last_setpoint_change_time before each tick so that the elapsed
     time check sees the desired hold duration.
     """
-    ctrl = TasmotaPIAdapter({"pi_ff_heat_slope": 0.35})
+    ctrl = TasmotaPIAdapter({"pi_outdoor_seed_heat": 0.35})
     if hold_seconds != 1800:
         original_tick = ctrl.tick
         hold_delta = 1800.0 - hold_seconds

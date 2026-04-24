@@ -16,11 +16,11 @@ from tests.hvac_bench.metrics import compute_all_metrics
 SEED_FACTORS = [0.0, 0.5, 1.0, 1.5]
 
 
-def _make_controller(seed_factor=1.0, **overrides):
-    true_slope = 0.35
+def _make_controller(profile, seed_factor=1.0, **overrides):
+    seed = profile.true_seed
     config = {
-        "pi_outdoor_seed_heat": true_slope * seed_factor,
-        "pi_ff_cool_slope": true_slope * seed_factor,
+        "pi_outdoor_seed_heat": seed * seed_factor,
+        "pi_outdoor_seed_cool": seed * seed_factor,
         **overrides,
     }
     ctrl = TasmotaPIAdapter(config)
@@ -42,7 +42,7 @@ class TestCoolingWarmStart:
     @pytest.mark.parametrize("seed_factor", [0.5, 1.0, 1.5])
     def test_warm_start(self, profile_name, seed_factor):
         profile = QUICK_PROFILES[profile_name]
-        ctrl = _make_controller(seed_factor)
+        ctrl = _make_controller(profile, seed_factor)
         ctrl.set_desired_temp(24.0)
         model = _make_model(profile, initial_temp=28.0, outdoor=32.0)
 
@@ -67,7 +67,7 @@ class TestCoolingHeatWave:
     @pytest.mark.parametrize("seed_factor", [0.5, 1.0])
     def test_heat_wave(self, profile_name, seed_factor):
         profile = QUICK_PROFILES[profile_name]
-        ctrl = _make_controller(seed_factor)
+        ctrl = _make_controller(profile, seed_factor)
         ctrl.set_desired_temp(24.0)
         model = _make_model(profile, initial_temp=24.0, outdoor=30.0)
 
@@ -95,7 +95,7 @@ class TestCoolingSteadyState:
     @pytest.mark.parametrize("seed_factor", [0.5, 1.0])
     def test_steady_state(self, profile_name, seed_factor):
         profile = QUICK_PROFILES[profile_name]
-        ctrl = _make_controller(seed_factor)
+        ctrl = _make_controller(profile, seed_factor)
         ctrl.set_desired_temp(24.0)
         model = _make_model(profile, initial_temp=24.0, outdoor=32.0)
 
@@ -120,7 +120,7 @@ class TestCoolingSolarRejection:
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
     def test_solar_rejection(self, profile_name):
         profile = QUICK_PROFILES[profile_name]
-        ctrl = _make_controller(seed_factor=1.0)
+        ctrl = _make_controller(profile, seed_factor=1.0)
         ctrl.set_desired_temp(24.0)
         model = _make_model(profile, initial_temp=24.0, outdoor=30.0,
                             solar_gain=self.SOLAR_GAINS[profile_name])

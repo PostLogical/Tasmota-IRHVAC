@@ -18,11 +18,11 @@ from tests.hvac_bench.metrics import compute_all_metrics
 SEED_FACTORS = [0.0, 0.5, 1.0, 1.5]
 
 
-def _make_controller(seed_factor=1.0, **overrides):
-    true_slope = 0.35
+def _make_controller(profile: HouseProfile, seed_factor=1.0, **overrides):
+    seed = profile.true_seed
     config = {
-        "pi_outdoor_seed_heat": true_slope * seed_factor,
-        "pi_outdoor_seed_cool": true_slope * seed_factor,
+        "pi_outdoor_seed_heat": seed * seed_factor,
+        "pi_outdoor_seed_cool": seed * seed_factor,
         **overrides,
     }
     ctrl = TasmotaPIAdapter(config)
@@ -44,7 +44,7 @@ class TestHeatingColdStart:
     @pytest.mark.parametrize("seed_factor", SEED_FACTORS)
     def test_cold_start(self, profile_name, seed_factor):
         profile = QUICK_PROFILES[profile_name]
-        ctrl = _make_controller(seed_factor)
+        ctrl = _make_controller(profile, seed_factor)
         ctrl.set_desired_temp(20.5)
         model = _make_model(profile, initial_temp=17.0, outdoor=2.0)
 
@@ -72,7 +72,7 @@ class TestHeatingColdSnap:
     @pytest.mark.parametrize("seed_factor", SEED_FACTORS)
     def test_cold_snap(self, profile_name, seed_factor):
         profile = QUICK_PROFILES[profile_name]
-        ctrl = _make_controller(seed_factor)
+        ctrl = _make_controller(profile, seed_factor)
         ctrl.set_desired_temp(20.5)
         model = _make_model(profile, initial_temp=20.5, outdoor=10.0)
 
@@ -102,7 +102,7 @@ class TestHeatingSetpointUp:
     @pytest.mark.parametrize("seed_factor", [0.5, 1.0, 1.5])
     def test_setpoint_up(self, profile_name, seed_factor):
         profile = QUICK_PROFILES[profile_name]
-        ctrl = _make_controller(seed_factor)
+        ctrl = _make_controller(profile, seed_factor)
         ctrl.set_desired_temp(20.5)
         model = _make_model(profile, initial_temp=20.5, outdoor=5.0)
 
@@ -123,7 +123,7 @@ class TestHeatingSetpointDown:
     @pytest.mark.parametrize("seed_factor", [0.5, 1.0, 1.5])
     def test_setpoint_down(self, profile_name, seed_factor):
         profile = QUICK_PROFILES[profile_name]
-        ctrl = _make_controller(seed_factor)
+        ctrl = _make_controller(profile, seed_factor)
         ctrl.set_desired_temp(22.5)
         model = _make_model(profile, initial_temp=22.5, outdoor=5.0)
 
@@ -144,7 +144,7 @@ class TestHeatingSteadyState:
     @pytest.mark.parametrize("seed_factor", [0.5, 1.0, 1.5])
     def test_steady_state(self, profile_name, seed_factor):
         profile = QUICK_PROFILES[profile_name]
-        ctrl = _make_controller(seed_factor)
+        ctrl = _make_controller(profile, seed_factor)
         ctrl.set_desired_temp(20.5)
         model = _make_model(profile, initial_temp=20.5, outdoor=5.0)
 
@@ -168,7 +168,7 @@ class TestHeatingRampDisturbance:
     @pytest.mark.parametrize("seed_factor", [0.5, 1.0])
     def test_ramp_disturbance(self, profile_name, seed_factor):
         profile = QUICK_PROFILES[profile_name]
-        ctrl = _make_controller(seed_factor)
+        ctrl = _make_controller(profile, seed_factor)
         ctrl.set_desired_temp(20.5)
         model = _make_model(profile, initial_temp=20.5, outdoor=5.0)
 

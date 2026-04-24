@@ -16,10 +16,11 @@ from tests.hvac_bench.runner import run_scenario
 from tests.hvac_bench.metrics import compute_all_metrics
 
 
-def _make_controller(seed_factor=1.0):
+def _make_controller(profile, seed_factor=1.0):
+    seed = profile.true_seed
     return TasmotaPIAdapter({
-        "pi_ff_heat_slope": 0.35 * seed_factor,
-        "pi_ff_cool_slope": 0.35 * seed_factor,
+        "pi_outdoor_seed_heat": seed * seed_factor,
+        "pi_outdoor_seed_cool": seed * seed_factor,
     })
 
 
@@ -36,7 +37,7 @@ class TestOilBoiler:
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
     def test_oil_boiler_recovery(self, profile_name):
         profile = QUICK_PROFILES[profile_name]
-        ctrl = _make_controller(seed_factor=1.0)
+        ctrl = _make_controller(profile, seed_factor=1.0)
         ctrl.set_desired_temp(20.5)
         model = ThermalModel(profile=profile, initial_temp=20.5, outdoor_temp=5.0)
         model.add_disturbance(oil_boiler(start_tick=8))
@@ -64,7 +65,7 @@ class TestFrontDoorOpen:
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
     def test_front_door_recovery(self, profile_name):
         profile = QUICK_PROFILES[profile_name]
-        ctrl = _make_controller(seed_factor=1.0)
+        ctrl = _make_controller(profile, seed_factor=1.0)
         ctrl.set_desired_temp(20.5)
         model = ThermalModel(profile=profile, initial_temp=20.5, outdoor_temp=0.0)
         model.add_disturbance(front_door_open(start_tick=8))
@@ -92,7 +93,7 @@ class TestGarageDoorOpen:
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
     def test_garage_door_during(self, profile_name):
         profile = QUICK_PROFILES[profile_name]
-        ctrl = _make_controller(seed_factor=1.0)
+        ctrl = _make_controller(profile, seed_factor=1.0)
         ctrl.set_desired_temp(20.5)
         model = ThermalModel(profile=profile, initial_temp=20.5, outdoor_temp=2.0)
         model.add_disturbance(garage_door_open(start_tick=8))
@@ -115,7 +116,7 @@ class TestCooking:
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
     def test_cooking_no_overshoot(self, profile_name):
         profile = QUICK_PROFILES[profile_name]
-        ctrl = _make_controller(seed_factor=1.0)
+        ctrl = _make_controller(profile, seed_factor=1.0)
         ctrl.set_desired_temp(20.5)
         model = ThermalModel(profile=profile, initial_temp=20.5, outdoor_temp=5.0)
         model.add_disturbance(cooking(start_tick=8))
@@ -141,7 +142,7 @@ class TestParty:
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
     def test_party_recovery(self, profile_name):
         profile = QUICK_PROFILES[profile_name]
-        ctrl = _make_controller(seed_factor=1.0)
+        ctrl = _make_controller(profile, seed_factor=1.0)
         ctrl.set_desired_temp(20.5)
         model = ThermalModel(profile=profile, initial_temp=20.5, outdoor_temp=5.0)
         model.add_disturbance(party(start_tick=4))

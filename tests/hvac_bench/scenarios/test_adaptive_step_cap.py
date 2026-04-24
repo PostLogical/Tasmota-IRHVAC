@@ -149,7 +149,7 @@ def run_full_system(
     # Create adapter with model inputs configured
     adapter = TasmotaPIAdapter({
         "pi_model_inputs": pi_model_inputs,
-        "pi_ff_heat_slope": 0.35,  # realistic LR value
+        "pi_outdoor_seed_heat": profile.true_seed,
         "pi_ki": 0.15,
         "pi_kp": 1.5,
         "pi_deadband": 0.5,

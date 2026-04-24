@@ -137,6 +137,6 @@ climate:
     outdoor_temp_sensor: sensor.outdoor_temperature
     # Feedforward seeds (auto-learning refines these over time)
     pi_ff_heat_reference: 15.0    # °C (59°F) - outdoor temp above which no heating offset needed
-    pi_ff_heat_slope: 0.30        # °C offset per °C below reference
+    pi_outdoor_seed_heat: 0.30    # °C offset per °C below reference
     pi_ff_cool_reference: 25.0    # °C (77°F) - outdoor temp below which no cooling offset needed
-    pi_ff_cool_slope: 0.30        # °C offset per °C above reference
+    pi_outdoor_seed_cool: 0.30    # °C offset per °C above reference

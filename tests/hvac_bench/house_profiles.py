@@ -67,6 +67,16 @@ class HouseProfile2R2C:
     description: str = ""
 
     @property
+    def true_seed(self) -> float:
+        """Physical FF seed from 2R2C steady-state: 1 / (hp_gain × τ_env).
+
+        At steady state (dT_wall/dt=0 → T_wall=T_air=desired):
+          sp = desired + (desired - outdoor) / (hp_gain × τ_env)
+        So FF offset = seed × (desired - outdoor) where seed = 1/(hp_gain × τ_env).
+        """
+        return 1.0 / (self.hp_gain * self.tau_env)
+
+    @property
     def tau_wall(self) -> float:
         """Wall-side time constant: τ_couple * mass_ratio."""
         return self.tau_couple * self.mass_ratio

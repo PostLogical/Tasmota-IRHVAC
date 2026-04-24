@@ -16,10 +16,11 @@ from tests.hvac_bench.metrics import compute_all_metrics
 N_RUNS = 50  # 50 runs for reasonable CI width without being too slow
 
 
-def _make_controller(seed_factor=1.0):
+def _make_controller(profile, seed_factor=1.0):
+    seed = profile.true_seed
     return TasmotaPIAdapter({
-        "pi_ff_heat_slope": 0.35 * seed_factor,
-        "pi_ff_cool_slope": 0.35 * seed_factor,
+        "pi_outdoor_seed_heat": seed * seed_factor,
+        "pi_outdoor_seed_cool": seed * seed_factor,
     })
 
 
@@ -43,7 +44,7 @@ class TestColdStartMonteCarlo:
         itaes = []
 
         for seed in range(N_RUNS):
-            ctrl = _make_controller(seed_factor=1.0)
+            ctrl = _make_controller(profile, seed_factor=1.0)
             ctrl.set_desired_temp(20.5)
             model = ThermalModel(
                 profile=profile, initial_temp=17.0, outdoor_temp=2.0,
@@ -77,7 +78,7 @@ class TestSteadyStateLimitCycleProbability:
         cycle_runs = 0
 
         for seed in range(N_RUNS):
-            ctrl = _make_controller(seed_factor=1.0)
+            ctrl = _make_controller(profile, seed_factor=1.0)
             ctrl.set_desired_temp(20.5)
             model = ThermalModel(
                 profile=profile, initial_temp=20.5, outdoor_temp=7.0,
@@ -123,7 +124,7 @@ class TestColdSnapMonteCarlo:
         cold_ticks_list = []
 
         for seed in range(N_RUNS):
-            ctrl = _make_controller(seed_factor=1.0)
+            ctrl = _make_controller(profile, seed_factor=1.0)
             ctrl.set_desired_temp(20.5)
             model = ThermalModel(
                 profile=profile, initial_temp=20.5, outdoor_temp=10.0,

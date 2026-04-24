@@ -13,10 +13,11 @@ from tests.hvac_bench.runner import run_scenario
 from tests.hvac_bench.metrics import compute_all_metrics
 
 
-def _make_controller(seed_factor=1.0):
+def _make_controller(profile, seed_factor=1.0):
+    seed = profile.true_seed
     return TasmotaPIAdapter({
-        "pi_ff_heat_slope": 0.35 * seed_factor,
-        "pi_ff_cool_slope": 0.35 * seed_factor,
+        "pi_outdoor_seed_heat": seed * seed_factor,
+        "pi_outdoor_seed_cool": seed * seed_factor,
     })
 
 
@@ -30,7 +31,7 @@ class TestCOPTracking:
     def test_heating_cop_range(self, profile_name):
         """COP should be in realistic range during heating."""
         profile = QUICK_PROFILES[profile_name]
-        ctrl = _make_controller(seed_factor=1.0)
+        ctrl = _make_controller(profile, seed_factor=1.0)
         ctrl.set_desired_temp(20.5)
         model = ThermalModel(
             profile=profile, initial_temp=20.5, outdoor_temp=5.0,
@@ -49,7 +50,7 @@ class TestCOPTracking:
     def test_cooling_cop_range(self, profile_name):
         """COP should be in realistic range during cooling."""
         profile = QUICK_PROFILES[profile_name]
-        ctrl = _make_controller(seed_factor=1.0)
+        ctrl = _make_controller(profile, seed_factor=1.0)
         ctrl.set_desired_temp(24.0)
         model = ThermalModel(
             profile=profile, initial_temp=24.0, outdoor_temp=32.0,
@@ -65,7 +66,7 @@ class TestCOPTracking:
     def test_energy_accumulates(self):
         """Cumulative kWh should increase over time."""
         profile = QUICK_PROFILES["standard_residential"]
-        ctrl = _make_controller(seed_factor=1.0)
+        ctrl = _make_controller(profile, seed_factor=1.0)
         ctrl.set_desired_temp(20.5)
         model = ThermalModel(
             profile=profile, initial_temp=17.0, outdoor_temp=0.0,
@@ -95,7 +96,7 @@ class TestCustomCOP:
             return 3.0
 
         profile = QUICK_PROFILES["standard_residential"]
-        ctrl = _make_controller(seed_factor=1.0)
+        ctrl = _make_controller(profile, seed_factor=1.0)
         ctrl.set_desired_temp(20.5)
         model = ThermalModel(
             profile=profile, initial_temp=20.5, outdoor_temp=5.0,
@@ -123,7 +124,7 @@ class TestOvershootEnergyCost:
         profile = QUICK_PROFILES[profile_name]
 
         # Correctly seeded
-        ctrl_good = _make_controller(seed_factor=1.0)
+        ctrl_good = _make_controller(profile, seed_factor=1.0)
         ctrl_good.set_desired_temp(20.5)
         model_good = ThermalModel(
             profile=profile, initial_temp=17.0, outdoor_temp=0.0,
@@ -132,7 +133,7 @@ class TestOvershootEnergyCost:
         hist_good = run_scenario(ctrl_good, model_good, n_ticks=32, mode="heat")
 
         # Overseeded
-        ctrl_over = _make_controller(seed_factor=1.5)
+        ctrl_over = _make_controller(profile, seed_factor=1.5)
         ctrl_over.set_desired_temp(20.5)
         model_over = ThermalModel(
             profile=profile, initial_temp=17.0, outdoor_temp=0.0,
