@@ -2030,32 +2030,35 @@ class TestBatchLearningFWLScenario:
 class TestGreyboxSolarPath:
     """Cover greybox observer solar proxy path (lines 227-239)."""
 
-    def test_greybox_fit_with_solar(self):
-        """fit_greybox uses solar branch when solar entity configured (lines 227-239)."""
+    def test_greybox_fit_with_solar_fix_kc(self):
+        """fit_greybox uses solar+fix_k_c branch (lines 227-239).
+
+        Requires: has_solar=True AND fix_k_c=True (low HP offset variance).
+        To get fix_k_c: all observations have same HP setpoint (no variance).
+        """
         import custom_components.tasmota_irhvac.pi.greybox_observer as go
         if not go.SCIPY_AVAILABLE:
             pytest.skip("scipy required")
 
         obs = []
-        for i in range(100):
-            # Mix of HP-on and HP-off observations
-            hp_on = i % 3 != 0
-            raw = {"sensor.solar": float(i % 12) * 50.0}  # solar irradiance
+        for i in range(80):
+            # All HP-on at same setpoint → hp_offset is constant → fix_k_c=True
+            solar_val = float(i % 12) * 50.0
+            raw = {"sensor.solar": solar_val}
             obs.append(Observation(
                 timestamp=float(i), wall_time=time.time() + i * 900,
-                hp_setpoint=22.0 if hp_on else None,
-                current_c=20.0 + 0.02 * (i % 15),
+                hp_setpoint=22.0,  # constant → hp_offset constant → low variance
+                current_c=20.0 + 0.02 * math.sin(i / 10.0),
                 desired_c=20.0,
                 outdoor_temp_c=5.0 + float(i % 10),
-                room_rate=0.001 if hp_on else -0.002,
-                raw_readings=raw, clamped=not hp_on,
-                clamped_reason="" if hp_on else "no_output",
+                room_rate=0.001 + 0.0005 * math.sin(i / 5.0),
+                raw_readings=raw, clamped=False, clamped_reason="",
             ))
         model_inputs = [
             {"entity_id": "sensor.solar", "name": "solar", "input_role": "solar"},
         ]
         result = go.fit_greybox(obs, model_inputs=model_inputs)
-        # Solar path may or may not succeed depending on data quality
+        # Should exercise the solar+fix_k_c residual function
 
     def test_greybox_jacobian_exception(self):
         """Jacobian SE computation handles pinv exception (lines 325-326)."""
