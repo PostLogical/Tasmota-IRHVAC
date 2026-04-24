@@ -151,8 +151,14 @@ class ModelInputManager:
         self,
         entity_states: dict[str, tuple[str, bool, str | None]],
     ) -> bool:
-        """Check if any model input entity is currently unavailable."""
+        """Check if any enabled model input entity is currently unavailable.
+
+        Disabled inputs (input_enabled=False) are skipped — their value is
+        forced to zero regardless, so unavailability doesn't affect data quality.
+        """
         for m_input in self._model_inputs:
+            if not m_input.get("input_enabled", True):
+                continue
             entity_id = m_input.get("entity_id", "")
             if not entity_id:
                 continue

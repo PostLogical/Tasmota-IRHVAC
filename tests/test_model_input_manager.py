@@ -505,6 +505,19 @@ class TestEnabledToggle:
         )
         assert mgr.values[0] == 1.0  # not zeroed
 
+    def test_disabled_input_unavailable_not_flagged(self):
+        """Disabled input that's unavailable should NOT trigger any_unavailable."""
+        m_input = {**STOVE_INPUT, "input_enabled": False}
+        mgr = ModelInputManager(model_inputs=[m_input], outdoor_temp_sensor=None)
+        # Entity not in states → would be unavailable if enabled
+        assert mgr.any_unavailable({}) is False
+
+    def test_enabled_input_unavailable_flagged(self):
+        """Enabled input that's unavailable should trigger any_unavailable."""
+        mgr = ModelInputManager(model_inputs=[STOVE_INPUT], outdoor_temp_sensor=None)
+        # Entity not in states → unavailable
+        assert mgr.any_unavailable({}) is True
+
 
 class TestNamedFeatures:
     """Tests for build_feature_names and build_named_features."""

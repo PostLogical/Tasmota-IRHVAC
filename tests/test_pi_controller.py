@@ -5618,3 +5618,86 @@ class TestSubsystemToggles:
         pi._run_batch_analysis()
         # Should increment (even if it returns early due to insufficient obs)
         assert pi._batch_cycle_count == cycle_before + 1
+
+    # ── Plant ID gating tests ────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_plant_id_disabled_no_check_observation(self):
+        """With plant_id_enabled=False, check_observation is not called."""
+        config = make_pi_config({
+            "pi_plant_id_enabled": False,
+            "pi_tau_estimate": 60.0,
+        })
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._inputs.outdoor_temp = 5.0
+        entity._attr_current_temperature = 20.0
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22.0
+
+        with patch.object(pi._plant_id, 'check_observation') as mock_check:
+            await pi._pi_tick()
+            mock_check.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_plant_id_disabled_no_start_observation(self):
+        """With plant_id_enabled=False, start_observation is not called on setpoint change."""
+        config = make_pi_config({
+            "pi_plant_id_enabled": False,
+            "pi_tau_estimate": 60.0,
+        })
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._inputs.outdoor_temp = 5.0
+        entity._attr_current_temperature = 18.0  # Large error
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 20.0
+        pi._pi_integral = 5.0  # Large integral to force setpoint change
+
+        with patch.object(pi._plant_id, 'start_observation') as mock_start:
+            await pi._pi_tick()
+            mock_start.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_plant_id_outdoor_none_no_check_observation(self):
+        """Plant ID gated when outdoor temp is None."""
+        config = make_pi_config({"pi_tau_estimate": 60.0})
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._inputs.outdoor_temp = None
+        entity._attr_current_temperature = 20.0
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22.0
+
+        with patch.object(pi._plant_id, 'check_observation') as mock_check:
+            await pi._pi_tick()
+            mock_check.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_plant_id_enabled_check_called(self):
+        """Plant ID check_observation called when enabled and inputs available."""
+        config = make_pi_config({"pi_tau_estimate": 60.0})
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._inputs.outdoor_temp = 5.0
+        entity._attr_current_temperature = 20.0
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22.0
+
+        with patch.object(pi._plant_id, 'check_observation', return_value=None) as mock_check:
+            await pi._pi_tick()
+            mock_check.assert_called_once()
+
+    def test_plant_id_imc_gains_preserved_when_disabled(self):
+        """IMC gains from tau_seed are used even when plant_id runtime disabled."""
+        config = make_pi_config({
+            "pi_plant_id_enabled": False,
+            "pi_tau_estimate": 60.0,
+            "pi_response_lag": 15.0,
+        })
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        # IMC should compute gains from tau=60 (not the manual default)
+        assert pi._plant_id.enabled is True, "PlantIdentifier itself should be enabled"
+        # Kp from IMC is different from the manual default
+        assert pi._pi_kp != 1.0

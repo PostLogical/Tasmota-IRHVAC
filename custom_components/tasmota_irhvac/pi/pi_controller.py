@@ -3817,13 +3817,18 @@ class PIController:
 
         error = desired_c - current_c
 
-        # Check ongoing τ step-response observation (raw — measures real plant)
-        tau_gain_update = self._plant_id.check_observation(
-            now_mono, raw_c, self._ff_offset,
-            hp_setpoint_c=float(self._hp_setpoint) if self._hp_setpoint is not None else None,
-        )
-        if tau_gain_update is not None:
-            self._apply_gain_update(tau_gain_update)
+        # Check ongoing τ step-response observation (raw — measures real plant).
+        # Gated on toggle + all inputs available: plant ID attributes all room
+        # temp change to the HP, so unmeasured disturbances contaminate τ.
+        if (self._pi_plant_id_enabled
+                and self._inputs.outdoor_temp is not None
+                and not self._any_model_input_unavailable()):
+            tau_gain_update = self._plant_id.check_observation(
+                now_mono, raw_c, self._ff_offset,
+                hp_setpoint_c=float(self._hp_setpoint) if self._hp_setpoint is not None else None,
+            )
+            if tau_gain_update is not None:
+                self._apply_gain_update(tau_gain_update)
 
         # Evaluate supplemental heat source override (selector control)
         now_mono = time.monotonic()
@@ -4386,7 +4391,10 @@ class PIController:
                     self._last_setpoint_change_time = now_mono
                     self._metrics.record_setpoint_change()
                     # Start τ observation on significant setpoint changes
-                    self._plant_id.start_observation(now_mono, current_c, desired_c, float(change), self._ff_offset)
+                    if (self._pi_plant_id_enabled
+                            and self._inputs.outdoor_temp is not None
+                            and not self._any_model_input_unavailable()):
+                        self._plant_id.start_observation(now_mono, current_c, desired_c, float(change), self._ff_offset)
                     return True
         else:
             _LOGGER.debug(
