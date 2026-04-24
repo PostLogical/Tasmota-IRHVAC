@@ -104,7 +104,7 @@ from .const import (
     CONF_PI_IMC_LAMBDA,
     CONF_PI_KI,
     CONF_PI_KP,
-    CONF_PI_MIN_INTERVAL,
+    CONF_PI_TICK_FALLBACK,
     CONF_PI_RESPONSE_LAG,
     CONF_PI_SENSOR_FILTER_TAU,
     CONF_PI_SETPOINT_HOLD,
@@ -153,7 +153,7 @@ from .const import (
     DEFAULT_PI_IMC_LAMBDA,
     DEFAULT_PI_KI,
     DEFAULT_PI_KP,
-    DEFAULT_PI_MIN_INTERVAL,
+    DEFAULT_PI_TICK_FALLBACK,
     DEFAULT_PI_RESPONSE_LAG,
     DEFAULT_PI_SENSOR_FILTER_TAU,
     DEFAULT_PI_SETPOINT_HOLD,
@@ -414,7 +414,7 @@ OPTIONS_PI_CONTROLLER_SCHEMA = vol.Schema(
         vol.Optional(CONF_PI_KD_FILTER_N, default=DEFAULT_PI_KD_FILTER_N): NumberSelector(
             NumberSelectorConfig(min=1, max=20, step=1, mode=NumberSelectorMode.BOX)
         ),
-        vol.Optional(CONF_PI_MIN_INTERVAL, default=DEFAULT_PI_MIN_INTERVAL): NumberSelector(
+        vol.Optional(CONF_PI_TICK_FALLBACK, default=DEFAULT_PI_TICK_FALLBACK): NumberSelector(
             NumberSelectorConfig(min=60, max=3600, step=60, mode=NumberSelectorMode.BOX)
         ),
         vol.Optional(CONF_PI_DEADBAND, default=DEFAULT_PI_DEADBAND): NumberSelector(
@@ -473,7 +473,7 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Tasmota IRHVAC."""
 
     VERSION = 1
-    MINOR_VERSION = 3  # v1.3: thermal effect sign convention
+    MINOR_VERSION = 12  # v1.12: PI re-tune, tick_fallback rename (supersedes legacy v1.11)
 
     @classmethod
     @callback
@@ -775,7 +775,7 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         NumberSelectorConfig(min=1, max=20, step=1, mode=NumberSelectorMode.BOX)
                     ),
                     vol.Optional(
-                        CONF_PI_MIN_INTERVAL, default=DEFAULT_PI_MIN_INTERVAL
+                        CONF_PI_TICK_FALLBACK, default=DEFAULT_PI_TICK_FALLBACK
                     ): NumberSelector(
                         NumberSelectorConfig(min=60, max=3600, step=60, mode=NumberSelectorMode.BOX)
                     ),

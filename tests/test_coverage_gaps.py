@@ -3037,7 +3037,8 @@ class TestMigrationV1Integration:
         assert result is True
 
         # Migration should have updated to current MINOR_VERSION
-        assert entry.minor_version == 3
+        from custom_components.tasmota_irhvac.__init__ import MINOR_VERSION
+        assert entry.minor_version == MINOR_VERSION
 
         # Temps should be converted from °C to °F
         assert entry.data["min_temp"] == pytest.approx(60.8, abs=0.1)

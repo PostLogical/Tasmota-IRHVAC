@@ -755,14 +755,14 @@ class TestEventDrivenTicking:
         pi_entity._pi._hp_setpoint = 22.0
 
         # Simulate a tick at normal interval (dt_factor = 1.0)
-        pi_entity._pi._pi_last_tick_time = _time.monotonic() - pi_entity._pi._pi_min_interval
+        pi_entity._pi._pi_last_tick_time = _time.monotonic() - pi_entity._pi._pi_tick_fallback
         await pi_entity._pi._pi_tick()
         integral_normal = pi_entity._pi._pi_integral
 
         # Reset and simulate a tick at half interval (dt_factor = 0.5)
         pi_entity._pi._pi_integral = 0.0
         pi_entity._pi._pi_last_error = 0.0
-        pi_entity._pi._pi_last_tick_time = _time.monotonic() - (pi_entity._pi._pi_min_interval / 2)
+        pi_entity._pi._pi_last_tick_time = _time.monotonic() - (pi_entity._pi._pi_tick_fallback / 2)
         await pi_entity._pi._pi_tick()
         integral_half = pi_entity._pi._pi_integral
 

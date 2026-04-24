@@ -69,7 +69,7 @@ from ..const import (
     CONF_PI_KD_FILTER_N,
     CONF_PI_KI,
     CONF_PI_KP,
-    CONF_PI_MIN_INTERVAL,
+    CONF_PI_TICK_FALLBACK,
     CONF_PI_MODEL_INPUTS,
     CONF_PI_RESPONSE_LAG,
     CONF_PI_SETPOINT_HOLD,
@@ -91,7 +91,7 @@ from ..const import (
     DEFAULT_PI_KD_FILTER_N,
     DEFAULT_PI_KI,
     DEFAULT_PI_KP,
-    DEFAULT_PI_MIN_INTERVAL,
+    DEFAULT_PI_TICK_FALLBACK,
     DEFAULT_PI_RESPONSE_LAG,
     DEFAULT_PI_SETPOINT_HOLD,
     DEFAULT_PI_SETPOINT_WEIGHT,
@@ -190,7 +190,7 @@ class PIController:
         self._SETPOINT_HOLD_SECONDS: float = float(
             config.get(CONF_PI_SETPOINT_HOLD, DEFAULT_PI_SETPOINT_HOLD)
         )
-        self._pi_min_interval: float = config.get(CONF_PI_MIN_INTERVAL, DEFAULT_PI_MIN_INTERVAL)
+        self._pi_tick_fallback: float = config.get(CONF_PI_TICK_FALLBACK, DEFAULT_PI_TICK_FALLBACK)
 
         # Plant identification + IMC gain scheduling
         self._plant_id = PlantIdentifier(
@@ -2021,7 +2021,7 @@ class PIController:
                 "ki": self._pi_ki,
                 "deadband": self._pi_deadband,
                 "setpoint_weight": self._pi_setpoint_weight,
-                "min_interval": self._pi_min_interval,
+                "tick_fallback": self._pi_tick_fallback,
                 "outdoor_temp_sensor": self._inputs.outdoor_temp_sensor,
                 "model_inputs": self._model_inputs,
             },
@@ -3430,7 +3430,7 @@ class PIController:
             return await self._pi_tick()
 
         elapsed = time.monotonic() - self._pi_last_tick_time
-        min_cooldown = max(60.0, self._pi_min_interval / 3.0)
+        min_cooldown = 60.0  # seconds between sensor-driven ticks
         if elapsed >= min_cooldown:
             return await self._pi_tick()
         return False
@@ -3486,7 +3486,7 @@ class PIController:
                 self._pi_timer_unsub()
             if self._pi_timer_callback:
                 self._pi_timer_unsub = async_call_later(
-                    self._hass, self._pi_min_interval, self._pi_timer_callback)
+                    self._hass, self._pi_tick_fallback, self._pi_timer_callback)
             return result
         finally:
             self._pi_tick_running = False
@@ -3516,9 +3516,9 @@ class PIController:
 
         now_mono = time.monotonic()
         if self._pi_last_tick_time > 0:
-            dt_seconds = min(now_mono - self._pi_last_tick_time, self._pi_min_interval * 2)
+            dt_seconds = min(now_mono - self._pi_last_tick_time, self._pi_tick_fallback * 2)
         else:
-            dt_seconds = float(self._pi_min_interval)
+            dt_seconds = float(self._pi_tick_fallback)
         self._pi_last_tick_time = now_mono
 
         # Convert to °C
@@ -3617,11 +3617,11 @@ class PIController:
         # Time since last tick (for time-normalized integral)
         now_mono = time.monotonic()
         if self._pi_last_tick_time > 0:
-            dt_seconds = min(now_mono - self._pi_last_tick_time, self._pi_min_interval * 2)
+            dt_seconds = min(now_mono - self._pi_last_tick_time, self._pi_tick_fallback * 2)
         else:
-            dt_seconds = float(self._pi_min_interval)
+            dt_seconds = float(self._pi_tick_fallback)
         self._pi_last_tick_time = now_mono
-        dt_factor = dt_seconds / float(self._pi_min_interval)
+        dt_factor = dt_seconds / float(self._pi_tick_fallback)
 
         # Convert both to °C for PI math
         raw_c = TemperatureConverter.convert(

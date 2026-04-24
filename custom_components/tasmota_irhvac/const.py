@@ -184,7 +184,7 @@ CONF_PI_KP = "pi_kp"
 CONF_PI_KI = "pi_ki"
 CONF_PI_KD = "pi_kd"
 CONF_PI_KD_FILTER_N = "pi_kd_filter_n"
-CONF_PI_MIN_INTERVAL = "pi_min_interval"
+CONF_PI_TICK_FALLBACK = "pi_tick_fallback"
 CONF_PI_DEADBAND = "pi_deadband"
 CONF_OUTDOOR_TEMP_SENSOR = "outdoor_temp_sensor"
 CONF_PI_OUTDOOR_SEED_HEAT = "pi_outdoor_seed_heat"
@@ -228,7 +228,7 @@ DEFAULT_PI_KP = 1.0
 DEFAULT_PI_KI = 0.20             # Optimized via 2R2C parameter sweep (Apr 2026)
 DEFAULT_PI_KD = 0.0              # Literature + 72h replay: D contraindicated for quantized HVAC
 DEFAULT_PI_KD_FILTER_N = 8       # Derivative filter coefficient: Tf = Td/N. Higher N = less filtering.
-DEFAULT_PI_MIN_INTERVAL = 900
+DEFAULT_PI_TICK_FALLBACK = 900
 DEFAULT_PI_DEADBAND = 0.5
 DEFAULT_PI_OUTDOOR_SEED_HEAT = 0.25
 DEFAULT_PI_OUTDOOR_SEED_COOL = 0.25

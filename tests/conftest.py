@@ -55,7 +55,7 @@ def make_config(overrides=None):
         "pi_enabled": False,
         "pi_kp": 1.5,
         "pi_ki": 0.15,
-        "pi_min_interval": 900,
+        "pi_tick_fallback": 900,
         "pi_deadband": 0.5,
         "outdoor_temp_sensor": "",
         "pi_outdoor_seed_heat": 0.25,
