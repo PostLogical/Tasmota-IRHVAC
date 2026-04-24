@@ -71,7 +71,7 @@ from .const import (
 )
 
 
-def _parse_ir_protocol_unit(config: dict) -> str:
+def _parse_ir_protocol_unit(config: dict[str, Any]) -> str:
     """Parse IR protocol unit from config, handling legacy celsius_mode format."""
     # New key takes priority
     val: str | None = config.get(CONF_IR_PROTOCOL_UNIT)

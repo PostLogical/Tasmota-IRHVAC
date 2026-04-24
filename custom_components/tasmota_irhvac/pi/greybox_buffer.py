@@ -112,7 +112,7 @@ class GreyboxBuffer(DiversityAwareBuffer):
         return [outdoor_delta, hp_offset, solar, obs.room_rate]
 
     @classmethod
-    def from_list(
+    def from_list(  # type: ignore[override]
         cls,
         data: list[dict[str, Any]],
         max_size: int = DEFAULT_GREYBOX_BUFFER_SIZE,

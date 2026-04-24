@@ -51,7 +51,7 @@ async def async_get_config_entry_diagnostics(
     return data
 
 
-def _redact(data: dict) -> dict:
+def _redact(data: dict[str, Any]) -> dict[str, Any]:
     """Redact sensitive keys from a dict."""
     return {
         k: "**REDACTED**" if k in REDACT_KEYS else v

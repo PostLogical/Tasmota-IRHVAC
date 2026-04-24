@@ -1188,7 +1188,7 @@ class ModelInputSubentryFlow(ConfigSubentryFlow):
     """Handle adding/editing a model input subentry."""
 
     async def async_step_user(
-        self, user_input: dict | None = None
+        self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
         """Add a new model input."""
         if user_input is not None:
@@ -1260,7 +1260,7 @@ class ModelInputSubentryFlow(ConfigSubentryFlow):
         )
 
     async def async_step_reconfigure(
-        self, user_input: dict | None = None
+        self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
         """Edit an existing model input."""
         subentry = self._get_reconfigure_subentry()
@@ -1330,7 +1330,7 @@ class SupplementalSourceSubentryFlow(ConfigSubentryFlow):
     """Handle adding/editing a supplemental heat source subentry."""
 
     async def async_step_user(
-        self, user_input: dict | None = None
+        self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
         """Add a new supplemental source."""
         if user_input is not None:
@@ -1387,7 +1387,7 @@ class SupplementalSourceSubentryFlow(ConfigSubentryFlow):
         )
 
     async def async_step_reconfigure(
-        self, user_input: dict | None = None
+        self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
         """Edit an existing supplemental source."""
         subentry = self._get_reconfigure_subentry()

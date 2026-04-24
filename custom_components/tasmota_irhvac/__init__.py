@@ -184,6 +184,20 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 migrated_inputs.append(m)
             new_options["pi_model_inputs"] = migrated_inputs
 
+        # Re-tune PI gains and seeds for new outdoor_delta observation equation.
+        # FF now handles setpoint steps → lower b; faster integral → higher Ki.
+        # Seeds rescaled: old formula max(0,15-outdoor) → new outdoor-desired.
+        # Only migrate values that match the old defaults.
+        if new_options.get("pi_ki", 0.15) == 0.15:
+            new_options["pi_ki"] = 0.20
+        if new_options.get("pi_setpoint_weight", 0.3) == 0.3:
+            new_options["pi_setpoint_weight"] = 0.15
+        # Reset all seeds to 0.25: old values were calibrated to the previous
+        # observation equation (max(0, 15-outdoor)) and don't transfer to the
+        # new formula (outdoor - desired).  RLS will re-learn from here.
+        new_options["pi_outdoor_seed_heat"] = 0.25
+        new_options["pi_outdoor_seed_cool"] = 0.25
+
         hass.config_entries.async_update_entry(
             entry, options=new_options,
             minor_version=MINOR_VERSION, version=1,
@@ -211,7 +225,7 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         entry, subentry, data=sub_data,
                     )
 
-        _LOGGER.info("Migrated to positive-warms-room sign convention (v1.3)")
+        _LOGGER.info("Migrated to positive-warms-room sign convention, PI re-tuned (v1.3)")
 
     return True
 

@@ -583,7 +583,7 @@ def run_closed_loop(data: AlignedData,
     # Monkey-patch _read_model_input_values to no-op — the adapter
     # sets values before the tick, but the PI tick would overwrite them
     # by reading from (non-existent) HA entities.
-    adapter._pi._read_model_input_values = lambda: None
+    adapter._pi._read_model_input_values = lambda *_args, **_kw: None
     print(f"Initial integral: {data.initial_integral:.3f}, "
           f"HP setpoint: {data.hp_setpoint_c[0]:.0f}°C")
 
@@ -767,6 +767,74 @@ ZONE_GAINS = {
 }
 
 
+def _run_param_sweep(data: AlignedData, zone: str) -> None:
+    """Sweep PI parameters in closed-loop against calibrated 2R2C room model.
+
+    Compares current defaults vs sweep candidates from tune_pid.py results.
+    Uses production disturbances so different params produce different trajectories.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from tests.hvac_bench.house_profiles import PROFILES_2R2C
+    from tests.benchmark_metrics import compute_all_metrics
+
+    if zone not in PROFILES_2R2C:
+        print(f"No calibrated 2R2C profile for zone '{zone}'.")
+        print(f"Available: {list(PROFILES_2R2C.keys())}")
+        return
+
+    profile = PROFILES_2R2C[zone]
+    gains = ZONE_GAINS.get(zone, {"solar_gain": 0.0, "stove_gain": 0.0})
+    mi_configs = ZONE_MODEL_INPUTS.get(zone, [])
+
+    PARAM_SETS = [
+        {"name": "Current (Ki=0.15 b=0.30)",
+         "pi_kp": 1.0, "pi_ki": 0.15, "pi_kd": 0.0, "pi_setpoint_weight": 0.30},
+        {"name": "Sweep A (Ki=0.20 b=0.15)",
+         "pi_kp": 1.0, "pi_ki": 0.20, "pi_kd": 0.0, "pi_setpoint_weight": 0.15},
+        {"name": "Sweep B (Ki=0.24 b=0.20)",
+         "pi_kp": 0.8, "pi_ki": 0.24, "pi_kd": 0.0, "pi_setpoint_weight": 0.20},
+        {"name": "Sweep C (Ki=0.22 b=0.20)",
+         "pi_kp": 1.0, "pi_ki": 0.22, "pi_kd": 0.0, "pi_setpoint_weight": 0.20},
+        {"name": "Sweep D (Ki=0.20 b=0.15 Kd=1)",
+         "pi_kp": 1.0, "pi_ki": 0.20, "pi_kd": 1.0, "pi_setpoint_weight": 0.15},
+    ]
+
+    duration_h = data.n_ticks * data.dt_seconds / 3600
+
+    print(f"\n{'='*100}")
+    print(f"PI PARAM SWEEP — {zone} ({duration_h:.0f}h, 2R2C: τ_env={profile.tau_env} "
+          f"hp={profile.hp_gain} τ_c={profile.tau_couple} mr={profile.mass_ratio})")
+    print(f"{'='*100}")
+    print(f"{'Config':<35} {'ITAE':>8} {'Cold':>6} {'MaxRun':>7} "
+          f"{'Revers':>7} {'SPchg':>6} {'IntRMS':>8} "
+          f"{'RMSE':>7} {'SP match':>9}")
+    print("-" * 100)
+
+    for params in PARAM_SETS:
+        name = params.pop("name")
+        pi_overrides = dict(params)
+        pi_overrides["pi_kd_filter_n"] = 8
+
+        result = run_closed_loop(
+            data,
+            solar_gain=gains["solar_gain"],
+            stove_gain=gains["stove_gain"],
+            hp_lag_minutes=5.0,
+            model_input_configs=mi_configs,
+            pi_overrides=pi_overrides,
+            profile_2r2c=profile,
+        )
+
+        history = result["history"]
+        m = compute_all_metrics(history)
+
+        print(f"{name:<35} {m['itae']:>8.1f} {m['cold_ticks']:>6} {m['cold_max_run']:>7} "
+              f"{m['reversals']:>7} {m['setpoint_changes']:>6} {m['integral_rms']:>8.1f} "
+              f"{result['room_rmse_c']:>7.4f} {result['setpoint_match_pct']:>8.1f}%")
+
+    print("-" * 100)
+
+
 def _run_kd_sweep(data: AlignedData, zone: str) -> None:
     """Sweep Kd values in closed-loop against calibrated 2R2C room model.
 
@@ -853,6 +921,8 @@ def main():
                         help="Export comparison CSV")
     parser.add_argument("--kd-sweep", action="store_true",
                         help="Run Kd derivative gain sweep (closed-loop, 2R2C)")
+    parser.add_argument("--param-sweep", action="store_true",
+                        help="Run PI param sweep: Ki/b/Kd candidates (closed-loop, 2R2C)")
     args = parser.parse_args()
 
     print(f"Loading data from {args.bundle} zone={args.zone}...")
@@ -860,6 +930,10 @@ def main():
     print(f"Aligned {data.n_ticks} ticks over "
           f"{data.n_ticks * data.dt_seconds / 3600:.1f} hours")
     print(f"Initial RLS coefficients: {data.initial_rls_coefficients}")
+
+    if args.param_sweep:
+        _run_param_sweep(data, args.zone)
+        return
 
     if args.kd_sweep:
         _run_kd_sweep(data, args.zone)

@@ -225,7 +225,7 @@ DEFAULT_SUPPLEMENTAL_SEED = 3.0                # Typical pellet stove: warms roo
 # PID controller defaults
 DEFAULT_PI_ENABLED = False
 DEFAULT_PI_KP = 1.0
-DEFAULT_PI_KI = 0.15             # Optimized via parameter sweep across 73 scenarios
+DEFAULT_PI_KI = 0.20             # Optimized via 2R2C parameter sweep (Apr 2026)
 DEFAULT_PI_KD = 0.0              # Literature + 72h replay: D contraindicated for quantized HVAC
 DEFAULT_PI_KD_FILTER_N = 8       # Derivative filter coefficient: Tf = Td/N. Higher N = less filtering.
 DEFAULT_PI_MIN_INTERVAL = 900
@@ -234,7 +234,7 @@ DEFAULT_PI_OUTDOOR_SEED_HEAT = 0.25
 DEFAULT_PI_OUTDOOR_SEED_COOL = 0.25
 DEFAULT_PI_OUTDOOR_SEED_CLAMP_MIN = 0.0
 DEFAULT_PI_OUTDOOR_SEED_CLAMP_MAX = 2.0
-DEFAULT_PI_SETPOINT_WEIGHT = 0.3  # 2-DOF: p_term = kp * b * error. Lower b reduces overshoot.
+DEFAULT_PI_SETPOINT_WEIGHT = 0.15 # 2-DOF: p_term = kp * b * error. Lower b since FF handles setpoint steps.
 DEFAULT_PI_TAU_ESTIMATE = 0.0      # Room thermal τ (minutes). 0 = disabled (use manual Kp/Ki).
 DEFAULT_PI_RESPONSE_LAG = 15.0     # HP response lag L (minutes). Compressor→room first-order lag.
 DEFAULT_PI_IMC_LAMBDA = 0.0        # IMC closed-loop speed λ (minutes). 0 = auto (τ/2).

@@ -1850,7 +1850,7 @@ class PIController:
             return {
                 "state": "Learning",
                 "buffer_total": len(self._greybox_buffer),
-                "buffer_max": self._greybox_buffer.max_size,
+                "buffer_max": self._greybox_buffer._max_size,
             }
 
         result = self._last_greybox_result

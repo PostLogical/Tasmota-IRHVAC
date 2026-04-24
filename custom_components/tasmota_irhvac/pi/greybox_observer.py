@@ -52,7 +52,7 @@ _LOGGER = logging.getLogger(__name__)
 
 # Try to import scipy; gracefully degrade if unavailable.
 try:
-    from scipy.optimize import least_squares as _least_squares
+    from scipy.optimize import least_squares as _least_squares  # type: ignore[import-untyped]
     SCIPY_AVAILABLE = True
 except ImportError:
     SCIPY_AVAILABLE = False

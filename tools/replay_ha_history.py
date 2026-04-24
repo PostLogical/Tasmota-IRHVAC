@@ -738,29 +738,25 @@ def _run_long_run(climate_ts, outdoor_ts, room_sensor_ts, zone,
 def _run_comparison(climate_ts, outdoor_ts, room_sensor_ts, zone):
     """Run parameter-sweep comparison (original mode)."""
     PARAM_SETS = [
-        # Baseline: flat gains (current production)
-        {"name": "Flat Kp=1.5 (baseline)",
-         "pi_ki": 0.15, "pi_kd": 0.0, "pi_setpoint_weight": 0.3},
-        # IMC sweep: τ seeds with default λ=L/3
-        {"name": "IMC τ=30 (Kp=1.50)",
-         "pi_tau_estimate": 30.0, "pi_response_lag": 15.0,
-         "pi_kd": 0.0, "pi_setpoint_weight": 0.3},
-        {"name": "IMC τ=45 (Kp=2.25)",
-         "pi_tau_estimate": 45.0, "pi_response_lag": 15.0,
-         "pi_kd": 0.0, "pi_setpoint_weight": 0.3},
+        # Current production defaults (const.py)
+        {"name": "Current (Kp=1.0 Ki=0.15 b=0.30)",
+         "pi_kp": 1.0, "pi_ki": 0.15, "pi_kd": 0.0, "pi_setpoint_weight": 0.3},
+        # Sweep winner: conservative (Kp=1.0)
+        {"name": "Sweep A (Kp=1.0 Ki=0.20 b=0.15)",
+         "pi_kp": 1.0, "pi_ki": 0.20, "pi_kd": 0.0, "pi_setpoint_weight": 0.15},
+        # Sweep winner: fine grid best
+        {"name": "Sweep B (Kp=0.8 Ki=0.24 b=0.20)",
+         "pi_kp": 0.8, "pi_ki": 0.24, "pi_kd": 0.0, "pi_setpoint_weight": 0.20},
+        # Middle ground
+        {"name": "Sweep C (Kp=1.0 Ki=0.22 b=0.20)",
+         "pi_kp": 1.0, "pi_ki": 0.22, "pi_kd": 0.0, "pi_setpoint_weight": 0.20},
+        # Test Kd contribution
+        {"name": "Sweep D (Kp=1.0 Ki=0.20 b=0.15 Kd=1)",
+         "pi_kp": 1.0, "pi_ki": 0.20, "pi_kd": 1.0, "pi_setpoint_weight": 0.15},
+        # IMC baseline for reference
         {"name": "IMC τ=60 (Kp=3.00)",
          "pi_tau_estimate": 60.0, "pi_response_lag": 15.0,
          "pi_kd": 0.0, "pi_setpoint_weight": 0.3},
-        {"name": "IMC τ=90 (Kp=4.50)",
-         "pi_tau_estimate": 90.0, "pi_response_lag": 15.0,
-         "pi_kd": 0.0, "pi_setpoint_weight": 0.3},
-        {"name": "IMC τ=120 (Kp=6.00)",
-         "pi_tau_estimate": 120.0, "pi_response_lag": 15.0,
-         "pi_kd": 0.0, "pi_setpoint_weight": 0.3},
-        # Best IMC + derivative
-        {"name": "IMC τ=60 + Kd=0.5",
-         "pi_tau_estimate": 60.0, "pi_response_lag": 15.0,
-         "pi_kd": 0.5, "pi_setpoint_weight": 0.3},
     ]
 
     # Run replays
@@ -794,9 +790,10 @@ def _run_comparison(climate_ts, outdoor_ts, room_sensor_ts, zone):
 
         # IMC state: learned τ and final gains
         imc_info = ""
-        if pi._tau_estimator.enabled:
-            imc_info = (f"  → τ learned: {pi._tau_estimator.tau:.0f} min "
-                        f"({pi._tau_estimator.observations} obs), "
+        plant_id = getattr(pi, "_plant_id", None)
+        if plant_id is not None and plant_id.enabled:
+            imc_info = (f"  → τ learned: {plant_id.tau:.0f} min "
+                        f"({plant_id.observations} obs), "
                         f"Kp={pi._pi_kp:.2f} Ki={pi._pi_ki:.3f}")
 
         print(f"{name:<42} {m['itae']:>8.1f} {m['cold_ticks']:>6} {m['cold_max_run']:>7} "
@@ -806,9 +803,9 @@ def _run_comparison(climate_ts, outdoor_ts, room_sensor_ts, zone):
             print(imc_info)
 
         result = {"name": name, "metrics": m, "history_len": len(history)}
-        if pi._tau_estimator.enabled:
-            result["tau_learned"] = round(pi._tau_estimator.tau, 1)
-            result["tau_observations"] = pi._tau_estimator.observations
+        if plant_id is not None and plant_id.enabled:
+            result["tau_learned"] = round(plant_id.tau, 1)
+            result["tau_observations"] = plant_id.observations
             result["final_kp"] = round(pi._pi_kp, 3)
             result["final_ki"] = round(pi._pi_ki, 4)
         all_results.append(result)

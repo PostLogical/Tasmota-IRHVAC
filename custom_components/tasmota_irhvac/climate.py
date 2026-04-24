@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from homeassistant.core import Event, EventStateChangedData, State
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
-    from homeassistant.helpers.event import CALLBACK_TYPE
+    from homeassistant.helpers.event import CALLBACK_TYPE  # type: ignore[attr-defined]
     from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
     from .config_model import IrhvacConfig
@@ -72,7 +72,7 @@ from homeassistant.const import (
     STATE_UNKNOWN,
     UnitOfTemperature,
 )
-from homeassistant.core import HomeAssistant, cached_property, callback
+from homeassistant.core import HomeAssistant, cached_property, callback  # type: ignore[attr-defined]
 from homeassistant.helpers import event as ha_event
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.device_registry import DeviceInfo

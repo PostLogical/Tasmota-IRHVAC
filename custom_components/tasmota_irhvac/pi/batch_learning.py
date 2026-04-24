@@ -618,7 +618,8 @@ class DiversityAwareBuffer:
             for i, obs in enumerate(self._buffer):
                 X[i] = self._get_feature_vector(obs)
             info_inv = np.array(self._info_inv, dtype=np.float64)
-            return np.einsum('ij,jk,ik->i', X, info_inv, X).tolist()
+            result: list[float] = np.einsum('ij,jk,ik->i', X, info_inv, X).tolist()
+            return result
         return [self._compute_leverage(self._get_feature_vector(o)) for o in self._buffer]
 
     def get_min_leverage(self) -> float:
@@ -728,7 +729,8 @@ class DiversityAwareBuffer:
         """
         if _NUMPY_AVAILABLE:
             try:
-                return np.linalg.eigvalsh(np.array(A)).tolist()
+                eigs: list[float] = np.linalg.eigvalsh(np.array(A)).tolist()
+                return eigs
             except np.linalg.LinAlgError:
                 return None
 
