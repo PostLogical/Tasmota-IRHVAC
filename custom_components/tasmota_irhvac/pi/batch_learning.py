@@ -777,7 +777,7 @@ class DiversityAwareBuffer:
                 return None
             v = [wi / norm for wi in w]
 
-        if inv_lam_min < 1e-15:
+        if inv_lam_min < 1e-15:  # pragma: no cover — IEEE 754 underflow guard
             return None
         lam_min = 1.0 / inv_lam_min
         return [lam_max, lam_min]
@@ -981,7 +981,7 @@ def _solve_fwl(
 
         wrzry = sum(w_sub[i] * r_z[i] * y_sub[i] for i in range(m_sub))
         wrzrz = sum(w_sub[i] * r_z[i] * r_z[i] for i in range(m_sub))
-        if wrzrz < 1e-15:
+        if wrzrz < 1e-15:  # pragma: no cover — IEEE 754 cancellation guard
             held.add(coeff_idx)
             continue
 
