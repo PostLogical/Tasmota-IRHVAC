@@ -5306,3 +5306,57 @@ class TestDriftDetection:
             assert len(signs) <= 10, (
                 f"History should be capped at 10, got {len(signs)}"
             )
+
+
+# ── Subsystem Toggle Tests ───────────────────────────────────────────
+
+
+class TestSubsystemToggles:
+    """Tests for runtime subsystem gating via config toggles."""
+
+    def test_toggles_default_true(self):
+        """All subsystem toggles default to True."""
+        entity = FakePIEntity(make_pi_config())
+        pi = entity._pi
+        assert pi._pi_ff_enabled is True
+        assert pi._pi_rls_online_enabled is True
+        assert pi._pi_batch_wls_enabled is True
+        assert pi._pi_plant_id_enabled is True
+
+    def test_toggles_read_from_config(self):
+        """Toggles reflect explicit config overrides."""
+        config = make_pi_config({
+            "pi_ff_enabled": False,
+            "pi_rls_online_enabled": False,
+            "pi_batch_wls_enabled": False,
+            "pi_plant_id_enabled": False,
+        })
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        assert pi._pi_ff_enabled is False
+        assert pi._pi_rls_online_enabled is False
+        assert pi._pi_batch_wls_enabled is False
+        assert pi._pi_plant_id_enabled is False
+
+    def test_diagnostics_expose_toggles(self):
+        """Full diagnostics include subsystem toggle states."""
+        config = make_pi_config({"pi_ff_enabled": False, "pi_batch_wls_enabled": False})
+        entity = FakePIEntity(config)
+        diag = entity._pi.get_full_diagnostics()
+        assert diag["config"]["ff_enabled"] is False
+        assert diag["config"]["rls_online_enabled"] is True
+        assert diag["config"]["batch_wls_enabled"] is False
+        assert diag["config"]["plant_id_enabled"] is True
+
+    def test_extra_state_attributes_expose_ff_enabled(self):
+        """Entity state attributes include ff_enabled."""
+        config = make_pi_config({"pi_ff_enabled": False})
+        entity = FakePIEntity(config)
+        attrs = entity._pi.get_extra_state_attributes()
+        assert attrs["ff_enabled"] is False
+
+    def test_extra_state_attributes_ff_enabled_default(self):
+        """ff_enabled defaults to True in entity state attributes."""
+        entity = FakePIEntity(make_pi_config())
+        attrs = entity._pi.get_extra_state_attributes()
+        assert attrs["ff_enabled"] is True

@@ -80,9 +80,15 @@ from ..const import (
     CONF_PI_AUTO_PERTURB_ENABLED,
     CONF_PI_AUTO_PERTURB_WINDOW_START,
     CONF_PI_AUTO_PERTURB_WINDOW_END,
+    CONF_PI_BATCH_WLS_ENABLED,
+    CONF_PI_FF_ENABLED,
+    CONF_PI_PLANT_ID_ENABLED,
+    CONF_PI_RLS_ONLINE_ENABLED,
     CONF_PI_TAU_ESTIMATE,
+    DEFAULT_PI_BATCH_WLS_ENABLED,
     DEFAULT_PI_DEADBAND,
     DEFAULT_PI_ENABLED,
+    DEFAULT_PI_FF_ENABLED,
     DEFAULT_PI_INTERCEPT_SEED_COOL,
     DEFAULT_PI_INTERCEPT_SEED_HEAT,
     DEFAULT_PI_OUTDOOR_SEED_COOL,
@@ -95,6 +101,8 @@ from ..const import (
     DEFAULT_PI_KD_FILTER_N,
     DEFAULT_PI_KI,
     DEFAULT_PI_KP,
+    DEFAULT_PI_PLANT_ID_ENABLED,
+    DEFAULT_PI_RLS_ONLINE_ENABLED,
     DEFAULT_PI_TICK_FALLBACK,
     DEFAULT_PI_RESPONSE_LAG,
     DEFAULT_PI_SETPOINT_HOLD,
@@ -191,6 +199,13 @@ class PIController:
         )  # Low-pass filter τ on room temperature (seconds). 0 = disabled.
         self._smith_enabled: bool = config.get(CONF_PI_SMITH_ENABLED, DEFAULT_PI_SMITH_ENABLED)
         self._greybox_blending_enabled: bool = config.get("pi_greybox_blending", False)
+        self._pi_ff_enabled: bool = config.get(CONF_PI_FF_ENABLED, DEFAULT_PI_FF_ENABLED)
+        self._pi_rls_online_enabled: bool = config.get(
+            CONF_PI_RLS_ONLINE_ENABLED, DEFAULT_PI_RLS_ONLINE_ENABLED)
+        self._pi_batch_wls_enabled: bool = config.get(
+            CONF_PI_BATCH_WLS_ENABLED, DEFAULT_PI_BATCH_WLS_ENABLED)
+        self._pi_plant_id_enabled: bool = config.get(
+            CONF_PI_PLANT_ID_ENABLED, DEFAULT_PI_PLANT_ID_ENABLED)
         self._SETPOINT_HOLD_SECONDS: float = float(
             config.get(CONF_PI_SETPOINT_HOLD, DEFAULT_PI_SETPOINT_HOLD)
         )
@@ -1487,6 +1502,7 @@ class PIController:
             "rls_heat_coefficients": rls_heat_coeffs,
             "rls_cool_coefficients": rls_cool_coeffs,
             "rls_observation_count": self._rls_heat.observation_count,
+            "ff_enabled": self._pi_ff_enabled,
             "ff_learning_suppressed": self._disturbance_suppress_active,
             "integral_convergence": round(self._metrics.integral_convergence, 2),
             "room_temp_rate": round(self._room_temp_rate, 4),  # °C/min
@@ -2034,6 +2050,10 @@ class PIController:
                 "tick_fallback": self._pi_tick_fallback,
                 "outdoor_temp_sensor": self._inputs.outdoor_temp_sensor,
                 "model_inputs": self._model_inputs,
+                "ff_enabled": self._pi_ff_enabled,
+                "rls_online_enabled": self._pi_rls_online_enabled,
+                "batch_wls_enabled": self._pi_batch_wls_enabled,
+                "plant_id_enabled": self._pi_plant_id_enabled,
             },
             "rls_model": {
                 "heat_coefficients": {
