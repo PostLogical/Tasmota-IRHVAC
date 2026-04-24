@@ -113,6 +113,12 @@ from .const import (
     CONF_PI_AUTO_PERTURB_ENABLED,
     CONF_PI_AUTO_PERTURB_WINDOW_START,
     CONF_PI_AUTO_PERTURB_WINDOW_END,
+    CONF_PI_BATCH_WLS_ENABLED,
+    CONF_PI_FF_ENABLED,
+    CONF_PI_INTERCEPT_SEED_COOL,
+    CONF_PI_INTERCEPT_SEED_HEAT,
+    CONF_PI_PLANT_ID_ENABLED,
+    CONF_PI_RLS_ONLINE_ENABLED,
     CONF_PI_TAU_ESTIMATE,
     CONF_PI_MODEL_INPUTS,
     CONF_SUPPLEMENTAL_AUTO_MODEL_INPUT,
@@ -144,8 +150,14 @@ from .const import (
     DEFAULT_MAX_TEMP,
     DEFAULT_PI_DEADBAND,
     DEFAULT_PI_ENABLED,
+    DEFAULT_PI_BATCH_WLS_ENABLED,
+    DEFAULT_PI_FF_ENABLED,
+    DEFAULT_PI_INTERCEPT_SEED_COOL,
+    DEFAULT_PI_INTERCEPT_SEED_HEAT,
     DEFAULT_PI_OUTDOOR_SEED_COOL,
     DEFAULT_PI_OUTDOOR_SEED_HEAT,
+    DEFAULT_PI_PLANT_ID_ENABLED,
+    DEFAULT_PI_RLS_ONLINE_ENABLED,
     DEFAULT_PI_OUTDOOR_SEED_CLAMP_MAX,
     DEFAULT_PI_OUTDOOR_SEED_CLAMP_MIN,
     DEFAULT_PI_KD,
@@ -399,7 +411,7 @@ OPTIONS_ADVANCED_SCHEMA = vol.Schema(
     }
 )
 
-OPTIONS_PI_CONTROLLER_SCHEMA = vol.Schema(
+OPTIONS_PI_GAINS_SCHEMA = vol.Schema(
     {
         vol.Optional(CONF_PI_ENABLED, default=DEFAULT_PI_ENABLED): BooleanSelector(),
         vol.Optional(CONF_PI_KP, default=DEFAULT_PI_KP): NumberSelector(
@@ -414,12 +426,14 @@ OPTIONS_PI_CONTROLLER_SCHEMA = vol.Schema(
         vol.Optional(CONF_PI_KD_FILTER_N, default=DEFAULT_PI_KD_FILTER_N): NumberSelector(
             NumberSelectorConfig(min=1, max=20, step=1, mode=NumberSelectorMode.BOX)
         ),
-        vol.Optional(CONF_PI_TICK_FALLBACK, default=DEFAULT_PI_TICK_FALLBACK): NumberSelector(
-            NumberSelectorConfig(min=60, max=3600, step=60, mode=NumberSelectorMode.BOX)
-        ),
         vol.Optional(CONF_PI_DEADBAND, default=DEFAULT_PI_DEADBAND): NumberSelector(
             NumberSelectorConfig(min=0, max=10, step=0.1, unit_of_measurement="°C", mode=NumberSelectorMode.BOX)
         ),
+    }
+)
+
+OPTIONS_PI_SEEDS_SCHEMA = vol.Schema(
+    {
         vol.Optional(CONF_OUTDOOR_TEMP_SENSOR): EntitySelector(
             EntitySelectorConfig(domain="sensor")
         ),
@@ -429,14 +443,25 @@ OPTIONS_PI_CONTROLLER_SCHEMA = vol.Schema(
         vol.Optional(CONF_PI_OUTDOOR_SEED_COOL, default=DEFAULT_PI_OUTDOOR_SEED_COOL): NumberSelector(
             NumberSelectorConfig(min=0, max=5, step=0.01, mode=NumberSelectorMode.BOX)
         ),
+        vol.Optional(CONF_PI_INTERCEPT_SEED_HEAT, default=DEFAULT_PI_INTERCEPT_SEED_HEAT): NumberSelector(
+            NumberSelectorConfig(min=-5, max=5, step=0.1, mode=NumberSelectorMode.BOX)
+        ),
+        vol.Optional(CONF_PI_INTERCEPT_SEED_COOL, default=DEFAULT_PI_INTERCEPT_SEED_COOL): NumberSelector(
+            NumberSelectorConfig(min=-5, max=5, step=0.1, mode=NumberSelectorMode.BOX)
+        ),
         vol.Optional(CONF_PI_OUTDOOR_SEED_CLAMP_MIN, default=DEFAULT_PI_OUTDOOR_SEED_CLAMP_MIN): NumberSelector(
             NumberSelectorConfig(min=0, max=10, step=0.1, mode=NumberSelectorMode.BOX)
         ),
         vol.Optional(CONF_PI_OUTDOOR_SEED_CLAMP_MAX, default=DEFAULT_PI_OUTDOOR_SEED_CLAMP_MAX): NumberSelector(
             NumberSelectorConfig(min=0, max=10, step=0.1, mode=NumberSelectorMode.BOX)
         ),
-        vol.Optional(CONF_PI_SETPOINT_WEIGHT, default=DEFAULT_PI_SETPOINT_WEIGHT): NumberSelector(
-            NumberSelectorConfig(min=0, max=1, step=0.05, mode=NumberSelectorMode.BOX)
+    }
+)
+
+OPTIONS_PI_TIMING_SCHEMA = vol.Schema(
+    {
+        vol.Optional(CONF_PI_TICK_FALLBACK, default=DEFAULT_PI_TICK_FALLBACK): NumberSelector(
+            NumberSelectorConfig(min=60, max=3600, step=60, mode=NumberSelectorMode.BOX)
         ),
         vol.Optional(CONF_PI_TAU_ESTIMATE, default=DEFAULT_PI_TAU_ESTIMATE): NumberSelector(
             NumberSelectorConfig(min=0, max=600, step=5, unit_of_measurement="min", mode=NumberSelectorMode.BOX)
@@ -450,10 +475,22 @@ OPTIONS_PI_CONTROLLER_SCHEMA = vol.Schema(
         vol.Optional(CONF_PI_SENSOR_FILTER_TAU, default=DEFAULT_PI_SENSOR_FILTER_TAU): NumberSelector(
             NumberSelectorConfig(min=0, max=600, step=10, unit_of_measurement="s", mode=NumberSelectorMode.BOX)
         ),
-        vol.Optional(CONF_PI_SMITH_ENABLED, default=DEFAULT_PI_SMITH_ENABLED): BooleanSelector(),
         vol.Optional(CONF_PI_SETPOINT_HOLD, default=DEFAULT_PI_SETPOINT_HOLD): NumberSelector(
             NumberSelectorConfig(min=0, max=3600, step=60, unit_of_measurement="s", mode=NumberSelectorMode.BOX)
         ),
+    }
+)
+
+OPTIONS_PI_ADVANCED_SCHEMA = vol.Schema(
+    {
+        vol.Optional(CONF_PI_FF_ENABLED, default=DEFAULT_PI_FF_ENABLED): BooleanSelector(),
+        vol.Optional(CONF_PI_RLS_ONLINE_ENABLED, default=DEFAULT_PI_RLS_ONLINE_ENABLED): BooleanSelector(),
+        vol.Optional(CONF_PI_BATCH_WLS_ENABLED, default=DEFAULT_PI_BATCH_WLS_ENABLED): BooleanSelector(),
+        vol.Optional(CONF_PI_PLANT_ID_ENABLED, default=DEFAULT_PI_PLANT_ID_ENABLED): BooleanSelector(),
+        vol.Optional(CONF_PI_SETPOINT_WEIGHT, default=DEFAULT_PI_SETPOINT_WEIGHT): NumberSelector(
+            NumberSelectorConfig(min=0, max=1, step=0.05, mode=NumberSelectorMode.BOX)
+        ),
+        vol.Optional(CONF_PI_SMITH_ENABLED, default=DEFAULT_PI_SMITH_ENABLED): BooleanSelector(),
         vol.Optional(CONF_PI_AUTO_PERTURB_ENABLED, default=False): BooleanSelector(),
         vol.Optional(CONF_PI_AUTO_PERTURB_WINDOW_START): NumberSelector(
             NumberSelectorConfig(min=0, max=23, step=1, mode=NumberSelectorMode.BOX)
@@ -655,7 +692,7 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             self._user_input.update(user_input)
             if user_input.get(CONF_PI_ENABLED):
-                return await self.async_step_pi_controller()
+                return await self.async_step_pi_gains()
             return await self._create_entry()
 
         schema = vol.Schema(
@@ -742,88 +779,55 @@ class TasmotaIrhvacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             })
         return self.async_show_form(step_id="advanced", data_schema=schema)
 
-    async def async_step_pi_controller(
+    async def async_step_pi_gains(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
-        """Step 4: PI Controller settings (shown when PI is enabled)."""
+        """PI setup step 1: PID gains & deadband."""
+        if user_input is not None:
+            self._user_input.update(user_input)
+            return await self.async_step_pi_seeds()
+
+        # Reuse options schema minus pi_enabled (already set in advanced step)
+        schema = vol.Schema(
+            {k: v for k, v in OPTIONS_PI_GAINS_SCHEMA.schema.items()
+             if str(k) != CONF_PI_ENABLED}
+        )
+        return self.async_show_form(step_id="pi_gains", data_schema=schema)
+
+    async def async_step_pi_seeds(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """PI setup step 2: Feed-forward seeds."""
+        if user_input is not None:
+            self._user_input.update(user_input)
+            return await self.async_step_pi_timing()
+
+        return self.async_show_form(
+            step_id="pi_seeds", data_schema=OPTIONS_PI_SEEDS_SCHEMA
+        )
+
+    async def async_step_pi_timing(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """PI setup step 3: Timing & filtering."""
+        if user_input is not None:
+            self._user_input.update(user_input)
+            return await self.async_step_pi_advanced()
+
+        return self.async_show_form(
+            step_id="pi_timing", data_schema=OPTIONS_PI_TIMING_SCHEMA
+        )
+
+    async def async_step_pi_advanced(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """PI setup step 4: Advanced PI settings."""
         if user_input is not None:
             self._user_input.update(user_input)
             return await self._create_entry()
 
         return self.async_show_form(
-            step_id="pi_controller",
-            data_schema=vol.Schema(
-                {
-                    vol.Optional(
-                        CONF_PI_KP, default=DEFAULT_PI_KP
-                    ): NumberSelector(
-                        NumberSelectorConfig(min=0, max=20, step=0.1, mode=NumberSelectorMode.BOX)
-                    ),
-                    vol.Optional(
-                        CONF_PI_KI, default=DEFAULT_PI_KI
-                    ): NumberSelector(
-                        NumberSelectorConfig(min=0, max=5, step=0.01, mode=NumberSelectorMode.BOX)
-                    ),
-                    vol.Optional(
-                        CONF_PI_KD, default=DEFAULT_PI_KD
-                    ): NumberSelector(
-                        NumberSelectorConfig(min=0, max=10, step=0.1, mode=NumberSelectorMode.BOX)
-                    ),
-                    vol.Optional(
-                        CONF_PI_KD_FILTER_N, default=DEFAULT_PI_KD_FILTER_N
-                    ): NumberSelector(
-                        NumberSelectorConfig(min=1, max=20, step=1, mode=NumberSelectorMode.BOX)
-                    ),
-                    vol.Optional(
-                        CONF_PI_TICK_FALLBACK, default=DEFAULT_PI_TICK_FALLBACK
-                    ): NumberSelector(
-                        NumberSelectorConfig(min=60, max=3600, step=60, mode=NumberSelectorMode.BOX)
-                    ),
-                    vol.Optional(
-                        CONF_PI_DEADBAND, default=DEFAULT_PI_DEADBAND
-                    ): NumberSelector(
-                        NumberSelectorConfig(min=0, max=10, step=0.1, unit_of_measurement="°C", mode=NumberSelectorMode.BOX)
-                    ),
-                    vol.Optional(CONF_OUTDOOR_TEMP_SENSOR): EntitySelector(
-                        EntitySelectorConfig(domain="sensor")
-                    ),
-                    vol.Optional(
-                        CONF_PI_OUTDOOR_SEED_HEAT, default=DEFAULT_PI_OUTDOOR_SEED_HEAT
-                    ): NumberSelector(
-                        NumberSelectorConfig(min=0, max=5, step=0.01, mode=NumberSelectorMode.BOX)
-                    ),
-                    vol.Optional(
-                        CONF_PI_OUTDOOR_SEED_COOL, default=DEFAULT_PI_OUTDOOR_SEED_COOL
-                    ): NumberSelector(
-                        NumberSelectorConfig(min=0, max=5, step=0.01, mode=NumberSelectorMode.BOX)
-                    ),
-                    vol.Optional(CONF_PI_OUTDOOR_SEED_CLAMP_MIN, default=DEFAULT_PI_OUTDOOR_SEED_CLAMP_MIN): NumberSelector(
-                        NumberSelectorConfig(min=0, max=10, step=0.1, mode=NumberSelectorMode.BOX)
-                    ),
-                    vol.Optional(CONF_PI_OUTDOOR_SEED_CLAMP_MAX, default=DEFAULT_PI_OUTDOOR_SEED_CLAMP_MAX): NumberSelector(
-                        NumberSelectorConfig(min=0, max=10, step=0.1, mode=NumberSelectorMode.BOX)
-                    ),
-                    vol.Optional(CONF_PI_SETPOINT_WEIGHT, default=DEFAULT_PI_SETPOINT_WEIGHT): NumberSelector(
-                        NumberSelectorConfig(min=0, max=1, step=0.05, mode=NumberSelectorMode.BOX)
-                    ),
-                    vol.Optional(CONF_PI_TAU_ESTIMATE, default=DEFAULT_PI_TAU_ESTIMATE): NumberSelector(
-                        NumberSelectorConfig(min=0, max=600, step=5, unit_of_measurement="min", mode=NumberSelectorMode.BOX)
-                    ),
-                    vol.Optional(CONF_PI_RESPONSE_LAG, default=DEFAULT_PI_RESPONSE_LAG): NumberSelector(
-                        NumberSelectorConfig(min=0, max=60, step=1, unit_of_measurement="min", mode=NumberSelectorMode.BOX)
-                    ),
-                    vol.Optional(CONF_PI_IMC_LAMBDA, default=DEFAULT_PI_IMC_LAMBDA): NumberSelector(
-                        NumberSelectorConfig(min=0, max=300, step=5, unit_of_measurement="min", mode=NumberSelectorMode.BOX)
-                    ),
-                    vol.Optional(CONF_PI_SENSOR_FILTER_TAU, default=DEFAULT_PI_SENSOR_FILTER_TAU): NumberSelector(
-                        NumberSelectorConfig(min=0, max=600, step=10, unit_of_measurement="s", mode=NumberSelectorMode.BOX)
-                    ),
-                    vol.Optional(CONF_PI_SMITH_ENABLED, default=DEFAULT_PI_SMITH_ENABLED): BooleanSelector(),
-                    vol.Optional(CONF_PI_SETPOINT_HOLD, default=DEFAULT_PI_SETPOINT_HOLD): NumberSelector(
-                        NumberSelectorConfig(min=0, max=3600, step=60, unit_of_measurement="s", mode=NumberSelectorMode.BOX)
-                    ),
-                }
-            ),
+            step_id="pi_advanced", data_schema=OPTIONS_PI_ADVANCED_SCHEMA
         )
 
     async def _create_entry(self) -> config_entries.ConfigFlowResult:
@@ -1069,16 +1073,74 @@ class TasmotaIrhvacOptionsFlow(OptionsFlowWithReload):
     async def async_step_pi_controller(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
-        """PI controller options."""
+        """PI controller sub-menu."""
+        return self.async_show_menu(
+            step_id="pi_controller",
+            menu_options=["pi_gains", "pi_seeds", "pi_timing", "pi_advanced"],
+        )
+
+    async def async_step_pi_gains(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """PI options: PID gains & deadband."""
         if user_input is not None:
             return self.async_create_entry(
                 data={**self.config_entry.options, **user_input}
             )
-
         return self.async_show_form(
-            step_id="pi_controller",
+            step_id="pi_gains",
             data_schema=self.add_suggested_values_to_schema(
-                OPTIONS_PI_CONTROLLER_SCHEMA, self.config_entry.options
+                OPTIONS_PI_GAINS_SCHEMA, self.config_entry.options
+            ),
+        )
+
+    async def async_step_pi_seeds(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """PI options: Feed-forward seeds."""
+        if user_input is not None:
+            merged = {**self.config_entry.options, **user_input}
+            # Clear optional entity if user removed it
+            if CONF_OUTDOOR_TEMP_SENSOR not in user_input:
+                merged.pop(CONF_OUTDOOR_TEMP_SENSOR, None)
+            return self.async_create_entry(data=merged)
+        return self.async_show_form(
+            step_id="pi_seeds",
+            data_schema=self.add_suggested_values_to_schema(
+                OPTIONS_PI_SEEDS_SCHEMA, self.config_entry.options
+            ),
+        )
+
+    async def async_step_pi_timing(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """PI options: Timing & filtering."""
+        if user_input is not None:
+            return self.async_create_entry(
+                data={**self.config_entry.options, **user_input}
+            )
+        return self.async_show_form(
+            step_id="pi_timing",
+            data_schema=self.add_suggested_values_to_schema(
+                OPTIONS_PI_TIMING_SCHEMA, self.config_entry.options
+            ),
+        )
+
+    async def async_step_pi_advanced(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """PI options: Advanced settings."""
+        if user_input is not None:
+            merged = {**self.config_entry.options, **user_input}
+            # Clear optional fields if user removed them
+            for key in (CONF_PI_AUTO_PERTURB_WINDOW_START, CONF_PI_AUTO_PERTURB_WINDOW_END):
+                if key not in user_input:
+                    merged.pop(key, None)
+            return self.async_create_entry(data=merged)
+        return self.async_show_form(
+            step_id="pi_advanced",
+            data_schema=self.add_suggested_values_to_schema(
+                OPTIONS_PI_ADVANCED_SCHEMA, self.config_entry.options
             ),
         )
 

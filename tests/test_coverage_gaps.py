@@ -2342,7 +2342,20 @@ class TestConfigFlowGaps:
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input={"pi_enabled": True},
         )
-        assert result["step_id"] == "pi_controller"
+        assert result["step_id"] == "pi_gains"
+        # Navigate through all 4 PI sub-steps
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={},
+        )
+        assert result["step_id"] == "pi_seeds"
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={},
+        )
+        assert result["step_id"] == "pi_timing"
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={},
+        )
+        assert result["step_id"] == "pi_advanced"
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input={},
         )

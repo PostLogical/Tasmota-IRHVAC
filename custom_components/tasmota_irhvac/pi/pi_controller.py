@@ -59,6 +59,8 @@ from ..const import (
     CONF_OUTDOOR_TEMP_SENSOR,
     CONF_PI_DEADBAND,
     CONF_PI_ENABLED,
+    CONF_PI_INTERCEPT_SEED_COOL,
+    CONF_PI_INTERCEPT_SEED_HEAT,
     CONF_PI_OUTDOOR_SEED_COOL,
     CONF_PI_OUTDOOR_SEED_HEAT,
     CONF_PI_OUTDOOR_SEED_CLAMP_MAX,
@@ -81,6 +83,8 @@ from ..const import (
     CONF_PI_TAU_ESTIMATE,
     DEFAULT_PI_DEADBAND,
     DEFAULT_PI_ENABLED,
+    DEFAULT_PI_INTERCEPT_SEED_COOL,
+    DEFAULT_PI_INTERCEPT_SEED_HEAT,
     DEFAULT_PI_OUTDOOR_SEED_COOL,
     DEFAULT_PI_OUTDOOR_SEED_HEAT,
     DEFAULT_PI_OUTDOOR_SEED_CLAMP_MAX,
@@ -235,6 +239,11 @@ class PIController:
             CONF_PI_OUTDOOR_SEED_HEAT, DEFAULT_PI_OUTDOOR_SEED_HEAT)
         self._outdoor_seed_cool: float = config.get(
             CONF_PI_OUTDOOR_SEED_COOL, DEFAULT_PI_OUTDOOR_SEED_COOL)
+        # Intercept seeds — direct baseline offset (no negation, not directional)
+        self._intercept_seed_heat: float = config.get(
+            CONF_PI_INTERCEPT_SEED_HEAT, DEFAULT_PI_INTERCEPT_SEED_HEAT)
+        self._intercept_seed_cool: float = config.get(
+            CONF_PI_INTERCEPT_SEED_COOL, DEFAULT_PI_INTERCEPT_SEED_COOL)
 
         # Learning suppression state (manual service + model input suppress_learning flags)
         self._manual_ff_suppress: bool = False
@@ -319,13 +328,14 @@ class PIController:
         self._n_model_inputs = 1 + len(self._model_inputs)  # outdoor_delta + configured inputs
 
         # Build seed coefficients and clamps
-        # Index 0: intercept (seed 0)
+        # Index 0: intercept (direct baseline offset, no negation)
         # Index 1: outdoor_delta (β = -seed, since warming → HP backs off)
         # Index 2+: model inputs in order
         # Convention: user-facing seeds are positive for "warms room".
         # Internal β = -seed (HP backs off when source warms room).
-        self._heat_seeds = [0.0, -self._outdoor_seed_heat]
-        self._cool_seeds = [0.0, -self._outdoor_seed_cool]
+        # Intercept is not directional — stored as-is.
+        self._heat_seeds = [self._intercept_seed_heat, -self._outdoor_seed_heat]
+        self._cool_seeds = [self._intercept_seed_cool, -self._outdoor_seed_cool]
         # Clamp in internal β space: seed (0, 2) → β (-2, 0)
         thermal_clamp_min = config.get(CONF_PI_OUTDOOR_SEED_CLAMP_MIN, DEFAULT_PI_OUTDOOR_SEED_CLAMP_MIN)
         thermal_clamp_max = config.get(CONF_PI_OUTDOOR_SEED_CLAMP_MAX, DEFAULT_PI_OUTDOOR_SEED_CLAMP_MAX)
@@ -3125,7 +3135,7 @@ class PIController:
         n = self._rls_heat.n  # same for both models
 
         if mode in (None, "heat"):
-            heat_seeds = [0.0, -self._outdoor_seed_heat]
+            heat_seeds = [self._intercept_seed_heat, -self._outdoor_seed_heat]
             for m_input in self._model_inputs:
                 heat_seeds.append(-float(m_input.get("seed_heat", 0.0)))
             heat_norm = [
@@ -3144,7 +3154,7 @@ class PIController:
             self._manual_override_heat = [None] * n
 
         if mode in (None, "cool"):
-            cool_seeds = [0.0, -self._outdoor_seed_cool]
+            cool_seeds = [self._intercept_seed_cool, -self._outdoor_seed_cool]
             for m_input in self._model_inputs:
                 cool_seeds.append(-float(m_input.get("seed_cool", 0.0)))
             cool_norm = [

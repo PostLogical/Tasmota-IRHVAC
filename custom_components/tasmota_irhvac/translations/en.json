@@ -199,53 +199,87 @@
           "power_sensor": "Binary sensor or sensor that indicates whether the AC unit is powered on."
         }
       },
-      "pi_controller": {
-        "title": "PI Controller",
-        "description": "Configure the PI+feedforward controller for automatic temperature regulation.",
+      "pi_gains": {
+        "title": "PID Gains & Deadband",
+        "description": "Configure the core PID controller parameters.",
         "data": {
-          "pi_enabled": "Enable PI Controller",
           "pi_kp": "Proportional Gain (Kp)",
           "pi_ki": "Integral Gain (Ki)",
           "pi_kd": "Derivative Gain (Kd)",
           "pi_kd_filter_n": "Derivative Filter (N)",
-          "pi_tick_fallback": "Tick Fallback Interval (seconds)",
-          "pi_deadband": "Deadband (°C)",
+          "pi_deadband": "Deadband (°C)"
+        },
+        "data_description": {
+          "pi_kp": "Proportional gain. Higher values react faster to temperature errors but may overshoot.",
+          "pi_ki": "Integral gain. Eliminates steady-state error over time.",
+          "pi_kd": "Derivative gain. Dampens overshoot by reacting to rate of temperature change. Set 0 to disable.",
+          "pi_kd_filter_n": "Derivative filter coefficient (2-20). Higher = less noise filtering. Default 8.",
+          "pi_deadband": "Temperature range (°C) around setpoint where no adjustments are made. Always in °C regardless of system unit."
+        }
+      },
+      "pi_seeds": {
+        "title": "Feed-Forward Seeds",
+        "description": "Configure the outdoor temperature sensor and initial feed-forward seed coefficients.",
+        "data": {
           "outdoor_temp_sensor": "Outdoor Temperature Sensor",
           "pi_outdoor_seed_heat": "Outdoor Seed (Heating)",
           "pi_outdoor_seed_cool": "Outdoor Seed (Cooling)",
+          "pi_intercept_seed_heat": "Intercept Seed (Heating)",
+          "pi_intercept_seed_cool": "Intercept Seed (Cooling)",
           "pi_outdoor_seed_clamp_min": "Outdoor Seed Clamp Min",
-          "pi_outdoor_seed_clamp_max": "Outdoor Seed Clamp Max",
-          "pi_setpoint_weight": "Setpoint Weight (0-1)",
+          "pi_outdoor_seed_clamp_max": "Outdoor Seed Clamp Max"
+        },
+        "data_description": {
+          "outdoor_temp_sensor": "Required for feed-forward and learning subsystems. Without this, only basic PI control is available.",
+          "pi_outdoor_seed_heat": "Initial outdoor compensation per degree of outdoor-indoor difference (heating). Positive = outdoor warmth reduces heating needed. The system learns the true value over time.",
+          "pi_outdoor_seed_cool": "Initial outdoor compensation per degree of outdoor-indoor difference (cooling). Positive = outdoor warmth reduces cooling needed. The system learns the true value over time.",
+          "pi_intercept_seed_heat": "Baseline FF intercept for heating. HP setpoint offset when all features are zero. Usually learned automatically; 0 is a safe starting point.",
+          "pi_intercept_seed_cool": "Baseline FF intercept for cooling. HP setpoint offset when all features are zero. Usually learned automatically; 0 is a safe starting point.",
+          "pi_outdoor_seed_clamp_min": "Minimum outdoor seed the system can learn. Default 0.0. Widen only if the system recommends it.",
+          "pi_outdoor_seed_clamp_max": "Maximum outdoor seed the system can learn. Default 2.0. Most systems stay well within this range."
+        }
+      },
+      "pi_timing": {
+        "title": "Timing & Filtering",
+        "description": "Configure timing intervals, IMC tuning, and signal filtering.",
+        "data": {
+          "pi_tick_fallback": "Tick Fallback Interval (seconds)",
           "pi_tau_estimate": "Room τ Estimate (minutes)",
           "pi_response_lag": "HP Response Lag (minutes)",
           "pi_imc_lambda": "IMC Lambda (minutes)",
           "pi_sensor_filter_tau": "Sensor Filter (seconds)",
+          "pi_setpoint_hold": "Setpoint Hold (seconds)"
+        },
+        "data_description": {
+          "pi_tick_fallback": "Maximum seconds between PI ticks. Sensor updates trigger ticks sooner (60s cooldown). This is the fallback if no sensor update arrives.",
+          "pi_tau_estimate": "Room thermal time constant (minutes). Enables IMC gain scheduling — Kp and Ki are derived automatically from τ and response lag. The controller learns τ online from step responses. 0 = disabled (use manual Kp/Ki).",
+          "pi_response_lag": "Heat pump response lag (minutes). Time for a setpoint change to begin affecting room temperature. Used by IMC gain formula and Smith predictor. Default 15 min.",
+          "pi_imc_lambda": "IMC closed-loop speed parameter (minutes). Controls aggressiveness of IMC-derived gains. Lower = faster but less robust. 0 = auto (response_lag / 3).",
+          "pi_sensor_filter_tau": "Low-pass filter time constant on room temperature sensor (seconds). Smooths noise without adding significant lag. 0 = disabled. Default 120s (2 min).",
+          "pi_setpoint_hold": "Minimum seconds between HP setpoint changes. Prevents oscillation from incomplete information. 0 = no hold (not recommended). Default 1200s (20 min)."
+        }
+      },
+      "pi_advanced": {
+        "title": "Advanced PI",
+        "description": "Configure subsystem toggles, setpoint weighting, and experimental features.",
+        "data": {
+          "pi_ff_enabled": "Feed-Forward",
+          "pi_rls_online_enabled": "Online RLS Learning",
+          "pi_batch_wls_enabled": "Batch WLS Analysis",
+          "pi_plant_id_enabled": "Plant Identification",
+          "pi_setpoint_weight": "Setpoint Weight (0-1)",
           "pi_smith_enabled": "Smith Predictor",
-          "pi_setpoint_hold": "Setpoint Hold (seconds)",
           "pi_auto_perturb_enabled": "Auto-Perturbation",
           "pi_auto_perturb_window_start": "Perturbation Window Start (hour)",
           "pi_auto_perturb_window_end": "Perturbation Window End (hour)"
         },
         "data_description": {
-          "pi_enabled": "Enable the PI+feedforward controller for automatic temperature regulation.",
-          "pi_kp": "Proportional gain. Higher values react faster to temperature errors but may overshoot.",
-          "pi_ki": "Integral gain. Eliminates steady-state error over time.",
-          "pi_kd": "Derivative gain. Dampens overshoot by reacting to rate of temperature change. Set 0 to disable.",
-          "pi_kd_filter_n": "Derivative filter coefficient (2-20). Higher = less noise filtering. Default 8.",
-          "pi_tick_fallback": "Maximum seconds between PI ticks. Sensor updates trigger ticks sooner (60s cooldown). This is the fallback if no sensor update arrives.",
-          "pi_deadband": "Temperature range (°C) around setpoint where no adjustments are made. Always in °C regardless of system unit.",
-          "outdoor_temp_sensor": "Outdoor temperature sensor for feedforward compensation. Without this, the PI controller runs on proportional + integral only (no weather-based offset). With it, the controller auto-learns optimal setpoint offsets for different outdoor temperatures.",
-          "pi_outdoor_seed_heat": "Initial outdoor compensation per degree of outdoor-indoor difference (heating). Positive = outdoor warmth reduces heating needed. The system learns the true value over time.",
-          "pi_outdoor_seed_cool": "Initial outdoor compensation per degree of outdoor-indoor difference (cooling). Positive = outdoor warmth reduces cooling needed. The system learns the true value over time.",
-          "pi_outdoor_seed_clamp_min": "Minimum outdoor seed the system can learn. Default 0.0. Widen only if the system recommends it.",
-          "pi_outdoor_seed_clamp_max": "Maximum outdoor seed the system can learn. Default 2.0. Most systems stay well within this range.",
+          "pi_ff_enabled": "Enable feedforward prediction and all learning subsystems (online RLS, batch WLS). When off, pure PI control with no FF offset.",
+          "pi_rls_online_enabled": "Enable per-tick online RLS coefficient updates. Requires FF enabled.",
+          "pi_batch_wls_enabled": "Enable scheduled batch WLS analysis for robust coefficient estimation. Requires FF enabled.",
+          "pi_plant_id_enabled": "Enable plant identification (τ estimation) for automatic IMC gain tuning.",
           "pi_setpoint_weight": "2-DOF PI setpoint weighting. At 1.0 (default), P reacts fully to setpoint changes. At 0.0, P only reacts to disturbances. Try 0.5 for less overshoot on setpoint changes.",
-          "pi_tau_estimate": "Room thermal time constant (minutes). Enables IMC gain scheduling — Kp and Ki are derived automatically from τ and response lag. The controller learns τ online from step responses. 0 = disabled (use manual Kp/Ki).",
-          "pi_response_lag": "Heat pump response lag (minutes). Time for a setpoint change to begin affecting room temperature. Used by IMC gain formula and Smith predictor. Default 15 min.",
-          "pi_imc_lambda": "IMC closed-loop speed parameter (minutes). Controls aggressiveness of IMC-derived gains. Lower = faster but less robust. 0 = auto (response_lag / 3).",
-          "pi_sensor_filter_tau": "Low-pass filter time constant on room temperature sensor (seconds). Smooths noise without adding significant lag. 0 = disabled. Default 120s (2 min).",
           "pi_smith_enabled": "Enable Smith predictor for dead-time compensation. Requires IMC (τ estimate > 0). Adjusts proportional term to anticipate HP pipeline delay.",
-          "pi_setpoint_hold": "Minimum seconds between HP setpoint changes. Prevents oscillation from incomplete information. 0 = no hold (not recommended). Default 1200s (20 min).",
           "pi_auto_perturb_enabled": "Automatically perturb the setpoint ±1°C when steady state is detected to accelerate plant identification. Temperature may vary ~1°C during learning cycles. Requires IMC (τ estimate > 0).",
           "pi_auto_perturb_window_start": "Optional: only start perturbation cycles during this time window (hour 0-23). Leave empty for anytime.",
           "pi_auto_perturb_window_end": "Optional: end hour of perturbation window (0-23). Leave empty for anytime."
@@ -502,29 +536,22 @@
       },
       "pi_controller": {
         "title": "PI Controller",
+        "menu_options": {
+          "pi_gains": "PID Gains & Deadband",
+          "pi_seeds": "Feed-Forward Seeds",
+          "pi_timing": "Timing & Filtering",
+          "pi_advanced": "Advanced PI"
+        }
+      },
+      "pi_gains": {
+        "title": "PID Gains & Deadband",
         "data": {
           "pi_enabled": "Enable PI Controller",
           "pi_kp": "Proportional Gain (Kp)",
           "pi_ki": "Integral Gain (Ki)",
           "pi_kd": "Derivative Gain (Kd)",
           "pi_kd_filter_n": "Derivative Filter (N)",
-          "pi_tick_fallback": "Tick Fallback Interval (seconds)",
-          "pi_deadband": "Deadband (°C)",
-          "outdoor_temp_sensor": "Outdoor Temperature Sensor",
-          "pi_outdoor_seed_heat": "Outdoor Seed (Heating)",
-          "pi_outdoor_seed_cool": "Outdoor Seed (Cooling)",
-          "pi_outdoor_seed_clamp_min": "Outdoor Seed Clamp Min",
-          "pi_outdoor_seed_clamp_max": "Outdoor Seed Clamp Max",
-          "pi_setpoint_weight": "Setpoint Weight (0-1)",
-          "pi_tau_estimate": "Room τ Estimate (minutes)",
-          "pi_response_lag": "HP Response Lag (minutes)",
-          "pi_imc_lambda": "IMC Lambda (minutes)",
-          "pi_sensor_filter_tau": "Sensor Filter (seconds)",
-          "pi_smith_enabled": "Smith Predictor",
-          "pi_setpoint_hold": "Setpoint Hold (seconds)",
-          "pi_auto_perturb_enabled": "Auto-Perturbation",
-          "pi_auto_perturb_window_start": "Perturbation Window Start (hour)",
-          "pi_auto_perturb_window_end": "Perturbation Window End (hour)"
+          "pi_deadband": "Deadband (°C)"
         },
         "data_description": {
           "pi_enabled": "Enable the PI+feedforward controller for automatic temperature regulation.",
@@ -532,20 +559,69 @@
           "pi_ki": "Integral gain. Eliminates steady-state error over time.",
           "pi_kd": "Derivative gain. Dampens overshoot by reacting to rate of temperature change. Set 0 to disable.",
           "pi_kd_filter_n": "Derivative filter coefficient (2-20). Higher = less noise filtering. Default 8.",
-          "pi_tick_fallback": "Maximum seconds between PI ticks. Sensor updates trigger ticks sooner (60s cooldown). This is the fallback if no sensor update arrives.",
-          "pi_deadband": "Temperature range (°C) around setpoint where no adjustments are made. Always in °C regardless of system unit.",
-          "outdoor_temp_sensor": "Outdoor temperature sensor for feedforward compensation. Without this, the PI controller runs on proportional + integral only (no weather-based offset). With it, the controller auto-learns optimal setpoint offsets for different outdoor temperatures.",
+          "pi_deadband": "Temperature range (°C) around setpoint where no adjustments are made. Always in °C regardless of system unit."
+        }
+      },
+      "pi_seeds": {
+        "title": "Feed-Forward Seeds",
+        "data": {
+          "outdoor_temp_sensor": "Outdoor Temperature Sensor",
+          "pi_outdoor_seed_heat": "Outdoor Seed (Heating)",
+          "pi_outdoor_seed_cool": "Outdoor Seed (Cooling)",
+          "pi_intercept_seed_heat": "Intercept Seed (Heating)",
+          "pi_intercept_seed_cool": "Intercept Seed (Cooling)",
+          "pi_outdoor_seed_clamp_min": "Outdoor Seed Clamp Min",
+          "pi_outdoor_seed_clamp_max": "Outdoor Seed Clamp Max"
+        },
+        "data_description": {
+          "outdoor_temp_sensor": "Required for feed-forward and learning subsystems. Without this, only basic PI control is available.",
           "pi_outdoor_seed_heat": "Initial outdoor compensation per degree of outdoor-indoor difference (heating). Positive = outdoor warmth reduces heating needed. The system learns the true value over time.",
           "pi_outdoor_seed_cool": "Initial outdoor compensation per degree of outdoor-indoor difference (cooling). Positive = outdoor warmth reduces cooling needed. The system learns the true value over time.",
+          "pi_intercept_seed_heat": "Baseline FF intercept for heating. HP setpoint offset when all features are zero. Usually learned automatically; 0 is a safe starting point.",
+          "pi_intercept_seed_cool": "Baseline FF intercept for cooling. HP setpoint offset when all features are zero. Usually learned automatically; 0 is a safe starting point.",
           "pi_outdoor_seed_clamp_min": "Minimum outdoor seed the system can learn. Default 0.0. Widen only if the system recommends it.",
-          "pi_outdoor_seed_clamp_max": "Maximum outdoor seed the system can learn. Default 2.0. Most systems stay well within this range.",
-          "pi_setpoint_weight": "2-DOF PI setpoint weighting. At 1.0 (default), P reacts fully to setpoint changes. At 0.0, P only reacts to disturbances. Try 0.5 for less overshoot on setpoint changes.",
+          "pi_outdoor_seed_clamp_max": "Maximum outdoor seed the system can learn. Default 2.0. Most systems stay well within this range."
+        }
+      },
+      "pi_timing": {
+        "title": "Timing & Filtering",
+        "data": {
+          "pi_tick_fallback": "Tick Fallback Interval (seconds)",
+          "pi_tau_estimate": "Room τ Estimate (minutes)",
+          "pi_response_lag": "HP Response Lag (minutes)",
+          "pi_imc_lambda": "IMC Lambda (minutes)",
+          "pi_sensor_filter_tau": "Sensor Filter (seconds)",
+          "pi_setpoint_hold": "Setpoint Hold (seconds)"
+        },
+        "data_description": {
+          "pi_tick_fallback": "Maximum seconds between PI ticks. Sensor updates trigger ticks sooner (60s cooldown). This is the fallback if no sensor update arrives.",
           "pi_tau_estimate": "Room thermal time constant (minutes). Enables IMC gain scheduling — Kp and Ki are derived automatically from τ and response lag. The controller learns τ online from step responses. 0 = disabled (use manual Kp/Ki).",
           "pi_response_lag": "Heat pump response lag (minutes). Time for a setpoint change to begin affecting room temperature. Used by IMC gain formula and Smith predictor. Default 15 min.",
           "pi_imc_lambda": "IMC closed-loop speed parameter (minutes). Controls aggressiveness of IMC-derived gains. Lower = faster but less robust. 0 = auto (response_lag / 3).",
           "pi_sensor_filter_tau": "Low-pass filter time constant on room temperature sensor (seconds). Smooths noise without adding significant lag. 0 = disabled. Default 120s (2 min).",
+          "pi_setpoint_hold": "Minimum seconds between HP setpoint changes. Prevents oscillation from incomplete information. 0 = no hold (not recommended). Default 1200s (20 min)."
+        }
+      },
+      "pi_advanced": {
+        "title": "Advanced PI",
+        "data": {
+          "pi_ff_enabled": "Feed-Forward",
+          "pi_rls_online_enabled": "Online RLS Learning",
+          "pi_batch_wls_enabled": "Batch WLS Analysis",
+          "pi_plant_id_enabled": "Plant Identification",
+          "pi_setpoint_weight": "Setpoint Weight (0-1)",
+          "pi_smith_enabled": "Smith Predictor",
+          "pi_auto_perturb_enabled": "Auto-Perturbation",
+          "pi_auto_perturb_window_start": "Perturbation Window Start (hour)",
+          "pi_auto_perturb_window_end": "Perturbation Window End (hour)"
+        },
+        "data_description": {
+          "pi_ff_enabled": "Enable feedforward prediction and all learning subsystems (online RLS, batch WLS). When off, pure PI control with no FF offset.",
+          "pi_rls_online_enabled": "Enable per-tick online RLS coefficient updates. Requires FF enabled.",
+          "pi_batch_wls_enabled": "Enable scheduled batch WLS analysis for robust coefficient estimation. Requires FF enabled.",
+          "pi_plant_id_enabled": "Enable plant identification (τ estimation) for automatic IMC gain tuning.",
+          "pi_setpoint_weight": "2-DOF PI setpoint weighting. At 1.0 (default), P reacts fully to setpoint changes. At 0.0, P only reacts to disturbances. Try 0.5 for less overshoot on setpoint changes.",
           "pi_smith_enabled": "Enable Smith predictor for dead-time compensation. Requires IMC (τ estimate > 0). Adjusts proportional term to anticipate HP pipeline delay.",
-          "pi_setpoint_hold": "Minimum seconds between HP setpoint changes. Prevents oscillation from incomplete information. 0 = no hold (not recommended). Default 1200s (20 min).",
           "pi_auto_perturb_enabled": "Automatically perturb the setpoint ±1°C when steady state is detected to accelerate plant identification. Temperature may vary ~1°C during learning cycles. Requires IMC (τ estimate > 0).",
           "pi_auto_perturb_window_start": "Optional: only start perturbation cycles during this time window (hour 0-23). Leave empty for anytime.",
           "pi_auto_perturb_window_end": "Optional: end hour of perturbation window (0-23). Leave empty for anytime."

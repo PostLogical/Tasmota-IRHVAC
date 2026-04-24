@@ -134,9 +134,9 @@ class TestConfigFlowFullWizard:
             },
         )
 
-        # Should advance to PI step
+        # Should advance to first PI sub-step (gains)
         assert result["type"] == FlowResultType.FORM
-        assert result["step_id"] == "pi_controller"
+        assert result["step_id"] == "pi_gains"
 
 
 class TestConfigFlowImport:
@@ -273,10 +273,91 @@ class TestOptionsFlowSubSteps:
         assert result["type"] == FlowResultType.CREATE_ENTRY
 
     @pytest.mark.asyncio
-    async def test_options_pi_controller_step(self, hass, setup_integration):
-        """PI controller options step should accept input and save."""
+    async def test_options_pi_controller_menu(self, hass, setup_integration):
+        """PI controller options should show sub-menu."""
         entry = await setup_integration()
-        result = await self._navigate_to_step(hass, entry, "pi_controller")
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={"next_step_id": "pi_controller"},
+        )
+        assert result["type"] == FlowResultType.MENU
+
+    @pytest.mark.asyncio
+    async def test_options_pi_gains_step(self, hass, setup_integration):
+        """PI gains sub-step should accept input and save."""
+        entry = await setup_integration()
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={"next_step_id": "pi_controller"},
+        )
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={"next_step_id": "pi_gains"},
+        )
+        assert result["type"] == FlowResultType.FORM
+        assert result["step_id"] == "pi_gains"
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={},
+        )
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+
+    @pytest.mark.asyncio
+    async def test_options_pi_seeds_step(self, hass, setup_integration):
+        """PI seeds sub-step should accept input and save."""
+        entry = await setup_integration()
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={"next_step_id": "pi_controller"},
+        )
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={"next_step_id": "pi_seeds"},
+        )
+        assert result["type"] == FlowResultType.FORM
+        assert result["step_id"] == "pi_seeds"
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={},
+        )
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+
+    @pytest.mark.asyncio
+    async def test_options_pi_timing_step(self, hass, setup_integration):
+        """PI timing sub-step should accept input and save."""
+        entry = await setup_integration()
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={"next_step_id": "pi_controller"},
+        )
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={"next_step_id": "pi_timing"},
+        )
+        assert result["type"] == FlowResultType.FORM
+        assert result["step_id"] == "pi_timing"
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={},
+        )
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+
+    @pytest.mark.asyncio
+    async def test_options_pi_advanced_step(self, hass, setup_integration):
+        """PI advanced sub-step should accept input and save."""
+        entry = await setup_integration()
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={"next_step_id": "pi_controller"},
+        )
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={"next_step_id": "pi_advanced"},
+        )
+        assert result["type"] == FlowResultType.FORM
+        assert result["step_id"] == "pi_advanced"
         result = await hass.config_entries.options.async_configure(
             result["flow_id"], user_input={},
         )

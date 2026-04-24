@@ -202,6 +202,12 @@ CONF_PI_AUTO_PERTURB_ENABLED = "pi_auto_perturb_enabled"
 CONF_PI_AUTO_PERTURB_WINDOW_START = "pi_auto_perturb_window_start"
 CONF_PI_AUTO_PERTURB_WINDOW_END = "pi_auto_perturb_window_end"
 CONF_PI_GREYBOX_BLENDING = "pi_greybox_blending"
+CONF_PI_INTERCEPT_SEED_HEAT = "pi_intercept_seed_heat"
+CONF_PI_INTERCEPT_SEED_COOL = "pi_intercept_seed_cool"
+CONF_PI_FF_ENABLED = "pi_ff_enabled"
+CONF_PI_RLS_ONLINE_ENABLED = "pi_rls_online_enabled"
+CONF_PI_BATCH_WLS_ENABLED = "pi_batch_wls_enabled"
+CONF_PI_PLANT_ID_ENABLED = "pi_plant_id_enabled"
 CONF_PI_MODEL_INPUTS = "pi_model_inputs"
 
 # Subentry types
@@ -241,6 +247,12 @@ DEFAULT_PI_IMC_LAMBDA = 0.0        # IMC closed-loop speed λ (minutes). 0 = aut
 DEFAULT_PI_SENSOR_FILTER_TAU = 120  # Measurement low-pass filter τ (seconds). 0 = disabled.
 DEFAULT_PI_SMITH_ENABLED = True     # Smith predictor for dead-time compensation. Requires IMC (tau>0).
 DEFAULT_PI_SETPOINT_HOLD = 1200     # Min seconds between HP setpoint changes. 0 = disabled.
+DEFAULT_PI_INTERCEPT_SEED_HEAT = 0.0
+DEFAULT_PI_INTERCEPT_SEED_COOL = 0.0
+DEFAULT_PI_FF_ENABLED = True
+DEFAULT_PI_RLS_ONLINE_ENABLED = True
+DEFAULT_PI_BATCH_WLS_ENABLED = True
+DEFAULT_PI_PLANT_ID_ENABLED = True
 
 # RLS model defaults
 DEFAULT_RLS_LAMBDA_BASE = 0.999  # Base forgetting factor (~10 day effective memory)
