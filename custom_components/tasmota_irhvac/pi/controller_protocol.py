@@ -98,6 +98,14 @@ class ControllerHook(Protocol):
 
     async def async_flush_observation_buffer(self, mode: str | None = None) -> None: ...
 
+    async def async_learning_reset(
+        self, targets: list[str], mode: str | None = None
+    ) -> None: ...
+
+    def get_learning_snapshot(self) -> dict[str, Any]: ...
+
+    def apply_learning_snapshot(self, data: dict[str, Any]) -> None: ...
+
 
 class NullController:
     """No-op controller for entities without PI enabled.
@@ -202,4 +210,15 @@ class NullController:
         pass
 
     async def async_flush_observation_buffer(self, mode: str | None = None) -> None:
+        pass
+
+    async def async_learning_reset(
+        self, targets: list[str], mode: str | None = None
+    ) -> None:
+        pass
+
+    def get_learning_snapshot(self) -> dict[str, Any]:
+        return {}
+
+    def apply_learning_snapshot(self, data: dict[str, Any]) -> None:
         pass

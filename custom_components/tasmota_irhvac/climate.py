@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from homeassistant.core import Event, EventStateChangedData, State
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
     from homeassistant.helpers.event import CALLBACK_TYPE  # type: ignore[attr-defined]
+    from homeassistant.helpers.storage import Store
     from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
     from .config_model import IrhvacConfig
@@ -506,6 +507,28 @@ SERVICE_TO_METHOD = {
         "method": "async_perturb_now",
         "schema": IRHVAC_SERVICE_SCHEMA,
     },
+    "learning_reset": {
+        "method": "async_learning_reset",
+        "schema": IRHVAC_SERVICE_SCHEMA.extend({
+            vol.Required("targets"): vol.All(
+                cv.ensure_list,
+                [vol.In(["seeds", "buffers", "integral", "plant_id", "greybox"])],
+            ),
+            vol.Optional("mode"): vol.In(["heat", "cool"]),
+        }),
+    },
+    "learning_save": {
+        "method": "async_learning_save",
+        "schema": IRHVAC_SERVICE_SCHEMA.extend({
+            vol.Required("slot"): cv.string,
+        }),
+    },
+    "learning_restore": {
+        "method": "async_learning_restore",
+        "schema": IRHVAC_SERVICE_SCHEMA.extend({
+            vol.Required("slot"): cv.string,
+        }),
+    },
 }
 
 
@@ -751,6 +774,8 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         else:
             self._controller = NullController()
             self._pi = None
+
+        self._snapshot_store: Store[dict[str, Any]] | None = None
 
         # Echo classification state (only active when PI is active)
         self._has_sent_once: bool = False
@@ -1883,6 +1908,54 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         if pi is None:
             return
         pi.perturb_now()
+
+    async def async_learning_reset(
+        self, targets: list[str], mode: str | None = None
+    ) -> None:
+        """Unified reset — selectively reset learning subsystems."""
+        await self._controller.async_learning_reset(targets=targets, mode=mode)
+        self.async_schedule_update_ha_state()
+
+    async def async_learning_save(self, slot: str) -> None:
+        """Save current learning state to a named snapshot slot."""
+        snapshot = self._controller.get_learning_snapshot()
+        if not snapshot:
+            _LOGGER.warning("learning_save: no PI controller data to snapshot")
+            return
+        store = self._get_snapshot_store()
+        data = await store.async_load() or {}
+        if len(data) >= 3 and slot not in data:
+            _LOGGER.warning(
+                "learning_save: max 3 slots, current: %s. Overwrite an existing slot.",
+                list(data.keys()),
+            )
+            return
+        data[slot] = snapshot
+        await store.async_save(data)
+        _LOGGER.info("Learning snapshot saved to slot '%s'", slot)
+
+    async def async_learning_restore(self, slot: str) -> None:
+        """Restore learning state from a named snapshot slot."""
+        store = self._get_snapshot_store()
+        data = await store.async_load() or {}
+        if slot not in data:
+            _LOGGER.warning(
+                "learning_restore: slot '%s' not found, available: %s",
+                slot, list(data.keys()),
+            )
+            return
+        self._controller.apply_learning_snapshot(data[slot])
+        self.async_schedule_update_ha_state()
+
+    def _get_snapshot_store(self) -> Store[dict[str, Any]]:
+        """Lazily create or return the Store for learning snapshots."""
+        if self._snapshot_store is None:
+            from homeassistant.helpers.storage import Store
+            safe_id = self.entity_id.replace(".", "_")
+            self._snapshot_store = Store(
+                self.hass, 1, f"tasmota_irhvac.snapshots.{safe_id}"
+            )
+        return self._snapshot_store
 
     def _resolve_coeff_index(self, name: str) -> int | None:
         """Resolve a coefficient name to its index."""

@@ -217,6 +217,15 @@ class PlantIdentifier:
         self._area_provider.cancel_observation()
         self._closed_loop_provider.cancel_observation()
 
+    def reset(self) -> None:
+        """Reset plant estimate to seeds and cancel all observations."""
+        self.abort_plant_test()
+        self.cancel_observation()
+        self._plant = PlantEstimate.from_seeds(
+            tau_seed=self._tau_seed, response_lag=self._response_lag
+        )
+        self._last_cross_check = None
+
     def _cross_validate(
         self, cl_tau_fast: ParameterEstimate, cl_tau_slow: ParameterEstimate
     ) -> dict[str, bool]:

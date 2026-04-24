@@ -2372,6 +2372,29 @@ class PIController:
         scale = rls.feature_scales[index]
         return (clamp[0] / scale, clamp[1] / scale)
 
+    def _flush_buffers(self, mode: str | None = None) -> None:
+        """Clear observation buffer(s) and batch learning state (no greybox)."""
+        if mode in (None, "heat"):
+            self._observation_buffer_heat.clear()
+        if mode in (None, "cool"):
+            self._observation_buffer_cool.clear()
+        self._last_batch_result = None
+        self._last_batch_timestamp = None
+        self._last_batch_wallclock = ""
+        self._drift_correction_signs = []
+        self._has_had_stable_batch = False
+        self._tuning_alert_counters = {}
+        self._tuning_alert_snapshots = {}
+
+    def _flush_greybox(self) -> None:
+        """Clear greybox buffer, results, and bridge."""
+        self._greybox_has_been_good = False
+        self._greybox_buffer.clear()
+        self._greybox_buffer_cache = []
+        self._last_greybox_result = None
+        self._last_greybox_bridge = None
+        self._last_greybox_timestamp_iso = None
+
     def flush_observation_buffer(self, mode: str | None = None) -> None:
         """Clear observation buffer(s) and reset batch learning state.
 
@@ -2382,23 +2405,8 @@ class PIController:
                   mode, drift correction history and batch result are also
                   cleared because they reference the now-invalid data.
         """
-        if mode in (None, "heat"):
-            self._observation_buffer_heat.clear()
-        if mode in (None, "cool"):
-            self._observation_buffer_cool.clear()
-        self._last_batch_result = None
-        self._last_batch_timestamp = None
-        self._last_batch_wallclock = ""
-        self._drift_correction_signs = []
-        self._has_had_stable_batch = False
-        self._greybox_has_been_good = False
-        self._greybox_buffer.clear()
-        self._greybox_buffer_cache = []
-        self._last_greybox_result = None
-        self._last_greybox_bridge = None
-        self._last_greybox_timestamp_iso = None
-        self._tuning_alert_counters = {}
-        self._tuning_alert_snapshots = {}
+        self._flush_buffers(mode)
+        self._flush_greybox()
         label = mode or "heat+cool"
         _LOGGER.info("Observation buffer (%s) flushed — batch learning will restart from scratch", label)
 
@@ -3112,12 +3120,8 @@ class PIController:
                 SIGNAL_FF_SUPPRESS_UPDATE.format(self._entity._config_entry_id),
             )
 
-    async def async_reset_ff_seeds(self, mode: str | None = None) -> None:
-        """Reset feedforward RLS models to seed values from config.
-
-        Args:
-            mode: "heat", "cool", or None (both).  Integral is always zeroed.
-        """
+    def _reset_seeds(self, mode: str | None = None) -> None:
+        """Reset RLS models to seed values from config (no integral change)."""
         n = self._rls_heat.n  # same for both models
 
         if mode in (None, "heat"):
@@ -3158,6 +3162,13 @@ class PIController:
                 self._rls_cool.frozen[i] = True
             self._manual_override_cool = [None] * n
 
+    async def async_reset_ff_seeds(self, mode: str | None = None) -> None:
+        """Reset feedforward RLS models to seed values from config.
+
+        Args:
+            mode: "heat", "cool", or None (both).  Integral is always zeroed.
+        """
+        self._reset_seeds(mode)
         self._pi_integral = 0.0
         label = mode or "heat+cool"
         _LOGGER.info("FF models (%s) reset to seed values, integral zeroed", label)
@@ -3165,6 +3176,80 @@ class PIController:
     async def async_flush_observation_buffer(self, mode: str | None = None) -> None:
         """Clear observation buffer(s) and reset batch learning state (service handler)."""
         self.flush_observation_buffer(mode=mode)
+
+    def _reset_plant_id(self) -> None:
+        """Abort active plant test, cancel observations, reset estimate to seeds."""
+        was_testing = self._plant_id.plant_test_active
+        self._plant_id.reset()
+        if was_testing:
+            self._pi_paused = False
+
+    async def async_learning_reset(
+        self, targets: list[str], mode: str | None = None
+    ) -> None:
+        """Unified reset service — selectively reset learning subsystems.
+
+        Args:
+            targets: List of subsystems to reset. Valid values:
+                "seeds", "buffers", "integral", "plant_id", "greybox".
+            mode: "heat", "cool", or None (both). Applies to seeds and buffers.
+        """
+        if "seeds" in targets:
+            self._reset_seeds(mode)
+        if "buffers" in targets:
+            self._flush_buffers(mode)
+        if "integral" in targets:
+            self._pi_integral = 0.0
+        if "plant_id" in targets:
+            self._reset_plant_id()
+        if "greybox" in targets:
+            self._flush_greybox()
+        _LOGGER.info(
+            "Learning reset: targets=%s, mode=%s", targets, mode or "heat+cool"
+        )
+
+    def get_learning_snapshot(self) -> dict[str, Any]:
+        """Capture current learning state for save/restore."""
+        return {
+            "rls_heat_model": self._rls_heat.as_dict(),
+            "rls_cool_model": self._rls_cool.as_dict(),
+            "pi_integral": self._pi_integral,
+            "manual_override_heat": list(self._manual_override_heat),
+            "manual_override_cool": list(self._manual_override_cool),
+            "heat_seeds_at_learn": list(self._heat_seeds),
+            "cool_seeds_at_learn": list(self._cool_seeds),
+        }
+
+    def apply_learning_snapshot(self, data: dict[str, Any]) -> None:
+        """Restore learning state from a saved snapshot."""
+        heat_dict = data.get("rls_heat_model", {})
+        if heat_dict:
+            self._rls_heat = RLSModel.from_dict(
+                heat_dict, self._n_model_inputs,
+                seed_coefficients=self._heat_seeds,
+                coeff_clamps=self._rls_heat_clamps,
+                feature_scales=self._feature_scales,
+            )
+            self._rls_heat_mature = self._rls_heat.observation_count > 0
+
+        cool_dict = data.get("rls_cool_model", {})
+        if cool_dict:
+            self._rls_cool = RLSModel.from_dict(
+                cool_dict, self._n_model_inputs,
+                seed_coefficients=self._cool_seeds,
+                coeff_clamps=self._rls_cool_clamps,
+                feature_scales=self._feature_scales,
+            )
+            self._rls_cool_mature = self._rls_cool.observation_count > 0
+
+        self._pi_integral = float(data.get("pi_integral", 0.0))
+        self._manual_override_heat = data.get(
+            "manual_override_heat", [None] * self._rls_heat.n
+        )
+        self._manual_override_cool = data.get(
+            "manual_override_cool", [None] * self._rls_cool.n
+        )
+        _LOGGER.info("Learning snapshot restored")
 
     def _resolve_active_supplemental_sources(self) -> list[str]:
         """Resolve which supplemental sources are currently active from HA state."""

@@ -377,3 +377,59 @@ perturb_now:
   target:
     entity:
       integration: tasmota_irhvac
+
+learning_reset:
+  name: Learning reset
+  description: Selectively reset learning subsystems. Choose which targets to reset — any combination of seeds, buffers, integral, plant_id, greybox. Mode param applies to seeds and buffers only.
+  target:
+    entity:
+      integration: tasmota_irhvac
+  fields:
+    targets:
+      description: Which subsystems to reset.
+      required: true
+      selector:
+        select:
+          multiple: true
+          options:
+            - seeds
+            - buffers
+            - integral
+            - plant_id
+            - greybox
+    mode:
+      description: Reset only this mode (heat or cool). Applies to seeds and buffers. Omit to reset both.
+      required: false
+      selector:
+        select:
+          options:
+            - heat
+            - cool
+
+learning_save:
+  name: Learning save
+  description: Save current learning state (RLS coefficients, covariance, integral, frozen state) to a named snapshot slot. Max 3 slots.
+  target:
+    entity:
+      integration: tasmota_irhvac
+  fields:
+    slot:
+      description: Name for this snapshot slot.
+      required: true
+      example: "before_renovation"
+      selector:
+        text:
+
+learning_restore:
+  name: Learning restore
+  description: Restore learning state from a previously saved snapshot slot.
+  target:
+    entity:
+      integration: tasmota_irhvac
+  fields:
+    slot:
+      description: Name of the snapshot slot to restore.
+      required: true
+      example: "before_renovation"
+      selector:
+        text:
