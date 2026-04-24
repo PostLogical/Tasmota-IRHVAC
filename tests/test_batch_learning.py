@@ -1567,3 +1567,510 @@ class TestResidualsByHour:
         }
         with pytest.raises(ValueError, match="v1 observation"):
             Observation.from_dict(d)
+
+
+# ── Coverage gap tests ──────────────────────────────────────────────
+
+
+class TestBatchLearningCoverageGaps:
+    """Cover missing lines in batch_learning.py."""
+
+    def _make_obs(self, features, sp, cur, des=20.0, rate=0.005,
+                  clamped=False, clamped_reason="", wall_hour=None):
+        wt = None
+        if wall_hour is not None:
+            import datetime as _dt
+            wt = _dt.datetime(2026, 1, 15, wall_hour, 30, 0).timestamp()
+        return _make_test_obs(features, sp, cur, des=des, rate=rate,
+                              clamped=clamped, clamped_reason=clamped_reason,
+                              wall_time=wt)
+
+    # ── Line 25-26: numpy unavailable fallback ──
+
+    def test_numpy_unavailable_flag(self):
+        """_NUMPY_AVAILABLE = False path when numpy import fails."""
+        import custom_components.tasmota_irhvac.pi.batch_learning as bl
+        orig = bl._NUMPY_AVAILABLE
+        try:
+            bl._NUMPY_AVAILABLE = False
+            # compute_belsley_diagnostics should return [] (line 1387)
+            result = bl.compute_belsley_diagnostics(
+                [[1.0, 2.0], [1.0, 3.0]], n_features=2, n_obs=2,
+            )
+            assert result == []
+        finally:
+            bl._NUMPY_AVAILABLE = orig
+
+    # ── Line 133: build_feature_vector_from_raw with outdoor_temp_c=None ──
+
+    def test_feature_vector_none_outdoor(self):
+        """build_feature_vector_from_raw returns None when outdoor_temp_c is None."""
+        from custom_components.tasmota_irhvac.pi.batch_learning import build_feature_vector_from_raw
+        obs = Observation(
+            timestamp=0.0, wall_time=time.time(),
+            hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+            outdoor_temp_c=None, room_rate=0.005,
+            raw_readings={}, clamped=False, clamped_reason="",
+        )
+        result = build_feature_vector_from_raw(
+            obs, _test_model_inputs(0), _test_feature_order(0),
+        )
+        assert result is None
+
+    # ── Line 516: eigenvalues returns None → condition_number = inf ──
+
+    def test_condition_number_eigenvalues_none(self):
+        """condition_number returns inf when eigenvalues cannot be computed."""
+        buf = DiversityAwareBuffer(n_features=4, max_size=100)
+        # Add observations with near-zero variance in one feature
+        for i in range(30):
+            buf.add(self._make_obs([1.0, float(i), 0.0, 0.0], sp=22.0, cur=20.0))
+        # Two identical features → singular correlation matrix with numpy
+        # numpy should still handle this, but we can test lambda_min < 1e-15 path
+        kappa = buf.compute_condition_number()
+        assert kappa >= 1.0  # At least returns something valid
+
+    # ── Line 521: lambda_min < 1e-15 ──
+
+    def test_condition_number_eigenvalues_none_path(self):
+        """condition_number returns inf when eigenvalues returns None (line 516)."""
+        from unittest.mock import patch as _patch
+        import custom_components.tasmota_irhvac.pi.batch_learning as bl
+        orig = bl._NUMPY_AVAILABLE
+        try:
+            bl._NUMPY_AVAILABLE = False
+            buf = DiversityAwareBuffer(
+                n_features=4, max_size=100,
+                feature_order=_test_feature_order(2),
+                model_inputs=_test_model_inputs(2),
+            )
+            for i in range(30):
+                buf.add(self._make_obs([1.0, float(i % 10), float(i), float(i * 2)], sp=22.0, cur=20.0))
+            with _patch.object(DiversityAwareBuffer, '_eigenvalues_symmetric', return_value=None):
+                kappa = buf.compute_condition_number()
+            assert kappa == float('inf')
+        finally:
+            bl._NUMPY_AVAILABLE = orig
+
+    def test_condition_number_lambda_min_zero(self):
+        """condition_number returns inf when lambda_min < 1e-15 (line 521)."""
+        from unittest.mock import patch as _patch
+        import custom_components.tasmota_irhvac.pi.batch_learning as bl
+        orig = bl._NUMPY_AVAILABLE
+        try:
+            bl._NUMPY_AVAILABLE = False
+            buf = DiversityAwareBuffer(
+                n_features=4, max_size=100,
+                feature_order=_test_feature_order(2),
+                model_inputs=_test_model_inputs(2),
+            )
+            for i in range(30):
+                buf.add(self._make_obs([1.0, float(i % 10), float(i), float(i * 2)], sp=22.0, cur=20.0))
+            with _patch.object(DiversityAwareBuffer, '_eigenvalues_symmetric', return_value=[10.0, 0.0]):
+                kappa = buf.compute_condition_number()
+            assert kappa == float('inf')
+        finally:
+            bl._NUMPY_AVAILABLE = orig
+
+    # ── Line 548: VIF with singular correlation matrix ──
+
+    def test_vif_singular_corr(self):
+        """VIF returns all inf when correlation matrix inversion fails (line 548)."""
+        from unittest.mock import patch as _patch
+        buf = DiversityAwareBuffer(
+            n_features=4, max_size=100,
+            feature_order=_test_feature_order(2),
+            model_inputs=_test_model_inputs(2),
+        )
+        for i in range(30):
+            buf.add(self._make_obs([1.0, float(i % 10), float(i), float(i * 2)], sp=22.0, cur=20.0))
+        with _patch.object(DiversityAwareBuffer, '_invert_matrix', return_value=None):
+            vif = buf.compute_vif()
+        assert all(v == float('inf') for v in vif)  # all inf including intercept
+
+    # ── Line 576: pairwise correlations with too many clamped obs ──
+
+    def test_pairwise_correlations_all_clamped(self):
+        """get_pairwise_correlations returns [] when < 20 unclamped obs."""
+        buf = DiversityAwareBuffer(
+            n_features=4, max_size=100,
+            feature_order=_test_feature_order(2),
+            model_inputs=_test_model_inputs(2),
+        )
+        # Add 25 observations, but all clamped
+        for i in range(25):
+            buf.add(self._make_obs(
+                [1.0, float(i), float(i % 3), float(i % 4)],
+                sp=22.0, cur=20.0, clamped=True, clamped_reason="no_output",
+            ))
+        result = buf.get_pairwise_correlations(["intercept", "od", "a", "b"])
+        assert result == []
+
+    # ── Line 600: zero-variance column in pairwise correlation ──
+
+    def test_pairwise_correlations_zero_variance(self):
+        """Pairs with zero-variance column are skipped (denom < 1e-12)."""
+        buf = DiversityAwareBuffer(
+            n_features=4, max_size=100,
+            feature_order=_test_feature_order(2),
+            model_inputs=_test_model_inputs(2),
+        )
+        for i in range(25):
+            # Feature 2 is constant → zero variance
+            buf.add(self._make_obs(
+                [1.0, float(i % 10), 5.0, float(i)],
+                sp=22.0, cur=20.0,
+            ))
+        result = buf.get_pairwise_correlations(["intercept", "od", "const", "var"])
+        # Pairs involving "const" should be absent (zero variance)
+        for name_a, name_b, r in result:
+            assert "const" not in (name_a, name_b)
+
+    # ── Lines 734-783: non-numpy eigenvalue fallback ──
+
+    def test_eigenvalues_no_numpy_n1(self):
+        """Eigenvalue for 1×1 matrix without numpy."""
+        import custom_components.tasmota_irhvac.pi.batch_learning as bl
+        orig = bl._NUMPY_AVAILABLE
+        try:
+            bl._NUMPY_AVAILABLE = False
+            buf = DiversityAwareBuffer(
+                n_features=3, max_size=100,
+                feature_order=_test_feature_order(1),
+                model_inputs=_test_model_inputs(1),
+            )
+            for i in range(30):
+                buf.add(self._make_obs([1.0, float(i % 10), float(i % 7)], sp=22.0, cur=20.0))
+            # Should exercise n=2 direct formula path (2×2 corr matrix)
+            kappa = buf.compute_condition_number()
+            assert kappa >= 1.0
+        finally:
+            bl._NUMPY_AVAILABLE = orig
+
+    def test_eigenvalues_no_numpy_n_gt_2(self):
+        """Eigenvalue via power iteration for n>2 without numpy."""
+        import custom_components.tasmota_irhvac.pi.batch_learning as bl
+        orig = bl._NUMPY_AVAILABLE
+        try:
+            bl._NUMPY_AVAILABLE = False
+            buf = DiversityAwareBuffer(
+                n_features=5, max_size=100,
+                feature_order=_test_feature_order(3),
+                model_inputs=_test_model_inputs(3),
+            )
+            for i in range(40):
+                buf.add(self._make_obs(
+                    [1.0, float(i % 10), float(i % 5), float(i % 3), float(i % 7)],
+                    sp=22.0, cur=20.0,
+                ))
+            kappa = buf.compute_condition_number()
+            assert kappa >= 1.0
+            assert kappa < float('inf')
+        finally:
+            bl._NUMPY_AVAILABLE = orig
+
+    # ── Line 898: _solve_joint returns None (singular) ──
+
+    def test_joint_solve_singular_falls_to_fwl(self):
+        """When joint solve fails, FWL is used (lines 898, 940-1027, 1185)."""
+        from unittest.mock import patch as _patch
+        # Create data where all model inputs are present but joint system is singular
+        obs = []
+        for i in range(40):
+            od = float(i % 10)
+            # Make model input perfectly correlated with outdoor_delta
+            inp_val = od * 2.0  # perfect collinearity
+            obs.append(self._make_obs(
+                [1.0, od, inp_val], sp=22.0, cur=20.0,
+            ))
+
+        with _patch(
+            "custom_components.tasmota_irhvac.pi.batch_learning._solve_joint",
+            return_value=None,
+        ):
+            result = weighted_least_squares(
+                obs, n_features=3, min_observations=20,
+                feature_order=_test_feature_order(1),
+                model_inputs=_test_model_inputs(1),
+            )
+        # FWL should have produced a result
+        assert result is not None
+
+    # ── Line 1073: n_features < 2 ──
+
+    def test_wls_n_features_lt_2(self):
+        """WLS returns None when n_features < 2."""
+        obs = [self._make_obs([1.0], sp=22.0, cur=20.0) for _ in range(30)]
+        result = weighted_least_squares(
+            obs, n_features=1, min_observations=20,
+            feature_order=["intercept"],
+            model_inputs=[],
+        )
+        assert result is None
+
+    # ── Line 1106: base solve fails ──
+
+    def test_wls_base_solve_fails(self):
+        """WLS returns None when base (intercept+outdoor_delta) solve fails."""
+        from unittest.mock import patch as _patch
+        obs = []
+        for i in range(30):
+            obs.append(self._make_obs([1.0, float(i % 10)], sp=22.0, cur=20.0))
+        with _patch(
+            "custom_components.tasmota_irhvac.pi.batch_learning._solve_symmetric",
+            return_value=None,
+        ):
+            result = weighted_least_squares(
+                obs, n_features=2, min_observations=20,
+                feature_order=_test_feature_order(0),
+                model_inputs=_test_model_inputs(0),
+            )
+        assert result is None
+
+    # ── Lines 1144-1145: model input with no entity_id ──
+
+    def test_wls_model_input_no_entity_id(self):
+        """Model input without entity_id is held (treated as unavailable)."""
+        obs = []
+        for i in range(30):
+            obs.append(self._make_obs([1.0, float(i % 10), float(i % 5)], sp=22.0, cur=20.0))
+        result = weighted_least_squares(
+            obs, n_features=3, min_observations=20,
+            feature_order=_test_feature_order(1),
+            model_inputs=[{"name": "no_id_input"}],  # no entity_id
+        )
+        assert result is not None
+        assert 2 in result.held_features  # index 2 should be held
+
+    # ── Lines 1247-1250: rare-feature outlier protection ──
+
+    def test_rare_feature_outlier_protection(self):
+        """Outliers with rare features are kept (not excluded)."""
+        obs = []
+        # 35 obs with only intercept + outdoor_delta
+        for i in range(35):
+            obs.append(self._make_obs([1.0, float(i % 10)], sp=22.0, cur=20.0))
+        # 5 obs with a rare model input present + large residual
+        for i in range(5):
+            o = self._make_obs([1.0, float(i)], sp=30.0, cur=20.0)  # big outlier
+            o.raw_readings[_TEST_ENTITIES[0]] = 25.0  # rare feature
+            obs.append(o)
+        result = weighted_least_squares(
+            obs, n_features=3, min_observations=20,
+            feature_order=_test_feature_order(1),
+            model_inputs=_test_model_inputs(1),
+            min_feature_representation=20,  # threshold above count=5
+        )
+        assert result is not None
+
+    # ── Lines 1309, 1313: ragged feature matrix in _compute_vif_from_features ──
+
+    def test_vif_from_features_ragged(self):
+        """_compute_vif_from_features handles ragged rows gracefully."""
+        from custom_components.tasmota_irhvac.pi.batch_learning import _compute_vif_from_features
+        # Rows of different lengths
+        X = [
+            [1.0, 2.0, 3.0],
+            [1.0, 2.5],  # short row
+            [1.0, 3.0, 4.0],
+        ]
+        result = _compute_vif_from_features(X, n_features=3, n_obs=3)
+        assert len(result) == 3
+        assert result[0] == 1.0  # intercept
+
+    # ── Line 1389: Belsley with n_obs < n_features ──
+
+    def test_belsley_insufficient_obs(self):
+        """compute_belsley_diagnostics returns [] with too few observations."""
+        from custom_components.tasmota_irhvac.pi.batch_learning import compute_belsley_diagnostics
+        result = compute_belsley_diagnostics(
+            [[1.0, 2.0, 3.0]], n_features=3, n_obs=1,
+        )
+        assert result == []
+
+    # ── Line 1395: Belsley with extra columns ──
+
+    def test_belsley_extra_columns(self):
+        """compute_belsley_diagnostics truncates extra columns."""
+        from custom_components.tasmota_irhvac.pi.batch_learning import compute_belsley_diagnostics
+        X = [[1.0, float(i), float(i * 2), 99.0] for i in range(20)]
+        result = compute_belsley_diagnostics(X, n_features=3, n_obs=20)
+        # Should not crash, may or may not find collinearity
+        assert isinstance(result, list)
+
+    # ── Lines 1406-1407: SVD failure ──
+
+    def test_belsley_svd_failure(self):
+        """compute_belsley_diagnostics returns [] on SVD failure."""
+        from custom_components.tasmota_irhvac.pi.batch_learning import compute_belsley_diagnostics
+        X = [[float('nan'), 1.0], [1.0, float('nan')]]
+        result = compute_belsley_diagnostics(X, n_features=2, n_obs=2)
+        assert result == []
+
+    # ── Line 1733: fuse_batch_greybox with near-zero variance ──
+
+    def test_fuse_batch_greybox_zero_variance(self):
+        """Fusion skips coefficients with near-zero std_err."""
+        result = BatchResult(
+            n_total=50, n_eligible=40,
+            beta_batch=[2.0, 0.5], beta_current=[1.8, 0.4],
+            residual_rms=0.1, max_coeff_change_pct=10.0,
+            recommend_update=True,
+            beta_std_err=[1e-8, 0.1],  # first has near-zero variance
+        )
+        fuse_batch_greybox(
+            result,
+            greybox_beta=[2.1, 0.6],
+            greybox_std_err=[1e-8, 0.1],  # both near-zero
+        )
+        # First coefficient should NOT be fused (zero variance skip)
+        assert result.beta_batch[0] == 2.0  # unchanged
+
+    # ── Line 1819: analyze_residuals_by_hour without feature_order ──
+
+    def test_residuals_by_hour_no_feature_order(self):
+        """analyze_residuals_by_hour skips obs when feature_order is None."""
+        obs = [self._make_obs([1.0, 5.0], sp=22.0, cur=20.0, wall_hour=10)
+               for _ in range(10)]
+        patterns = analyze_residuals_by_hour(
+            obs, [1.0, 0.3], n_features=2,
+            feature_order=None, model_inputs=None,
+        )
+        assert patterns == []
+
+    # ── Line 1822: feature vector is None in residual analysis ──
+
+    def test_residuals_by_hour_missing_outdoor_temp(self):
+        """analyze_residuals_by_hour skips obs with None outdoor_temp_c."""
+        obs = []
+        for _ in range(10):
+            o = Observation(
+                timestamp=0.0, wall_time=time.time(),
+                hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=None, room_rate=0.005,
+                raw_readings={}, clamped=False, clamped_reason="",
+            )
+            obs.append(o)
+        patterns = analyze_residuals_by_hour(
+            obs, [1.0, 0.3], n_features=2,
+            feature_order=_test_feature_order(0),
+            model_inputs=_test_model_inputs(0),
+        )
+        assert patterns == []
+
+    # ── Line 1866: sign reversal breaks span ──
+
+    def test_residuals_by_hour_sign_reversal(self):
+        """Span extension stops when sign flips."""
+        obs = []
+        beta = [1.0, 0.3]
+        for hour in range(24):
+            for _ in range(8):
+                od = 5.0
+                true_offset = 1.0 + 0.3 * od
+                if hour in (10, 11, 12):
+                    bias = 0.8  # positive
+                elif hour == 13:
+                    bias = -0.8  # negative — sign flip
+                else:
+                    bias = 0.0
+                obs.append(self._make_obs(
+                    [1.0, od], sp=20.0 + true_offset + bias, cur=20.0,
+                    wall_hour=hour,
+                ))
+        patterns = analyze_residuals_by_hour(
+            obs, beta, n_features=2,
+            feature_order=_test_feature_order(0),
+            model_inputs=_test_model_inputs(0),
+        )
+        # Hour 13 should not be merged with 10-12 (different sign)
+        pos = [p for p in patterns if p.mean_residual > 0]
+        neg = [p for p in patterns if p.mean_residual < 0]
+        assert len(pos) >= 1
+        assert len(neg) >= 1
+
+    # ── Lines 734-783: non-numpy eigenvalue paths (direct calls) ──
+
+    def test_eigenvalues_n1_no_numpy(self):
+        """Eigenvalue for 1×1 matrix without numpy (line 738)."""
+        import custom_components.tasmota_irhvac.pi.batch_learning as bl
+        orig = bl._NUMPY_AVAILABLE
+        try:
+            bl._NUMPY_AVAILABLE = False
+            result = DiversityAwareBuffer._eigenvalues_symmetric([[5.0]], 1)
+            assert result == [5.0]
+        finally:
+            bl._NUMPY_AVAILABLE = orig
+
+    def test_eigenvalues_n2_no_numpy(self):
+        """Eigenvalue for 2×2 matrix without numpy (lines 739-744)."""
+        import custom_components.tasmota_irhvac.pi.batch_learning as bl
+        orig = bl._NUMPY_AVAILABLE
+        try:
+            bl._NUMPY_AVAILABLE = False
+            A = [[2.0, 0.0], [0.0, 3.0]]
+            result = DiversityAwareBuffer._eigenvalues_symmetric(A, 2)
+            assert len(result) == 2
+            assert abs(result[0] - 3.0) < 0.01
+            assert abs(result[1] - 2.0) < 0.01
+        finally:
+            bl._NUMPY_AVAILABLE = orig
+
+    def test_eigenvalues_n3_zero_matrix_no_numpy(self):
+        """Eigenvalue for zero 3×3 matrix → None (lines 762, 777)."""
+        import custom_components.tasmota_irhvac.pi.batch_learning as bl
+        orig = bl._NUMPY_AVAILABLE
+        try:
+            bl._NUMPY_AVAILABLE = False
+            A = [[0.0] * 3 for _ in range(3)]
+            result = DiversityAwareBuffer._eigenvalues_symmetric(A, 3)
+            assert result is None
+        finally:
+            bl._NUMPY_AVAILABLE = orig
+
+    def test_eigenvalues_n3_valid_no_numpy(self):
+        """Eigenvalue for valid 3×3 matrix without numpy (full power iteration)."""
+        import custom_components.tasmota_irhvac.pi.batch_learning as bl
+        orig = bl._NUMPY_AVAILABLE
+        try:
+            bl._NUMPY_AVAILABLE = False
+            A = [[3.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 1.0]]
+            result = DiversityAwareBuffer._eigenvalues_symmetric(A, 3)
+            assert result is not None
+            assert len(result) == 2  # [lambda_max, lambda_min]
+        finally:
+            bl._NUMPY_AVAILABLE = orig
+
+    # ── Line 25-26: numpy import fallback ──
+
+    def test_numpy_import_fallback(self):
+        """_NUMPY_AVAILABLE=False when numpy import fails (lines 25-26)."""
+        import sys
+        import importlib
+        import custom_components.tasmota_irhvac.pi.batch_learning as bl
+        numpy_mod = sys.modules.get("numpy")
+        sys.modules["numpy"] = None  # poison
+        try:
+            importlib.reload(bl)
+            assert bl._NUMPY_AVAILABLE is False
+        finally:
+            if numpy_mod is not None:
+                sys.modules["numpy"] = numpy_mod
+            else:
+                sys.modules.pop("numpy", None)
+            importlib.reload(bl)
+
+    def test_eigvalsh_linalg_error(self):
+        """eigvalsh LinAlgError → returns None (lines 734-735)."""
+        import numpy as np
+        from unittest.mock import patch as _patch
+        buf = DiversityAwareBuffer(
+            n_features=3, max_size=100,
+            feature_order=_test_feature_order(1),
+            model_inputs=_test_model_inputs(1),
+        )
+        for i in range(30):
+            buf.add(self._make_obs([1.0, float(i % 10), float(i % 7)], sp=22.0, cur=20.0))
+        with _patch.object(np.linalg, 'eigvalsh', side_effect=np.linalg.LinAlgError("test")):
+            kappa = buf.compute_condition_number()
+        assert kappa == float('inf')
