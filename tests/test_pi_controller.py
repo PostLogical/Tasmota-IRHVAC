@@ -1706,8 +1706,8 @@ class TestModelInputClamps:
         pi = entity._pi
         assert pi._rls_heat_clamps[2] is None
 
-    def test_model_input_with_partial_clamp(self):
-        """Model input with only clamp_min (no clamp_max) should have None."""
+    def test_model_input_with_partial_clamp_min_only(self):
+        """Model input with only clamp_min should clamp with upper=inf."""
         config = make_pi_config({
             "pi_model_inputs": [{
                 "name": "Stove",
@@ -1715,6 +1715,44 @@ class TestModelInputClamps:
                 "seed_heat": 3.0,
                 "seed_cool": 0.0,
                 "clamp_min": 0.0,
+                "lag_tau": 0,
+            }],
+        })
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        clamp = pi._rls_heat_clamps[2]
+        assert clamp is not None
+        # seed_min=0 → β upper = 0; seed_max absent → β lower = -inf
+        assert clamp[0] == float("-inf")
+        assert clamp[1] == 0.0
+
+    def test_model_input_with_partial_clamp_max_only(self):
+        """Model input with only clamp_max should clamp with lower=-inf."""
+        config = make_pi_config({
+            "pi_model_inputs": [{
+                "name": "Stove",
+                "entity_id": "input_boolean.stove",
+                "seed_heat": 3.0,
+                "seed_cool": 0.0,
+                "clamp_max": 12.0,
+                "lag_tau": 0,
+            }],
+        })
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        clamp = pi._rls_heat_clamps[2]
+        assert clamp is not None
+        assert clamp[0] == -12.0
+        assert clamp[1] == float("inf")
+
+    def test_model_input_with_no_clamps(self):
+        """Model input with no clamps should have None."""
+        config = make_pi_config({
+            "pi_model_inputs": [{
+                "name": "Stove",
+                "entity_id": "input_boolean.stove",
+                "seed_heat": 3.0,
+                "seed_cool": 0.0,
                 "lag_tau": 0,
             }],
         })

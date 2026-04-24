@@ -339,10 +339,14 @@ class PIController:
             clamp_max = m_input.get("clamp_max")
             # Clamps are in seed space (positive = warms room).
             # Internal β = -seed, so negate and flip.
-            clamp: tuple[float, float] | None = (
-                (-float(clamp_max), -float(clamp_min))
-                if clamp_min is not None and clamp_max is not None else None
-            )
+            # Either side can be set independently; missing side → ±inf.
+            clamp: tuple[float, float] | None
+            if clamp_min is not None or clamp_max is not None:
+                seed_lo = float(clamp_min) if clamp_min is not None else -math.inf
+                seed_hi = float(clamp_max) if clamp_max is not None else math.inf
+                clamp = (-seed_hi, -seed_lo)
+            else:
+                clamp = None
             self._rls_heat_clamps.append(clamp)
             self._rls_cool_clamps.append(clamp)
 

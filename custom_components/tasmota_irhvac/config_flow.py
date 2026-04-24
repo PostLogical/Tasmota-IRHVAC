@@ -1225,7 +1225,7 @@ class ModelInputSubentryFlow(ConfigSubentryFlow):
                     vol.Optional("seed_cool", default=0.0): NumberSelector(
                         NumberSelectorConfig(min=-20, max=20, step=0.01, unit_of_measurement="°C", mode=NumberSelectorMode.BOX)
                     ),
-                    vol.Optional("clamp_min", default=0.0): NumberSelector(
+                    vol.Optional("clamp_min"): NumberSelector(
                         NumberSelectorConfig(min=0, max=50, step=0.1, unit_of_measurement="°C", mode=NumberSelectorMode.BOX)
                     ),
                     vol.Optional("clamp_max"): NumberSelector(
@@ -1289,7 +1289,7 @@ class ModelInputSubentryFlow(ConfigSubentryFlow):
                         vol.Optional("seed_cool", default=0.0): NumberSelector(
                             NumberSelectorConfig(min=-20, max=20, step=0.01, unit_of_measurement="°C", mode=NumberSelectorMode.BOX)
                         ),
-                        vol.Optional("clamp_min", default=0.0): NumberSelector(
+                        vol.Optional("clamp_min"): NumberSelector(
                             NumberSelectorConfig(min=0, max=50, step=0.1, unit_of_measurement="°C", mode=NumberSelectorMode.BOX)
                         ),
                         vol.Optional("clamp_max"): NumberSelector(

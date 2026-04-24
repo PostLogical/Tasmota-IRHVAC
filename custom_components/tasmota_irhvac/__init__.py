@@ -175,12 +175,17 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     m["seed_heat"] = -m["seed_heat"]
                 if "seed_cool" in m:
                     m["seed_cool"] = -m["seed_cool"]
-                # Negate clamps from old internal β space to seed space
-                if "clamp_min" in m and "clamp_max" in m:
-                    old_min = m["clamp_min"]
-                    old_max = m["clamp_max"]
-                    m["clamp_min"] = -old_max
-                    m["clamp_max"] = -old_min
+                # Negate clamps from old internal β space to seed space.
+                # Each side independent — missing side stays absent.
+                has_min = "clamp_min" in m
+                has_max = "clamp_max" in m
+                if has_min or has_max:
+                    old_min = m.pop("clamp_min", None)
+                    old_max = m.pop("clamp_max", None)
+                    if old_max is not None:
+                        m["clamp_min"] = -old_max
+                    if old_min is not None:
+                        m["clamp_max"] = -old_min
                 migrated_inputs.append(m)
             new_options["pi_model_inputs"] = migrated_inputs
 
@@ -214,11 +219,15 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if "seed_cool" in sub_data:
                     sub_data["seed_cool"] = -sub_data["seed_cool"]
                     changed = True
-                if "clamp_min" in sub_data and "clamp_max" in sub_data:
-                    old_min = sub_data["clamp_min"]
-                    old_max = sub_data["clamp_max"]
-                    sub_data["clamp_min"] = -old_max
-                    sub_data["clamp_max"] = -old_min
+                has_min = "clamp_min" in sub_data
+                has_max = "clamp_max" in sub_data
+                if has_min or has_max:
+                    old_min = sub_data.pop("clamp_min", None)
+                    old_max = sub_data.pop("clamp_max", None)
+                    if old_max is not None:
+                        sub_data["clamp_min"] = -old_max
+                    if old_min is not None:
+                        sub_data["clamp_max"] = -old_min
                     changed = True
                 if changed:
                     hass.config_entries.async_update_subentry(
