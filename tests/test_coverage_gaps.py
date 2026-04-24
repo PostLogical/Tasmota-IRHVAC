@@ -5538,3 +5538,619 @@ class TestTauEstimatorGaps:
         result = provider.check_observation(now_mono=600.0, current_c=20.1)
         assert result is None
         assert not provider.active
+
+
+# ── repairs.py coverage gaps ────────────────────────────────────────
+
+
+class TestRepairsCoverageGaps:
+    """Tests for uncovered lines in repairs.py."""
+
+    @pytest.mark.asyncio
+    async def test_auto_perturb_stall_routes(self, hass):
+        """Line 38: auto_perturb_stall routes to AutoPerturbStallRepairFlow."""
+        from custom_components.tasmota_irhvac.repairs import (
+            async_create_fix_flow,
+            AutoPerturbStallRepairFlow,
+        )
+
+        flow = await async_create_fix_flow(
+            hass, "stall_test",
+            {"repair_type": "auto_perturb_stall", "entry_id": "test123"},
+        )
+        assert isinstance(flow, AutoPerturbStallRepairFlow)
+
+    @pytest.mark.asyncio
+    async def test_missing_repair_type_routes_to_unknown(self, hass):
+        """Line 40: missing/empty repair_type falls through to UnknownRepairFlow."""
+        from custom_components.tasmota_irhvac.repairs import (
+            async_create_fix_flow,
+            UnknownRepairFlow,
+        )
+
+        flow = await async_create_fix_flow(
+            hass, "weird_issue",
+            {"repair_type": "totally_unknown_type"},
+        )
+        assert isinstance(flow, UnknownRepairFlow)
+
+    @pytest.mark.asyncio
+    async def test_save_seeds_climate_none_in_data(self, hass):
+        """Lines 91-94: SaveSeedsRepairFlow aborts when climate is None in DATA_KEY."""
+        from custom_components.tasmota_irhvac.repairs import SaveSeedsRepairFlow
+
+        entry = MockConfigEntry(domain=DOMAIN, data=make_config(), title="Test")
+        entry.add_to_hass(hass)
+
+        # DATA_KEY exists but entry_id maps to None
+        hass.data.setdefault(DATA_KEY, {})[entry.entry_id] = None
+
+        flow = SaveSeedsRepairFlow({"entry_id": entry.entry_id})
+        flow.hass = hass
+
+        result = await flow.async_step_confirm(user_input={})
+        assert result["type"] == "abort"
+        assert result["reason"] == "pi_not_available"
+
+    @pytest.mark.asyncio
+    async def test_save_seeds_climate_missing_from_data_key(self, hass):
+        """Lines 91-94: SaveSeedsRepairFlow aborts when entry_id not in DATA_KEY."""
+        from custom_components.tasmota_irhvac.repairs import SaveSeedsRepairFlow
+
+        entry = MockConfigEntry(domain=DOMAIN, data=make_config(), title="Test")
+        entry.add_to_hass(hass)
+
+        # DATA_KEY exists but entry_id is not present at all
+        hass.data.setdefault(DATA_KEY, {})
+
+        flow = SaveSeedsRepairFlow({"entry_id": entry.entry_id})
+        flow.hass = hass
+
+        result = await flow.async_step_confirm(user_input={})
+        assert result["type"] == "abort"
+        assert result["reason"] == "pi_not_available"
+
+    @pytest.mark.asyncio
+    async def test_save_seeds_climate_no_pi_attr(self, hass):
+        """Lines 91-94: SaveSeedsRepairFlow aborts when climate has no _pi attr."""
+        from custom_components.tasmota_irhvac.repairs import SaveSeedsRepairFlow
+
+        entry = MockConfigEntry(domain=DOMAIN, data=make_config(), title="Test")
+        entry.add_to_hass(hass)
+
+        # Climate object without _pi attribute at all
+        mock_climate = MagicMock(spec=[])  # empty spec = no attributes
+        hass.data.setdefault(DATA_KEY, {})[entry.entry_id] = mock_climate
+
+        flow = SaveSeedsRepairFlow({"entry_id": entry.entry_id})
+        flow.hass = hass
+
+        result = await flow.async_step_confirm(user_input={})
+        assert result["type"] == "abort"
+        assert result["reason"] == "pi_not_available"
+
+    @pytest.mark.asyncio
+    async def test_auto_perturb_stall_init_delegates_to_confirm(self, hass):
+        """Lines 271-272, 277: AutoPerturbStallRepairFlow init and entry_id extraction."""
+        from custom_components.tasmota_irhvac.repairs import AutoPerturbStallRepairFlow
+
+        flow = AutoPerturbStallRepairFlow({"entry_id": "test_entry_abc"})
+        flow.hass = hass
+        assert flow._entry_id == "test_entry_abc"
+
+        # Init with no user_input delegates to confirm which shows form
+        result = await flow.async_step_init()
+        assert result["type"] == "form"
+        assert result["step_id"] == "confirm"
+
+    @pytest.mark.asyncio
+    async def test_auto_perturb_stall_confirm_with_pi(self, hass):
+        """Lines 283-293: AutoPerturbStallRepairFlow confirm calls perturb_now."""
+        from custom_components.tasmota_irhvac.repairs import AutoPerturbStallRepairFlow
+
+        mock_pi = MagicMock()
+        mock_climate = MagicMock()
+        mock_climate._pi = mock_pi
+
+        hass.data.setdefault(DATA_KEY, {})["entry_abc"] = mock_climate
+
+        flow = AutoPerturbStallRepairFlow({"entry_id": "entry_abc"})
+        flow.hass = hass
+
+        result = await flow.async_step_confirm(user_input={})
+        assert result["type"] == "create_entry"
+        mock_pi.perturb_now.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_auto_perturb_stall_confirm_no_pi(self, hass):
+        """Lines 283-293: AutoPerturbStallRepairFlow confirm with climate._pi=None."""
+        from custom_components.tasmota_irhvac.repairs import AutoPerturbStallRepairFlow
+
+        mock_climate = MagicMock()
+        mock_climate._pi = None
+
+        hass.data.setdefault(DATA_KEY, {})["entry_abc"] = mock_climate
+
+        flow = AutoPerturbStallRepairFlow({"entry_id": "entry_abc"})
+        flow.hass = hass
+
+        result = await flow.async_step_confirm(user_input={})
+        assert result["type"] == "create_entry"
+
+    @pytest.mark.asyncio
+    async def test_auto_perturb_stall_confirm_no_climate(self, hass):
+        """Lines 283-293: AutoPerturbStallRepairFlow confirm with no climate entity."""
+        from custom_components.tasmota_irhvac.repairs import AutoPerturbStallRepairFlow
+
+        hass.data.setdefault(DATA_KEY, {})
+        # entry_id not in DATA_KEY at all
+
+        flow = AutoPerturbStallRepairFlow({"entry_id": "missing_entry"})
+        flow.hass = hass
+
+        result = await flow.async_step_confirm(user_input={})
+        assert result["type"] == "create_entry"
+
+    @pytest.mark.asyncio
+    async def test_unknown_repair_flow_aborts(self, hass):
+        """Line 306: UnknownRepairFlow.async_step_init aborts with unknown_issue."""
+        from custom_components.tasmota_irhvac.repairs import UnknownRepairFlow
+
+        flow = UnknownRepairFlow()
+        flow.hass = hass
+
+        result = await flow.async_step_init()
+        assert result["type"] == "abort"
+        assert result["reason"] == "unknown_issue"
+
+
+# ── __init__.py: v1.3 migration rename + negate + subentry (L150,162,171-190,200-219) ──
+
+
+class TestMigrationV1_3SignConvention:
+    """Cover v1.3 migration: key renames, seed negation, clamp flipping."""
+
+    @pytest.mark.asyncio
+    async def test_v1_3_renames_slope_keys(self, hass):
+        """v1.3 migration should rename pi_ff_heat_slope -> pi_outdoor_seed_heat."""
+        from custom_components.tasmota_irhvac import async_migrate_entry
+
+        config = make_config()
+        options = {
+            "pi_ff_heat_slope": 0.35,
+            "pi_ff_cool_slope": 0.20,
+        }
+        entry = MockConfigEntry(
+            domain=DOMAIN, data=config, options=options,
+            version=1, minor_version=2,
+        )
+        entry.add_to_hass(hass)
+
+        result = await async_migrate_entry(hass, entry)
+        assert result is True
+
+        # Old keys removed
+        assert "pi_ff_heat_slope" not in entry.options
+        assert "pi_ff_cool_slope" not in entry.options
+        # v1.12 resets outdoor seeds to 0.25, but the v1.3 rename ran first
+        assert entry.options["pi_outdoor_seed_heat"] == 0.25
+        assert entry.options["pi_outdoor_seed_cool"] == 0.25
+
+    @pytest.mark.asyncio
+    async def test_v1_3_renames_clamp_keys(self, hass):
+        """v1.3 migration should rename heat clamp keys to shared clamp keys."""
+        from custom_components.tasmota_irhvac import async_migrate_entry
+
+        options = {
+            "pi_outdoor_delta_clamp_heat_min": -5.0,
+            "pi_outdoor_delta_clamp_heat_max": 10.0,
+            "pi_outdoor_delta_clamp_cool_min": -3.0,
+            "pi_outdoor_delta_clamp_cool_max": 8.0,
+        }
+        entry = MockConfigEntry(
+            domain=DOMAIN, data=make_config(), options=options,
+            version=1, minor_version=2,
+        )
+        entry.add_to_hass(hass)
+
+        result = await async_migrate_entry(hass, entry)
+        assert result is True
+
+        assert "pi_outdoor_delta_clamp_heat_min" not in entry.options
+        assert "pi_outdoor_delta_clamp_heat_max" not in entry.options
+        assert "pi_outdoor_delta_clamp_cool_min" not in entry.options
+        assert "pi_outdoor_delta_clamp_cool_max" not in entry.options
+
+    @pytest.mark.asyncio
+    async def test_v1_3_negates_model_input_seeds_and_flips_clamps(self, hass):
+        """v1.3 migration should negate seeds and flip clamps on model inputs."""
+        from custom_components.tasmota_irhvac import async_migrate_entry
+
+        options = {
+            "pi_model_inputs": [
+                {
+                    "entity_id": "input_boolean.stove",
+                    "seed_heat": -2.0,
+                    "seed_cool": 1.5,
+                    "clamp_min": -10.0,
+                    "clamp_max": 5.0,
+                },
+            ],
+        }
+        entry = MockConfigEntry(
+            domain=DOMAIN, data=make_config(), options=options,
+            version=1, minor_version=2,
+        )
+        entry.add_to_hass(hass)
+
+        result = await async_migrate_entry(hass, entry)
+        assert result is True
+
+        mi = entry.options["pi_model_inputs"][0]
+        # Seeds negated
+        assert mi["seed_heat"] == 2.0
+        assert mi["seed_cool"] == -1.5
+        # Clamps flipped: new_min = -old_max, new_max = -old_min
+        assert mi["clamp_min"] == -5.0
+        assert mi["clamp_max"] == 10.0
+
+    @pytest.mark.asyncio
+    async def test_v1_3_negates_model_input_seeds_only(self, hass):
+        """v1.3 migration with seeds but no clamps should only negate seeds."""
+        from custom_components.tasmota_irhvac import async_migrate_entry
+
+        options = {
+            "pi_model_inputs": [
+                {
+                    "entity_id": "input_boolean.stove",
+                    "seed_heat": -3.0,
+                    "seed_cool": 0.0,
+                },
+            ],
+        }
+        entry = MockConfigEntry(
+            domain=DOMAIN, data=make_config(), options=options,
+            version=1, minor_version=2,
+        )
+        entry.add_to_hass(hass)
+
+        result = await async_migrate_entry(hass, entry)
+        assert result is True
+
+        mi = entry.options["pi_model_inputs"][0]
+        assert mi["seed_heat"] == 3.0
+        assert mi["seed_cool"] == 0.0
+        assert "clamp_min" not in mi
+        assert "clamp_max" not in mi
+
+    @pytest.mark.asyncio
+    async def test_v1_3_negates_subentry_seeds_and_flips_clamps(
+        self, hass, mqtt_mock, enable_custom_integrations
+    ):
+        """v1.3 migration should negate subentry seeds and flip subentry clamps."""
+        from custom_components.tasmota_irhvac import async_migrate_entry
+
+        config = make_config()
+        entry = MockConfigEntry(
+            domain=DOMAIN, data=config, options={},
+            version=1, minor_version=2,
+        )
+        entry.add_to_hass(hass)
+
+        # Add a model_input subentry with old-convention seeds and clamps
+        result = await hass.config_entries.subentries.async_init(
+            (entry.entry_id, "model_input"),
+            context={"source": "user"},
+        )
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            user_input={
+                "name": "Stove",
+                "entity_id": "input_boolean.stove",
+                "seed_heat": -4.0,
+                "seed_cool": 2.0,
+                "clamp_min": -8.0,
+                "clamp_max": 3.0,
+            },
+        )
+
+        # Reset minor_version to 2 to trigger v1.3 migration
+        hass.config_entries.async_update_entry(entry, minor_version=2, version=1)
+
+        migrate_result = await async_migrate_entry(hass, entry)
+        assert migrate_result is True
+
+        # Find the subentry and verify
+        sub = next(iter(entry.subentries.values()))
+        assert sub.data["seed_heat"] == 4.0
+        assert sub.data["seed_cool"] == -2.0
+        assert sub.data["clamp_min"] == -3.0
+        assert sub.data["clamp_max"] == 8.0
+
+
+# ── __init__.py: v1.12 migration rename pi_min_interval (L230) ──────
+
+
+class TestMigrationV1_12TickFallback:
+    """Cover v1.12 migration: pi_min_interval -> pi_tick_fallback rename."""
+
+    @pytest.mark.asyncio
+    async def test_v1_12_renames_pi_min_interval(self, hass):
+        """v1.12 migration should rename pi_min_interval to pi_tick_fallback."""
+        from custom_components.tasmota_irhvac import async_migrate_entry
+
+        options = {
+            "pi_min_interval": 600,
+        }
+        entry = MockConfigEntry(
+            domain=DOMAIN, data=make_config(), options=options,
+            version=1, minor_version=3,
+        )
+        entry.add_to_hass(hass)
+
+        result = await async_migrate_entry(hass, entry)
+        assert result is True
+
+        assert "pi_min_interval" not in entry.options
+        assert entry.options["pi_tick_fallback"] == 600
+
+
+# ── __init__.py: _check_tuning_health_issues guard (L319) ───────────
+
+
+class TestTuningHealthGuard:
+    """Cover _check_tuning_health_issues early return when climate_entity is None."""
+
+    @pytest.mark.asyncio
+    async def test_check_tuning_health_no_climate_entity(self, hass):
+        """_check_tuning_health_issues should return early when no climate entity."""
+        from custom_components.tasmota_irhvac import _check_tuning_health_issues
+
+        entry = MockConfigEntry(
+            domain=DOMAIN, data=make_config(),
+            version=1, minor_version=12,
+        )
+        entry.add_to_hass(hass)
+
+        # DATA_KEY not in hass.data at all - should hit the guard and return
+        _check_tuning_health_issues(hass, entry)
+        # No error = guard worked
+
+    @pytest.mark.asyncio
+    async def test_check_tuning_health_entry_id_missing(self, hass):
+        """_check_tuning_health_issues should return when entry_id not in DATA_KEY."""
+        from custom_components.tasmota_irhvac import _check_tuning_health_issues
+
+        entry = MockConfigEntry(
+            domain=DOMAIN, data=make_config(),
+            version=1, minor_version=12,
+        )
+        entry.add_to_hass(hass)
+
+        # DATA_KEY exists but entry_id is absent
+        hass.data[DATA_KEY] = {}
+
+        _check_tuning_health_issues(hass, entry)
+        # No error = guard worked
+
+
+# ── climate.py service handler PI-None guards ────────────────────────
+
+
+class TestServicePiNoneGuards:
+    """Cover early-return paths when _pi is None in service handlers."""
+
+    @pytest.mark.asyncio
+    async def test_set_coefficient_pi_none(self, hass, setup_integration):
+        """async_set_coefficient should return early when PI is disabled."""
+        entry = await setup_integration({"pi_enabled": False})
+        entity = get_climate_entity(hass, entry)
+        assert entity._pi is None
+
+        # Call directly — service schema requires PI-only params
+        await entity.async_set_coefficient(mode="heat", name="intercept", value=1.0)
+        # Should not crash — just returns
+
+    @pytest.mark.asyncio
+    async def test_freeze_coefficient_pi_none(self, hass, setup_integration):
+        """async_freeze_coefficient should return early when PI is disabled."""
+        entry = await setup_integration({"pi_enabled": False})
+        entity = get_climate_entity(hass, entry)
+        assert entity._pi is None
+
+        await entity.async_freeze_coefficient(mode="heat", name="intercept", frozen=True)
+        # Should not crash — just returns
+
+    @pytest.mark.asyncio
+    async def test_identify_plant_pi_none(self, hass, setup_integration):
+        """async_identify_plant should return early when PI is disabled."""
+        entry = await setup_integration({"pi_enabled": False})
+        entity = get_climate_entity(hass, entry)
+        assert entity._pi is None
+
+        await entity.async_identify_plant(amplitude=2, n_cycles=4)
+        # Should not crash — just returns
+
+    @pytest.mark.asyncio
+    async def test_abort_identify_plant_pi_none(self, hass, setup_integration):
+        """async_abort_identify_plant should return early when PI is disabled."""
+        entry = await setup_integration({"pi_enabled": False})
+        entity = get_climate_entity(hass, entry)
+        assert entity._pi is None
+
+        await entity.async_abort_identify_plant()
+        # Should not crash — just returns
+
+    @pytest.mark.asyncio
+    async def test_perturb_now_pi_none(self, hass, setup_integration):
+        """async_perturb_now should return early when PI is disabled."""
+        entry = await setup_integration({"pi_enabled": False})
+        entity = get_climate_entity(hass, entry)
+        assert entity._pi is None
+
+        await entity.async_perturb_now()
+        # Should not crash — just returns
+
+
+class TestIdentifyPlantComfortBounds:
+    """Cover async_identify_plant comfort bound conversion (lines 1879-1896)."""
+
+    @pytest.mark.asyncio
+    async def test_identify_plant_with_comfort_bounds(self, hass, setup_pi_integration):
+        """async_identify_plant should convert comfort bounds and call start_plant_test."""
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        with patch.object(pi, "start_plant_test") as mock_start:
+            await entity.async_identify_plant(
+                amplitude=2, n_cycles=4, comfort_min=18.0, comfort_max=26.0,
+            )
+            mock_start.assert_called_once()
+            call_kwargs = mock_start.call_args[1]
+            assert call_kwargs["amplitude_c"] == 2
+            assert call_kwargs["n_cycles"] == 4
+            # Entity is in °C, bounds pass through identity conversion
+            assert call_kwargs["comfort_min_c"] == pytest.approx(18.0)
+            assert call_kwargs["comfort_max_c"] == pytest.approx(26.0)
+
+    @pytest.mark.asyncio
+    async def test_identify_plant_no_comfort_bounds(self, hass, setup_pi_integration):
+        """async_identify_plant without comfort bounds passes None."""
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        with patch.object(pi, "start_plant_test") as mock_start:
+            await entity.async_identify_plant(amplitude=3, n_cycles=2)
+            mock_start.assert_called_once()
+            call_kwargs = mock_start.call_args[1]
+            assert call_kwargs["comfort_min_c"] is None
+            assert call_kwargs["comfort_max_c"] is None
+
+
+class TestLearningSaveNoSnapshot:
+    """Cover async_learning_save when get_learning_snapshot returns empty."""
+
+    @pytest.mark.asyncio
+    async def test_learning_save_no_pi_data(self, hass, setup_integration):
+        """learning_save should warn and return when no PI data to snapshot."""
+        entry = await setup_integration({"pi_enabled": False})
+        entity = get_climate_entity(hass, entry)
+
+        # NullController.get_learning_snapshot() returns {} which is falsy
+        await entity.async_learning_save(slot="test")
+        # Should not crash — just warns and returns
+
+
+class TestLearningSaveMaxSlots:
+    """Cover async_learning_save max 3 slots warning (lines 1927-1932)."""
+
+    @pytest.mark.asyncio
+    async def test_learning_save_fourth_slot_rejected(self, hass, setup_pi_integration):
+        """learning_save should reject a 4th slot name when 3 already exist."""
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+
+        # Save 3 slots
+        for name in ["slot_a", "slot_b", "slot_c"]:
+            await hass.services.async_call(
+                DOMAIN, "learning_save",
+                {"entity_id": entity.entity_id, "slot": name},
+                blocking=True,
+            )
+
+        # Fourth different slot should be rejected
+        await hass.services.async_call(
+            DOMAIN, "learning_save",
+            {"entity_id": entity.entity_id, "slot": "slot_d"},
+            blocking=True,
+        )
+
+        # Verify slot_d was not saved by trying to restore it
+        entity._pi._rls_heat.beta[0] = 999.0
+        await hass.services.async_call(
+            DOMAIN, "learning_restore",
+            {"entity_id": entity.entity_id, "slot": "slot_d"},
+            blocking=True,
+        )
+        # Should still be 999.0 because slot_d was never saved
+        assert entity._pi._rls_heat.beta[0] == 999.0
+
+
+class TestResolveCoeffIndexNotPIController:
+    """Cover _resolve_coeff_index line 1964-1965: _pi is not PIController."""
+
+    @pytest.mark.asyncio
+    async def test_resolve_coeff_index_pi_none(self, hass, setup_integration):
+        """_resolve_coeff_index should return None when _pi is None."""
+        entry = await setup_integration({"pi_enabled": False})
+        entity = get_climate_entity(hass, entry)
+        assert entity._pi is None
+
+        result = entity._resolve_coeff_index("intercept")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_resolve_coeff_index_non_pi_object(self, hass, setup_pi_integration):
+        """_resolve_coeff_index should return None when _pi is not a PIController."""
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+
+        # Replace _pi with a non-PIController object
+        entity._pi = MagicMock()
+        result = entity._resolve_coeff_index("intercept")
+        assert result is None
+
+
+class TestLearningSaveStoreLoading:
+    """Cover async_learning_save store loading path."""
+
+    @pytest.mark.asyncio
+    async def test_learning_save_creates_store_lazily(self, hass, setup_pi_integration):
+        """learning_save should lazily create snapshot store on first call."""
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+
+        # Store should not exist yet
+        assert entity._snapshot_store is None
+
+        await hass.services.async_call(
+            DOMAIN, "learning_save",
+            {"entity_id": entity.entity_id, "slot": "first"},
+            blocking=True,
+        )
+
+        # Store should now exist
+        assert entity._snapshot_store is not None
+
+    @pytest.mark.asyncio
+    async def test_learning_save_overwrite_existing_slot(self, hass, setup_pi_integration):
+        """learning_save should allow overwriting an existing slot even at max."""
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+
+        # Fill 3 slots
+        for name in ["x", "y", "z"]:
+            await hass.services.async_call(
+                DOMAIN, "learning_save",
+                {"entity_id": entity.entity_id, "slot": name},
+                blocking=True,
+            )
+
+        # Overwriting existing slot "x" should succeed even at max capacity
+        entity._pi._rls_heat.beta[0] = 42.0
+        await hass.services.async_call(
+            DOMAIN, "learning_save",
+            {"entity_id": entity.entity_id, "slot": "x"},
+            blocking=True,
+        )
+
+        # Verify by restoring
+        entity._pi._rls_heat.beta[0] = 0.0
+        await hass.services.async_call(
+            DOMAIN, "learning_restore",
+            {"entity_id": entity.entity_id, "slot": "x"},
+            blocking=True,
+        )
+        assert entity._pi._rls_heat.beta[0] == 42.0
