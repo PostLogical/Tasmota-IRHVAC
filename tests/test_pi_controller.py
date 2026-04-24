@@ -5581,3 +5581,40 @@ class TestSubsystemToggles:
         assert len(pi._observation_buffer_heat.get_all()) > heat_before, (
             "Observations should still be buffered for batch WLS"
         )
+
+    # ── Batch WLS gating tests ───────────────────────────────────────
+
+    def test_batch_wls_disabled_skips_analysis(self):
+        """With batch_wls_enabled=False, _run_batch_analysis returns without incrementing."""
+        config = make_pi_config({"pi_batch_wls_enabled": False})
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        cycle_before = pi._batch_cycle_count
+        pi._run_batch_analysis()
+        assert pi._batch_cycle_count == cycle_before, (
+            "Batch cycle count should not increment when disabled"
+        )
+
+    def test_batch_wls_disabled_ff_parent_off(self):
+        """Batch skipped when parent ff_enabled=False even if batch_wls_enabled=True."""
+        config = make_pi_config({"pi_ff_enabled": False, "pi_batch_wls_enabled": True})
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        cycle_before = pi._batch_cycle_count
+        pi._run_batch_analysis()
+        assert pi._batch_cycle_count == cycle_before, (
+            "Batch should be suppressed when FF is disabled"
+        )
+
+    def test_batch_wls_enabled_default_increments(self):
+        """Default batch_wls_enabled=True allows batch cycle to proceed."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        cycle_before = pi._batch_cycle_count
+        pi._run_batch_analysis()
+        # Should increment (even if it returns early due to insufficient obs)
+        assert pi._batch_cycle_count == cycle_before + 1

@@ -692,6 +692,13 @@ class PIController:
         ±1.0°C step cap per coefficient per 12h cycle (enlarged to ±3.0°C
         for recently-unlocked features when batch quality gates pass).
         """
+        if not self._pi_batch_wls_enabled or not self._pi_ff_enabled:
+            _LOGGER.debug(
+                "%sBatch WLS: skipped (ff_enabled=%s, batch_wls_enabled=%s)",
+                self._log_prefix, self._pi_ff_enabled, self._pi_batch_wls_enabled,
+            )
+            return
+
         self._batch_cycle_count += 1
         e = self._entity
         is_heating = e._attr_hvac_mode == HVACMode.HEAT
