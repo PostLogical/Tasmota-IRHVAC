@@ -2921,28 +2921,29 @@ class PIController:
             issues.append(stall_issue)
 
         # ── Outdoor temp sensor unavailability ────────────────────────
+        # Only relevant when an outdoor temp sensor is configured.
         # Grace: 5 min after startup (entities often unavailable during HA boot),
         # then 30 min of continuous unavailability triggers the repair.
-        STARTUP_GRACE = 300.0   # 5 minutes
-        UNAVAIL_THRESHOLD = 1800.0  # 30 minutes
-        now_mono = time.monotonic()
-        past_startup = (now_mono - self._init_time) > STARTUP_GRACE
+        if self._inputs.outdoor_temp_sensor:
+            STARTUP_GRACE = 300.0   # 5 minutes
+            UNAVAIL_THRESHOLD = 1800.0  # 30 minutes
+            now_mono = time.monotonic()
+            past_startup = (now_mono - self._init_time) > STARTUP_GRACE
 
-        outdoor_unavail = (
-            self._outdoor_temp_unavailable_since is not None
-            and past_startup
-            and (now_mono - self._outdoor_temp_unavailable_since) > UNAVAIL_THRESHOLD
-        )
-        sensor_name = self._inputs.outdoor_temp_sensor or "outdoor_temp"
-        issues.append((
-            f"outdoor_temp_unavailable_{entry_id}",
-            "warning",
-            "outdoor_temp_unavailable",
-            {"sensor": sensor_name},
-            outdoor_unavail,
-            outdoor_unavail,
-            None,
-        ))
+            outdoor_unavail = (
+                self._outdoor_temp_unavailable_since is not None
+                and past_startup
+                and (now_mono - self._outdoor_temp_unavailable_since) > UNAVAIL_THRESHOLD
+            )
+            issues.append((
+                f"outdoor_temp_unavailable_{entry_id}",
+                "warning",
+                "outdoor_temp_unavailable",
+                {"sensor": self._inputs.outdoor_temp_sensor},
+                outdoor_unavail,
+                outdoor_unavail,
+                None,
+            ))
 
         return issues
 
@@ -4189,7 +4190,7 @@ class PIController:
                 and abs(self._room_temp_rate) < 0.02
             )
             rls_mature = self._rls_heat_mature if is_heating else self._rls_cool_mature
-            if branch_ready and rls_mature and self._rls_shared_gate_open(learning_suppressed):
+            if branch_ready and rls_mature and x is not None and self._rls_shared_gate_open(learning_suppressed):
                 # Observe hp_setpoint - desired_c: what offset maintained target
                 self._rls_learn_observation(
                     rls, x, float(self._hp_setpoint) - desired_c, "RLS update",
@@ -4248,7 +4249,7 @@ class PIController:
 
             branch_ready = self._stable_oodb_ticks >= min_oodb_ticks
             rls_mature = self._rls_heat_mature if is_heating else self._rls_cool_mature
-            if branch_ready and rls_mature and self._rls_shared_gate_open(learning_suppressed):
+            if branch_ready and rls_mature and x is not None and self._rls_shared_gate_open(learning_suppressed):
                 # Observe hp_setpoint - current_c: what offset maintains equilibrium
                 self._rls_learn_observation(
                     rls, x, float(self._hp_setpoint) - current_c, "RLS oodb",

@@ -5425,7 +5425,28 @@ class TestSubsystemToggles:
 
         gb_before = len(pi._greybox_buffer.get_all())
         await pi._pi_tick()
-        assert len(pi._greybox_buffer.get_all()) > gb_before
+        gb_obs = pi._greybox_buffer.get_all()
+        assert len(gb_obs) > gb_before
+
+    @pytest.mark.asyncio
+    async def test_ff_disabled_greybox_observation_content_valid(self):
+        """Greybox observations with ff_disabled have valid fields for fitting."""
+        config = make_pi_config({"pi_ff_enabled": False})
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._inputs.outdoor_temp = 5.0
+        entity._attr_current_temperature = 20.0
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22.0
+
+        await pi._pi_tick()
+        obs = pi._greybox_buffer.get_all()[-1]
+
+        # Greybox needs: outdoor_temp_c, current_c, hp_setpoint, room_rate
+        assert obs.outdoor_temp_c == 5.0
+        assert obs.current_c == 20.0
+        assert obs.hp_setpoint is not None  # HP is active (setpoint > room)
+        assert obs.desired_c == 22.0
 
     @pytest.mark.asyncio
     async def test_ff_enabled_outdoor_none_freezes_offset(self):
@@ -5790,3 +5811,98 @@ class TestSubsystemToggles:
         outdoor_issues = [i for i in issues if "outdoor_temp_unavailable" in i[0]]
         assert len(outdoor_issues) == 1
         assert outdoor_issues[0][4] is False, "Should dismiss when recovered"
+
+    # ── Frozen FF + integral compensation ─────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_frozen_ff_integral_compensates(self):
+        """When FF is frozen (outdoor unavailable), integral should compensate.
+
+        Scenario: FF computed with outdoor_temp=0 (cold). Then outdoor goes
+        unavailable. FF offset is frozen. Room is below target, so error > 0
+        and integral should grow to compensate. Over multiple ticks, the
+        integral drives the setpoint toward what's needed.
+        """
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        entity._attr_current_temperature = 20.0
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22.0
+        pi._pi_integral = 0.0
+
+        # Tick 1: valid outdoor temp, compute FF offset
+        pi._inputs.outdoor_temp = 0.0
+        await pi._pi_tick()
+        frozen_offset = pi._ff_offset
+        assert frozen_offset != 0.0, "FF should be nonzero with cold outdoor"
+        integral_after_valid = pi._pi_integral
+
+        # Make outdoor temp unavailable
+        pi._inputs.outdoor_temp = None
+
+        # Ticks 2-5: outdoor unavailable, FF frozen, integral compensates.
+        # Advance tick time to get meaningful dt for integration.
+        for _ in range(4):
+            entity._attr_current_temperature = 20.0  # Still below target
+            pi._pi_last_tick_time = time.monotonic() - 900  # 15 min gap
+            await pi._pi_tick()
+
+        assert pi._ff_offset == frozen_offset, "FF should stay frozen"
+        assert pi._pi_integral > integral_after_valid, (
+            "Integral should grow (error > 0 in heating, room below target)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_frozen_ff_wrong_direction_integral_compensates(self):
+        """Frozen FF in wrong direction: integral must push setpoint down.
+
+        Scenario: FF computed with cold outdoor (positive FF offset for heating).
+        Outdoor warms up but sensor dies. FF is frozen positive but room is now
+        above target. The integral should decrease to compensate for the
+        now-excessive FF offset, pulling the setpoint down.
+
+        Uses monotonic time mocking to get meaningful dt between ticks.
+        """
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        entity._attr_current_temperature = 20.0
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22.0
+        pi._pi_integral = 0.0
+
+        # Tick 1: cold outdoor → positive FF offset
+        pi._inputs.outdoor_temp = 0.0
+        await pi._pi_tick()
+        frozen_offset = pi._ff_offset
+        assert frozen_offset != 0.0
+        integral_after_first = pi._pi_integral
+
+        # Now outdoor warms and room overshoots, but sensor dies
+        pi._inputs.outdoor_temp = None
+        entity._attr_current_temperature = 23.0  # Above target
+
+        # Simulate 15-minute tick intervals by advancing _pi_last_tick_time
+        for i in range(8):
+            pi._pi_last_tick_time = time.monotonic() - 900  # 15 min ago
+            await pi._pi_tick()
+
+        assert pi._ff_offset == frozen_offset, "FF stays frozen"
+        assert pi._pi_integral < integral_after_first, (
+            "Integral should decrease to compensate for now-excessive frozen FF"
+        )
+
+    def test_outdoor_repair_not_emitted_when_unconfigured(self):
+        """No outdoor temp repair when sensor is not configured."""
+        config = make_pi_config({"outdoor_temp_sensor": ""})
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        now = time.monotonic()
+        pi._init_time = now - 600
+
+        issues = pi._check_tuning_health()
+        outdoor_issues = [i for i in issues if "outdoor_temp_unavailable" in i[0]]
+        assert len(outdoor_issues) == 0, (
+            "No outdoor repair when sensor unconfigured"
+        )
