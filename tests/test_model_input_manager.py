@@ -148,11 +148,19 @@ class TestOutdoorTemp:
         assert mgr.outdoor_temp is not None
         assert abs(mgr.outdoor_temp - 10.0) < 0.1
 
-    def test_update_outdoor_temp_invalid(self):
+    def test_update_outdoor_temp_invalid_sets_none(self):
+        """Parse failure sets outdoor_temp to None (defense-in-depth, prevents stale data)."""
         mgr = ModelInputManager(model_inputs=[], outdoor_temp_sensor="sensor.outdoor")
         mgr.outdoor_temp = 5.0
         mgr.update_outdoor_temp("unavailable", "°C")
-        assert mgr.outdoor_temp == 5.0  # Unchanged on parse failure
+        assert mgr.outdoor_temp is None
+
+    def test_update_outdoor_temp_nan_sets_none(self):
+        """NaN-like string also clears outdoor_temp."""
+        mgr = ModelInputManager(model_inputs=[], outdoor_temp_sensor="sensor.outdoor")
+        mgr.outdoor_temp = 5.0
+        mgr.update_outdoor_temp("unknown", "°C")
+        assert mgr.outdoor_temp is None
 
 
 DELTA_INPUT = {

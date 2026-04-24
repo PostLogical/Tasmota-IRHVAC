@@ -260,6 +260,11 @@ class PIController:
         self._intercept_seed_cool: float = config.get(
             CONF_PI_INTERCEPT_SEED_COOL, DEFAULT_PI_INTERCEPT_SEED_COOL)
 
+        # Sensor unavailability tracking for repairs.
+        # Set when outdoor_temp transitions from valid to None (not on startup).
+        self._outdoor_temp_unavailable_since: float | None = None
+        self._init_time: float = time.monotonic()
+
         # Learning suppression state (manual service + model input suppress_learning flags)
         self._manual_ff_suppress: bool = False
         self._manual_ff_suppress_reason: str = ""
@@ -2915,6 +2920,30 @@ class PIController:
         if stall_issue is not None:
             issues.append(stall_issue)
 
+        # ── Outdoor temp sensor unavailability ────────────────────────
+        # Grace: 5 min after startup (entities often unavailable during HA boot),
+        # then 30 min of continuous unavailability triggers the repair.
+        STARTUP_GRACE = 300.0   # 5 minutes
+        UNAVAIL_THRESHOLD = 1800.0  # 30 minutes
+        now_mono = time.monotonic()
+        past_startup = (now_mono - self._init_time) > STARTUP_GRACE
+
+        outdoor_unavail = (
+            self._outdoor_temp_unavailable_since is not None
+            and past_startup
+            and (now_mono - self._outdoor_temp_unavailable_since) > UNAVAIL_THRESHOLD
+        )
+        sensor_name = self._inputs.outdoor_temp_sensor or "outdoor_temp"
+        issues.append((
+            f"outdoor_temp_unavailable_{entry_id}",
+            "warning",
+            "outdoor_temp_unavailable",
+            {"sensor": sensor_name},
+            outdoor_unavail,
+            outdoor_unavail,
+            None,
+        ))
+
         return issues
 
     def get_health_status(self) -> dict[str, Any]:
@@ -3517,9 +3546,27 @@ class PIController:
     def _async_outdoor_temp_changed(self, event: Event[EventStateChangedData]) -> None:
         """Handle outdoor temperature sensor state changes."""
         new_state = event.data.get("new_state")
-        if new_state is not None:
-            unit = new_state.attributes.get("unit_of_measurement", UnitOfTemperature.CELSIUS)
-            self._inputs.update_outdoor_temp(new_state.state, unit)
+        if new_state is None:
+            return
+        if new_state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+            if self._inputs.outdoor_temp is not None:
+                # Transition from valid → unavailable: start tracking
+                self._outdoor_temp_unavailable_since = time.monotonic()
+                _LOGGER.warning(
+                    "%sOutdoor temp sensor unavailable — FF frozen, learning paused",
+                    self._log_prefix,
+                )
+            self._inputs.outdoor_temp = None
+            return
+        unit = new_state.attributes.get("unit_of_measurement", UnitOfTemperature.CELSIUS)
+        self._inputs.update_outdoor_temp(new_state.state, unit)
+        if self._outdoor_temp_unavailable_since is not None:
+            duration = time.monotonic() - self._outdoor_temp_unavailable_since
+            _LOGGER.info(
+                "%sOutdoor temp sensor recovered after %.0f s",
+                self._log_prefix, duration,
+            )
+            self._outdoor_temp_unavailable_since = None
 
     @callback
     def _async_model_input_changed(self, event: Event[EventStateChangedData]) -> None:

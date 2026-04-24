@@ -745,6 +745,10 @@
           }
         }
       }
+    },
+    "outdoor_temp_unavailable": {
+      "title": "Outdoor temperature sensor unavailable",
+      "description": "Sensor `{sensor}` has been unavailable for an extended period. Feedforward learning, observation recording, and plant identification are paused. The controller is running on PI feedback only with a frozen FF offset. Check the sensor connection and entity status."
     }
   },
   "config_subentries": {

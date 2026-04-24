@@ -59,14 +59,20 @@ class ModelInputManager:
         return 1 + len(self._model_inputs)
 
     def update_outdoor_temp(self, state_value: str, unit: str) -> None:
-        """Update outdoor temperature from a sensor reading, converting to °C."""
+        """Update outdoor temperature from a sensor reading, converting to °C.
+
+        Sets to None on parse failure (defense-in-depth) rather than
+        silently retaining a stale value.  The primary unavailability
+        check is in _async_outdoor_temp_changed, but this catches edge
+        cases like NaN strings or corrupted state values.
+        """
         try:
             temp = float(state_value)
             self.outdoor_temp = TemperatureConverter.convert(
                 temp, unit, UnitOfTemperature.CELSIUS
             )
         except (ValueError, TypeError):
-            pass
+            self.outdoor_temp = None
 
     def read_values(
         self,

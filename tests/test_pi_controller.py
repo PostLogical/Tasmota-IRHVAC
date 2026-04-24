@@ -1,5 +1,7 @@
 """Tests for the PI controller mixin."""
 
+import time
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 
@@ -5701,3 +5703,90 @@ class TestSubsystemToggles:
         assert pi._plant_id.enabled is True, "PlantIdentifier itself should be enabled"
         # Kp from IMC is different from the manual default
         assert pi._pi_kp != 1.0
+
+    # ── Outdoor temp unavailability tests ─────────────────────────────
+
+    def test_outdoor_temp_unavailable_sets_none(self):
+        """Outdoor temp set to None when handler receives unavailable state."""
+        entity = FakePIEntity(make_pi_config())
+        pi = entity._pi
+        pi._inputs.outdoor_temp = 5.0
+
+        # Simulate state change to unavailable
+        event_data = {"new_state": MagicMock(state="unavailable",
+                                              attributes={"unit_of_measurement": "°C"})}
+        event = MagicMock()
+        event.data = event_data
+        pi._async_outdoor_temp_changed(event)
+
+        assert pi._inputs.outdoor_temp is None
+
+    def test_outdoor_temp_unavailable_tracks_since(self):
+        """Unavailability tracking starts on transition from valid to None."""
+        entity = FakePIEntity(make_pi_config())
+        pi = entity._pi
+        pi._inputs.outdoor_temp = 5.0  # Was valid
+
+        event_data = {"new_state": MagicMock(state="unavailable",
+                                              attributes={"unit_of_measurement": "°C"})}
+        event = MagicMock()
+        event.data = event_data
+        pi._async_outdoor_temp_changed(event)
+
+        assert pi._outdoor_temp_unavailable_since is not None
+
+    def test_outdoor_temp_recovery_clears_tracking(self):
+        """Recovery from unavailable clears the tracking timestamp."""
+        entity = FakePIEntity(make_pi_config())
+        pi = entity._pi
+        pi._inputs.outdoor_temp = 5.0
+        pi._outdoor_temp_unavailable_since = 100.0  # Was tracking
+
+        event_data = {"new_state": MagicMock(state="10.0",
+                                              attributes={"unit_of_measurement": "°C"})}
+        event = MagicMock()
+        event.data = event_data
+        pi._async_outdoor_temp_changed(event)
+
+        assert pi._outdoor_temp_unavailable_since is None
+        assert pi._inputs.outdoor_temp is not None
+
+    def test_outdoor_temp_unavailable_repair_not_during_startup(self):
+        """Repair should not fire during startup grace period."""
+        entity = FakePIEntity(make_pi_config())
+        pi = entity._pi
+        # Simulate: init just happened, outdoor temp immediately unavailable
+        pi._init_time = time.monotonic()
+        pi._outdoor_temp_unavailable_since = time.monotonic() - 3600  # 1hr ago
+
+        issues = pi._check_tuning_health()
+        outdoor_issues = [i for i in issues if "outdoor_temp_unavailable" in i[0]]
+        # Should not create because we're within startup grace
+        for issue in outdoor_issues:
+            assert issue[4] is False, "Should not fire during startup grace"
+
+    def test_outdoor_temp_unavailable_repair_fires_after_threshold(self):
+        """Repair fires after 30 min of continuous unavailability past startup."""
+        entity = FakePIEntity(make_pi_config())
+        pi = entity._pi
+        now = time.monotonic()
+        pi._init_time = now - 600  # 10 min ago (past 5-min startup grace)
+        pi._outdoor_temp_unavailable_since = now - 2000  # ~33 min ago
+
+        issues = pi._check_tuning_health()
+        outdoor_issues = [i for i in issues if "outdoor_temp_unavailable" in i[0]]
+        assert len(outdoor_issues) == 1
+        assert outdoor_issues[0][4] is True, "Should fire after 30 min"
+
+    def test_outdoor_temp_unavailable_repair_dismissed_on_recovery(self):
+        """Repair should_create=False when outdoor temp is available."""
+        entity = FakePIEntity(make_pi_config())
+        pi = entity._pi
+        now = time.monotonic()
+        pi._init_time = now - 600
+        pi._outdoor_temp_unavailable_since = None  # Recovered
+
+        issues = pi._check_tuning_health()
+        outdoor_issues = [i for i in issues if "outdoor_temp_unavailable" in i[0]]
+        assert len(outdoor_issues) == 1
+        assert outdoor_issues[0][4] is False, "Should dismiss when recovered"
