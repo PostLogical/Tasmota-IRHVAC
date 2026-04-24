@@ -5512,3 +5512,72 @@ class TestSubsystemToggles:
 
         assert pi._disturbance_suppress_active is True
         assert "outdoor_temp_unavailable" in pi._disturbance_active_suppressors
+
+    # ── RLS online gating tests ──────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_rls_online_disabled_no_learning(self):
+        """RLS observation count must not change when online RLS is disabled."""
+        config = make_pi_config({"pi_rls_online_enabled": False})
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._inputs.outdoor_temp = 5.0
+        entity._attr_current_temperature = 21.9  # In deadband
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22.0
+        pi._ff_settled_ticks = 10
+        pi._rls_heat_mature = True
+
+        count_before = pi._rls_heat.observation_count
+        await pi._pi_tick()
+        assert pi._rls_heat.observation_count == count_before, (
+            "RLS should not learn when online RLS is disabled"
+        )
+
+    @pytest.mark.asyncio
+    async def test_rls_online_disabled_ff_still_predicts(self):
+        """FF offset is still computed from existing coefficients when online RLS disabled."""
+        config = make_pi_config({"pi_rls_online_enabled": False})
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._inputs.outdoor_temp = 0.0  # Cold → large delta
+        entity._attr_current_temperature = 20.0
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22.0
+
+        await pi._pi_tick()
+        assert pi._ff_offset != 0.0, "FF should still predict from seeds"
+
+    def test_rls_shared_gate_respects_toggle(self):
+        """_rls_shared_gate_open returns False when toggle disabled."""
+        config = make_pi_config({"pi_rls_online_enabled": False})
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._inputs.outdoor_temp = 5.0
+        assert pi._rls_shared_gate_open(False) is False
+
+    def test_rls_shared_gate_open_when_enabled(self):
+        """_rls_shared_gate_open returns True when all conditions met."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._inputs.outdoor_temp = 5.0
+        # Default: rls_online_enabled=True, no suppression, no tracking
+        assert pi._rls_shared_gate_open(False) is True
+
+    @pytest.mark.asyncio
+    async def test_rls_online_disabled_observations_still_buffered(self):
+        """Observation buffers still grow when online RLS is disabled but FF is on."""
+        config = make_pi_config({"pi_rls_online_enabled": False})
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._inputs.outdoor_temp = 5.0
+        entity._attr_current_temperature = 20.0
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22.0
+
+        heat_before = len(pi._observation_buffer_heat.get_all())
+        await pi._pi_tick()
+        assert len(pi._observation_buffer_heat.get_all()) > heat_before, (
+            "Observations should still be buffered for batch WLS"
+        )

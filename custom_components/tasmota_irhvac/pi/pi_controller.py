@@ -3332,9 +3332,10 @@ class PIController:
     # ── RLS learning ─────────────────────────────────────────────────
 
     def _rls_shared_gate_open(self, learning_suppressed: bool) -> bool:
-        """Check shared RLS learning preconditions (outdoor temp, suppression, tracking)."""
+        """Check shared RLS learning preconditions (toggle, outdoor temp, suppression, tracking)."""
         return (
-            self._inputs.outdoor_temp is not None
+            self._pi_rls_online_enabled
+            and self._inputs.outdoor_temp is not None
             and not learning_suppressed
             and not self._any_model_input_unavailable()
             and not self._supplemental.tracking_mode
@@ -3446,6 +3447,8 @@ class PIController:
     ) -> None:
         """Log reasons why RLS learning gate is blocked (deadband path)."""
         reasons: list[str] = []
+        if not self._pi_rls_online_enabled:
+            reasons.append("online RLS disabled")
         if self._inputs.outdoor_temp is None:
             reasons.append("no outdoor temp")
         if learning_suppressed:
