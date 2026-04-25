@@ -164,8 +164,8 @@ class RegimeProbe:
         hp_setpoint: int,
         current_c: float,
         min_temp_c: float,
-        margin_above: float,
-        margin_below: float,
+        cal_min: float,
+        cal_max: float,
         is_heating: bool,
         is_clamped: bool,
         learning_suppressed: bool,
@@ -194,7 +194,7 @@ class RegimeProbe:
         # ── IDLE: wait for uncertain zone + stability ────────────
         if self._state == ProbeState.IDLE:
             hp_uncertain = self._is_uncertain(
-                hp_setpoint, current_c, margin_above, margin_below, is_heating,
+                hp_setpoint, current_c, cal_min, cal_max, is_heating,
             )
             can_probe = (
                 current_c - min_temp_c >= MIN_DELTA_BELOW_CURRENT
@@ -245,34 +245,33 @@ class RegimeProbe:
     def _is_uncertain(
         hp_setpoint: int,
         current_c: float,
-        margin_above: float,
-        margin_below: float,
+        cal_min: float,
+        cal_max: float,
         is_heating: bool,
     ) -> bool:
-        """Check if HP contribution is uncertain at this offset."""
-        signed_offset = hp_setpoint - current_c
+        """Check if HP contribution is uncertain at this delta.
+
+        delta = current_c - setpoint.  Uncertain when delta is between
+        cal_min and cal_max (the head unit's calibration bounds).
+        """
+        delta = current_c - hp_setpoint
         if is_heating:
-            return (
-                (signed_offset > 0 and signed_offset < margin_above)
-                or (signed_offset < 0 and abs(signed_offset) < margin_below)
-            )
-        # Cooling: signs reversed
-        return (
-            (signed_offset < 0 and abs(signed_offset) < margin_above)
-            or (signed_offset > 0 and signed_offset < margin_below)
-        )
+            # HP ON when delta < cal_min, OFF when delta > cal_max
+            return cal_min <= delta <= cal_max
+        # Cooling: HP ON when delta > cal_max, OFF when delta < cal_min
+        return cal_min <= delta <= cal_max
 
     @staticmethod
     def is_contribution_uncertain(
         hp_setpoint: int,
         current_c: float,
-        margin_above: float,
-        margin_below: float,
+        cal_min: float,
+        cal_max: float,
         is_heating: bool,
     ) -> bool:
         """Public static helper for use by learning gates."""
         return RegimeProbe._is_uncertain(
-            hp_setpoint, current_c, margin_above, margin_below, is_heating,
+            hp_setpoint, current_c, cal_min, cal_max, is_heating,
         )
 
     # ── Transitions ──────────────────────────────────────────────────
@@ -294,7 +293,7 @@ class RegimeProbe:
             "Regime probe: baseline started "
             "(setpoint=%d°C, room=%.1f°C, delta=%.1f°C, %s)",
             hp_setpoint, current_c,
-            abs(hp_setpoint - current_c),
+            current_c - hp_setpoint,
             "heating" if is_heating else "cooling",
         )
 
@@ -305,7 +304,7 @@ class RegimeProbe:
         _LOGGER.info(
             "Regime probe: testing HP contribution at delta=%.1f°C "
             "(setpoint %d°C → min, room=%.1f°C)",
-            abs(self._probe_hp_setpoint - self._probe_current_c),
+            self._probe_current_c - self._probe_hp_setpoint,
             self._probe_hp_setpoint,
             self._probe_current_c,
         )
@@ -315,8 +314,7 @@ class RegimeProbe:
         baseline_avg = sum(self._baseline_rates) / len(self._baseline_rates)
         probe_avg = sum(self._probe_rates) / len(self._probe_rates)
         rate_change = probe_avg - baseline_avg  # signed
-        delta = abs(self._probe_hp_setpoint - self._probe_current_c)
-        signed_offset = self._probe_hp_setpoint - self._probe_current_c
+        delta = self._probe_current_c - self._probe_hp_setpoint  # current - setpoint
 
         # Directional check: in heating, removing HP → rate should decrease.
         if self._probe_is_heating:
@@ -327,6 +325,9 @@ class RegimeProbe:
         self._probes_completed += 1
 
         if not hp_was_contributing:
+            # HP was NOT contributing at this delta → transition is below
+            # this delta → evidence to shrink cal_max.
+            self._contribution_evidence_above.append(delta)
             self._no_contribution_count += 1
             _LOGGER.info(
                 "Regime probe: complete — HP was NOT contributing at "
@@ -334,19 +335,13 @@ class RegimeProbe:
                 delta, baseline_avg, probe_avg, rate_change,
             )
         else:
-            side = "above" if (
-                (self._probe_is_heating and signed_offset > 0)
-                or (not self._probe_is_heating and signed_offset < 0)
-            ) else "below"
-            evidence = (
-                self._contribution_evidence_above if side == "above"
-                else self._contribution_evidence_below
-            )
-            evidence.append(delta)
+            # HP WAS contributing at this delta → transition is above
+            # this delta → evidence to shrink cal_min.
+            self._contribution_evidence_below.append(delta)
             _LOGGER.info(
                 "Regime probe: complete — HP WAS contributing at "
-                "delta=%.1f°C %s side (rate %.4f→%.4f, change=%.4f)",
-                delta, side, baseline_avg, probe_avg, rate_change,
+                "delta=%.1f°C (rate %.4f→%.4f, change=%.4f)",
+                delta, baseline_avg, probe_avg, rate_change,
             )
 
         self._begin_cooldown(now_mono)
@@ -370,55 +365,65 @@ class RegimeProbe:
 
     # ── Margin update ────────────────────────────────────────────────
 
-    def compute_margin_updates(
+    def compute_calibration_updates(
         self,
-        current_above: float,
-        current_below: float,
+        current_cal_min: float,
+        current_cal_max: float,
     ) -> tuple[float, float]:
-        """Check evidence and return updated (margin_above, margin_below).
+        """Check evidence and return updated (cal_min, cal_max).
 
-        Call after each probe completes.  Only shrinks, never widens.
+        Call after each probe completes.  Only shrinks the band, never widens.
         Requires SHRINK_CONFIRMATIONS probes at similar deltas.
-        """
-        new_above = current_above
-        new_below = current_below
 
-        # Check above-side evidence
+        Evidence types (stored as delta = current_c - setpoint at probe time):
+        - evidence_above: "HP was contributing" at this delta → transition
+          is above this delta → cal_max stays at or above here.
+          (Shrinks cal_max down toward this delta.)
+        - evidence_below: "HP was NOT contributing" at this delta →
+          transition is below this delta → cal_min stays at or below here.
+          (Shrinks cal_min up toward this delta.)
+        """
+        new_min = current_cal_min
+        new_max = current_cal_max
+
+        # "HP not contributing" evidence → shrink cal_max down
         for delta in self._contribution_evidence_above:
             confirming = [
                 d for d in self._contribution_evidence_above
                 if abs(d - delta) < SHRINK_DELTA_TOLERANCE
             ]
             if len(confirming) >= SHRINK_CONFIRMATIONS:
-                candidate = min(confirming) * SHRINK_FACTOR
-                if candidate < new_above:
-                    new_above = candidate
+                # Transition is below the lowest confirmed delta
+                candidate = min(confirming) - SHRINK_DELTA_TOLERANCE
+                if candidate < new_max:
+                    new_max = candidate
                     self._confirmations_total += 1
 
-        # Check below-side evidence
+        # "HP was contributing" evidence → shrink cal_min up
         for delta in self._contribution_evidence_below:
             confirming = [
                 d for d in self._contribution_evidence_below
                 if abs(d - delta) < SHRINK_DELTA_TOLERANCE
             ]
             if len(confirming) >= SHRINK_CONFIRMATIONS:
-                candidate = min(confirming) * SHRINK_FACTOR
-                if candidate < new_below:
-                    new_below = candidate
+                # Transition is above the highest confirmed delta
+                candidate = max(confirming) + SHRINK_DELTA_TOLERANCE
+                if candidate > new_min:
+                    new_min = candidate
                     self._confirmations_total += 1
 
-        if new_above < current_above:
+        if new_max < current_cal_max:
             _LOGGER.info(
-                "Regime probe: above margin shrunk %.1f→%.1f°C",
-                current_above, new_above,
+                "Regime probe: cal_max shrunk %.1f→%.1f°C",
+                current_cal_max, new_max,
             )
-        if new_below < current_below:
+        if new_min > current_cal_min:
             _LOGGER.info(
-                "Regime probe: below margin shrunk %.1f→%.1f°C",
-                current_below, new_below,
+                "Regime probe: cal_min shrunk %.1f→%.1f°C",
+                current_cal_min, new_min,
             )
 
-        return new_above, new_below
+        return new_min, new_max
 
     # ── Window ───────────────────────────────────────────────────────
 

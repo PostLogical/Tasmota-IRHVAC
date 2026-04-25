@@ -39,8 +39,8 @@ def _tick(rp: RegimeProbe, now: float, **kw):
         hp_setpoint=20,
         current_c=20.5,
         min_temp_c=15.0,
-        margin_above=2.0,
-        margin_below=1.0,
+        cal_min=-2.0,
+        cal_max=2.0,
         is_heating=True,
         is_clamped=False,
         learning_suppressed=False,
@@ -82,14 +82,14 @@ class TestStateTransitions:
 
     def test_enters_baseline_when_uncertain(self):
         rp = _make()
-        # hp_setpoint=20, current=20.5, margin_above=2.0 → offset=-0.5,
-        # |offset|=0.5 < margin_below=1.0 → uncertain
+        # hp_setpoint=20, current=20.5, cal_min=2.0 → offset=-0.5,
+        # |offset|=0.5 < cal_max=1.0 → uncertain
         _tick(rp, 0.0, hp_setpoint=20, current_c=20.5)
         assert rp.state == ProbeState.BASELINE
 
     def test_stays_idle_when_not_uncertain(self):
         rp = _make()
-        # hp_setpoint=25, current=20, offset=5 > margin_above=2.0 → not uncertain
+        # hp_setpoint=25, current=20, offset=5 > cal_min=2.0 → not uncertain
         _tick(rp, 0.0, hp_setpoint=25, current_c=20.0)
         assert rp.state == ProbeState.IDLE
 
@@ -161,45 +161,48 @@ class TestStateTransitions:
 # ── Uncertainty detection ────────────────────────────────────────────
 
 class TestUncertaintyDetection:
-    def test_heating_above_margin(self):
-        # setpoint above current but within margin_above
+    """delta = current_c - setpoint; uncertain when cal_min <= delta <= cal_max."""
+
+    def test_heating_in_band(self):
+        # setpoint=22, current=21, delta=-1.0, band=[-2, 2] → uncertain
         assert RegimeProbe.is_contribution_uncertain(
-            hp_setpoint=21, current_c=20.0, margin_above=2.0,
-            margin_below=1.0, is_heating=True,
+            hp_setpoint=22, current_c=21.0, cal_min=-2.0,
+            cal_max=2.0, is_heating=True,
         )
 
-    def test_heating_above_outside_margin(self):
-        # setpoint well above current
+    def test_heating_definitely_on(self):
+        # setpoint=22, current=19, delta=-3.0 < cal_min=-2.0 → definitely on
         assert not RegimeProbe.is_contribution_uncertain(
-            hp_setpoint=25, current_c=20.0, margin_above=2.0,
-            margin_below=1.0, is_heating=True,
+            hp_setpoint=22, current_c=19.0, cal_min=-2.0,
+            cal_max=2.0, is_heating=True,
         )
 
-    def test_heating_below_margin(self):
-        # setpoint below current but within margin_below
+    def test_heating_definitely_off(self):
+        # setpoint=22, current=25, delta=3.0 > cal_max=2.0 → definitely off
+        assert not RegimeProbe.is_contribution_uncertain(
+            hp_setpoint=22, current_c=25.0, cal_min=-2.0,
+            cal_max=2.0, is_heating=True,
+        )
+
+    def test_heating_narrowed_band(self):
+        # Narrowed band: [-1.5, -0.5], delta=-1.0 → uncertain
         assert RegimeProbe.is_contribution_uncertain(
-            hp_setpoint=20, current_c=20.5, margin_above=2.0,
-            margin_below=1.0, is_heating=True,
+            hp_setpoint=22, current_c=21.0, cal_min=-1.5,
+            cal_max=-0.5, is_heating=True,
         )
 
-    def test_heating_below_outside_margin(self):
-        # setpoint well below current
-        assert not RegimeProbe.is_contribution_uncertain(
-            hp_setpoint=18, current_c=20.5, margin_above=2.0,
-            margin_below=1.0, is_heating=True,
-        )
-
-    def test_cooling_above_margin(self):
-        # Cooling: setpoint below current within margin_above
+    def test_cooling_in_band(self):
+        # setpoint=24, current=25, delta=1.0, band=[-2, 2] → uncertain
         assert RegimeProbe.is_contribution_uncertain(
-            hp_setpoint=24, current_c=25.0, margin_above=2.0,
-            margin_below=1.0, is_heating=False,
+            hp_setpoint=24, current_c=25.0, cal_min=-2.0,
+            cal_max=2.0, is_heating=False,
         )
 
-    def test_cooling_outside_margin(self):
+    def test_cooling_definitely_on(self):
+        # setpoint=24, current=27, delta=3.0 > cal_max=2.0 → definitely on
         assert not RegimeProbe.is_contribution_uncertain(
-            hp_setpoint=20, current_c=25.0, margin_above=2.0,
-            margin_below=1.0, is_heating=False,
+            hp_setpoint=24, current_c=27.0, cal_min=-2.0,
+            cal_max=2.0, is_heating=False,
         )
 
 
@@ -293,44 +296,45 @@ class TestAbort:
 
 # ── Margin updates ───────────────────────────────────────────────────
 
-class TestMarginUpdates:
+class TestCalibrationUpdates:
+    """compute_calibration_updates: evidence shrinks [cal_min, cal_max]."""
+
     def test_no_change_without_evidence(self):
         rp = _make()
-        above, below = rp.compute_margin_updates(2.0, 1.0)
-        assert above == 2.0
-        assert below == 1.0
+        cal_min, cal_max = rp.compute_calibration_updates(-2.0, 2.0)
+        assert cal_min == -2.0
+        assert cal_max == 2.0
 
-    def test_shrink_requires_confirmations(self):
+    def test_shrink_cal_max_requires_confirmations(self):
         rp = _make()
-        # Add only 1 evidence point — not enough
-        rp._contribution_evidence_above.append(1.5)
-        above, below = rp.compute_margin_updates(2.0, 1.0)
-        assert above == 2.0  # not yet shrunk
+        # "HP not contributing" at delta=0.5 → transition below 0.5 → shrink cal_max
+        rp._contribution_evidence_above.append(0.5)
+        cal_min, cal_max = rp.compute_calibration_updates(-2.0, 2.0)
+        assert cal_max == 2.0  # not enough evidence yet
 
-    def test_shrink_with_sufficient_confirmations(self):
-        rp = _make()
-        # Add SHRINK_CONFIRMATIONS evidence points at similar deltas
-        for _ in range(SHRINK_CONFIRMATIONS):
-            rp._contribution_evidence_above.append(1.5)
-        above, below = rp.compute_margin_updates(2.0, 1.0)
-        assert above == pytest.approx(1.5 * SHRINK_FACTOR)
-        assert below == 1.0  # below unchanged
-
-    def test_shrink_below_side(self):
+    def test_shrink_cal_max_with_confirmations(self):
         rp = _make()
         for _ in range(SHRINK_CONFIRMATIONS):
-            rp._contribution_evidence_below.append(0.8)
-        above, below = rp.compute_margin_updates(2.0, 1.0)
-        assert above == 2.0
-        assert below == pytest.approx(0.8 * SHRINK_FACTOR)
+            rp._contribution_evidence_above.append(0.5)
+        cal_min, cal_max = rp.compute_calibration_updates(-2.0, 2.0)
+        assert cal_max < 2.0  # shrunk
+        assert cal_min == -2.0  # min unchanged
+
+    def test_shrink_cal_min_with_confirmations(self):
+        rp = _make()
+        # "HP was contributing" at delta=-1.0 → transition above -1.0 → shrink cal_min
+        for _ in range(SHRINK_CONFIRMATIONS):
+            rp._contribution_evidence_below.append(-1.0)
+        cal_min, cal_max = rp.compute_calibration_updates(-2.0, 2.0)
+        assert cal_min > -2.0  # shrunk
+        assert cal_max == 2.0  # max unchanged
 
     def test_never_widens(self):
         rp = _make()
-        # Even with no-contribution evidence, margin doesn't widen
         rp._no_contribution_count = 10
-        above, below = rp.compute_margin_updates(2.0, 1.0)
-        assert above == 2.0
-        assert below == 1.0
+        cal_min, cal_max = rp.compute_calibration_updates(-2.0, 2.0)
+        assert cal_min == -2.0
+        assert cal_max == 2.0
 
 
 # ── Persistence ──────────────────────────────────────────────────────
@@ -342,8 +346,8 @@ class TestCoolingMode:
         """In cooling: removing HP (which was cooling) → room warms → rate increases."""
         rp = _make()
         t = 0.0
-        # Cooling mode: setpoint=24, current=25, margin_above=2.0
-        # offset = 24-25 = -1, |offset|=1 < margin_above → uncertain
+        # Cooling mode: setpoint=24, current=25, cal_min=2.0
+        # offset = 24-25 = -1, |offset|=1 < cal_min → uncertain
         kw = dict(hp_setpoint=24, current_c=25.0, is_heating=False)
         _tick(rp, t, **kw)
         assert rp.state == ProbeState.BASELINE
