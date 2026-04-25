@@ -56,6 +56,7 @@ class Observation:
     clamped: bool  # True if HP setpoint was at min or max
     clamped_reason: str = ""  # "", "no_output", "saturated_low", "saturated_high"
     supplemental_active: bool = False  # supplemental source tracking or assisting
+    hp_contribution_uncertain: bool = False  # |hp_offset| within regime margin
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -71,6 +72,7 @@ class Observation:
             "clamp": self.clamped,
             "cr": self.clamped_reason,
             "sa": self.supplemental_active,
+            "hcu": self.hp_contribution_uncertain,
         }
 
     @classmethod
@@ -94,6 +96,7 @@ class Observation:
             clamped=d["clamp"],
             clamped_reason=d.get("cr", ""),
             supplemental_active=d.get("sa", False),
+            hp_contribution_uncertain=d.get("hcu", False),
         )
 
 
@@ -1058,6 +1061,7 @@ def weighted_least_squares(
         if o.clamped_reason not in _EXCLUDE_REASONS
         and o.hp_setpoint is not None
         and abs(o.room_rate) < room_rate_threshold
+        and not o.hp_contribution_uncertain
     ]
 
     if len(eligible) < min_observations:

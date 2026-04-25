@@ -4223,6 +4223,21 @@ class PIController:
             or (is_cooling and self._hp_setpoint > current_c)
         )
 
+        # Regime boundary uncertainty: sensor calibration mismatch between
+        # our sensor and HP's internal sensor means we can't trust HP
+        # contribution when |offset| is small.  Asymmetric margins per mode.
+        margin_above = (
+            self._regime_margin_above_heat if is_heating
+            else self._regime_margin_above_cool
+        )
+        margin_below = (
+            self._regime_margin_below_heat if is_heating
+            else self._regime_margin_below_cool
+        )
+        hp_contribution_uncertain = RegimeProbe.is_contribution_uncertain(
+            self._hp_setpoint, current_c, margin_above, margin_below, is_heating,
+        )
+
         # HP thermostat deadband override: the HP's internal thermostat
         # has its own hysteresis, so the compressor may still cycle even
         # when hp_setpoint is slightly below room temp (heating).  We use
@@ -4378,6 +4393,7 @@ class PIController:
                 and output_change < 0.045
                 and abs(self._room_temp_rate) < 0.02
                 and not hp_no_output
+                and not hp_contribution_uncertain
             )
             rls_mature = self._rls_heat_mature if is_heating else self._rls_cool_mature
             if branch_ready and rls_mature and x is not None and self._rls_shared_gate_open(learning_suppressed):
@@ -4416,6 +4432,7 @@ class PIController:
                 self._hp_setpoint <= self._min_temp_c
                 or self._hp_setpoint >= self._max_temp_c
                 or hp_no_output
+                or hp_contribution_uncertain
             )
             min_oodb_ticks = 8 + int(abs_error * 4)  # +4 ticks per °C of error
 
@@ -4564,11 +4581,12 @@ class PIController:
                 clamped=obs_clamped,
                 clamped_reason=obs_clamped_reason,
                 supplemental_active=obs_supplemental_active,
+                hp_contribution_uncertain=hp_contribution_uncertain,
             )
             # RLS observation buffer: only when we have a valid feature vector
-            # (ff_enabled + outdoor temp available).  HP-off observations are
-            # zero-value for regression and waste diversity buffer slots.
-            if x is not None and obs_clamped_reason != "no_output":
+            # (ff_enabled + outdoor temp available).  HP-off and uncertain-
+            # contribution observations are zero-value for regression.
+            if x is not None and obs_clamped_reason != "no_output" and not hp_contribution_uncertain:
                 active_buffer = self._observation_buffer_heat if is_heating else self._observation_buffer_cool
                 active_buffer.add(obs)
             # Grey-box buffer gets ALL observations (including HP-off) when
