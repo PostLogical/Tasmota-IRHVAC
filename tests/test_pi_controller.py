@@ -4593,6 +4593,34 @@ class TestHPDeadbandLearning:
         assert restored.hp_deadband_estimate_heat == 0.5
         assert restored.hp_deadband_estimate_cool == 0.5
 
+    @pytest.mark.asyncio
+    async def test_regime_margin_persisted_and_restored(self):
+        """Regime margins survive save/restore cycle; narrowed margins log."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._regime_margin_above_heat = 1.2  # narrowed from 2.0
+        pi._regime_margin_below_heat = 0.7  # narrowed from 1.0
+        pi._regime_margin_above_cool = 1.5
+        pi._regime_margin_below_cool = 0.8
+
+        stored = pi.get_extra_stored_data()
+        assert stored is not None
+        d = stored.as_dict()
+        assert d["regime_margin_above_heat"] == 1.2
+
+        from custom_components.tasmota_irhvac.pi.pi_stored_data import PIExtraStoredData
+        restored = PIExtraStoredData.from_dict(d)
+        assert restored is not None
+
+        entity2 = FakePIEntity(config)
+        pi2 = entity2._pi
+        pi2.restore_extra_stored_data(restored)
+        assert pi2._regime_margin_above_heat == 1.2
+        assert pi2._regime_margin_below_heat == 0.7
+        assert pi2._regime_margin_above_cool == 1.5
+        assert pi2._regime_margin_below_cool == 0.8
+
     # ── Tick counter ──────────────────────────────────────────────────
 
     @pytest.mark.asyncio

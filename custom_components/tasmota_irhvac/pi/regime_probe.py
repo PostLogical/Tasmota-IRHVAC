@@ -226,7 +226,7 @@ class RegimeProbe:
                 len(self._probe_rates) >= PROBE_MIN_READINGS
                 and elapsed >= PROBE_MIN_DURATION_S
             ):
-                self._analyze()
+                self._analyze(now_mono)
                 return _INACTIVE
             return RegimeProbeResult(probe_active=True, force_min_setpoint=True)
 
@@ -310,7 +310,7 @@ class RegimeProbe:
             self._probe_current_c,
         )
 
-    def _analyze(self) -> None:
+    def _analyze(self, now_mono: float) -> None:
         """Compare baseline and probe rates. Update state."""
         baseline_avg = sum(self._baseline_rates) / len(self._baseline_rates)
         probe_avg = sum(self._probe_rates) / len(self._probe_rates)
@@ -349,16 +349,16 @@ class RegimeProbe:
                 delta, side, baseline_avg, probe_avg, rate_change,
             )
 
-        self._begin_cooldown()
+        self._begin_cooldown(now_mono)
 
-    def _begin_cooldown(self) -> None:
+    def _begin_cooldown(self, now_mono: float) -> None:
         if self._confirmations_total >= CONFIRMATION_THRESHOLD:
             cooldown = CONVERGED_COOLDOWN_S
         elif self._probes_completed >= SHRINK_CONFIRMATIONS:
             cooldown = CONFIRMED_COOLDOWN_S
         else:
             cooldown = INITIAL_COOLDOWN_S
-        self._cooldown_end_mono = self._phase_start_mono + cooldown
+        self._cooldown_end_mono = now_mono + cooldown
         self._state = ProbeState.COOLDOWN
 
     def _abort(self, reason: str) -> None:
