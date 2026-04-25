@@ -252,12 +252,14 @@ class PIController:
         # Control parameters are stored in °C always — read directly, no conversion
         self._pi_deadband: float = config.get(CONF_PI_DEADBAND, DEFAULT_PI_DEADBAND)
         self._pi_setpoint_weight: float = config.get(CONF_PI_SETPOINT_WEIGHT, DEFAULT_PI_SETPOINT_WEIGHT)
-        # Q-feedback parameters (Bohn & Atherton 1995).
-        # Lower bound 0.3 from production data: prevents spurious nudges from
-        # sensor noise and HP/sensor calibration offset.  Upper bound 0.5 blocks
-        # real integral corrections (the "bunkroom bug" where q_error=0.8
-        # corrupted the integral).  See project_qfeedback_sweep.md.
-        self._q_feedback_lower: float = 0.3
+        # Q-feedback parameters.  Upper bound 0.5 blocks real integral
+        # corrections (the "bunkroom bug" where q_error=0.8 corrupted the
+        # integral).  Lower bound 0.0 (continuous): 30-day full-stack sims
+        # showed 0.3 caused sustained limit cycles (14-190 rev/wk) by
+        # blocking q-feedback at the q_errors (0.15-0.30) needed to lock
+        # onto the correct SP.  At 0.0, converges to 0-2 rev/wk within
+        # 1-2 weeks.  See project_qfeedback_sweep.md.
+        self._q_feedback_lower: float = 0.0
         self._q_feedback_gain: float = 0.4
 
         # Feedforward config — seeds are positive = warms room, negated to internal β
@@ -4460,7 +4462,11 @@ class PIController:
         # lands near an integer, preventing limit cycles from 1°C HP steps.
         # Only acts on small misalignments (≤ 0.5°C, half a step) — large
         # gaps are real integral corrections, not quantization artifacts.
-        if in_deadband and self._pi_ki != 0:
+        # Gated on FF: without feedforward the integral carries the full
+        # steady-state correction and q-feedback nudges are negligible
+        # against it.  With FF converged the integral is near zero and
+        # q-feedback is the dominant force at the quantization boundary.
+        if self._pi_ff_enabled and in_deadband and self._pi_ki != 0:
             q_error = float(self._hp_setpoint) - clamped_setpoint
             if self._q_feedback_lower < abs(q_error) <= 0.5:
                 self._pi_integral += (q_error / self._pi_ki) * self._q_feedback_gain

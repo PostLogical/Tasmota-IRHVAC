@@ -996,6 +996,9 @@ class TestPIEdgeCases:
         pi_entity._pi._pi_integral = 0.0
         pi_entity._pi._pi_last_tick_time = 0
         pi_entity._attr_hvac_mode = HVACMode.HEAT
+        # Disable FF so q-feedback doesn't fire (this test is about
+        # integration rate, not quantization alignment).
+        pi_entity._pi._pi_ff_enabled = False
 
         await pi_entity._pi._pi_tick()
 
@@ -1188,24 +1191,22 @@ class TestFullRateIntegrationRegression:
     # ── Dynamic tests (room temp responds to HP, tests oscillation) ──
 
     def test_quantization_boundary_limit_cycle(self):
-        """Quantization boundary: SS setpoint at x.25 causes limit cycles.
+        """Quantization boundary: PI-only limit cycle at SS=x.25.
 
         With outdoor=5, hp_gain=0.8, desired=22: the true steady-state
-        setpoint is 26.25 — between two integers. The q-feedback mechanism
-        (Bohn & Atherton 1995) should nudge the integral to lock onto one
-        integer. Currently, q-feedback has a dead zone (0.3–0.5°C gate)
-        that misses q_error=0.25 at this operating point — see future work
-        for continuous Bohn & Atherton formulation to eliminate the dead zone.
+        setpoint is 26.25 — between two integers. Without FF, the integral
+        carries the full correction and q-feedback is gated off (no FF).
+        The limit cycle persists but full-rate integration limits reversals
+        vs variable-rate.
 
-        At SP=26: room=21.8, error=+0.2 → in deadband, q_error=-0.25 (below 0.3 gate)
-        At SP=27: room=22.6, error=-0.6 → out of deadband (q-feedback disabled)
+        With FF enabled and converged (production), q-feedback (lower=0.0)
+        locks onto the correct SP within 1-2 weeks. See 30-day full-stack
+        sims in project_qfeedback_sweep.md.
 
-        Result: q-feedback never fires, limit cycle persists. Full-rate
-        integration limits reversals vs variable-rate (symmetric rates),
-        but cannot eliminate the cycle without q-feedback coverage.
-
-        This test documents the current behavior; the goal is ≤6 reversals
-        once the q-feedback dead zone is addressed.
+        TODO: add a full-stack bench test (PI+FF+RLS with batch triggering)
+        that validates q-feedback convergence over simulated weeks. The
+        current bench runner doesn't trigger batch analysis, so this PI-only
+        test is the best available automated validation.
         """
         full_traj, var_traj = self._run_ab_dynamic(
             21.0, 120, outdoor_c=5.0, tau_minutes=60.0, hp_gain=0.8,
@@ -1214,9 +1215,8 @@ class TestFullRateIntegrationRegression:
         full_rev = self._count_reversals(full_traj)
         var_rev = self._count_reversals(var_traj)
 
-        # Full-rate should have fewer reversals than variable-rate at
-        # quantization boundary (symmetric rates damp faster than
-        # variable-rate's asymmetric 0.4 up / 1.0 down)
+        # PI-only (no FF → no q-feedback): full-rate should not be
+        # worse than variable-rate.
         assert full_rev <= var_rev + 2, (
             f"Full-rate ({full_rev} rev) should not oscillate more than "
             f"variable-rate ({var_rev} rev) at quantization boundary"
@@ -1549,9 +1549,9 @@ class TestPIMathContinued:
     async def test_quantization_feedback_in_deadband(self, pi_entity):
         """Quantization feedback should nudge integral for small misalignments.
 
-        Only activates when |q_error| is between 0.3 and 0.5 (true
-        quantization misalignment). Large gaps are real integral corrections
-        and must not trigger feedback (that caused integral runaway).
+        Activates for any |q_error| ≤ 0.5 (quantization misalignment).
+        Large gaps (> 0.5) are real integral corrections and must not
+        trigger feedback (that caused integral runaway — the bunkroom bug).
         """
         pi = pi_entity._pi
         pi._desired_temp = 20.5
