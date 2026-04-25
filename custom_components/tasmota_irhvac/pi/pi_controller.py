@@ -4256,13 +4256,13 @@ class PIController:
             self._head_calibration_max_heat if is_heating
             else self._head_calibration_max_cool
         )
-        delta = current_c - self._hp_setpoint
+        current_to_setpoint_delta = current_c - self._hp_setpoint
         if is_heating:
-            hp_definitely_on = delta < cal_min
-            hp_definitely_off = delta > cal_max
+            hp_definitely_on = current_to_setpoint_delta < cal_min
+            hp_definitely_off = current_to_setpoint_delta > cal_max
         else:  # cooling: HP active when room is warm
-            hp_definitely_on = delta > cal_max
-            hp_definitely_off = delta < cal_min
+            hp_definitely_on = current_to_setpoint_delta > cal_max
+            hp_definitely_off = current_to_setpoint_delta < cal_min
 
         # For learning: observation is usable only when HP is clearly on
         # AND setpoint isn't saturated at min/max.

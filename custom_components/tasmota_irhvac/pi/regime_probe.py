@@ -249,17 +249,13 @@ class RegimeProbe:
         cal_max: float,
         is_heating: bool,
     ) -> bool:
-        """Check if HP contribution is uncertain at this delta.
+        """Check if HP contribution is uncertain.
 
-        delta = current_c - setpoint.  Uncertain when delta is between
-        cal_min and cal_max (the head unit's calibration bounds).
+        current_to_setpoint_delta = current_c - setpoint.  Uncertain when
+        within [cal_min, cal_max] (the head unit's calibration bounds).
         """
-        delta = current_c - hp_setpoint
-        if is_heating:
-            # HP ON when delta < cal_min, OFF when delta > cal_max
-            return cal_min <= delta <= cal_max
-        # Cooling: HP ON when delta > cal_max, OFF when delta < cal_min
-        return cal_min <= delta <= cal_max
+        current_to_setpoint_delta = current_c - hp_setpoint
+        return cal_min <= current_to_setpoint_delta <= cal_max
 
     @staticmethod
     def is_contribution_uncertain(
@@ -314,7 +310,7 @@ class RegimeProbe:
         baseline_avg = sum(self._baseline_rates) / len(self._baseline_rates)
         probe_avg = sum(self._probe_rates) / len(self._probe_rates)
         rate_change = probe_avg - baseline_avg  # signed
-        delta = self._probe_current_c - self._probe_hp_setpoint  # current - setpoint
+        current_to_setpoint_delta = self._probe_current_c - self._probe_hp_setpoint
 
         # Directional check: in heating, removing HP → rate should decrease.
         if self._probe_is_heating:
@@ -325,23 +321,23 @@ class RegimeProbe:
         self._probes_completed += 1
 
         if not hp_was_contributing:
-            # HP was NOT contributing at this delta → transition is below
-            # this delta → evidence to shrink cal_max.
-            self._contribution_evidence_above.append(delta)
+            # HP was NOT contributing → transition is below this point
+            # → evidence to shrink cal_max.
+            self._contribution_evidence_above.append(current_to_setpoint_delta)
             self._no_contribution_count += 1
             _LOGGER.info(
-                "Regime probe: complete — HP was NOT contributing at "
-                "delta=%.1f°C (rate %.4f→%.4f, change=%.4f)",
-                delta, baseline_avg, probe_avg, rate_change,
+                "Regime probe: complete — HP was NOT contributing "
+                "(current_to_sp=%.1f°C, rate %.4f→%.4f, change=%.4f)",
+                current_to_setpoint_delta, baseline_avg, probe_avg, rate_change,
             )
         else:
-            # HP WAS contributing at this delta → transition is above
-            # this delta → evidence to shrink cal_min.
-            self._contribution_evidence_below.append(delta)
+            # HP WAS contributing → transition is above this point
+            # → evidence to shrink cal_min.
+            self._contribution_evidence_below.append(current_to_setpoint_delta)
             _LOGGER.info(
-                "Regime probe: complete — HP WAS contributing at "
-                "delta=%.1f°C (rate %.4f→%.4f, change=%.4f)",
-                delta, baseline_avg, probe_avg, rate_change,
+                "Regime probe: complete — HP WAS contributing "
+                "(current_to_sp=%.1f°C, rate %.4f→%.4f, change=%.4f)",
+                current_to_setpoint_delta, baseline_avg, probe_avg, rate_change,
             )
 
         self._begin_cooldown(now_mono)
@@ -375,7 +371,7 @@ class RegimeProbe:
         Call after each probe completes.  Only shrinks the band, never widens.
         Requires SHRINK_CONFIRMATIONS probes at similar deltas.
 
-        Evidence types (stored as delta = current_c - setpoint at probe time):
+        Evidence types (stored as current_to_setpoint_delta at probe time):
         - evidence_above: "HP was contributing" at this delta → transition
           is above this delta → cal_max stays at or above here.
           (Shrinks cal_max down toward this delta.)
