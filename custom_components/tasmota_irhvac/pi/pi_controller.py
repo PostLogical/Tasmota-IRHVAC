@@ -252,6 +252,13 @@ class PIController:
         # Control parameters are stored in °C always — read directly, no conversion
         self._pi_deadband: float = config.get(CONF_PI_DEADBAND, DEFAULT_PI_DEADBAND)
         self._pi_setpoint_weight: float = config.get(CONF_PI_SETPOINT_WEIGHT, DEFAULT_PI_SETPOINT_WEIGHT)
+        # Q-feedback parameters (Bohn & Atherton 1995).
+        # Lower bound 0.3 from production data: prevents spurious nudges from
+        # sensor noise and HP/sensor calibration offset.  Upper bound 0.5 blocks
+        # real integral corrections (the "bunkroom bug" where q_error=0.8
+        # corrupted the integral).  See project_qfeedback_sweep.md.
+        self._q_feedback_lower: float = 0.3
+        self._q_feedback_gain: float = 0.4
 
         # Feedforward config — seeds are positive = warms room, negated to internal β
         self._outdoor_seed_heat: float = config.get(
@@ -4455,8 +4462,8 @@ class PIController:
         # gaps are real integral corrections, not quantization artifacts.
         if in_deadband and self._pi_ki != 0:
             q_error = float(self._hp_setpoint) - clamped_setpoint
-            if 0.3 < abs(q_error) <= 0.5:
-                self._pi_integral += (q_error / self._pi_ki) * 0.4
+            if self._q_feedback_lower < abs(q_error) <= 0.5:
+                self._pi_integral += (q_error / self._pi_ki) * self._q_feedback_gain
 
         # ── Observation recording ────────────────────────────────────
         # Gate on data quality: don't record observations with stale or
