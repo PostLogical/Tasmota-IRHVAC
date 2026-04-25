@@ -129,6 +129,7 @@ from .health_checks import (
 )
 from .performance_metrics import PerformanceMetrics
 from .auto_perturbation import AutoPerturbation
+from .regime_probe import RegimeProbe
 from .smith_predictor import SmithPredictor
 from .supplemental_controller import SupplementalController
 from .plant_identifier import PlantIdentifier
@@ -236,6 +237,13 @@ class PIController:
             enabled=config.get(CONF_PI_AUTO_PERTURB_ENABLED, False),
             window_start=config.get(CONF_PI_AUTO_PERTURB_WINDOW_START),
             window_end=config.get(CONF_PI_AUTO_PERTURB_WINDOW_END),
+        )
+
+        # Active probing for HP contribution regime boundary (Layer 3).
+        # Detects sensor calibration mismatch between our sensor and HP's
+        # internal sensor by briefly forcing HP to min and observing room_rate.
+        self._regime_probe = RegimeProbe(
+            enabled=config.get(CONF_PI_AUTO_PERTURB_ENABLED, False),
         )
 
         # Derive effective Kp/Ki: IMC formula or manual config
@@ -458,6 +466,17 @@ class PIController:
         self._hp_deadband_estimate_heat: float = 0.5
         self._hp_deadband_estimate_cool: float = 0.5
         self._hp_no_output_ticks: int = 0
+
+        # Regime boundary: asymmetric uncertainty margins for learning gates.
+        # _margin_above: HP setpoint above current but HP might have cut out
+        #   (HP sensor reads warmer → compressor off before our detection).
+        # _margin_below: HP setpoint below current but HP might still cycle
+        #   (HP internal hysteresis keeps compressor running briefly).
+        # Start conservative; shrink via active probing (RegimeProbe).
+        self._regime_margin_above_heat: float = 2.0
+        self._regime_margin_above_cool: float = 2.0
+        self._regime_margin_below_heat: float = 1.0
+        self._regime_margin_below_cool: float = 1.0
 
         # Drift detection: per-coefficient history of batch correction signs.
         # Each entry is +1 (batch pushed up), -1 (batch pushed down), or 0.
@@ -1214,6 +1233,11 @@ class PIController:
             tuning_alert_snapshots=dict(self._tuning_alert_snapshots),
             hp_deadband_estimate_heat=self._hp_deadband_estimate_heat,
             hp_deadband_estimate_cool=self._hp_deadband_estimate_cool,
+            regime_margin_above_heat=self._regime_margin_above_heat,
+            regime_margin_above_cool=self._regime_margin_above_cool,
+            regime_margin_below_heat=self._regime_margin_below_heat,
+            regime_margin_below_cool=self._regime_margin_below_cool,
+            regime_probe_state=self._regime_probe.as_dict(),
             exclusion_count=self._exclusion_count,
             auto_perturb_state=self._auto_perturb.as_dict(),
             manual_override_heat=list(self._manual_override_heat),
@@ -1313,6 +1337,23 @@ class PIController:
                 self._log_prefix,
                 self._hp_deadband_estimate_heat,
                 self._hp_deadband_estimate_cool,
+            )
+
+        # Restore regime boundary margins and probe state
+        self._regime_margin_above_heat = data.regime_margin_above_heat
+        self._regime_margin_above_cool = data.regime_margin_above_cool
+        self._regime_margin_below_heat = data.regime_margin_below_heat
+        self._regime_margin_below_cool = data.regime_margin_below_cool
+        if data.regime_probe_state:
+            self._regime_probe.restore(data.regime_probe_state)
+        if (self._regime_margin_above_heat < 2.0 or self._regime_margin_below_heat < 1.0
+                or self._regime_margin_above_cool < 2.0 or self._regime_margin_below_cool < 1.0):
+            _LOGGER.debug(
+                "%sRestored regime margins: heat above=%.1f/below=%.1f°C, "
+                "cool above=%.1f/below=%.1f°C",
+                self._log_prefix,
+                self._regime_margin_above_heat, self._regime_margin_below_heat,
+                self._regime_margin_above_cool, self._regime_margin_below_cool,
             )
 
         # Restore anomaly exclusion count
@@ -4336,6 +4377,7 @@ class PIController:
                 self._ff_settled_ticks >= 4
                 and output_change < 0.045
                 and abs(self._room_temp_rate) < 0.02
+                and not hp_no_output
             )
             rls_mature = self._rls_heat_mature if is_heating else self._rls_cool_mature
             if branch_ready and rls_mature and x is not None and self._rls_shared_gate_open(learning_suppressed):

@@ -1,0 +1,462 @@
+"""Active probing for HP contribution regime boundary detection.
+
+Pure computation — no Home Assistant dependencies.  When the HP setpoint
+is near room temperature, the HP's actual contribution is uncertain due
+to sensor calibration mismatch between our room sensor and the HP's
+internal sensor.  This module actively probes the boundary by briefly
+forcing the HP to minimum setpoint and observing whether the room rate
+changes, directly resolving the ambiguity.
+
+The probe narrows an asymmetric uncertainty band around hp_setpoint ==
+current_c.  The "above" side (setpoint > current but HP might have cut
+out) and "below" side (setpoint < current but HP might still cycle)
+shrink independently as probes confirm or deny HP contribution.
+
+Literature: PWARX regime-switching models (building thermal), Cragg
+(1971) hurdle models, dead-zone nonlinearity identification.
+"""
+
+from __future__ import annotations
+
+import enum
+import logging
+from dataclasses import dataclass, field
+from typing import Any
+
+_LOGGER = logging.getLogger(__name__)
+
+# ── Constants ────────────────────────────────────────────────────────
+
+BASELINE_MIN_READINGS: int = 2
+"""Minimum sensor readings for baseline rate estimate."""
+
+BASELINE_MIN_DURATION_S: float = 180.0
+"""AND at least 3 min elapsed (lower bound; in practice 2 readings
+in steady state take 5–10 min)."""
+
+PROBE_MIN_READINGS: int = 2
+"""Minimum sensor readings during HP-off probe."""
+
+PROBE_MIN_DURATION_S: float = 480.0
+"""AND at least 8 min elapsed.  The room rate responds on the fast
+thermal time constant (~5–15 min air volume + surface convection).
+At 8 min with τ_fast=10 min: 55 % of the rate change is visible.
+Detectable at ≥1 °C offsets given k_c ≈ 0.02 °C/min per °C."""
+
+RATE_CHANGE_THRESHOLD: float = 0.005
+"""°C/min — minimum directional rate change to detect HP contribution.
+Matches the EMA-filtered room_rate noise floor."""
+
+STABILITY_THRESHOLD: float = 0.03
+"""°C/min — moderate threshold for probe entry (not the strict
+steady-state gates used for learning)."""
+
+MIN_DELTA_BELOW_CURRENT: float = 3.0
+"""Min setpoint must be ≥ 3 °C below current_c to guarantee the
+compressor is off regardless of sensor offset (2 °C max offset + 1 °C
+margin)."""
+
+INITIAL_COOLDOWN_S: float = 1800.0
+"""30 min — quick re-probe for confirmation."""
+
+CONFIRMED_COOLDOWN_S: float = 14400.0
+"""4 hours — after first confirmations, space out to let conditions
+change so probes occur at different deltas."""
+
+CONVERGED_COOLDOWN_S: float = 86400.0
+"""24 hours — once margin has stabilised, probe rarely."""
+
+SHRINK_CONFIRMATIONS: int = 2
+"""Probes needed at similar deltas before shrinking margin."""
+
+SHRINK_DELTA_TOLERANCE: float = 0.5
+"""°C — probes within this range of each other count as confirming."""
+
+SHRINK_FACTOR: float = 0.8
+"""Shrink margin to this fraction of confirmed delta (adds safety)."""
+
+# How many successful confirmations before moving to longer cooldown
+CONFIRMATION_THRESHOLD: int = 3
+
+
+class ProbeState(enum.Enum):
+    """State machine states."""
+    IDLE = "idle"
+    BASELINE = "baseline"
+    PROBE = "probe"
+    ANALYZE = "analyze"
+    COOLDOWN = "cooldown"
+
+
+@dataclass
+class RegimeProbeResult:
+    """Result returned each tick."""
+    probe_active: bool = False
+    force_min_setpoint: bool = False
+
+
+_INACTIVE = RegimeProbeResult()
+
+
+class RegimeProbe:
+    """Active probing state machine for HP contribution regime boundary.
+
+    State flow::
+
+        IDLE ──(uncertain + stable)──> BASELINE ──(readings + time)──>
+        PROBE ──(readings + time)──> ANALYZE ──(update margin)──>
+        COOLDOWN ──(cooldown elapsed)──> IDLE
+    """
+
+    def __init__(
+        self,
+        *,
+        window_start: int | None = None,
+        window_end: int | None = None,
+        enabled: bool = True,
+    ) -> None:
+        self._enabled = enabled
+        self._window_start = window_start
+        self._window_end = window_end
+
+        self._state = ProbeState.IDLE
+
+        # Timing
+        self._phase_start_mono: float = 0.0
+        self._cooldown_end_mono: float = 0.0
+
+        # Readings collected
+        self._baseline_rates: list[float] = []
+        self._probe_rates: list[float] = []
+
+        # Context at probe start
+        self._probe_hp_setpoint: int = 0
+        self._probe_current_c: float = 0.0
+        self._probe_is_heating: bool = True
+
+        # Evidence accumulation (persisted)
+        self._contribution_evidence_above: list[float] = []
+        self._contribution_evidence_below: list[float] = []
+        self._no_contribution_count: int = 0
+        self._confirmations_total: int = 0
+        self._probes_completed: int = 0
+
+    # ── Properties ───────────────────────────────────────────────────
+
+    @property
+    def state(self) -> ProbeState:
+        return self._state
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    @property
+    def probes_completed(self) -> int:
+        return self._probes_completed
+
+    # ── Main tick ────────────────────────────────────────────────────
+
+    def tick(
+        self,
+        now_mono: float,
+        room_temp_rate: float,
+        hp_setpoint: int,
+        current_c: float,
+        min_temp_c: float,
+        margin_above: float,
+        margin_below: float,
+        is_heating: bool,
+        is_clamped: bool,
+        learning_suppressed: bool,
+        current_hour: int,
+        auto_perturb_active: bool,
+    ) -> RegimeProbeResult:
+        """Advance the state machine.  Returns probe status."""
+        if not self._enabled:
+            return _INACTIVE
+
+        # ── Guards (apply in all states except COOLDOWN) ─────────
+        if self._state != ProbeState.COOLDOWN:
+            if not self._in_window(current_hour):
+                if self._state not in (ProbeState.IDLE, ProbeState.COOLDOWN):
+                    self._abort("outside time window")
+                return _INACTIVE
+            if auto_perturb_active:
+                if self._state not in (ProbeState.IDLE, ProbeState.COOLDOWN):
+                    self._abort("auto-perturbation active")
+                return _INACTIVE
+            if is_clamped or learning_suppressed:
+                if self._state not in (ProbeState.IDLE, ProbeState.COOLDOWN):
+                    self._abort("clamped or learning suppressed")
+                return _INACTIVE
+
+        # ── IDLE: wait for uncertain zone + stability ────────────
+        if self._state == ProbeState.IDLE:
+            hp_uncertain = self._is_uncertain(
+                hp_setpoint, current_c, margin_above, margin_below, is_heating,
+            )
+            can_probe = (
+                current_c - min_temp_c >= MIN_DELTA_BELOW_CURRENT
+                and not auto_perturb_active
+                and not is_clamped
+                and not learning_suppressed
+            )
+            if hp_uncertain and can_probe and abs(room_temp_rate) < STABILITY_THRESHOLD:
+                self._begin_baseline(now_mono, hp_setpoint, current_c, is_heating)
+
+        # ── BASELINE: collect room_rate readings ─────────────────
+        elif self._state == ProbeState.BASELINE:
+            self._baseline_rates.append(room_temp_rate)
+            elapsed = now_mono - self._phase_start_mono
+            if (
+                len(self._baseline_rates) >= BASELINE_MIN_READINGS
+                and elapsed >= BASELINE_MIN_DURATION_S
+            ):
+                self._begin_probe(now_mono)
+                return RegimeProbeResult(probe_active=True, force_min_setpoint=True)
+            # Not ready yet — still collecting baseline
+            return _INACTIVE
+
+        # ── PROBE: HP at minimum, collect room_rate ──────────────
+        elif self._state == ProbeState.PROBE:
+            self._probe_rates.append(room_temp_rate)
+            elapsed = now_mono - self._phase_start_mono
+            if (
+                len(self._probe_rates) >= PROBE_MIN_READINGS
+                and elapsed >= PROBE_MIN_DURATION_S
+            ):
+                self._analyze()
+                return _INACTIVE
+            return RegimeProbeResult(probe_active=True, force_min_setpoint=True)
+
+        # ── ANALYZE: handled synchronously in _analyze() ─────────
+
+        # ── COOLDOWN: wait for cooldown to elapse ────────────────
+        elif self._state == ProbeState.COOLDOWN:
+            if now_mono >= self._cooldown_end_mono:
+                self._state = ProbeState.IDLE
+
+        return _INACTIVE
+
+    # ── Uncertainty check ────────────────────────────────────────────
+
+    @staticmethod
+    def _is_uncertain(
+        hp_setpoint: int,
+        current_c: float,
+        margin_above: float,
+        margin_below: float,
+        is_heating: bool,
+    ) -> bool:
+        """Check if HP contribution is uncertain at this offset."""
+        signed_offset = hp_setpoint - current_c
+        if is_heating:
+            return (
+                (signed_offset > 0 and signed_offset < margin_above)
+                or (signed_offset < 0 and abs(signed_offset) < margin_below)
+            )
+        # Cooling: signs reversed
+        return (
+            (signed_offset < 0 and abs(signed_offset) < margin_above)
+            or (signed_offset > 0 and signed_offset < margin_below)
+        )
+
+    @staticmethod
+    def is_contribution_uncertain(
+        hp_setpoint: int,
+        current_c: float,
+        margin_above: float,
+        margin_below: float,
+        is_heating: bool,
+    ) -> bool:
+        """Public static helper for use by learning gates."""
+        return RegimeProbe._is_uncertain(
+            hp_setpoint, current_c, margin_above, margin_below, is_heating,
+        )
+
+    # ── Transitions ──────────────────────────────────────────────────
+
+    def _begin_baseline(
+        self,
+        now_mono: float,
+        hp_setpoint: int,
+        current_c: float,
+        is_heating: bool,
+    ) -> None:
+        self._state = ProbeState.BASELINE
+        self._phase_start_mono = now_mono
+        self._baseline_rates = []
+        self._probe_hp_setpoint = hp_setpoint
+        self._probe_current_c = current_c
+        self._probe_is_heating = is_heating
+        _LOGGER.info(
+            "Regime probe: baseline started "
+            "(setpoint=%d°C, room=%.1f°C, delta=%.1f°C, %s)",
+            hp_setpoint, current_c,
+            abs(hp_setpoint - current_c),
+            "heating" if is_heating else "cooling",
+        )
+
+    def _begin_probe(self, now_mono: float) -> None:
+        self._state = ProbeState.PROBE
+        self._phase_start_mono = now_mono
+        self._probe_rates = []
+        _LOGGER.info(
+            "Regime probe: testing HP contribution at delta=%.1f°C "
+            "(setpoint %d°C → min, room=%.1f°C)",
+            abs(self._probe_hp_setpoint - self._probe_current_c),
+            self._probe_hp_setpoint,
+            self._probe_current_c,
+        )
+
+    def _analyze(self) -> None:
+        """Compare baseline and probe rates. Update state."""
+        baseline_avg = sum(self._baseline_rates) / len(self._baseline_rates)
+        probe_avg = sum(self._probe_rates) / len(self._probe_rates)
+        rate_change = probe_avg - baseline_avg  # signed
+        delta = abs(self._probe_hp_setpoint - self._probe_current_c)
+        signed_offset = self._probe_hp_setpoint - self._probe_current_c
+
+        # Directional check: in heating, removing HP → rate should decrease.
+        if self._probe_is_heating:
+            hp_was_contributing = rate_change < -RATE_CHANGE_THRESHOLD
+        else:
+            hp_was_contributing = rate_change > RATE_CHANGE_THRESHOLD
+
+        self._probes_completed += 1
+
+        if not hp_was_contributing:
+            self._no_contribution_count += 1
+            _LOGGER.info(
+                "Regime probe: complete — HP was NOT contributing at "
+                "delta=%.1f°C (rate %.4f→%.4f, change=%.4f)",
+                delta, baseline_avg, probe_avg, rate_change,
+            )
+        else:
+            side = "above" if (
+                (self._probe_is_heating and signed_offset > 0)
+                or (not self._probe_is_heating and signed_offset < 0)
+            ) else "below"
+            evidence = (
+                self._contribution_evidence_above if side == "above"
+                else self._contribution_evidence_below
+            )
+            evidence.append(delta)
+            _LOGGER.info(
+                "Regime probe: complete — HP WAS contributing at "
+                "delta=%.1f°C %s side (rate %.4f→%.4f, change=%.4f)",
+                delta, side, baseline_avg, probe_avg, rate_change,
+            )
+
+        self._begin_cooldown()
+
+    def _begin_cooldown(self) -> None:
+        if self._confirmations_total >= CONFIRMATION_THRESHOLD:
+            cooldown = CONVERGED_COOLDOWN_S
+        elif self._probes_completed >= SHRINK_CONFIRMATIONS:
+            cooldown = CONFIRMED_COOLDOWN_S
+        else:
+            cooldown = INITIAL_COOLDOWN_S
+        self._cooldown_end_mono = self._phase_start_mono + cooldown
+        self._state = ProbeState.COOLDOWN
+
+    def _abort(self, reason: str) -> None:
+        if self._state in (ProbeState.BASELINE, ProbeState.PROBE):
+            _LOGGER.info("Regime probe aborted: %s", reason)
+        self._state = ProbeState.IDLE
+        self._baseline_rates = []
+        self._probe_rates = []
+
+    # ── Margin update ────────────────────────────────────────────────
+
+    def compute_margin_updates(
+        self,
+        current_above: float,
+        current_below: float,
+    ) -> tuple[float, float]:
+        """Check evidence and return updated (margin_above, margin_below).
+
+        Call after each probe completes.  Only shrinks, never widens.
+        Requires SHRINK_CONFIRMATIONS probes at similar deltas.
+        """
+        new_above = current_above
+        new_below = current_below
+
+        # Check above-side evidence
+        for delta in self._contribution_evidence_above:
+            confirming = [
+                d for d in self._contribution_evidence_above
+                if abs(d - delta) < SHRINK_DELTA_TOLERANCE
+            ]
+            if len(confirming) >= SHRINK_CONFIRMATIONS:
+                candidate = min(confirming) * SHRINK_FACTOR
+                if candidate < new_above:
+                    new_above = candidate
+                    self._confirmations_total += 1
+
+        # Check below-side evidence
+        for delta in self._contribution_evidence_below:
+            confirming = [
+                d for d in self._contribution_evidence_below
+                if abs(d - delta) < SHRINK_DELTA_TOLERANCE
+            ]
+            if len(confirming) >= SHRINK_CONFIRMATIONS:
+                candidate = min(confirming) * SHRINK_FACTOR
+                if candidate < new_below:
+                    new_below = candidate
+                    self._confirmations_total += 1
+
+        if new_above < current_above:
+            _LOGGER.info(
+                "Regime probe: above margin shrunk %.1f→%.1f°C",
+                current_above, new_above,
+            )
+        if new_below < current_below:
+            _LOGGER.info(
+                "Regime probe: below margin shrunk %.1f→%.1f°C",
+                current_below, new_below,
+            )
+
+        return new_above, new_below
+
+    # ── Window ───────────────────────────────────────────────────────
+
+    def _in_window(self, hour: int) -> bool:
+        """True if current hour is within configured window (or no window)."""
+        if self._window_start is None or self._window_end is None:
+            return True
+        s, e = self._window_start, self._window_end
+        if s <= e:
+            return s <= hour < e
+        return hour >= s or hour < e  # wraps midnight
+
+    # ── External API ─────────────────────────────────────────────────
+
+    def abort(self, reason: str = "") -> None:
+        """Abort any active probe and return to IDLE."""
+        self._abort(reason or "external")
+
+    # ── Persistence ──────────────────────────────────────────────────
+
+    def as_dict(self) -> dict[str, Any]:
+        """Serialise counters and evidence (state resets to IDLE on restart)."""
+        return {
+            "probes_completed": self._probes_completed,
+            "no_contribution_count": self._no_contribution_count,
+            "confirmations_total": self._confirmations_total,
+            "evidence_above": list(self._contribution_evidence_above),
+            "evidence_below": list(self._contribution_evidence_below),
+        }
+
+    def restore(self, data: dict[str, Any]) -> None:
+        """Restore counters from persisted data."""
+        self._probes_completed = int(data.get("probes_completed", 0))
+        self._no_contribution_count = int(data.get("no_contribution_count", 0))
+        self._confirmations_total = int(data.get("confirmations_total", 0))
+        self._contribution_evidence_above = [
+            float(d) for d in data.get("evidence_above", [])
+        ]
+        self._contribution_evidence_below = [
+            float(d) for d in data.get("evidence_below", [])
+        ]

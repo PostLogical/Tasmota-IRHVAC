@@ -54,6 +54,11 @@ class PIExtraStoredData(ExtraStoredData):
     tuning_alert_snapshots: dict[str, float] = dataclasses.field(default_factory=dict)
     hp_deadband_estimate_heat: float = 0.5
     hp_deadband_estimate_cool: float = 0.5
+    regime_margin_above_heat: float = 2.0
+    regime_margin_above_cool: float = 2.0
+    regime_margin_below_heat: float = 1.0
+    regime_margin_below_cool: float = 1.0
+    regime_probe_state: dict[str, Any] = dataclasses.field(default_factory=dict)  # RegimeProbe.as_dict()
     exclusion_count: int = 0
     auto_perturb_state: dict[str, Any] = dataclasses.field(default_factory=dict)  # AutoPerturbation.as_dict()
     manual_override_heat: list[bool | None] = dataclasses.field(default_factory=list)
@@ -101,6 +106,11 @@ class PIExtraStoredData(ExtraStoredData):
             "tuning_alert_snapshots": self.tuning_alert_snapshots,
             "hp_deadband_estimate_heat": self.hp_deadband_estimate_heat,
             "hp_deadband_estimate_cool": self.hp_deadband_estimate_cool,
+            "regime_margin_above_heat": self.regime_margin_above_heat,
+            "regime_margin_above_cool": self.regime_margin_above_cool,
+            "regime_margin_below_heat": self.regime_margin_below_heat,
+            "regime_margin_below_cool": self.regime_margin_below_cool,
+            "regime_probe_state": self.regime_probe_state,
             "exclusion_count": self.exclusion_count,
             "auto_perturb_state": self.auto_perturb_state,
             "manual_override_heat": self.manual_override_heat,
@@ -159,6 +169,11 @@ class PIExtraStoredData(ExtraStoredData):
                 }),
                 hp_deadband_estimate_heat=float(restored.get("hp_deadband_estimate_heat", 0.5)),
                 hp_deadband_estimate_cool=float(restored.get("hp_deadband_estimate_cool", 0.5)),
+                regime_margin_above_heat=float(restored.get("regime_margin_above_heat", 2.0)),
+                regime_margin_above_cool=float(restored.get("regime_margin_above_cool", 2.0)),
+                regime_margin_below_heat=float(restored.get("regime_margin_below_heat", 1.0)),
+                regime_margin_below_cool=float(restored.get("regime_margin_below_cool", 1.0)),
+                regime_probe_state=restored.get("regime_probe_state", {}),
                 exclusion_count=int(restored.get("exclusion_count", 0)),
                 auto_perturb_state=restored.get("auto_perturb_state", {}),
                 manual_override_heat=restored.get("manual_override_heat", []),
