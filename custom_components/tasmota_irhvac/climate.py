@@ -529,6 +529,15 @@ SERVICE_TO_METHOD = {
             vol.Required("slot"): cv.string,
         }),
     },
+    "set_subsystem": {
+        "method": "async_set_subsystem",
+        "schema": IRHVAC_SERVICE_SCHEMA.extend({
+            vol.Required("subsystem"): vol.In([
+                "control", "ff", "rls_online", "batch_wls", "plant_id",
+            ]),
+            vol.Required("enabled"): cv.boolean,
+        }),
+    },
 }
 
 
@@ -776,6 +785,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             self._pi = None
 
         self._snapshot_store: Store[dict[str, Any]] | None = None
+        self._pi_autosave_store: Store[dict[str, Any]] | None = None
 
         # Echo classification state (only active when PI is active)
         self._has_sent_once: bool = False
@@ -890,8 +900,16 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         if self._power_sensor:
             regist_track_state_change_event(self._power_sensor)
 
-        # Initialize PI controller (restores state, no I/O)
-        await self._controller.async_added_to_hass(old_state=old_state)
+        # Initialize PI controller (restores state, no I/O).
+        # Load auto-save as fallback — ExtraStoredData may have been
+        # overwritten with None while NullController was active.
+        pi_autosave: dict[str, Any] | None = None
+        if self._pi is not None:
+            store = self._get_pi_autosave_store()
+            pi_autosave = await store.async_load()
+        await self._controller.async_added_to_hass(
+            old_state=old_state, pi_autosave=pi_autosave,
+        )
 
         # PI fallback timer — PI reschedules after every tick, climate.py
         # provides the callback that bridges timer fire → send_ir.
@@ -1271,6 +1289,13 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
 
     async def async_will_remove_from_hass(self) -> None:
         """Unsubscribe when removed."""
+        # Auto-save PI state so it survives a PI disable→enable cycle.
+        # NullController.get_extra_stored_data() returns None, which would
+        # overwrite the saved PI state on subsequent state writes.
+        pi_data = self._controller.get_extra_stored_data()
+        if pi_data is not None:
+            store = self._get_pi_autosave_store()
+            await store.async_save(pi_data.as_dict())
         if hasattr(self, "_vendor_timer_unsub") and self._vendor_timer_unsub:
             self._vendor_timer_unsub()
             self._vendor_timer_unsub = None
@@ -1843,6 +1868,14 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         """Clear observation buffer(s) and reset batch learning state."""
         await self._controller.async_flush_observation_buffer(mode=mode)
 
+    async def async_set_subsystem(self, subsystem: str, enabled: bool) -> None:
+        """Toggle a PI subsystem at runtime without reload."""
+        pi = self._pi
+        if pi is None:
+            return
+        pi.set_subsystem(subsystem, enabled)
+        self.async_schedule_update_ha_state()
+
     async def async_set_coefficient(self, mode: str, name: str, value: float) -> None:
         """Set an RLS coefficient by name."""
         pi = self._pi
@@ -1956,6 +1989,16 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                 self.hass, 1, f"tasmota_irhvac.snapshots.{safe_id}"
             )
         return self._snapshot_store
+
+    def _get_pi_autosave_store(self) -> Store[dict[str, Any]]:
+        """Lazily create or return the Store for PI auto-save (survives PI disable)."""
+        if self._pi_autosave_store is None:
+            from homeassistant.helpers.storage import Store
+            safe_id = self.entity_id.replace(".", "_")
+            self._pi_autosave_store = Store(
+                self.hass, 1, f"tasmota_irhvac.pi_autosave.{safe_id}"
+            )
+        return self._pi_autosave_store
 
     def _resolve_coeff_index(self, name: str) -> int | None:
         """Resolve a coefficient name to its index."""

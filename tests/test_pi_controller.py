@@ -1655,6 +1655,299 @@ class TestPIMathContinued:
         pi_entity._pi.restore_extra_stored_data(data)
         assert pi_entity._pi._pi_integral == 100.0
 
+    @pytest.mark.asyncio
+    async def test_restore_from_autosave_when_extra_data_missing(self):
+        """PI should restore from auto-save dict when ExtraStoredData is None.
+
+        This covers the PI disable→enable cycle: NullController overwrites
+        ExtraStoredData with None, but the auto-save Store preserves the
+        previous PI state.
+        """
+        from custom_components.tasmota_irhvac.pi.pi_controller import PIExtraStoredData
+
+        config = make_pi_config({"outdoor_temp_sensor": ""})
+        entity = FakePIEntity(config)
+
+        # Build an auto-save dict from a known state
+        autosave = PIExtraStoredData(
+            pi_integral=12.3,
+            desired_temp=21.5,
+            hp_setpoint=24.0,
+        ).as_dict()
+
+        # ExtraStoredData returns None (as if NullController overwrote it)
+        entity.async_get_last_extra_data = AsyncMock(return_value=None)
+
+        await entity._pi.async_added_to_hass(pi_autosave=autosave)
+
+        assert entity._pi._pi_integral == 12.3
+        assert entity._pi._desired_temp == 21.5
+        assert entity._pi._hp_setpoint == 24.0
+
+    @pytest.mark.asyncio
+    async def test_extra_data_takes_priority_over_autosave(self):
+        """ExtraStoredData should win over auto-save when both are available."""
+        from custom_components.tasmota_irhvac.pi.pi_controller import PIExtraStoredData
+
+        config = make_pi_config({"outdoor_temp_sensor": ""})
+        entity = FakePIEntity(config)
+
+        # ExtraStoredData has integral=5.0
+        extra = PIExtraStoredData(pi_integral=5.0, desired_temp=20.0, hp_setpoint=22.0)
+        mock_extra = MagicMock()
+        mock_extra.as_dict.return_value = extra.as_dict()
+        entity.async_get_last_extra_data = AsyncMock(return_value=mock_extra)
+
+        # Auto-save has integral=12.3 (stale)
+        autosave = PIExtraStoredData(
+            pi_integral=12.3, desired_temp=21.5, hp_setpoint=24.0,
+        ).as_dict()
+
+        await entity._pi.async_added_to_hass(pi_autosave=autosave)
+
+        # ExtraStoredData wins
+        assert entity._pi._pi_integral == 5.0
+        assert entity._pi._desired_temp == 20.0
+
+    @pytest.mark.asyncio
+    async def test_autosave_used_when_extra_data_not_pi(self):
+        """Auto-save should be used when ExtraStoredData exists but isn't PI data.
+
+        Another controller type could write ExtraStoredData that doesn't
+        deserialize as PIExtraStoredData.
+        """
+        from custom_components.tasmota_irhvac.pi.pi_controller import PIExtraStoredData
+
+        config = make_pi_config({"outdoor_temp_sensor": ""})
+        entity = FakePIEntity(config)
+
+        # ExtraStoredData exists but isn't PI data (missing pi_integral key)
+        mock_extra = MagicMock()
+        mock_extra.as_dict.return_value = {"some_other_controller": True}
+        entity.async_get_last_extra_data = AsyncMock(return_value=mock_extra)
+
+        # Auto-save has valid PI data
+        autosave = PIExtraStoredData(
+            pi_integral=8.8, desired_temp=22.0, hp_setpoint=25.0,
+        ).as_dict()
+
+        await entity._pi.async_added_to_hass(pi_autosave=autosave)
+
+        assert entity._pi._pi_integral == 8.8
+        assert entity._pi._desired_temp == 22.0
+
+
+# ── set_subsystem service + observe-only mode ──────────────────────
+
+
+class TestSetSubsystem:
+    """Tests for the set_subsystem runtime toggle and observe-only mode."""
+
+    def test_set_subsystem_toggles_ff(self):
+        """set_subsystem('ff', False) should disable feedforward."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        assert pi._pi_ff_enabled is True
+        pi.set_subsystem("ff", False)
+        assert pi._pi_ff_enabled is False
+        pi.set_subsystem("ff", True)
+        assert pi._pi_ff_enabled is True
+
+    def test_set_subsystem_toggles_all(self):
+        """All five subsystems should be toggleable."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        for name, attr in pi._SUBSYSTEM_ATTRS.items():
+            assert getattr(pi, attr) is True, f"{name} should default to True"
+            pi.set_subsystem(name, False)
+            assert getattr(pi, attr) is False, f"{name} should be False after disable"
+            pi.set_subsystem(name, True)
+            assert getattr(pi, attr) is True, f"{name} should be True after re-enable"
+
+    def test_set_subsystem_unknown_ignored(self):
+        """Unknown subsystem name should be silently ignored."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi.set_subsystem("nonexistent", False)  # should not raise
+
+    def test_control_active_false_runs_observe_tick(self):
+        """When control_active=False, PI tick should run observe path (no IR)."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 23.0
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 21.0
+
+        pi.set_subsystem("control", False)
+        result = pi._observe_tick()
+        assert result is False  # No IR command
+
+    def test_observe_tick_preserves_integral(self):
+        """Observe tick must NOT zero the integral (unlike passive tick)."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._pi_integral = 5.0
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 23.0
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 21.0
+
+        pi._observe_tick()
+        assert pi._pi_integral == 5.0
+
+    def test_observe_tick_updates_sensor_filter(self):
+        """Observe tick should keep the sensor filter warm."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 23.0
+        entity._attr_current_temperature = 21.5
+
+        pi._observe_tick()
+        assert pi._sensor_filtered is not None
+
+    def test_learning_state_shows_observing(self):
+        """Learning state sensor should show 'Observing' when control inactive."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 22.0
+        entity._attr_hvac_mode = HVACMode.HEAT
+
+        pi.set_subsystem("control", False)
+        state = pi.get_learning_state()
+        assert state["state"] == "Observing"
+
+    def test_subsystem_toggles_persist_in_extra_stored_data(self):
+        """Subsystem toggle states should round-trip through ExtraStoredData."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        pi.set_subsystem("control", False)
+        pi.set_subsystem("ff", False)
+        pi.set_subsystem("rls_online", False)
+
+        data = pi.get_extra_stored_data()
+        assert data is not None
+        d = data.as_dict()
+        assert d["control_active"] is False
+        assert d["ff_enabled"] is False
+        assert d["rls_online_enabled"] is False
+        assert d["batch_wls_enabled"] is True
+        assert d["plant_id_enabled"] is True
+
+        # Restore into a fresh controller
+        config2 = make_pi_config()
+        entity2 = FakePIEntity(config2)
+        pi2 = entity2._pi
+        from custom_components.tasmota_irhvac.pi.pi_controller import PIExtraStoredData
+        pi2.restore_extra_stored_data(PIExtraStoredData.from_dict(d))
+        assert pi2._control_active is False
+        assert pi2._pi_ff_enabled is False
+        assert pi2._pi_rls_online_enabled is False
+        assert pi2._pi_batch_wls_enabled is True
+
+    def test_control_active_in_attributes(self):
+        """control_active should appear in extra state attributes."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 23.0
+        entity._attr_hvac_mode = HVACMode.HEAT
+
+        attrs = pi.get_extra_state_attributes()
+        assert "control_active" in attrs
+        assert attrs["control_active"] is True
+
+        pi.set_subsystem("control", False)
+        attrs = pi.get_extra_state_attributes()
+        assert attrs["control_active"] is False
+
+    @pytest.mark.asyncio
+    async def test_observe_tick_via_pi_tick_inner(self):
+        """_pi_tick_inner should route to _observe_tick when control_active=False."""
+        config = make_pi_config({"outdoor_temp_sensor": ""})
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._pi_enabled = True
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 23.0
+        pi._pi_integral = 3.0
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 21.0
+
+        pi.set_subsystem("control", False)
+        result = await pi._pi_tick_inner()
+        assert result is False
+        # Integral preserved
+        assert pi._pi_integral == 3.0
+
+    def test_observe_tick_no_temperature(self):
+        """Observe tick should return False when temperature is None."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        entity._attr_current_temperature = None
+
+        result = pi._observe_tick()
+        assert result is False
+
+    def test_observe_tick_rate_tracking(self):
+        """Observe tick should track room temperature rate over multiple calls."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 23.0
+
+        # Multiple ticks to build up rate history
+        for temp in [20.0, 20.1, 20.2, 20.3, 20.4, 20.5, 20.6]:
+            entity._attr_current_temperature = temp
+            pi._observe_tick()
+
+        # Should have computed a rate
+        assert pi._room_temp_rate != 0.0
+        # History should be capped at 5
+        assert len(pi._room_temp_history) <= 5
+
+    def test_observe_tick_plant_id_with_outdoor(self):
+        """Observe tick should call plant_id when outdoor temp is available."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 23.0
+        entity._attr_current_temperature = 21.0
+        # Set outdoor temp available
+        pi._inputs._outdoor_temp = 5.0
+
+        pi._observe_tick()
+        # Should not crash — plant_id received the observation
+
+    def test_observe_tick_no_sensor_filter(self):
+        """Observe tick with sensor_filter_tau=0 should use raw temp."""
+        config = make_pi_config({"pi_sensor_filter_tau": 0})
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 23.0
+        entity._attr_current_temperature = 21.5
+
+        pi._observe_tick()
+        # No filter applied — sensor_filtered stays None
+        assert pi._sensor_filtered is None
+
 
 # ── Model Input Clamps (line 448) ───────────────────────────────────
 

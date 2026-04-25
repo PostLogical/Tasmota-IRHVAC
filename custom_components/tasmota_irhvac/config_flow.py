@@ -483,10 +483,6 @@ OPTIONS_PI_TIMING_SCHEMA = vol.Schema(
 
 OPTIONS_PI_ADVANCED_SCHEMA = vol.Schema(
     {
-        vol.Optional(CONF_PI_FF_ENABLED, default=DEFAULT_PI_FF_ENABLED): BooleanSelector(),
-        vol.Optional(CONF_PI_RLS_ONLINE_ENABLED, default=DEFAULT_PI_RLS_ONLINE_ENABLED): BooleanSelector(),
-        vol.Optional(CONF_PI_BATCH_WLS_ENABLED, default=DEFAULT_PI_BATCH_WLS_ENABLED): BooleanSelector(),
-        vol.Optional(CONF_PI_PLANT_ID_ENABLED, default=DEFAULT_PI_PLANT_ID_ENABLED): BooleanSelector(),
         vol.Optional(CONF_PI_SETPOINT_WEIGHT, default=DEFAULT_PI_SETPOINT_WEIGHT): NumberSelector(
             NumberSelectorConfig(min=0, max=1, step=0.05, mode=NumberSelectorMode.BOX)
         ),

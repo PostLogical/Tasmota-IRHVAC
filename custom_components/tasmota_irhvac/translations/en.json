@@ -261,12 +261,8 @@
       },
       "pi_advanced": {
         "title": "Advanced PI",
-        "description": "Configure subsystem toggles, setpoint weighting, and experimental features.",
+        "description": "Configure setpoint weighting and experimental features. Subsystem toggles (FF, RLS, batch WLS, plant ID) are now runtime services — use set_subsystem.",
         "data": {
-          "pi_ff_enabled": "Feed-Forward",
-          "pi_rls_online_enabled": "Online RLS Learning",
-          "pi_batch_wls_enabled": "Batch WLS Analysis",
-          "pi_plant_id_enabled": "Plant Identification",
           "pi_setpoint_weight": "Setpoint Weight (0-1)",
           "pi_smith_enabled": "Smith Predictor",
           "pi_auto_perturb_enabled": "Auto-Perturbation",
@@ -274,10 +270,6 @@
           "pi_auto_perturb_window_end": "Perturbation Window End (hour)"
         },
         "data_description": {
-          "pi_ff_enabled": "Enable feedforward prediction and all learning subsystems (online RLS, batch WLS). When off, pure PI control with no FF offset.",
-          "pi_rls_online_enabled": "Enable per-tick online RLS coefficient updates. Requires FF enabled.",
-          "pi_batch_wls_enabled": "Enable scheduled batch WLS analysis for robust coefficient estimation. Requires FF enabled.",
-          "pi_plant_id_enabled": "Enable plant identification (τ estimation) for automatic IMC gain tuning.",
           "pi_setpoint_weight": "2-DOF PI setpoint weighting. At 1.0 (default), P reacts fully to setpoint changes. At 0.0, P only reacts to disturbances. Try 0.5 for less overshoot on setpoint changes.",
           "pi_smith_enabled": "Enable Smith predictor for dead-time compensation. Requires IMC (τ estimate > 0). Adjusts proportional term to anticipate HP pipeline delay.",
           "pi_auto_perturb_enabled": "Automatically perturb the setpoint ±1°C when steady state is detected to accelerate plant identification. Temperature may vary ~1°C during learning cycles. Requires IMC (τ estimate > 0).",
@@ -605,10 +597,6 @@
       "pi_advanced": {
         "title": "Advanced PI",
         "data": {
-          "pi_ff_enabled": "Feed-Forward",
-          "pi_rls_online_enabled": "Online RLS Learning",
-          "pi_batch_wls_enabled": "Batch WLS Analysis",
-          "pi_plant_id_enabled": "Plant Identification",
           "pi_setpoint_weight": "Setpoint Weight (0-1)",
           "pi_smith_enabled": "Smith Predictor",
           "pi_auto_perturb_enabled": "Auto-Perturbation",
@@ -616,10 +604,6 @@
           "pi_auto_perturb_window_end": "Perturbation Window End (hour)"
         },
         "data_description": {
-          "pi_ff_enabled": "Enable feedforward prediction and all learning subsystems (online RLS, batch WLS). When off, pure PI control with no FF offset.",
-          "pi_rls_online_enabled": "Enable per-tick online RLS coefficient updates. Requires FF enabled.",
-          "pi_batch_wls_enabled": "Enable scheduled batch WLS analysis for robust coefficient estimation. Requires FF enabled.",
-          "pi_plant_id_enabled": "Enable plant identification (τ estimation) for automatic IMC gain tuning.",
           "pi_setpoint_weight": "2-DOF PI setpoint weighting. At 1.0 (default), P reacts fully to setpoint changes. At 0.0, P only reacts to disturbances. Try 0.5 for less overshoot on setpoint changes.",
           "pi_smith_enabled": "Enable Smith predictor for dead-time compensation. Requires IMC (τ estimate > 0). Adjusts proportional term to anticipate HP pipeline delay.",
           "pi_auto_perturb_enabled": "Automatically perturb the setpoint ±1°C when steady state is detected to accelerate plant identification. Temperature may vary ~1°C during learning cycles. Requires IMC (τ estimate > 0).",

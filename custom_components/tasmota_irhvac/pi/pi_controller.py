@@ -199,6 +199,10 @@ class PIController:
         )  # Low-pass filter τ on room temperature (seconds). 0 = disabled.
         self._smith_enabled: bool = config.get(CONF_PI_SMITH_ENABLED, DEFAULT_PI_SMITH_ENABLED)
         self._greybox_blending_enabled: bool = config.get("pi_greybox_blending", False)
+        # Runtime subsystem toggles — config provides initial defaults,
+        # persisted state (ExtraStoredData) overrides on restore,
+        # set_subsystem service toggles at runtime.
+        self._control_active: bool = True
         self._pi_ff_enabled: bool = config.get(CONF_PI_FF_ENABLED, DEFAULT_PI_FF_ENABLED)
         self._pi_rls_online_enabled: bool = config.get(
             CONF_PI_RLS_ONLINE_ENABLED, DEFAULT_PI_RLS_ONLINE_ENABLED)
@@ -578,7 +582,11 @@ class PIController:
 
     # ── Lifecycle hooks (called by climate entity) ───────────────────
 
-    async def async_added_to_hass(self, old_state: State | None = None) -> None:
+    async def async_added_to_hass(
+        self,
+        old_state: State | None = None,
+        pi_autosave: dict[str, Any] | None = None,
+    ) -> None:
         """Set up PI after entity is added to HA."""
         # Build log prefix from entity name (e.g. "Dining Room" from "climate.dining_room")
         eid = getattr(self._entity, "entity_id", None) or ""
@@ -590,14 +598,28 @@ class PIController:
 
         e = self._entity
 
-        # Restore PI state — prefer ExtraStoredData, fall back to state attributes
+        # Restore PI state — try sources in priority order:
+        # 1. ExtraStoredData (normal restart path)
+        # 2. Auto-save Store (survives PI disable→enable cycle)
+        # 3. State attributes (legacy migration)
+        restored = False
         extra_data = await e.async_get_last_extra_data()
         if extra_data is not None:
             pi_data = PIExtraStoredData.from_dict(extra_data.as_dict())
             if pi_data is not None:
                 self.restore_extra_stored_data(pi_data)
                 _LOGGER.debug("PI: restored from ExtraStoredData")
-        else:
+                restored = True
+        if not restored and pi_autosave is not None:
+            pi_data = PIExtraStoredData.from_dict(pi_autosave)
+            if pi_data is not None:
+                self.restore_extra_stored_data(pi_data)
+                _LOGGER.info(
+                    "%sPI: restored from auto-save (previous PI session)",
+                    self._log_prefix,
+                )
+                restored = True
+        if not restored:
             # Fall back to state attributes (migration from pre-ExtraStoredData versions)
             if old_state is None:
                 old_state = await e.async_get_last_state()
@@ -1189,6 +1211,11 @@ class PIController:
             manual_override_cool=list(self._manual_override_cool),
             batch_cycle_count=self._batch_cycle_count,
             unlock_batch_cycle=list(self._unlock_batch_cycle),
+            control_active=self._control_active,
+            ff_enabled=self._pi_ff_enabled,
+            rls_online_enabled=self._pi_rls_online_enabled,
+            batch_wls_enabled=self._pi_batch_wls_enabled,
+            plant_id_enabled=self._pi_plant_id_enabled,
         )
 
     def restore_extra_stored_data(self, data: PIExtraStoredData) -> None:
@@ -1349,6 +1376,12 @@ class PIController:
         # Coefficients with unchanged seeds keep their learned values.
         self._apply_seed_changes(data.heat_seeds_at_learn, self._heat_seeds, self._rls_heat)
         self._apply_seed_changes(data.cool_seeds_at_learn, self._cool_seeds, self._rls_cool)
+        # Restore runtime subsystem toggle states
+        self._control_active = data.control_active
+        self._pi_ff_enabled = data.ff_enabled
+        self._pi_rls_online_enabled = data.rls_online_enabled
+        self._pi_batch_wls_enabled = data.batch_wls_enabled
+        self._pi_plant_id_enabled = data.plant_id_enabled
         # Restore lag filter states
         if data.lag_filter_states:
             self._inputs.restore_lag_states(data.lag_filter_states)
@@ -1515,7 +1548,11 @@ class PIController:
             "rls_heat_coefficients": rls_heat_coeffs,
             "rls_cool_coefficients": rls_cool_coeffs,
             "rls_observation_count": self._rls_heat.observation_count,
+            "control_active": self._control_active,
             "ff_enabled": self._pi_ff_enabled,
+            "rls_online_enabled": self._pi_rls_online_enabled,
+            "batch_wls_enabled": self._pi_batch_wls_enabled,
+            "plant_id_enabled": self._pi_plant_id_enabled,
             "ff_learning_suppressed": self._disturbance_suppress_active,
             "integral_convergence": round(self._metrics.integral_convergence, 2),
             "room_temp_rate": round(self._room_temp_rate, 4),  # °C/min
@@ -1852,7 +1889,9 @@ class PIController:
 
         n_model = n - 2  # Model input features only
         n_frozen = len(frozen_names)
-        if n_model == 0:
+        if not self._control_active:
+            state = "Observing"
+        elif n_model == 0:
             state = "Optimized"  # No model inputs → nothing to learn
         elif n_frozen == n_model:
             state = "Learning"
@@ -3188,6 +3227,27 @@ class PIController:
                 SIGNAL_FF_SUPPRESS_UPDATE.format(self._entity._config_entry_id),
             )
 
+    _SUBSYSTEM_ATTRS: dict[str, str] = {
+        "control": "_control_active",
+        "ff": "_pi_ff_enabled",
+        "rls_online": "_pi_rls_online_enabled",
+        "batch_wls": "_pi_batch_wls_enabled",
+        "plant_id": "_pi_plant_id_enabled",
+    }
+
+    def set_subsystem(self, subsystem: str, enabled: bool) -> None:
+        """Toggle a runtime subsystem on/off (service call handler)."""
+        attr = self._SUBSYSTEM_ATTRS.get(subsystem)
+        if attr is None:
+            _LOGGER.warning("Unknown subsystem: %s", subsystem)
+            return
+        old = getattr(self, attr)
+        setattr(self, attr, enabled)
+        _LOGGER.info(
+            "%sSubsystem %s: %s → %s",
+            self._log_prefix, subsystem, old, enabled,
+        )
+
     def _reset_seeds(self, mode: str | None = None) -> None:
         """Reset RLS models to seed values from config (no integral change)."""
         n = self._rls_heat.n  # same for both models
@@ -3752,11 +3812,90 @@ class PIController:
 
         return False  # No IR command
 
+    def _observe_tick(self) -> bool:
+        """Observation-only tick when control_active=False but HVAC is on.
+
+        Like _passive_tick but the HP is running under its own thermostat
+        logic (not PI).  Key differences from _passive_tick:
+        - Integral is NOT zeroed (preserved for when control resumes)
+        - Plant ID receives actual hp_setpoint (HP is heating, we observe)
+        - Grey-box receives hp_setpoint (richer data than OFF-mode)
+        - WLS buffer is NOT fed (data is from a different control regime)
+        """
+        e = self._entity
+
+        if e._attr_current_temperature is None:
+            return False
+
+        now_mono = time.monotonic()
+        if self._pi_last_tick_time > 0:
+            dt_seconds = min(now_mono - self._pi_last_tick_time, self._pi_tick_fallback * 2)
+        else:
+            dt_seconds = float(self._pi_tick_fallback)
+        self._pi_last_tick_time = now_mono
+
+        raw_c = TemperatureConverter.convert(
+            e._attr_current_temperature,
+            e.temperature_unit,
+            UnitOfTemperature.CELSIUS,
+        )
+
+        # Sensor filter (keeps filter warm)
+        if self._sensor_filter_tau > 0 and dt_seconds > 0:
+            if self._sensor_filtered is None:
+                self._sensor_filtered = raw_c
+            alpha = 1.0 - math.exp(-dt_seconds / self._sensor_filter_tau)
+            self._sensor_filtered = alpha * raw_c + (1.0 - alpha) * self._sensor_filtered
+            current_c = self._sensor_filtered
+        else:
+            current_c = raw_c
+
+        # Track room temperature rate of change
+        self._room_temp_history.append((now_mono, raw_c))
+        if len(self._room_temp_history) > 5:
+            self._room_temp_history.pop(0)
+        if len(self._room_temp_history) >= 2:
+            t0, temp0 = self._room_temp_history[0]
+            t1, temp1 = self._room_temp_history[-1]
+            elapsed_min = (t1 - t0) / 60.0
+            if elapsed_min > 0:
+                self._room_temp_rate = (temp1 - temp0) / elapsed_min
+
+        # Plant ID: HP is running, pass actual setpoint for τ observation
+        hp_sp = float(self._hp_setpoint) if self._hp_setpoint is not None else None
+        if self._pi_plant_id_enabled and self._inputs.outdoor_temp is not None:
+            self._plant_id.check_observation(
+                now_mono, raw_c, 0.0, hp_setpoint_c=hp_sp,
+            )
+
+        # Read model inputs and update lag filters
+        self._read_model_input_values(current_c)
+        self._inputs.update_lag_filters(dt_seconds)
+
+        # Grey-box buffer: HP is running so we get heating-mode data
+        self._greybox_buffer.add(Observation(
+            timestamp=now_mono,
+            wall_time=time.time(),
+            hp_setpoint=hp_sp,
+            current_c=current_c,
+            desired_c=self._desired_temp or current_c,
+            outdoor_temp_c=self._inputs.outdoor_temp,
+            room_rate=self._room_temp_rate,
+            raw_readings=self._inputs.build_raw_readings(),
+            clamped=True,
+            clamped_reason="observe_only",
+            supplemental_active=False,
+        ))
+
+        return False  # No IR command — HP runs its own thermostat
+
     async def _pi_tick_inner(self, now: datetime | None = None) -> bool:
         """PI + feedforward controller tick implementation. Returns True if send needed."""
         e = self._entity
         if e._attr_hvac_mode == HVACMode.OFF:
             return self._passive_tick()
+        if not self._control_active:
+            return self._observe_tick()
         if self._desired_temp is None or self._hp_setpoint is None:
             return False
         if e._attr_current_temperature is None:

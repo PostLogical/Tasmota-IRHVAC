@@ -61,6 +61,12 @@ class PIExtraStoredData(ExtraStoredData):
     greybox_buffer: list[dict[str, Any]] = dataclasses.field(default_factory=list)  # Observation.as_dict()
     batch_cycle_count: int = 0
     unlock_batch_cycle: list[int | None] = dataclasses.field(default_factory=list)
+    # Runtime subsystem toggles (persisted so they survive restarts)
+    control_active: bool = True
+    ff_enabled: bool = True
+    rls_online_enabled: bool = True
+    batch_wls_enabled: bool = True
+    plant_id_enabled: bool = True
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize to JSON-compatible dict."""
@@ -102,6 +108,11 @@ class PIExtraStoredData(ExtraStoredData):
             "greybox_buffer": self.greybox_buffer,
             "batch_cycle_count": self.batch_cycle_count,
             "unlock_batch_cycle": self.unlock_batch_cycle,
+            "control_active": self.control_active,
+            "ff_enabled": self.ff_enabled,
+            "rls_online_enabled": self.rls_online_enabled,
+            "batch_wls_enabled": self.batch_wls_enabled,
+            "plant_id_enabled": self.plant_id_enabled,
         }
 
     @classmethod
@@ -155,6 +166,11 @@ class PIExtraStoredData(ExtraStoredData):
                 greybox_buffer=restored.get("greybox_buffer", []),
                 batch_cycle_count=int(restored.get("batch_cycle_count", 0)),
                 unlock_batch_cycle=restored.get("unlock_batch_cycle", []),
+                control_active=bool(restored.get("control_active", True)),
+                ff_enabled=bool(restored.get("ff_enabled", True)),
+                rls_online_enabled=bool(restored.get("rls_online_enabled", True)),
+                batch_wls_enabled=bool(restored.get("batch_wls_enabled", True)),
+                plant_id_enabled=bool(restored.get("plant_id_enabled", True)),
             )
         except (KeyError, ValueError, TypeError, AttributeError):
             return None

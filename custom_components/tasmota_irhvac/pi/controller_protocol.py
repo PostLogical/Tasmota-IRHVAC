@@ -42,7 +42,12 @@ class ControllerHook(Protocol):
 
     # ── Lifecycle ────────────────────────────────────────────────────
 
-    async def async_added_to_hass(self, *, old_state: State | None = None) -> None: ...
+    async def async_added_to_hass(
+        self,
+        *,
+        old_state: State | None = None,
+        pi_autosave: dict[str, Any] | None = None,
+    ) -> None: ...
 
     def async_will_remove_from_hass(self) -> None: ...
 
@@ -134,7 +139,12 @@ class NullController:
 
     # ── Lifecycle ────────────────────────────────────────────────────
 
-    async def async_added_to_hass(self, *, old_state: State | None = None) -> None:
+    async def async_added_to_hass(
+        self,
+        *,
+        old_state: State | None = None,
+        pi_autosave: dict[str, Any] | None = None,
+    ) -> None:
         pass
 
     def async_will_remove_from_hass(self) -> None:

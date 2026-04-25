@@ -196,6 +196,34 @@ class TestPIControllerGaps:
         assert entity._pi_recovery_unsub is None
 
     @pytest.mark.asyncio
+    async def test_will_remove_saves_pi_state_to_autosave_store(
+        self, hass, setup_pi_integration,
+    ):
+        """async_will_remove_from_hass should save PI state to auto-save Store.
+
+        This ensures PI state survives a PI disable→enable cycle where
+        NullController would overwrite ExtraStoredData with None.
+        """
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        # Set up recognizable PI state
+        pi._pi_integral = 42.0
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 24.0
+
+        await entity.async_will_remove_from_hass()
+
+        # Verify the auto-save Store was written
+        store = entity._get_pi_autosave_store()
+        saved = await store.async_load()
+        assert saved is not None
+        assert saved["pi_integral"] == 42.0
+        assert saved["desired_temp"] == 21.0
+        assert saved["hp_setpoint"] == 24.0
+
+    @pytest.mark.asyncio
     async def test_cooldown_prevents_rapid_ticks(self, hass, setup_pi_integration):
         """Sensor changes within cooldown should not trigger rapid ticks."""
         entry = await setup_pi_integration()
@@ -5935,6 +5963,30 @@ class TestTuningHealthGuard:
 
 
 # ── climate.py service handler PI-None guards ────────────────────────
+
+
+class TestSetSubsystemService:
+    """Cover the set_subsystem service handler in climate.py."""
+
+    @pytest.mark.asyncio
+    async def test_set_subsystem_service(self, hass, setup_pi_integration):
+        """set_subsystem service should toggle PI subsystem at runtime."""
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        assert pi._pi_ff_enabled is True
+        await entity.async_set_subsystem(subsystem="ff", enabled=False)
+        assert pi._pi_ff_enabled is False
+
+    @pytest.mark.asyncio
+    async def test_set_subsystem_pi_none(self, hass, setup_integration):
+        """set_subsystem should return early when PI is disabled."""
+        entry = await setup_integration({"pi_enabled": False})
+        entity = get_climate_entity(hass, entry)
+        assert entity._pi is None
+        await entity.async_set_subsystem(subsystem="control", enabled=False)
+        # Should not crash
 
 
 class TestServicePiNoneGuards:

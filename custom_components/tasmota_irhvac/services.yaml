@@ -433,3 +433,27 @@ learning_restore:
       example: "before_renovation"
       selector:
         text:
+
+set_subsystem:
+  name: Set subsystem
+  description: Toggle a PI subsystem on or off at runtime. No reload needed — takes effect on next tick. State persists across restarts. Use 'control' to enable/disable PI setpoint output (observe-only mode).
+  target:
+    entity:
+      integration: tasmota_irhvac
+  fields:
+    subsystem:
+      description: "Subsystem to toggle: control (PI output), ff (feedforward), rls_online (per-tick RLS), batch_wls (batch analysis), plant_id (τ estimation)."
+      required: true
+      selector:
+        select:
+          options:
+            - control
+            - ff
+            - rls_online
+            - batch_wls
+            - plant_id
+    enabled:
+      description: Whether to enable (true) or disable (false) the subsystem.
+      required: true
+      selector:
+        boolean:
