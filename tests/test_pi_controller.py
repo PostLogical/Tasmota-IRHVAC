@@ -1930,7 +1930,7 @@ class TestSetSubsystem:
         pi._hp_setpoint = 23.0
         entity._attr_current_temperature = 21.0
         # Set outdoor temp available
-        pi._inputs._outdoor_temp = 5.0
+        pi._inputs.outdoor_temp = 5.0
 
         pi._observe_tick()
         # Should not crash — plant_id received the observation
