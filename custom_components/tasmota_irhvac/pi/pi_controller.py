@@ -463,20 +463,29 @@ class PIController:
         # We learn the effective deadband width from rate-based observations
         # and use it as a fast-path margin for integration freeze decisions.
         # Separate estimates per mode — asymmetric compressor cycling logic.
+        self._hp_no_output_ticks: int = 0
+        # Legacy aliases: integration freeze code references these directly.
+        # They map to head_calibration_max (the positive-side bound) and will
+        # be removed when the integration freeze is refactored to use the
+        # zone model directly.  Writes update cal_max; reads return cal_max.
+        # (Cannot use @property because the integration code does direct
+        # assignment, so we keep them as real attributes that are synced.)
         self._hp_deadband_estimate_heat: float = 0.5
         self._hp_deadband_estimate_cool: float = 0.5
-        self._hp_no_output_ticks: int = 0
 
-        # Regime boundary: asymmetric uncertainty margins for learning gates.
-        # _margin_above: HP setpoint above current but HP might have cut out
-        #   (HP sensor reads warmer → compressor off before our detection).
-        # _margin_below: HP setpoint below current but HP might still cycle
-        #   (HP internal hysteresis keeps compressor running briefly).
-        # Start conservative; shrink via active probing (RegimeProbe).
-        self._regime_margin_above_heat: float = 2.0
-        self._regime_margin_above_cool: float = 2.0
-        self._regime_margin_below_heat: float = 1.0
-        self._regime_margin_below_cool: float = 1.0
+        # Head unit calibration: bounds on the HP's effective on/off
+        # transition point relative to our setpoint, as seen by our sensor.
+        # The HP transitions at approximately current_c = setpoint + true_cal.
+        # We don't know true_cal, so we bound it: [cal_min, cal_max].
+        # delta = current_c - setpoint; HP definitely ON when delta < cal_min,
+        # definitely OFF when delta > cal_max, uncertain in between.
+        # Starts conservative (±2°C); shrinks via active probing + passive
+        # room-rate evidence (merged hp_deadband_estimate).  Per mode
+        # because HP heating/cooling calibration can differ.
+        self._head_calibration_min_heat: float = -2.0
+        self._head_calibration_max_heat: float = 2.0
+        self._head_calibration_min_cool: float = -2.0
+        self._head_calibration_max_cool: float = 2.0
 
         # Drift detection: per-coefficient history of batch correction signs.
         # Each entry is +1 (batch pushed up), -1 (batch pushed down), or 0.
@@ -1233,10 +1242,10 @@ class PIController:
             tuning_alert_snapshots=dict(self._tuning_alert_snapshots),
             hp_deadband_estimate_heat=self._hp_deadband_estimate_heat,
             hp_deadband_estimate_cool=self._hp_deadband_estimate_cool,
-            regime_margin_above_heat=self._regime_margin_above_heat,
-            regime_margin_above_cool=self._regime_margin_above_cool,
-            regime_margin_below_heat=self._regime_margin_below_heat,
-            regime_margin_below_cool=self._regime_margin_below_cool,
+            head_calibration_min_heat=self._head_calibration_min_heat,
+            head_calibration_max_heat=self._head_calibration_max_heat,
+            head_calibration_min_cool=self._head_calibration_min_cool,
+            head_calibration_max_cool=self._head_calibration_max_cool,
             regime_probe_state=self._regime_probe.as_dict(),
             exclusion_count=self._exclusion_count,
             auto_perturb_state=self._auto_perturb.as_dict(),
@@ -1339,21 +1348,21 @@ class PIController:
                 self._hp_deadband_estimate_cool,
             )
 
-        # Restore regime boundary margins and probe state
-        self._regime_margin_above_heat = data.regime_margin_above_heat
-        self._regime_margin_above_cool = data.regime_margin_above_cool
-        self._regime_margin_below_heat = data.regime_margin_below_heat
-        self._regime_margin_below_cool = data.regime_margin_below_cool
+        # Restore head calibration bounds and probe state
+        self._head_calibration_min_heat = data.head_calibration_min_heat
+        self._head_calibration_max_heat = data.head_calibration_max_heat
+        self._head_calibration_min_cool = data.head_calibration_min_cool
+        self._head_calibration_max_cool = data.head_calibration_max_cool
         if data.regime_probe_state:
             self._regime_probe.restore(data.regime_probe_state)
-        if (self._regime_margin_above_heat < 2.0 or self._regime_margin_below_heat < 1.0
-                or self._regime_margin_above_cool < 2.0 or self._regime_margin_below_cool < 1.0):
+        if (self._head_calibration_min_heat > -2.0 or self._head_calibration_max_heat < 2.0
+                or self._head_calibration_min_cool > -2.0 or self._head_calibration_max_cool < 2.0):
             _LOGGER.debug(
-                "%sRestored regime margins: heat above=%.1f/below=%.1f°C, "
-                "cool above=%.1f/below=%.1f°C",
+                "%sRestored head calibration: heat [%.1f, %.1f]°C, "
+                "cool [%.1f, %.1f]°C",
                 self._log_prefix,
-                self._regime_margin_above_heat, self._regime_margin_below_heat,
-                self._regime_margin_above_cool, self._regime_margin_below_cool,
+                self._head_calibration_min_heat, self._head_calibration_max_heat,
+                self._head_calibration_min_cool, self._head_calibration_max_cool,
             )
 
         # Restore anomaly exclusion count
@@ -4223,19 +4232,43 @@ class PIController:
             or (is_cooling and self._hp_setpoint > current_c)
         )
 
-        # Regime boundary uncertainty: sensor calibration mismatch between
-        # our sensor and HP's internal sensor means we can't trust HP
-        # contribution when |offset| is small.  Asymmetric margins per mode.
-        margin_above = (
-            self._regime_margin_above_heat if is_heating
-            else self._regime_margin_above_cool
+        # ── HP contribution zone model ────────────────────────────────
+        # Three zones based on delta = current_c - setpoint and the
+        # head unit's calibration bounds [cal_min, cal_max]:
+        #
+        #   HP definitely ON  |    uncertain    |  HP definitely OFF
+        #   <─────────────────|─────────────────|──────────────────>
+        #                  cal_min           cal_max
+        #                        delta = current_c - setpoint
+        #
+        # Heating: HP active when room is cold (delta < cal_min)
+        # Cooling: HP active when room is warm (delta > cal_max)
+        #
+        # Each consumer decides how to treat the uncertain middle:
+        #   Integration:  uncertain = ON  (keep integrating, HP might cycle)
+        #   Learning/RLS: uncertain = OFF (don't learn, offset unreliable)
+        #   Grey-box:     uncertain = OFF (hp_offset = 0, treat as passive)
+        cal_min = (
+            self._head_calibration_min_heat if is_heating
+            else self._head_calibration_min_cool
         )
-        margin_below = (
-            self._regime_margin_below_heat if is_heating
-            else self._regime_margin_below_cool
+        cal_max = (
+            self._head_calibration_max_heat if is_heating
+            else self._head_calibration_max_cool
         )
-        hp_contribution_uncertain = RegimeProbe.is_contribution_uncertain(
-            self._hp_setpoint, current_c, margin_above, margin_below, is_heating,
+        delta = current_c - self._hp_setpoint
+        if is_heating:
+            hp_definitely_on = delta < cal_min
+            hp_definitely_off = delta > cal_max
+        else:  # cooling: HP active when room is warm
+            hp_definitely_on = delta > cal_max
+            hp_definitely_off = delta < cal_min
+
+        # For learning: observation is usable only when HP is clearly on
+        # AND setpoint isn't saturated at min/max.
+        hp_observation_usable = (
+            hp_definitely_on
+            and self._min_temp_c < self._hp_setpoint < self._max_temp_c
         )
 
         # HP thermostat deadband override: the HP's internal thermostat
@@ -4392,8 +4425,7 @@ class PIController:
                 self._ff_settled_ticks >= 4
                 and output_change < 0.045
                 and abs(self._room_temp_rate) < 0.02
-                and not hp_no_output
-                and not hp_contribution_uncertain
+                and hp_observation_usable
             )
             rls_mature = self._rls_heat_mature if is_heating else self._rls_cool_mature
             if branch_ready and rls_mature and x is not None and self._rls_shared_gate_open(learning_suppressed):
@@ -4428,12 +4460,7 @@ class PIController:
             # Output-normalized: 0.075°C ≈ 0.5 × 0.15 at default Ki
             integral_stable = integral_change * self._pi_ki < 0.075
             self._prev_integral_for_oodb = self._pi_integral
-            setpoint_clamped = (
-                self._hp_setpoint <= self._min_temp_c
-                or self._hp_setpoint >= self._max_temp_c
-                or hp_no_output
-                or hp_contribution_uncertain
-            )
+            setpoint_clamped = not hp_observation_usable
             min_oodb_ticks = 8 + int(abs_error * 4)  # +4 ticks per °C of error
 
             if room_stable and integral_stable and not setpoint_clamped:
@@ -4581,12 +4608,11 @@ class PIController:
                 clamped=obs_clamped,
                 clamped_reason=obs_clamped_reason,
                 supplemental_active=obs_supplemental_active,
-                hp_contribution_uncertain=hp_contribution_uncertain,
+                hp_contribution_uncertain=not hp_definitely_on,
             )
             # RLS observation buffer: only when we have a valid feature vector
-            # (ff_enabled + outdoor temp available).  HP-off and uncertain-
-            # contribution observations are zero-value for regression.
-            if x is not None and obs_clamped_reason != "no_output" and not hp_contribution_uncertain:
+            # (ff_enabled + outdoor temp available) and HP is clearly contributing.
+            if x is not None and hp_observation_usable:
                 active_buffer = self._observation_buffer_heat if is_heating else self._observation_buffer_cool
                 active_buffer.add(obs)
             # Grey-box buffer gets ALL observations (including HP-off) when

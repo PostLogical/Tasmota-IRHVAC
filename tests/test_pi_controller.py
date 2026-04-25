@@ -550,7 +550,7 @@ class TestFeedforward:
         pi._inputs.filtered = [0.0]
         pi._inputs.outdoor_temp = 5.0
         pi._desired_temp = 22.0
-        pi._hp_setpoint = 22.0
+        pi._hp_setpoint = 26  # Well above current → delta < cal_min → HP definitely on
         pi._pi_integral = 0.5  # Small, stable
         pi._prev_integral_for_rls = 0.5
         pi._ff_settled_ticks = 10
@@ -4594,20 +4594,20 @@ class TestHPDeadbandLearning:
         assert restored.hp_deadband_estimate_cool == 0.5
 
     @pytest.mark.asyncio
-    async def test_regime_margin_persisted_and_restored(self):
-        """Regime margins survive save/restore cycle; narrowed margins log."""
+    async def test_head_calibration_persisted_and_restored(self):
+        """Head calibration bounds survive save/restore cycle."""
         config = make_pi_config()
         entity = FakePIEntity(config)
         pi = entity._pi
-        pi._regime_margin_above_heat = 1.2  # narrowed from 2.0
-        pi._regime_margin_below_heat = 0.7  # narrowed from 1.0
-        pi._regime_margin_above_cool = 1.5
-        pi._regime_margin_below_cool = 0.8
+        pi._head_calibration_min_heat = -1.2  # narrowed from -2.0
+        pi._head_calibration_max_heat = 0.7   # narrowed from 2.0
+        pi._head_calibration_min_cool = -1.5
+        pi._head_calibration_max_cool = 0.8
 
         stored = pi.get_extra_stored_data()
         assert stored is not None
         d = stored.as_dict()
-        assert d["regime_margin_above_heat"] == 1.2
+        assert d["head_calibration_min_heat"] == -1.2
 
         from custom_components.tasmota_irhvac.pi.pi_stored_data import PIExtraStoredData
         restored = PIExtraStoredData.from_dict(d)
@@ -4616,10 +4616,10 @@ class TestHPDeadbandLearning:
         entity2 = FakePIEntity(config)
         pi2 = entity2._pi
         pi2.restore_extra_stored_data(restored)
-        assert pi2._regime_margin_above_heat == 1.2
-        assert pi2._regime_margin_below_heat == 0.7
-        assert pi2._regime_margin_above_cool == 1.5
-        assert pi2._regime_margin_below_cool == 0.8
+        assert pi2._head_calibration_min_heat == -1.2
+        assert pi2._head_calibration_max_heat == 0.7
+        assert pi2._head_calibration_min_cool == -1.5
+        assert pi2._head_calibration_max_cool == 0.8
 
     # ── Tick counter ──────────────────────────────────────────────────
 
@@ -5918,7 +5918,7 @@ class TestSubsystemToggles:
         pi._inputs.outdoor_temp = 5.0
         entity._attr_current_temperature = 20.0
         pi._desired_temp = 22.0
-        pi._hp_setpoint = 22.0
+        pi._hp_setpoint = 26  # Well above current → HP definitely on
 
         heat_before = len(pi._observation_buffer_heat.get_all())
         await pi._pi_tick()
