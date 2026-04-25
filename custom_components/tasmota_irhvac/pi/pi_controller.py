@@ -464,14 +464,6 @@ class PIController:
         # and use it as a fast-path margin for integration freeze decisions.
         # Separate estimates per mode — asymmetric compressor cycling logic.
         self._hp_no_output_ticks: int = 0
-        # Legacy aliases: integration freeze code references these directly.
-        # They map to head_calibration_max (the positive-side bound) and will
-        # be removed when the integration freeze is refactored to use the
-        # zone model directly.  Writes update cal_max; reads return cal_max.
-        # (Cannot use @property because the integration code does direct
-        # assignment, so we keep them as real attributes that are synced.)
-        self._hp_deadband_estimate_heat: float = 0.5
-        self._hp_deadband_estimate_cool: float = 0.5
 
         # Head unit calibration: bounds on the HP's effective on/off
         # transition point relative to our setpoint, as seen by our sensor.
@@ -480,7 +472,7 @@ class PIController:
         # delta = current_c - setpoint; HP definitely ON when delta < cal_min,
         # definitely OFF when delta > cal_max, uncertain in between.
         # Starts conservative (±2°C); shrinks via active probing + passive
-        # room-rate evidence (merged hp_deadband_estimate).  Per mode
+        # room-rate evidence (replaces former hp_deadband_estimate).  Per mode
         # because HP heating/cooling calibration can differ.
         self._head_calibration_min_heat: float = -2.0
         self._head_calibration_max_heat: float = 2.0
@@ -1240,8 +1232,6 @@ class PIController:
                 "greybox_has_been_good": int(self._greybox_has_been_good),
             },
             tuning_alert_snapshots=dict(self._tuning_alert_snapshots),
-            hp_deadband_estimate_heat=self._hp_deadband_estimate_heat,
-            hp_deadband_estimate_cool=self._hp_deadband_estimate_cool,
             head_calibration_min_heat=self._head_calibration_min_heat,
             head_calibration_max_heat=self._head_calibration_max_heat,
             head_calibration_min_cool=self._head_calibration_min_cool,
@@ -1337,22 +1327,29 @@ class PIController:
             )
             self._greybox_buffer_cache = data.greybox_buffer
 
-        # Restore learned HP thermostat deadband estimates
-        self._hp_deadband_estimate_heat = data.hp_deadband_estimate_heat
-        self._hp_deadband_estimate_cool = data.hp_deadband_estimate_cool
-        if self._hp_deadband_estimate_heat > 0 or self._hp_deadband_estimate_cool > 0:
-            _LOGGER.debug(
-                "%sRestored HP deadband estimates: heat=%.2f°C, cool=%.2f°C",
-                self._log_prefix,
-                self._hp_deadband_estimate_heat,
-                self._hp_deadband_estimate_cool,
-            )
-
         # Restore head calibration bounds and probe state
         self._head_calibration_min_heat = data.head_calibration_min_heat
         self._head_calibration_max_heat = data.head_calibration_max_heat
         self._head_calibration_min_cool = data.head_calibration_min_cool
         self._head_calibration_max_cool = data.head_calibration_max_cool
+
+        # Migrate legacy hp_deadband_estimate into cal_max if cal is still
+        # at default (first restore after upgrade).  The old estimate was the
+        # positive-side bound — seed cal_max from it.
+        if (data.hp_deadband_estimate_heat != 0.5
+                and self._head_calibration_max_heat == 2.0):
+            self._head_calibration_max_heat = data.hp_deadband_estimate_heat
+            _LOGGER.info(
+                "%sMigrated hp_deadband_estimate_heat %.2f → cal_max",
+                self._log_prefix, data.hp_deadband_estimate_heat,
+            )
+        if (data.hp_deadband_estimate_cool != 0.5
+                and self._head_calibration_max_cool == 2.0):
+            self._head_calibration_max_cool = data.hp_deadband_estimate_cool
+            _LOGGER.info(
+                "%sMigrated hp_deadband_estimate_cool %.2f → cal_max",
+                self._log_prefix, data.hp_deadband_estimate_cool,
+            )
         if data.regime_probe_state:
             self._regime_probe.restore(data.regime_probe_state)
         if (self._head_calibration_min_heat > -2.0 or self._head_calibration_max_heat < 2.0
@@ -4271,139 +4268,101 @@ class PIController:
             and self._min_temp_c < self._hp_setpoint < self._max_temp_c
         )
 
-        # HP thermostat deadband override: the HP's internal thermostat
-        # has its own hysteresis, so the compressor may still cycle even
-        # when hp_setpoint is slightly below room temp (heating).  We use
-        # a learned deadband estimate as a fast-path margin, plus a rate-
-        # based fallback to detect cycling beyond the learned range.
-        #
-        # hp_no_output stays strict for learning/batch gates — only
-        # skip_integration gets the override.
-        if hp_no_output:
+        # ── Integration freeze: HP estimated active? ────────────────
+        # Use the midpoint of [cal_min, cal_max] as our best estimate of
+        # where the HP transitions.  Integrate when the HP is probably on
+        # (delta below midpoint for heating, above for cooling).
+        cal_midpoint = (cal_min + cal_max) / 2.0
+        if is_heating:
+            hp_estimated_active = current_to_setpoint_delta <= cal_midpoint
+        else:
+            hp_estimated_active = current_to_setpoint_delta >= cal_midpoint
+
+        # Passive calibration learning: after sustained time in the
+        # "estimated inactive" zone, room_rate reveals whether the HP
+        # is actually still contributing.  Updates cal_min/cal_max.
+        if not hp_estimated_active:
             self._hp_no_output_ticks += 1
         else:
             self._hp_no_output_ticks = 0
 
-        deadband_margin = (
-            self._hp_deadband_estimate_heat if is_heating
-            else self._hp_deadband_estimate_cool
-        )
-        delta = abs(current_c - self._hp_setpoint)
-
-        # Fast path: delta within learned deadband — HP likely still cycling.
-        override_learned = hp_no_output and delta <= deadband_margin
-
-        # Slow path: rate-based inference.  After 10 ticks (~10 min) of
-        # hp_no_output, if the room isn't cooling (heating) or warming
-        # (cooling), the HP must still be producing output despite our
-        # prediction.  Updates the learned estimate.
-        _OVERRIDE_TICKS = 10
-        override_rate = (
-            hp_no_output
-            and not override_learned
-            and self._hp_no_output_ticks >= _OVERRIDE_TICKS
-            and (
+        # Passive calibration evidence from room_rate.  Currently log-only:
+        # the rate signal is confounded (solar, stove, adjacent zones) and
+        # now affects learning gates, not just integration.  Monitor in
+        # production before enabling.
+        # TODO: Once production logs confirm the evidence is reliable,
+        # enable cal_min/cal_max updates here.  Consider: higher tick
+        # threshold (15-20), safety margin on updates, or shrink-only
+        # (no widening from passive evidence).
+        _CAL_EVIDENCE_TICKS = 10
+        if not hp_estimated_active and self._hp_no_output_ticks >= _CAL_EVIDENCE_TICKS:
+            hp_still_on = (
                 (is_heating and self._room_temp_rate >= 0.0)
                 or (is_cooling and self._room_temp_rate <= 0.0)
             )
-        )
-        # Downward learning: HP confirmed off at this delta (room moving
-        # in the expected passive direction).  If delta < current estimate,
-        # the estimate was too generous — shrink it.  This fires even when
-        # delta is within the learned deadband (override_learned=True),
-        # because room cooling within the estimate is evidence the estimate
-        # is too high (sensor miscalibration, unit serviced, etc.).
-        confirmed_off = (
-            hp_no_output
-            and self._hp_no_output_ticks >= _OVERRIDE_TICKS
-            and (
+            hp_confirmed_off = (
                 (is_heating and self._room_temp_rate < 0.0)
                 or (is_cooling and self._room_temp_rate > 0.0)
             )
-        )
-        if confirmed_off and delta < deadband_margin:
-            if is_heating:
-                _LOGGER.info(
-                    "%sHP deadband narrowed (heat): %.2f°C → %.2f°C "
-                    "(setpoint=%d°C, room=%.1f°C, rate=%.4f)",
-                    self._log_prefix,
-                    self._hp_deadband_estimate_heat, delta,
-                    self._hp_setpoint, current_c, self._room_temp_rate,
-                )
-                self._hp_deadband_estimate_heat = delta
-            else:
-                _LOGGER.info(
-                    "%sHP deadband narrowed (cool): %.2f°C → %.2f°C "
-                    "(setpoint=%d°C, room=%.1f°C, rate=%.4f)",
-                    self._log_prefix,
-                    self._hp_deadband_estimate_cool, delta,
-                    self._hp_setpoint, current_c, self._room_temp_rate,
-                )
-                self._hp_deadband_estimate_cool = delta
-
-        if override_rate:
-            # Learn: HP is cycling at this delta — grow estimate.
-            if is_heating:
-                if delta > self._hp_deadband_estimate_heat:
+            if hp_still_on:
+                if is_heating and current_to_setpoint_delta > cal_max:
                     _LOGGER.info(
-                        "%sHP deadband widened (heat): %.2f°C → %.2f°C "
-                        "(setpoint=%d°C, room=%.1f°C, rate=%.4f)",
-                        self._log_prefix,
-                        self._hp_deadband_estimate_heat, delta,
-                        self._hp_setpoint, current_c, self._room_temp_rate,
+                        "%sHead cal passive: HP still on at %.1f°C "
+                        "(would widen cal_max %.1f→%.1f, rate=%.4f)",
+                        self._log_prefix, current_to_setpoint_delta,
+                        cal_max, current_to_setpoint_delta,
+                        self._room_temp_rate,
                     )
-                    self._hp_deadband_estimate_heat = delta
-            elif delta > self._hp_deadband_estimate_cool:
-                _LOGGER.info(
-                    "%sHP deadband widened (cool): %.2f°C → %.2f°C "
-                    "(setpoint=%d°C, room=%.1f°C, rate=%.4f)",
-                    self._log_prefix,
-                    self._hp_deadband_estimate_cool, delta,
-                    self._hp_setpoint, current_c, self._room_temp_rate,
-                )
-                self._hp_deadband_estimate_cool = delta
-
-        override_freeze = override_learned or override_rate
+                elif not is_heating and current_to_setpoint_delta < cal_min:
+                    _LOGGER.info(
+                        "%sHead cal passive: HP still on at %.1f°C "
+                        "(would widen cal_min %.1f→%.1f, rate=%.4f)",
+                        self._log_prefix, current_to_setpoint_delta,
+                        cal_min, current_to_setpoint_delta,
+                        self._room_temp_rate,
+                    )
+            elif hp_confirmed_off:
+                if is_heating and current_to_setpoint_delta < cal_max:
+                    _LOGGER.info(
+                        "%sHead cal passive: HP off at %.1f°C "
+                        "(would shrink cal_max %.1f→%.1f, rate=%.4f)",
+                        self._log_prefix, current_to_setpoint_delta,
+                        cal_max, current_to_setpoint_delta,
+                        self._room_temp_rate,
+                    )
+                elif not is_heating and current_to_setpoint_delta > cal_min:
+                    _LOGGER.info(
+                        "%sHead cal passive: HP off at %.1f°C "
+                        "(would shrink cal_min %.1f→%.1f, rate=%.4f)",
+                        self._log_prefix, current_to_setpoint_delta,
+                        cal_min, current_to_setpoint_delta,
+                        self._room_temp_rate,
+                    )
 
         skip_integration = (
             (is_heating and self._hp_setpoint <= self._min_temp_c and error < 0)
             or (is_cooling and self._hp_setpoint >= self._max_temp_c and error > 0)
-            or (hp_no_output and not override_freeze)
+            or not hp_estimated_active
         )
 
         # Log transitions into/out of conditional integration freeze.
         if skip_integration and not self._integration_frozen:
-            if hp_no_output:
-                _LOGGER.debug(
-                    "%sIntegration frozen: HP no output "
-                    "(setpoint=%d°C, room=%.1f°C, delta=%.2f°C, "
-                    "deadband_est=%.2f°C), error=%.2f°C",
-                    self._log_prefix, self._hp_setpoint, current_c,
-                    delta, deadband_margin, error,
-                )
-            else:
-                _LOGGER.debug(
-                    "%sIntegration frozen: %s at %s limit, error=%.2f°C",
-                    self._log_prefix,
-                    "heating" if is_heating else "cooling",
-                    "min" if is_heating else "max",
-                    error,
-                )
+            _LOGGER.debug(
+                "%sIntegration frozen: %s (setpoint=%d°C, room=%.1f°C, "
+                "cal=[%.1f,%.1f], mid=%.1f, error=%.2f)",
+                self._log_prefix,
+                "HP estimated inactive" if not hp_estimated_active
+                else ("min limit" if is_heating else "max limit"),
+                self._hp_setpoint, current_c,
+                cal_min, cal_max, cal_midpoint, error,
+            )
         elif not skip_integration and self._integration_frozen:
-            if override_freeze:
-                _LOGGER.debug(
-                    "%sIntegration unfrozen: HP deadband override "
-                    "(%s, delta=%.2f°C, est=%.2f°C, ticks=%d, rate=%.4f)",
-                    self._log_prefix,
-                    "learned" if override_learned else "rate",
-                    delta, deadband_margin,
-                    self._hp_no_output_ticks, self._room_temp_rate,
-                )
-            else:
-                _LOGGER.debug(
-                    "%sIntegration unfrozen: error=%.2f°C, setpoint=%.1f°C",
-                    self._log_prefix, error, self._hp_setpoint,
-                )
+            _LOGGER.debug(
+                "%sIntegration unfrozen: HP estimated active "
+                "(setpoint=%d°C, room=%.1f°C, cal=[%.1f,%.1f], mid=%.1f)",
+                self._log_prefix, self._hp_setpoint, current_c,
+                cal_min, cal_max, cal_midpoint,
+            )
         self._integration_frozen = skip_integration
 
         if in_deadband:

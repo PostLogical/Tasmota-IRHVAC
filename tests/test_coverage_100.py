@@ -2508,26 +2508,52 @@ class TestRemainingPIControllerGaps:
         # Should not crash — break at i=2 >= len(coeff_names_list)=2
 
     @pytest.mark.asyncio
-    async def test_cooling_deadband_narrowing_confirmed_off(self):
-        """HP deadband narrows in cooling: HP confirmed off (lines 4098-4105)."""
+    async def test_cooling_passive_evidence_logs_only(self, caplog):
+        """Passive rate evidence in cooling logs but does not change cal bounds."""
+        import logging
         entity = _make_pi()
         pi = entity._pi
         pi._desired_temp = 24.0
         pi._hp_setpoint = 24
         entity._attr_hvac_mode = HVACMode.COOL
-        pi._hp_deadband_estimate_cool = 3.0
+        pi._head_calibration_max_cool = 3.0
         pi._inputs.outdoor_temp = 30.0
 
         # Set up conditions: hp_no_output=True, confirmed_off=True in cooling
-        # hp_no_output needs delta < deadband_margin
-        # confirmed_off needs _hp_no_output_ticks >= 10, room_temp_rate > 0
-        entity._attr_current_temperature = 23.5  # delta = |24-23.5| = 0.5 < 3.0 = deadband
+        entity._attr_current_temperature = 23.5
         pi._hp_no_output_ticks = 15
         pi._room_temp_rate = 0.03  # room warming → HP confirmed off in cooling
         pi._integration_frozen = False
         pi._pi_last_tick_time = time.monotonic() - 900
-        await pi._pi_tick()
-        assert pi._hp_deadband_estimate_cool <= 0.5  # narrowed to delta
+
+        cal_max_before = pi._head_calibration_max_cool
+        with caplog.at_level(logging.INFO):
+            await pi._pi_tick()
+        assert pi._head_calibration_max_cool == cal_max_before  # log-only, no change
+
+    @pytest.mark.asyncio
+    async def test_cooling_passive_evidence_hp_still_on(self, caplog):
+        """Cooling mode: HP still on (room cooling) logs passive evidence."""
+        import logging
+        entity = _make_pi()
+        pi = entity._pi
+        pi._desired_temp = 24.0
+        pi._hp_setpoint = 24
+        entity._attr_hvac_mode = HVACMode.COOL
+        pi._inputs.outdoor_temp = 30.0
+        # delta = 21 - 24 = -3 < cal_min(-2.0) → hp_still_on path
+        entity._attr_current_temperature = 21.0
+        pi._room_temp_rate = -0.01  # room cooling → HP might still be on
+        pi._hp_no_output_ticks = 15
+        pi._integration_frozen = True
+        pi._pi_last_tick_time = time.monotonic() - 900
+
+        cal_min_before = pi._head_calibration_min_cool
+        with caplog.at_level(logging.INFO):
+            await pi._pi_tick()
+        assert pi._head_calibration_min_cool == cal_min_before  # log-only
+        still_on_msgs = [r for r in caplog.records if "HP still on" in r.message]
+        assert len(still_on_msgs) >= 1
 
     @pytest.mark.asyncio
     async def test_integration_frozen_at_min_not_deadband(self):
