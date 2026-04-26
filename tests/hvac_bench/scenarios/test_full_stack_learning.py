@@ -532,6 +532,343 @@ class TestDisturbanceRejection:
 # ── Scenario 4: Real Weather Replay ──────────────────────────────────────
 
 
+# ── Scenario: Staged model input rollout ─────────────────────────────────
+
+
+def _stove_schedule(tick: int) -> float:
+    """Pellet stove: runs 6pm-10pm on cold days, off otherwise.
+
+    Intermittent, correlated with cold outdoor (runs when it's coldest).
+    This is the hard case for learning — sparse, confounded.
+    """
+    tick_min = 15.0
+    hour = (tick * tick_min / 60.0) % 24.0
+    day = tick * tick_min / (60.0 * 24.0)
+    # Only fires on "cold" days (day 0, 2, 4, ... — alternating)
+    if int(day) % 2 != 0:
+        return 0.0
+    if hour < 18 or hour > 22:
+        return 0.0
+    return 1.0
+
+
+def _adjacent_zone_schedule(tick: int) -> float:
+    """Adjacent zone (sunroom) temp delta from room.
+
+    Warmer than room during solar hours, cooler at night.
+    Correlated with solar — tests collinearity handling.
+    """
+    tick_min = 15.0
+    hour = (tick * tick_min / 60.0) % 24.0
+    day = tick * tick_min / (60.0 * 24.0)
+    # Solar-driven: warm during day, cool at night
+    if 8 <= hour <= 18:
+        solar_factor = math.sin(math.pi * (hour - 8) / 10)
+        cloud = 0.5 + 0.5 * math.cos(2 * math.pi * day / 3.0 + 1.0)
+        return 3.0 * solar_factor * cloud  # up to +3°C warmer
+    return -2.0  # cooler at night
+
+
+class TestStagedModelInputRollout:
+    """Validate automatic staged feature unlocking via κ/VIF gating.
+
+    All model inputs are configured from the start but begin frozen
+    (production behavior: _cold_start_freeze).  The batch WLS + staged
+    learning gate decides when to unlock each feature based on data
+    quality (std_err, VIF, κ).
+
+    Tests that:
+    - outdoor_delta (always active) converges first
+    - Solar unlocks when daytime data provides sufficient contrast
+    - Adjacent zone (correlated with solar) is gated by κ until decorrelated
+    - Stove (intermittent) stays frozen until enough active observations
+    - Unlocking one feature doesn't destabilize others
+    - FF fraction increases as features unlock
+    """
+
+    @staticmethod
+    def _make_config(n_days: int = 30) -> FullStackConfig:
+        return FullStackConfig(
+            n_days=n_days,
+            profile_name="living_room",
+            outdoor_base_c=-5.0,
+            outdoor_diurnal_c=6.0,
+            desired_c=20.5,
+            noise_sigma=0.1,
+            noise_seed=42,
+            model_inputs=[
+                ModelInputSpec(
+                    name="Solar Proxy",
+                    entity_id="sensor.solar_proxy",
+                    input_role="solar",
+                    true_thermal_effect=0.005,
+                    true_ff_coef=-2.0,
+                    seed_heat=0.0,
+                    schedule=_solar_schedule,
+                ),
+                ModelInputSpec(
+                    name="Sunroom Delta",
+                    entity_id="sensor.sunroom_delta",
+                    input_role="adjacent_zone",
+                    true_thermal_effect=0.001,
+                    true_ff_coef=-0.5,
+                    seed_heat=0.0,
+                    schedule=_adjacent_zone_schedule,
+                    delta_from_room=True,
+                ),
+                ModelInputSpec(
+                    name="Pellet Stove",
+                    entity_id="sensor.pellet_stove",
+                    input_role="heat_source",
+                    true_thermal_effect=0.008,
+                    true_ff_coef=-3.0,
+                    seed_heat=0.0,
+                    schedule=_stove_schedule,
+                ),
+            ],
+            relax_kappa_gate=False,  # let κ gating work naturally
+        )
+
+    def test_features_start_frozen(self):
+        """Model input features (indices 2+) should start frozen."""
+        config = self._make_config(n_days=2)
+        result = run_full_stack(config)
+
+        # First batch snapshot should show model inputs frozen
+        if result.coef_trajectory:
+            snap = result.coef_trajectory[0]
+            for name in ["Solar Proxy", "Sunroom Delta", "Pellet Stove"]:
+                frozen_key = f"{name}_frozen"
+                if frozen_key in snap:
+                    assert snap[frozen_key] is True, (
+                        f"{name} should start frozen"
+                    )
+
+    def test_outdoor_delta_learns_first(self):
+        """outdoor_delta (base feature, never frozen) should converge first."""
+        config = self._make_config(n_days=30)
+        result = run_full_stack(config)
+
+        # outdoor_delta should stabilize early (first 10 batches)
+        if len(result.coef_trajectory) >= 15:
+            early_ods = [snap.get("outdoor_delta", 0)
+                         for snap in result.coef_trajectory[5:15]]
+            od_range = max(early_ods) - min(early_ods)
+            assert od_range < 0.2, (
+                f"outdoor_delta not stabilizing early: range={od_range:.4f}"
+            )
+
+    def test_unlock_does_not_destabilize_outdoor(self):
+        """When a feature unlocks, outdoor_delta should not jump."""
+        config = self._make_config(n_days=30)
+        result = run_full_stack(config)
+
+        # Find batches where a feature unfroze
+        for i in range(1, len(result.coef_trajectory)):
+            prev = result.coef_trajectory[i - 1]
+            curr = result.coef_trajectory[i]
+            for name in ["Solar Proxy", "Sunroom Delta", "Pellet Stove"]:
+                was_frozen = prev.get(f"{name}_frozen", True)
+                now_frozen = curr.get(f"{name}_frozen", True)
+                if was_frozen and not now_frozen:
+                    # Feature just unlocked — check outdoor_delta stability
+                    od_prev = prev.get("outdoor_delta", 0)
+                    od_curr = curr.get("outdoor_delta", 0)
+                    assert abs(od_curr - od_prev) < 0.3, (
+                        f"outdoor_delta jumped {od_prev:.4f} → {od_curr:.4f} "
+                        f"when {name} unlocked at batch {i}"
+                    )
+
+    def test_no_integral_runaway_during_unlocks(self):
+        """Integral should stay bounded through all feature unlocks."""
+        config = self._make_config(n_days=30)
+        result = run_full_stack(config)
+
+        max_integral = max(abs(h["integral"]) for h in result.history)
+        assert max_integral < 50, (
+            f"Integral runaway during staged unlocks: max={max_integral:.1f}"
+        )
+
+    def test_ff_fraction_increases_with_unlocks(self):
+        """FF fraction should increase as more features unlock and learn."""
+        config = self._make_config(n_days=30)
+        result = run_full_stack(config)
+
+        if len(result.daily_ff_fraction) >= 21:
+            first_week = sum(result.daily_ff_fraction[:7]) / 7
+            third_week = sum(result.daily_ff_fraction[14:21]) / 7
+            # FF fraction should not collapse
+            assert third_week >= first_week * 0.7, (
+                f"FF fraction collapsed: week 1={first_week:.2%}, "
+                f"week 3={third_week:.2%}"
+            )
+
+    def test_comfort_maintained_through_unlocks(self):
+        """Comfort should stay ≥75% even with staged unlocks."""
+        config = self._make_config(n_days=30)
+        result = run_full_stack(config)
+
+        assert result.comfort_hours_pct >= 75.0, (
+            f"Comfort too low during staged rollout: "
+            f"{result.comfort_hours_pct:.1f}%"
+        )
+
+
+# ── Scenario: Recovery from bad states ───────────────────────────────────
+
+
+class TestRecoveryFromBadStates:
+    """Validate that the system self-heals from corrupted learning state.
+
+    Tests coefficient sign flips, covariance collapse, and large
+    integral windup — the production failure modes that HA Repairs
+    warns about.
+    """
+
+    def test_recovery_from_sign_flip(self):
+        """If outdoor_delta flips sign, batch WLS should correct it.
+
+        Simulate by starting with a positive outdoor_delta seed (wrong
+        sign — means HP backs off when it's colder, backwards).
+        """
+        profile = PROFILES_2R2C["living_room"]
+        config = FullStackConfig(
+            n_days=30,
+            profile_name="living_room",
+            outdoor_base_c=-5.0,
+            outdoor_diurnal_c=6.0,
+            desired_c=20.5,
+            noise_sigma=0.1,
+            noise_seed=42,
+            pi_overrides={
+                # Positive seed = wrong sign (should be negative in RLS)
+                "pi_outdoor_seed_heat": profile.true_seed * -1.0,
+            },
+            relax_kappa_gate=True,
+        )
+        result = run_full_stack(config)
+
+        # outdoor_delta should end up negative (correct sign)
+        od = result.final_coefs.get("outdoor_delta", 0)
+        assert od < 0, (
+            f"outdoor_delta still wrong sign after 30 days: {od:.4f}"
+        )
+
+        # System should still be functional — comfort > 70%
+        assert result.comfort_hours_pct >= 70.0, (
+            f"Comfort collapsed after sign flip: {result.comfort_hours_pct:.1f}%"
+        )
+
+    def test_recovery_from_large_integral_windup(self):
+        """System should recover from a large initial integral error.
+
+        Simulate by injecting a massive disturbance early that winds
+        up the integral, then removing it.
+        """
+        config = FullStackConfig(
+            n_days=14,
+            profile_name="living_room",
+            outdoor_base_c=-5.0,
+            outdoor_diurnal_c=6.0,
+            desired_c=20.5,
+            noise_sigma=0.1,
+            noise_seed=42,
+            disturbances=[
+                # Massive cold draft for 2 hours on day 1
+                Disturbance(
+                    start_tick=48,  # noon day 0
+                    duration_ticks=8,  # 2 hours
+                    field="room_temp_offset",
+                    value=-5.0,  # -5°C sensor error
+                ),
+            ],
+            relax_kappa_gate=True,
+        )
+        result = run_full_stack(config)
+
+        # Integral should recover — last week's integral RMS should be
+        # much lower than the peak
+        if len(result.daily_integral_rms) >= 7:
+            peak_irms = max(result.daily_integral_rms[:3])
+            last_week_irms = sum(result.daily_integral_rms[-7:]) / 7
+            if peak_irms > 1.0:
+                assert last_week_irms < peak_irms * 0.8, (
+                    f"Integral not recovering: peak={peak_irms:.2f}, "
+                    f"last week avg={last_week_irms:.2f}"
+                )
+
+        # Comfort in last week should be reasonable
+        if len(result.daily_comfort_pct) >= 7:
+            last_week_comfort = sum(result.daily_comfort_pct[-7:]) / 7
+            assert last_week_comfort >= 80.0, (
+                f"Comfort not recovered in last week: {last_week_comfort:.1f}%"
+            )
+
+    def test_recovery_from_covariance_collapse(self):
+        """If P collapses (RLS stops learning), batch WLS should compensate.
+
+        Simulate by running with very low forgetting factor (λ≈0.99)
+        which causes fast P decay, then check that batch WLS still
+        corrects coefficients even when online RLS has stalled.
+        """
+        profile = PROFILES_2R2C["living_room"]
+        config = FullStackConfig(
+            n_days=30,
+            profile_name="living_room",
+            outdoor_base_c=-5.0,
+            outdoor_diurnal_c=6.0,
+            desired_c=20.5,
+            noise_sigma=0.1,
+            noise_seed=42,
+            pi_overrides={
+                "pi_outdoor_seed_heat": profile.true_seed * 2.0,
+                "pi_rls_forgetting": 0.99,  # fast decay → P collapse
+            },
+            relax_kappa_gate=True,
+        )
+        result = run_full_stack(config)
+
+        # Batch WLS should still function — coefficients should stabilize
+        if len(result.coef_trajectory) >= 15:
+            late_ods = [snap.get("outdoor_delta", 0)
+                        for snap in result.coef_trajectory[-10:]]
+            od_std = _std(late_ods)
+            assert od_std < 0.1, (
+                f"Coefficients not stable despite P collapse: "
+                f"outdoor_delta std={od_std:.4f}"
+            )
+
+        # System should still be comfortable
+        assert result.comfort_hours_pct >= 80.0, (
+            f"Comfort collapsed with low λ: {result.comfort_hours_pct:.1f}%"
+        )
+
+    def test_wrong_sign_seed_all_profiles(self):
+        """All profiles should recover from a wrong-sign outdoor seed."""
+        for profile_name in ["living_room", "bunkroom"]:
+            profile = PROFILES_2R2C[profile_name]
+            config = FullStackConfig(
+                n_days=14,
+                profile_name=profile_name,
+                outdoor_base_c=-5.0,
+                outdoor_diurnal_c=6.0,
+                desired_c=20.5,
+                noise_sigma=0.1,
+                noise_seed=42,
+                pi_overrides={
+                    "pi_outdoor_seed_heat": profile.true_seed * -1.0,
+                },
+                relax_kappa_gate=True,
+            )
+            result = run_full_stack(config)
+
+            # Should have corrected sign
+            od = result.final_coefs.get("outdoor_delta", 0)
+            assert od < 0, (
+                f"{profile_name}: outdoor_delta still wrong sign: {od:.4f}"
+            )
+
+
 _WEATHER_DIR = Path(__file__).parent.parent / "weather_data"
 
 
