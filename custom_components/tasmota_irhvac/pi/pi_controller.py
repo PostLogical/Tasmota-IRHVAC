@@ -129,7 +129,7 @@ from .health_checks import (
 )
 from .performance_metrics import PerformanceMetrics
 from .auto_perturbation import AutoPerturbation
-from .regime_probe import RegimeProbe
+from .regime_probe import ProbeState, RegimeProbe
 from .smith_predictor import SmithPredictor
 from .supplemental_controller import SupplementalController
 from .plant_identifier import PlantIdentifier
@@ -4224,10 +4224,6 @@ class PIController:
         # compressor — zero output, open loop.
         # Ljung §13.3: no plant information during actuator saturation.
         # Åström & Hägglund §6.4: stop integrating when actuator is saturated.
-        hp_no_output = (
-            (is_heating and self._hp_setpoint < current_c)
-            or (is_cooling and self._hp_setpoint > current_c)
-        )
 
         # ── HP contribution zone model ────────────────────────────────
         # Three zones based on delta = current_c - setpoint and the
@@ -4338,6 +4334,48 @@ class PIController:
                         cal_min, current_to_setpoint_delta,
                         self._room_temp_rate,
                     )
+
+        # ── Regime probe: active boundary detection ────────────────
+        # Probe fires when contribution is uncertain + room is stable.
+        # force_min_setpoint overrides HP to min so we can observe the
+        # room rate without HP contribution and resolve the ambiguity.
+        probe_prev_state = self._regime_probe.state
+        probe_result = self._regime_probe.tick(
+            now_mono=now_mono,
+            room_temp_rate=self._room_temp_rate,
+            hp_setpoint=self._hp_setpoint,
+            current_c=current_c,
+            min_temp_c=self._min_temp_c,
+            cal_min=cal_min,
+            cal_max=cal_max,
+            is_heating=is_heating,
+            is_clamped=(
+                self._hp_setpoint <= self._min_temp_c
+                or self._hp_setpoint >= self._max_temp_c
+            ),
+            learning_suppressed=self._manual_ff_suppress,
+            current_hour=datetime.now().hour,
+            auto_perturb_active=self._auto_perturb.offset != 0.0,
+        )
+        if probe_result.force_min_setpoint:
+            self._hp_setpoint = int(self._min_temp_c)
+            hp_observation_usable = False
+            hp_estimated_active = False
+
+        # After probe completes (ANALYZE → COOLDOWN), apply margin updates.
+        if (
+            probe_prev_state != ProbeState.COOLDOWN
+            and self._regime_probe.state == ProbeState.COOLDOWN
+        ):
+            new_min, new_max = self._regime_probe.compute_calibration_updates(
+                cal_min, cal_max,
+            )
+            if is_heating:
+                self._head_calibration_min_heat = new_min
+                self._head_calibration_max_heat = new_max
+            else:
+                self._head_calibration_min_cool = new_min
+                self._head_calibration_max_cool = new_max
 
         skip_integration = (
             (is_heating and self._hp_setpoint <= self._min_temp_c and error < 0)
@@ -4526,7 +4564,7 @@ class PIController:
         )
 
         # Clamped status computed unconditionally (used by hysteresis below)
-        if hp_no_output:
+        if hp_definitely_off:
             obs_clamped = True
             obs_clamped_reason = "no_output"
         elif self._hp_setpoint <= self._min_temp_c:

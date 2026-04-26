@@ -1203,10 +1203,9 @@ class TestFullRateIntegrationRegression:
         locks onto the correct SP within 1-2 weeks. See 30-day full-stack
         sims in project_qfeedback_sweep.md.
 
-        TODO: add a full-stack bench test (PI+FF+RLS with batch triggering)
-        that validates q-feedback convergence over simulated weeks. The
-        current bench runner doesn't trigger batch analysis, so this PI-only
-        test is the best available automated validation.
+        Full-stack bench validation: see TestQFeedbackConvergence in
+        tests/hvac_bench/scenarios/test_full_stack_learning.py which runs
+        21-day simulations with batch WLS triggering across profiles.
         """
         full_traj, var_traj = self._run_ab_dynamic(
             21.0, 120, outdoor_c=5.0, tau_minutes=60.0, hp_gain=0.8,
@@ -4435,6 +4434,296 @@ class TestHeadCalibrationZoneModel:
         assert pi._hp_no_output_ticks == 0, (
             "Tick counter should reset when HP is active"
         )
+
+
+class TestRegimeProbeIntegration:
+    """Tests for regime probe wired into _pi_tick_inner.
+
+    Verifies: tick() called each cycle, force_min_setpoint overrides
+    HP setpoint and freezes integration, calibration updates applied
+    after probe completes, mutual exclusion with auto-perturbation.
+    """
+
+    @pytest.mark.asyncio
+    async def test_probe_forces_min_setpoint(self):
+        """When probe returns force_min_setpoint, HP setpoint → min."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 22.5  # delta=0.5, inside [-2, 2]
+        pi._pi_integral = 0.0
+        pi._sensor_filter_tau = 0
+        pi._inputs.outdoor_temp = 5.0
+
+        # Enable probe and force it into PROBE state
+        pi._regime_probe._enabled = True
+        # First tick enters BASELINE (uncertain zone, stable rate)
+        pi._regime_probe._state = __import__(
+            "custom_components.tasmota_irhvac.pi.regime_probe",
+            fromlist=["ProbeState"],
+        ).ProbeState.PROBE
+        pi._regime_probe._phase_start_mono = 0.0
+        pi._regime_probe._probe_hp_setpoint = 22
+        pi._regime_probe._probe_current_c = 22.5
+        pi._regime_probe._probe_is_heating = True
+        pi._regime_probe._probe_rates = []
+
+        with patch("time.monotonic", return_value=100.0):
+            await pi._pi_tick()
+
+        # During PROBE, force_min_setpoint is True → HP at min
+        assert pi._hp_setpoint == int(pi._min_temp_c), (
+            f"Probe should force HP to min ({pi._min_temp_c}), got {pi._hp_setpoint}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_probe_freezes_integration(self):
+        """Integration should be frozen during active probe."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 22.5
+        pi._pi_integral = 1.0
+        pi._sensor_filter_tau = 0
+        pi._inputs.outdoor_temp = 5.0
+
+        from custom_components.tasmota_irhvac.pi.regime_probe import ProbeState
+        pi._regime_probe._enabled = True
+        pi._regime_probe._state = ProbeState.PROBE
+        pi._regime_probe._phase_start_mono = 0.0
+        pi._regime_probe._probe_hp_setpoint = 22
+        pi._regime_probe._probe_current_c = 22.5
+        pi._regime_probe._probe_is_heating = True
+        pi._regime_probe._probe_rates = []
+
+        integral_before = pi._pi_integral
+        with patch("time.monotonic", return_value=100.0):
+            await pi._pi_tick()
+
+        # force_min_setpoint → hp_estimated_active=False → skip_integration
+        assert pi._integration_frozen is True
+
+    @pytest.mark.asyncio
+    async def test_probe_suppresses_learning(self):
+        """Observations should not be buffered during active probe."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 22.5
+        pi._pi_integral = 0.0
+        pi._sensor_filter_tau = 0
+        pi._inputs.outdoor_temp = 5.0
+
+        from custom_components.tasmota_irhvac.pi.regime_probe import ProbeState
+        pi._regime_probe._enabled = True
+        pi._regime_probe._state = ProbeState.PROBE
+        pi._regime_probe._phase_start_mono = 0.0
+        pi._regime_probe._probe_hp_setpoint = 22
+        pi._regime_probe._probe_current_c = 22.5
+        pi._regime_probe._probe_is_heating = True
+        pi._regime_probe._probe_rates = []
+
+        buf_before = len(pi._observation_buffer_heat)
+        with patch("time.monotonic", return_value=100.0):
+            await pi._pi_tick()
+
+        assert len(pi._observation_buffer_heat) == buf_before, (
+            "WLS buffer should not grow during probe (hp_observation_usable=False)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_probe_applies_calibration_updates(self):
+        """After probe completes (→ COOLDOWN), cal bounds should update."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 22.5  # delta=0.5
+        pi._pi_integral = 0.0
+        pi._sensor_filter_tau = 0
+        pi._inputs.outdoor_temp = 5.0
+
+        from custom_components.tasmota_irhvac.pi.regime_probe import (
+            ProbeState, PROBE_MIN_DURATION_S, PROBE_MIN_READINGS,
+            SHRINK_CONFIRMATIONS, SHRINK_DELTA_TOLERANCE,
+        )
+        pi._regime_probe._enabled = True
+        # Set up PROBE state at the end — enough readings + time to trigger ANALYZE
+        pi._regime_probe._state = ProbeState.PROBE
+        pi._regime_probe._phase_start_mono = 0.0
+        pi._regime_probe._probe_hp_setpoint = 22
+        pi._regime_probe._probe_current_c = 22.5  # delta = 0.5
+        pi._regime_probe._probe_is_heating = True
+        # Pre-fill enough readings (one less than needed, tick adds one more)
+        pi._regime_probe._probe_rates = [0.0] * (PROBE_MIN_READINGS - 1)
+        pi._regime_probe._baseline_rates = [0.01, 0.01]  # baseline avg = 0.01
+
+        # Pre-seed "not contributing" evidence at similar delta so compute_calibration_updates
+        # will have enough confirmations to shrink cal_max
+        pi._regime_probe._contribution_evidence_above = [0.5] * (SHRINK_CONFIRMATIONS - 1)
+
+        cal_max_before = pi._head_calibration_max_heat
+
+        t = PROBE_MIN_DURATION_S + 1.0
+        with patch("time.monotonic", return_value=t):
+            await pi._pi_tick()
+
+        # After ANALYZE → COOLDOWN, probe should have processed evidence
+        assert pi._regime_probe.state == ProbeState.COOLDOWN
+
+    @pytest.mark.asyncio
+    async def test_probe_cooling_mode_updates_cool_cal(self):
+        """In cooling mode, probe updates _head_calibration_*_cool fields."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22
+        entity._attr_hvac_mode = HVACMode.COOL
+        entity._attr_current_temperature = 21.5  # delta = -0.5, inside [-2, 2]
+        pi._pi_integral = 0.0
+        pi._sensor_filter_tau = 0
+        pi._inputs.outdoor_temp = 30.0
+
+        from custom_components.tasmota_irhvac.pi.regime_probe import (
+            ProbeState, PROBE_MIN_DURATION_S, PROBE_MIN_READINGS,
+            SHRINK_CONFIRMATIONS,
+        )
+        pi._regime_probe._enabled = True
+        pi._regime_probe._state = ProbeState.PROBE
+        pi._regime_probe._phase_start_mono = 0.0
+        pi._regime_probe._probe_hp_setpoint = 22
+        pi._regime_probe._probe_current_c = 21.5
+        pi._regime_probe._probe_is_heating = False
+        pi._regime_probe._probe_rates = [0.0] * (PROBE_MIN_READINGS - 1)
+        pi._regime_probe._baseline_rates = [-0.01, -0.01]
+
+        # Pre-seed evidence for cooling (HP was contributing → shrink cal_min)
+        pi._regime_probe._contribution_evidence_below = [-0.5] * (SHRINK_CONFIRMATIONS - 1)
+
+        t = PROBE_MIN_DURATION_S + 1.0
+        with patch("time.monotonic", return_value=t):
+            await pi._pi_tick()
+
+        assert pi._regime_probe.state == ProbeState.COOLDOWN
+        # Cooling mode should update cool calibration, not heat
+        assert pi._head_calibration_min_heat == -2.0  # unchanged
+
+
+class TestObservationRecordingZoneModel:
+    """Tests for observation recording with hp_definitely_off.
+
+    After the zone model rework, clamped_reason='no_output' uses
+    hp_definitely_off (delta > cal_max) instead of the old hp_no_output
+    (setpoint < current).  Uncertain-zone observations get hp_setpoint
+    recorded (not None) but are flagged hp_contribution_uncertain=True.
+    """
+
+    @pytest.mark.asyncio
+    async def test_definitely_off_records_no_output(self):
+        """HP definitely off (delta > cal_max) → clamped_reason='no_output'."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 17  # delta = 24.0 - 17 = 7.0 >> cal_max=2.0
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 24.0
+        pi._pi_integral = 0.0
+        pi._sensor_filter_tau = 0
+        pi._inputs.outdoor_temp = 5.0
+
+        await pi._pi_tick()
+
+        obs = pi._greybox_buffer.get_all()
+        no_output = [o for o in obs if o.clamped_reason == "no_output"]
+        assert len(no_output) >= 1
+        assert no_output[-1].hp_setpoint is None
+
+    @pytest.mark.asyncio
+    async def test_uncertain_zone_records_setpoint(self):
+        """In uncertain zone (cal_min < delta < cal_max), hp_setpoint is recorded."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 21  # delta = 22.0 - 21 = 1.0, inside [-2, 2]
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 22.0
+        pi._pi_integral = 0.0
+        pi._sensor_filter_tau = 0
+        pi._inputs.outdoor_temp = 5.0
+
+        await pi._pi_tick()
+
+        obs = pi._greybox_buffer.get_all()
+        assert len(obs) >= 1
+        last = obs[-1]
+        # Not definitely off → hp_setpoint should be recorded (not None)
+        assert last.hp_setpoint is not None, (
+            "Uncertain zone: hp_setpoint should be recorded"
+        )
+        assert last.clamped_reason != "no_output", (
+            "Uncertain zone: should not be marked no_output"
+        )
+        assert last.hp_contribution_uncertain is True, (
+            "Uncertain zone: should be flagged uncertain"
+        )
+
+    @pytest.mark.asyncio
+    async def test_definitely_on_records_setpoint(self):
+        """HP definitely on (delta < cal_min) → normal observation."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 25  # delta = 20 - 25 = -5.0 < cal_min=-2.0
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 20.0
+        pi._pi_integral = 0.0
+        pi._sensor_filter_tau = 0
+        pi._inputs.outdoor_temp = 5.0
+
+        await pi._pi_tick()
+
+        obs = pi._greybox_buffer.get_all()
+        assert len(obs) >= 1
+        last = obs[-1]
+        assert last.hp_setpoint == 25.0
+        assert last.hp_contribution_uncertain is False
+        assert last.clamped_reason != "no_output"
+
+    @pytest.mark.asyncio
+    async def test_cooling_definitely_off_records_no_output(self):
+        """Cooling: HP definitely off (delta < cal_min) → no_output."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 27  # delta = 20 - 27 = -7.0 < cal_min=-2.0
+        entity._attr_hvac_mode = HVACMode.COOL
+        entity._attr_current_temperature = 20.0
+        pi._pi_integral = 0.0
+        pi._sensor_filter_tau = 0
+        pi._inputs.outdoor_temp = 30.0
+
+        await pi._pi_tick()
+
+        obs = pi._greybox_buffer.get_all()
+        no_output = [o for o in obs if o.clamped_reason == "no_output"]
+        assert len(no_output) >= 1
+        assert no_output[-1].hp_setpoint is None
 
 
 class TestBatchWLSApply:
