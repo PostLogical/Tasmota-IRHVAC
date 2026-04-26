@@ -943,6 +943,21 @@ class PIController:
                 if i < rls.n:
                     rls.beta[i] = val * rls.feature_scales[i]
 
+            # Apply coefficient clamps (same bounds as online RLS).
+            # Without this, batch WLS can bypass clamps and set
+            # coefficients to physically impossible values (e.g. solar
+            # coefficient positive = "HP pushes harder when warmer").
+            #
+            # Ideally the WLS solver itself would solve constrained LS
+            # so other coefficients are estimated correctly given the
+            # constraint.  Post-write clipping is approximate but the
+            # distortion is small when clamps only clip to a boundary.
+            for i in range(rls.n):
+                clamp = rls.coeff_clamps[i] if i < len(rls.coeff_clamps) else None
+                if clamp is not None:
+                    lo, hi = clamp
+                    rls.beta[i] = max(lo, min(hi, rls.beta[i]))
+
             # P-aware update: reduce covariance for updated coefficients
             # so RLS treats the batch correction as real posterior
             # information and doesn't immediately drift back.
