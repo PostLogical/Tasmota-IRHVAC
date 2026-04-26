@@ -222,10 +222,13 @@ class FullStackResult:
     batch_kappa: list[float]  # condition number at each batch
     batch_covariance_trace: list[float]  # tr(P) at each batch
 
-    # ── Equipment metrics ────────────────────────────────────────────
-    daily_saturation_pct: list[float]  # % ticks at min or max setpoint
-    daily_short_cycles: list[int]  # reversals within 30 min
-    total_short_cycles: int
+    # ── Setpoint behavior metrics ────────────────────────────────────
+    # We send IR setpoints to the HP's thermostat; we don't control the
+    # compressor directly.  These measure our setpoint behavior, not
+    # compressor cycling.
+    daily_setpoint_limited_pct: list[float]  # % ticks at min or max SP (no room to adjust)
+    daily_rapid_sp_changes: list[int]  # SP reversals within 30 min of each other
+    total_rapid_sp_changes: int
 
 
 # ── Default weather schedules ────────────────────────────────────────────
@@ -412,7 +415,7 @@ def run_full_stack(
     worst_overshoot = 0.0
     cur_violation_streak = 0
     longest_violation_streak = 0
-    total_short_cycles = 0
+    total_rapid_sp_changes = 0
 
     # Per-day accumulators
     day_itae = 0.0
@@ -436,8 +439,8 @@ def run_full_stack(
     daily_ff_fraction: list[float] = []
     daily_covariance_trace: list[float] = []
     daily_buffer_utilization: list[float] = []
-    daily_saturation_pct: list[float] = []
-    daily_short_cycles: list[int] = []
+    daily_setpoint_limited_pct: list[float] = []
+    daily_rapid_sp_changes: list[int] = []
 
     batch_kappa: list[float] = []
     batch_covariance_trace: list[float] = []
@@ -632,11 +635,11 @@ def run_full_stack(
             )
 
             # Equipment
-            daily_saturation_pct.append(day_saturated / day_len * 100.0)
-            daily_short_cycles.append(
-                _count_short_cycles(day_slice, tick_min)
+            daily_setpoint_limited_pct.append(day_saturated / day_len * 100.0)
+            daily_rapid_sp_changes.append(
+                _count_rapid_sp_changes(day_slice, tick_min)
             )
-            total_short_cycles += daily_short_cycles[-1]
+            total_rapid_sp_changes += daily_rapid_sp_changes[-1]
 
             # Reset accumulators
             day_itae = 0.0
@@ -764,9 +767,9 @@ def run_full_stack(
         batch_kappa=batch_kappa,
         batch_covariance_trace=batch_covariance_trace,
         # Equipment
-        daily_saturation_pct=daily_saturation_pct,
-        daily_short_cycles=daily_short_cycles,
-        total_short_cycles=total_short_cycles,
+        daily_setpoint_limited_pct=daily_setpoint_limited_pct,
+        daily_rapid_sp_changes=daily_rapid_sp_changes,
+        total_rapid_sp_changes=total_rapid_sp_changes,
     )
 
 
@@ -800,12 +803,13 @@ def _get_coef_state(pi, model_inputs, true_coefs):
     return current, errors
 
 
-def _count_short_cycles(history: list[dict], tick_min: float,
-                        window_min: float = 30.0) -> int:
-    """Count reversals that happen within `window_min` minutes of each other.
+def _count_rapid_sp_changes(history: list[dict], tick_min: float,
+                            window_min: float = 30.0) -> int:
+    """Count setpoint reversals within `window_min` minutes of each other.
 
-    A short cycle is a direction change followed by another direction change
-    within the window — stresses the compressor.
+    Rapid setpoint changes cause unnecessary IR blasts to the HP's
+    thermostat.  We don't control the compressor directly, but rapid
+    setpoint oscillation is undesirable behavior regardless.
     """
     window_ticks = int(window_min / tick_min)
     reversal_ticks = []
