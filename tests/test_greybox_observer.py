@@ -54,11 +54,11 @@ class TestFitGreybox:
     True model (rate-coefficient form):
         room_rate = ua_c × (T_out - T_air) + k_c × hp_offset + α_c × solar
 
-    With ua_c=0.006 (τ=167 min), k_c=0.02, α_c=-0.04.
-    These correspond to UA=0.3, K_hp=1.0, α_solar=-2.0, C_eff=50.0.
+    With ua_c=0.006 (τ=167 min), k_c=0.02, α_c=+0.04.
+    These correspond to UA=0.3, K_hp=1.0, α_solar=+2.0, C_eff=50.0.
     """
 
-    # True rate coefficients: UA/C=0.3/50, K/C=1/50, α/C=-2/50
+    # True rate coefficients: UA/C=0.3/50, K/C=1/50, α/C=+2/50
     UA_C_TRUE = 0.006
     K_C_TRUE = 0.02
     ALPHA_C_TRUE = 0.04
@@ -511,7 +511,7 @@ class TestGreyboxBridgeEndToEnd:
         """β from bridge should match the true steady-state gains.
 
         True β₁ = -UA_C/K_C = -0.006/0.02 = -0.3
-        True β₂ = -ALPHA_C/K_C = 0.04/0.02 = 2.0
+        True β₂ = -ALPHA_C/K_C = -0.04/0.02 = -2.0
         """
         obs = self._generate_observations()
         model_inputs = [{"name": "Solar Proxy", "entity_id": "sensor.solar_proxy", "input_role": "solar"}]
