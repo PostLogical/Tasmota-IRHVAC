@@ -74,6 +74,8 @@ class TestWrongSeedsConvergence:
                     true_thermal_effect=0.01,
                     true_ff_coef=-3.0,
                     seed_heat=0.0,  # wrong: should be -3.0
+                    lag_tau=120,
+                    clamp_min=0,  # solar only warms, never cools
                     schedule=_solar_schedule,
                 ),
             ],
@@ -604,6 +606,8 @@ class TestStagedModelInputRollout:
                     true_thermal_effect=0.005,
                     true_ff_coef=-2.0,
                     seed_heat=0.0,
+                    lag_tau=120,
+                    clamp_min=0,
                     schedule=_solar_schedule,
                 ),
                 ModelInputSpec(
@@ -925,6 +929,8 @@ class TestRealWeatherReplay:
                     true_thermal_effect=0.005,
                     true_ff_coef=-2.0,
                     seed_heat=0.0,
+                    lag_tau=120,
+                    clamp_min=0,
                     schedule=solar_fn,
                 ),
             ] if solar_fn else [],

@@ -52,6 +52,8 @@ class ModelInputSpec:
     schedule: Callable[[int], float] | None = None  # tick -> value
     delta_from_room: bool = False
     lag_tau: int = 0
+    clamp_min: float | None = None  # min in seed space (positive = warms room)
+    clamp_max: float | None = None  # max in seed space
 
 
 @dataclass
@@ -335,7 +337,7 @@ def run_full_stack(
     # Build model input config for PIController
     pi_model_inputs = []
     for mi in config.model_inputs:
-        pi_model_inputs.append({
+        entry: dict = {
             "entity_id": mi.entity_id,
             "name": mi.name,
             "input_role": mi.input_role,
@@ -343,7 +345,12 @@ def run_full_stack(
             "seed_cool": mi.seed_cool,
             "lag_tau": mi.lag_tau,
             "delta_from_room": mi.delta_from_room,
-        })
+        }
+        if mi.clamp_min is not None:
+            entry["clamp_min"] = mi.clamp_min
+        if mi.clamp_max is not None:
+            entry["clamp_max"] = mi.clamp_max
+        pi_model_inputs.append(entry)
 
     # Create adapter
     pi_config = {
@@ -362,6 +369,13 @@ def run_full_stack(
     if config.relax_kappa_gate:
         pi._batch_kappa_threshold = 10000
 
+    # Compute solar_gain for the thermal model from solar model inputs.
+    # The thermal model applies this via 2R2C physics (30% air, 70% wall).
+    solar_thermal_gain = sum(
+        mi.true_thermal_effect for mi in config.model_inputs
+        if mi.input_role == "solar"
+    )
+
     # Create thermal model
     initial_outdoor = config.outdoor_base_c
     if config.outdoor_schedule is not None:
@@ -372,7 +386,7 @@ def run_full_stack(
         outdoor_temp=initial_outdoor,
         sensor_noise_sigma=config.noise_sigma,
         noise_seed=config.noise_seed,
-        solar_gain=0.0,
+        solar_gain=solar_thermal_gain,
         stove_gain=0.0,
     )
 
@@ -458,11 +472,18 @@ def run_full_stack(
 
         # Compute model input values
         input_values: dict[str, float] = {}
+        solar_proxy_value = 0.0
         extra_heat_rate = 0.0
         for mi in config.model_inputs:
             val = mi.schedule(tick) if mi.schedule is not None else 0.0
             input_values[mi.name] = val
-            extra_heat_rate += mi.true_thermal_effect * val
+            if mi.input_role == "solar":
+                # Solar goes through the thermal model's 2R2C physics
+                # (30% convective to air, 70% radiative to walls).
+                solar_proxy_value += val
+            else:
+                # Non-solar inputs (stove, adjacent zone) add heat directly
+                extra_heat_rate += mi.true_thermal_effect * val
 
         # Apply disturbances
         room_temp_offset = 0.0
@@ -472,9 +493,14 @@ def run_full_stack(
                     room_temp_offset = d.value
                 elif d.field in input_values:
                     input_values[d.field] = d.value
+                    # Update solar_proxy if the disturbance overrides it
+                    for mi in config.model_inputs:
+                        if mi.name == d.field and mi.input_role == "solar":
+                            solar_proxy_value = d.value
 
-        # Apply extra heat from model inputs
-        model.room_temp += extra_heat_rate * tick_min
+        # Apply non-solar extra heat directly to room
+        if extra_heat_rate != 0:
+            model.room_temp += extra_heat_rate * tick_min
 
         # Read sensor (with optional disturbance offset)
         sensor_reading = model.read_sensor() + room_temp_offset
@@ -504,10 +530,11 @@ def run_full_stack(
 
         hp_setpoint = float(pi._hp_setpoint)
 
-        # Advance thermal model
+        # Advance thermal model (solar goes through 2R2C air/wall split)
         model.step(
             hp_setpoint=hp_setpoint,
             dt_minutes=tick_min,
+            solar_proxy=solar_proxy_value,
             tick=tick,
             mode=config.mode,
         )

@@ -1870,6 +1870,26 @@ class PIController:
                     )
                     continue
 
+            # 5. Partial regression sign check for warming inputs.
+            # Inputs with role "solar" or "heat_source" warm the room,
+            # so their β (internal convention) must be ≤ 0 (HP backs off
+            # when warmer).  A positive β means the partial regression
+            # is confounded — keep frozen until the signal is clean.
+            role = self._coeff_role(i)
+            if role in ("solar", "heat_source"):
+                beta_i = (
+                    full_result.beta_batch[i]
+                    if i < len(full_result.beta_batch)
+                    else 0.0
+                )
+                if beta_i > 0:
+                    _LOGGER.debug(
+                        "%sFeature unlock: %s[%d] — partial β=%.4f > 0 "
+                        "(wrong sign for %s, keeping frozen)",
+                        self._log_prefix, name, i, beta_i, role,
+                    )
+                    continue
+
             # All conditions met — unfreeze
             self.set_frozen(mode, i, frozen=False, manual=False)
             unlocked_any = True
