@@ -144,6 +144,11 @@ class CheckpointState:
     total_itae: float
     total_violations: int
 
+    # Learning state
+    ff_fraction: float  # current |FF| / (|FF| + |integral|)
+    covariance_trace: float  # current tr(P)
+    buffer_utilization: float  # current buffer len / max
+
     # Access to PI internals
     pi: object  # PIController instance
 
@@ -194,6 +199,33 @@ class FullStackResult:
 
     # Checkpoint results (collected by callbacks if they return values)
     checkpoint_data: list[dict]
+
+    # ── Comfort metrics ──────────────────────────────────────────────
+    comfort_hours_pct: float  # % of ticks within deadband
+    cold_violations: int  # ticks where room < desired - deadband
+    warm_violations: int  # ticks where room > desired + deadband
+    worst_undershoot: float  # max (desired - room) when room < desired
+    worst_overshoot: float  # max (room - desired) when room > desired
+    longest_violation_streak: int  # max consecutive ticks outside deadband
+
+    # Per-day comfort rollups
+    daily_comfort_pct: list[float]
+    daily_cold_violations: list[int]
+    daily_warm_violations: list[int]
+
+    # ── Learning metrics ─────────────────────────────────────────────
+    daily_ff_fraction: list[float]  # |FF| / (|FF| + |integral|)
+    daily_covariance_trace: list[float]  # tr(P) from RLS
+    daily_buffer_utilization: list[float]  # buffer len / max_size
+
+    # Per-batch snapshots
+    batch_kappa: list[float]  # condition number at each batch
+    batch_covariance_trace: list[float]  # tr(P) at each batch
+
+    # ── Equipment metrics ────────────────────────────────────────────
+    daily_saturation_pct: list[float]  # % ticks at min or max setpoint
+    daily_short_cycles: list[int]  # reversals within 30 min
+    total_short_cycles: int
 
 
 # ── Default weather schedules ────────────────────────────────────────────
@@ -374,11 +406,23 @@ def run_full_stack(
     integral_sq_sum = 0.0
     total_itae = 0.0
     total_violations = 0
+    cold_violations = 0
+    warm_violations = 0
+    worst_undershoot = 0.0
+    worst_overshoot = 0.0
+    cur_violation_streak = 0
+    longest_violation_streak = 0
+    total_short_cycles = 0
 
     # Per-day accumulators
     day_itae = 0.0
     day_violations = 0
+    day_cold_viols = 0
+    day_warm_viols = 0
     day_integral_sq = 0.0
+    day_ff_sum = 0.0
+    day_ff_plus_int_sum = 0.0
+    day_saturated = 0
     day_start_tick = 0
 
     daily_itae: list[float] = []
@@ -386,6 +430,17 @@ def run_full_stack(
     daily_reversals: list[int] = []
     daily_mae: list[float] = []
     daily_integral_rms: list[float] = []
+    daily_comfort_pct: list[float] = []
+    daily_cold_violations: list[int] = []
+    daily_warm_violations: list[int] = []
+    daily_ff_fraction: list[float] = []
+    daily_covariance_trace: list[float] = []
+    daily_buffer_utilization: list[float] = []
+    daily_saturation_pct: list[float] = []
+    daily_short_cycles: list[int] = []
+
+    batch_kappa: list[float] = []
+    batch_covariance_trace: list[float] = []
 
     checkpoint_data: list[dict] = []
     last_checkpoint_tick = 0
@@ -465,9 +520,37 @@ def run_full_stack(
         day_itae += t_hours * deadband_error
         total_itae += tick * tick_min * deadband_error  # absolute
 
-        if abs_error > DEADBAND:
+        is_violation = abs_error > DEADBAND
+        if is_violation:
             total_violations += 1
             day_violations += 1
+            cur_violation_streak += 1
+            if cur_violation_streak > longest_violation_streak:
+                longest_violation_streak = cur_violation_streak
+            # Asymmetric: cold vs warm
+            if error > 0:  # error = desired - room, positive = room too cold
+                cold_violations += 1
+                day_cold_viols += 1
+                if error > worst_undershoot:
+                    worst_undershoot = error
+            else:
+                warm_violations += 1
+                day_warm_viols += 1
+                if -error > worst_overshoot:
+                    worst_overshoot = -error
+        else:
+            cur_violation_streak = 0
+
+        # FF fraction: |FF| / (|FF| + |integral|)
+        ff_abs = abs(pi._ff_offset)
+        int_abs = abs(pi._pi_integral)
+        denom = ff_abs + int_abs
+        day_ff_sum += ff_abs
+        day_ff_plus_int_sum += denom
+
+        # Saturation: at min or max setpoint
+        if hp_setpoint <= pi._min_temp_c or hp_setpoint >= pi._max_temp_c:
+            day_saturated += 1
 
         # Record history
         history.append({
@@ -477,6 +560,7 @@ def run_full_stack(
             "hp_setpoint": hp_setpoint,
             "integral": pi._pi_integral,
             "ff_offset": pi._ff_offset,
+            "ff_fraction": ff_abs / denom if denom > 0 else 0.0,
             "error": error,
             "outdoor": model.outdoor_temp,
             "d_term": getattr(pi, "_pi_d_filtered", 0.0),
@@ -494,6 +578,13 @@ def run_full_stack(
             _snapshot_coefs(pi, batch_count, config.model_inputs,
                             true_coefs, coef_trajectory)
 
+            # κ and covariance trace at batch time
+            rls = pi._rls_heat
+            p_diag = rls.get_covariance_diagonal()
+            batch_covariance_trace.append(sum(p_diag))
+            kappa = pi._cached_kappa
+            batch_kappa.append(kappa if kappa is not None else float("inf"))
+
             # Check convergence
             if batches_to_converge is None:
                 snap = coef_trajectory[-1]
@@ -508,20 +599,54 @@ def run_full_stack(
         # End-of-day rollup
         if (tick + 1) % ticks_per_day == 0 and tick > 0:
             day_slice = history[day_start_tick:tick + 1]
+            day_len = len(day_slice)
             day_errors = [abs(h["room_temp"] - config.desired_c)
                           for h in day_slice]
 
             daily_itae.append(day_itae)
             daily_violations.append(day_violations)
             daily_reversals.append(_count_reversals(day_slice))
-            daily_mae.append(sum(day_errors) / len(day_errors))
+            daily_mae.append(sum(day_errors) / day_len)
             daily_integral_rms.append(
                 math.sqrt(day_integral_sq / ticks_per_day)
             )
 
+            # Comfort
+            in_deadband = sum(1 for e in day_errors if e <= DEADBAND)
+            daily_comfort_pct.append(in_deadband / day_len * 100.0)
+            daily_cold_violations.append(day_cold_viols)
+            daily_warm_violations.append(day_warm_viols)
+
+            # Learning
+            daily_ff_fraction.append(
+                day_ff_sum / day_ff_plus_int_sum
+                if day_ff_plus_int_sum > 0 else 0.0
+            )
+            rls = pi._rls_heat
+            p_diag = rls.get_covariance_diagonal()
+            daily_covariance_trace.append(sum(p_diag))
+            buf = pi._observation_buffer_heat
+            buf_max = getattr(buf, "_max_size", 500)
+            daily_buffer_utilization.append(
+                len(buf) / buf_max if buf_max > 0 else 0.0
+            )
+
+            # Equipment
+            daily_saturation_pct.append(day_saturated / day_len * 100.0)
+            daily_short_cycles.append(
+                _count_short_cycles(day_slice, tick_min)
+            )
+            total_short_cycles += daily_short_cycles[-1]
+
+            # Reset accumulators
             day_itae = 0.0
             day_violations = 0
+            day_cold_viols = 0
+            day_warm_viols = 0
             day_integral_sq = 0.0
+            day_ff_sum = 0.0
+            day_ff_plus_int_sum = 0.0
+            day_saturated = 0
             day_start_tick = tick + 1
 
         # Checkpoints
@@ -544,6 +669,15 @@ def run_full_stack(
                     pi, config.model_inputs, true_coefs
                 )
 
+                # Learning state for checkpoint
+                rls_cp = pi._rls_heat
+                p_diag_cp = rls_cp.get_covariance_diagonal()
+                ff_a = abs(pi._ff_offset)
+                int_a = abs(pi._pi_integral)
+                denom_cp = ff_a + int_a
+                buf_cp = pi._observation_buffer_heat
+                buf_max_cp = getattr(buf_cp, "_max_size", 500)
+
                 state = CheckpointState(
                     tick=tick,
                     day=current_day,
@@ -565,6 +699,11 @@ def run_full_stack(
                                 if period_errors else 0.0),
                     total_itae=total_itae,
                     total_violations=total_violations,
+                    ff_fraction=ff_a / denom_cp if denom_cp > 0 else 0.0,
+                    covariance_trace=sum(p_diag_cp),
+                    buffer_utilization=(
+                        len(buf_cp) / buf_max_cp if buf_max_cp > 0 else 0.0
+                    ),
                     pi=pi,
                 )
                 cp.callback(state)
@@ -580,6 +719,11 @@ def run_full_stack(
     weekly_itae = _rollup(daily_itae, 7)
     weekly_violations = _rollup(daily_violations, 7)
     weekly_reversals = _rollup(daily_reversals, 7)
+
+    # Comfort totals
+    in_deadband_total = sum(1 for h in history
+                           if abs(h["room_temp"] - config.desired_c) <= DEADBAND)
+    comfort_pct = in_deadband_total / n_ticks * 100.0 if n_ticks else 0.0
 
     return FullStackResult(
         history=history,
@@ -603,6 +747,26 @@ def run_full_stack(
         weekly_violations=weekly_violations,
         weekly_reversals=weekly_reversals,
         checkpoint_data=checkpoint_data,
+        # Comfort
+        comfort_hours_pct=comfort_pct,
+        cold_violations=cold_violations,
+        warm_violations=warm_violations,
+        worst_undershoot=worst_undershoot,
+        worst_overshoot=worst_overshoot,
+        longest_violation_streak=longest_violation_streak,
+        daily_comfort_pct=daily_comfort_pct,
+        daily_cold_violations=daily_cold_violations,
+        daily_warm_violations=daily_warm_violations,
+        # Learning
+        daily_ff_fraction=daily_ff_fraction,
+        daily_covariance_trace=daily_covariance_trace,
+        daily_buffer_utilization=daily_buffer_utilization,
+        batch_kappa=batch_kappa,
+        batch_covariance_trace=batch_covariance_trace,
+        # Equipment
+        daily_saturation_pct=daily_saturation_pct,
+        daily_short_cycles=daily_short_cycles,
+        total_short_cycles=total_short_cycles,
     )
 
 
@@ -634,6 +798,35 @@ def _get_coef_state(pi, model_inputs, true_coefs):
             if name in true_coefs:
                 errors[name] = abs(val - true_coefs[name])
     return current, errors
+
+
+def _count_short_cycles(history: list[dict], tick_min: float,
+                        window_min: float = 30.0) -> int:
+    """Count reversals that happen within `window_min` minutes of each other.
+
+    A short cycle is a direction change followed by another direction change
+    within the window — stresses the compressor.
+    """
+    window_ticks = int(window_min / tick_min)
+    reversal_ticks = []
+    prev_dir = 0
+    for i in range(1, len(history)):
+        delta = history[i]["hp_setpoint"] - history[i - 1]["hp_setpoint"]
+        if delta > 0:
+            d = 1
+        elif delta < 0:
+            d = -1
+        else:
+            continue
+        if prev_dir != 0 and d != prev_dir:
+            reversal_ticks.append(i)
+        prev_dir = d
+
+    short = 0
+    for i in range(1, len(reversal_ticks)):
+        if reversal_ticks[i] - reversal_ticks[i - 1] <= window_ticks:
+            short += 1
+    return short
 
 
 def _rollup(daily: list, period: int) -> list:

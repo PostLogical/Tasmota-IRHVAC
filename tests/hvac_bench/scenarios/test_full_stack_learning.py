@@ -149,6 +149,47 @@ class TestWrongSeedsConvergence:
                 f"last week={last_week_mae:.3f}"
             )
 
+    def test_ff_fraction_increases(self):
+        """FF should carry more of the load as learning progresses."""
+        config = self._make_config(n_days=30)
+        result = run_full_stack(config)
+
+        if len(result.daily_ff_fraction) >= 14:
+            first_week_ff = sum(result.daily_ff_fraction[:7]) / 7
+            last_week_ff = sum(result.daily_ff_fraction[-7:]) / 7
+            # FF fraction should increase (or at least not collapse)
+            assert last_week_ff >= first_week_ff * 0.8, (
+                f"FF fraction declining: week 1={first_week_ff:.2%}, "
+                f"last week={last_week_ff:.2%}"
+            )
+
+    def test_covariance_does_not_collapse(self):
+        """RLS covariance trace should not collapse to zero."""
+        config = self._make_config(n_days=30)
+        result = run_full_stack(config)
+
+        if result.batch_covariance_trace:
+            min_trace = min(result.batch_covariance_trace)
+            assert min_trace > 1e-6, (
+                f"Covariance collapsed: min tr(P)={min_trace:.2e}"
+            )
+
+    def test_no_long_violation_streaks(self):
+        """No more than 5 hours of consecutive violations.
+
+        With intentionally wrong seeds, the cold start produces a long
+        streak while the integral compensates.  After the first day,
+        streaks should be much shorter.
+        """
+        config = self._make_config(n_days=30)
+        result = run_full_stack(config)
+
+        # 20 ticks = 5 hours — generous for wrong-seed cold start
+        assert result.longest_violation_streak <= 20, (
+            f"Violation streak too long: {result.longest_violation_streak} "
+            f"ticks ({result.longest_violation_streak * 15} min)"
+        )
+
 
 # ── Scenario 2: Bunkroom Slow Learner ────────────────────────────────────
 
@@ -207,6 +248,28 @@ class TestBunkroomSlowLearner:
         assert abs(od) < 2.0, (
             f"outdoor_delta diverged: {od:.3f}"
         )
+
+    def test_comfort_above_80_pct(self):
+        """Room should be within deadband ≥80% of the time."""
+        config = self._make_config(n_days=30)
+        result = run_full_stack(config)
+
+        assert result.comfort_hours_pct >= 80.0, (
+            f"Comfort only {result.comfort_hours_pct:.1f}% "
+            f"(cold={result.cold_violations}, warm={result.warm_violations})"
+        )
+
+    def test_cold_violations_dominate(self):
+        """In heating mode, cold violations should outnumber warm."""
+        config = self._make_config(n_days=30)
+        result = run_full_stack(config)
+
+        # Warm violations in heating mode suggest overshoot or wrong FF sign
+        if result.total_violations > 10:
+            assert result.cold_violations >= result.warm_violations, (
+                f"Unexpected warm dominance in heating: "
+                f"cold={result.cold_violations}, warm={result.warm_violations}"
+            )
 
 
 # ── Scenario 3: Q-Feedback Convergence ───────────────────────────────────
