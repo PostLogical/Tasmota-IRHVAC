@@ -188,20 +188,23 @@ def check_feature_diversity(
     min_activity_pct: float,
     min_observations: int,
     model_inputs: list[dict[str, Any]] | None = None,
+    model_input_start: int = 2,
 ) -> tuple[str, str, str] | None:
     """Check observation buffer feature diversity.
 
     Args:
         model_inputs: model input config dicts, used to resolve entity_ids
             for raw_readings lookup.  Required for v2 observations.
+        model_input_start: first feature index that is a model input
+            (skips intercept, outdoor_delta, and any automatic features).
     """
     total_obs = len(observations)
     if total_obs < min_observations:
         return None
     m_inputs = model_inputs or []
     starved: list[str] = []
-    for j in range(2, n_features):  # skip intercept & outdoor_delta
-        input_idx = j - 2
+    for j in range(model_input_start, n_features):
+        input_idx = j - model_input_start
         name = feature_names[j] if j < len(feature_names) else f"feature_{j}"
         entity_id = m_inputs[input_idx].get("entity_id", "") if input_idx < len(m_inputs) else ""
         active = sum(

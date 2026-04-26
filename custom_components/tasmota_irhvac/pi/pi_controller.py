@@ -117,7 +117,7 @@ from ..const import (
 from ..const import DEFAULT_RLS_P_INIT
 from .rls_model import RLSModel
 from .pi_stored_data import PIExtraStoredData
-from .model_input_manager import ModelInputManager
+from .model_input_manager import FeatureLayout, FeatureSpec, ModelInputManager
 from .health_checks import (
     check_comfort,
     check_feature_diversity,
@@ -364,71 +364,77 @@ class PIController:
                 "suppress_learning": True,  # Learning deferred per research
                 "_auto_supplemental": True,  # Internal flag for filtering
             })
-        # Outdoor delta is always the first model input (index 1, after intercept)
-        # Other model inputs follow in order of _model_inputs list
-        self._n_model_inputs = 1 + len(self._model_inputs)  # outdoor_delta + configured inputs
-
-        # Build seed coefficients and clamps
-        # Index 0: intercept (direct baseline offset, no negation)
-        # Index 1: outdoor_delta (β = -seed, since warming → HP backs off)
-        # Index 2+: model inputs in order
+        # ── Feature layout: single source of truth for vector structure ──
         # Convention: user-facing seeds are positive for "warms room".
         # Internal β = -seed (HP backs off when source warms room).
         # Intercept is not directional — stored as-is.
-        self._heat_seeds = [self._intercept_seed_heat, -self._outdoor_seed_heat]
-        self._cool_seeds = [self._intercept_seed_cool, -self._outdoor_seed_cool]
-        # Clamp in internal β space: seed (0, 2) → β (-2, 0)
         thermal_clamp_min = config.get(CONF_PI_OUTDOOR_SEED_CLAMP_MIN, DEFAULT_PI_OUTDOOR_SEED_CLAMP_MIN)
         thermal_clamp_max = config.get(CONF_PI_OUTDOOR_SEED_CLAMP_MAX, DEFAULT_PI_OUTDOOR_SEED_CLAMP_MAX)
         beta_clamp = (-thermal_clamp_max, -thermal_clamp_min)
-        self._rls_heat_clamps: list[tuple[float, float] | None] = [None, beta_clamp]
-        self._rls_cool_clamps: list[tuple[float, float] | None] = [None, beta_clamp]
+        specs: list[FeatureSpec] = [
+            FeatureSpec(
+                name="intercept", role="intercept",
+                seed_heat=self._intercept_seed_heat,
+                seed_cool=self._intercept_seed_cool,
+                clamp=None, scale=1.0, frozen_at_init=False,
+            ),
+            FeatureSpec(
+                name="outdoor_delta", role="outdoor_delta",
+                seed_heat=-self._outdoor_seed_heat,
+                seed_cool=-self._outdoor_seed_cool,
+                clamp=beta_clamp, scale=13.0, frozen_at_init=False,
+            ),
+        ]
         for m_input in self._model_inputs:
-            self._heat_seeds.append(-float(m_input.get("seed_heat", 0.0)))
-            self._cool_seeds.append(-float(m_input.get("seed_cool", 0.0)))
             clamp_min = m_input.get("clamp_min")
             clamp_max = m_input.get("clamp_max")
-            # Clamps are in seed space (positive = warms room).
-            # Internal β = -seed, so negate and flip.
-            # Either side can be set independently; missing side → ±inf.
-            clamp: tuple[float, float] | None
+            mi_clamp: tuple[float, float] | None
             if clamp_min is not None or clamp_max is not None:
                 seed_lo = float(clamp_min) if clamp_min is not None else -math.inf
                 seed_hi = float(clamp_max) if clamp_max is not None else math.inf
-                clamp = (-seed_hi, -seed_lo)
+                mi_clamp = (-seed_hi, -seed_lo)
             else:
-                clamp = None
-            self._rls_heat_clamps.append(clamp)
-            self._rls_cool_clamps.append(clamp)
+                mi_clamp = None
+            specs.append(FeatureSpec(
+                name=m_input.get("name", f"input_{len(specs) - 2}"),
+                role="model_input",
+                seed_heat=-float(m_input.get("seed_heat", 0.0)),
+                seed_cool=-float(m_input.get("seed_cool", 0.0)),
+                clamp=mi_clamp,
+                scale=float(m_input.get("typical_value", 0.5)),
+                frozen_at_init=True,
+            ))
+        self._features = FeatureLayout(specs)
 
-        # Feature scales = expected σ of each feature (van der Sluis 1969,
-        # Haykin Adaptive Filter Theory §13). Normalizes features to O(1)
-        # for balanced P-matrix conditioning and learning rates.
-        # intercept=1.0, outdoor_delta σ ≈ range/4 ≈ 50/4 ≈ 13, model inputs ~0.5
-        self._feature_scales = [1.0, 13.0]
-        for m_input in self._model_inputs:
-            self._feature_scales.append(float(m_input.get("typical_value", 0.5)))
+        # Legacy aliases — kept during refactor so downstream reads still work.
+        # These are read-only views derived from FeatureLayout.
+        self._heat_seeds = self._features.seeds("heat")
+        self._cool_seeds = self._features.seeds("cool")
+        self._rls_heat_clamps = self._features.clamps()
+        self._rls_cool_clamps = self._features.clamps()
+        self._feature_scales = self._features.scales
+        self._n_model_inputs = self._features.n_inputs
 
         # RLS models (separate for heating and cooling)
         self._rls_heat = RLSModel(
-            n_inputs=self._n_model_inputs,
+            n_inputs=self._features.n_inputs,
             seed_coefficients=self._heat_seeds,
             coeff_clamps=self._rls_heat_clamps,
             feature_scales=self._feature_scales,
         )
         self._rls_cool = RLSModel(
-            n_inputs=self._n_model_inputs,
+            n_inputs=self._features.n_inputs,
             seed_coefficients=self._cool_seeds,
             coeff_clamps=self._rls_cool_clamps,
             feature_scales=self._feature_scales,
         )
 
-        # Cold start: freeze model input features (index 2+) until batch
-        # WLS establishes per-feature confidence.  Intercept (0) and
-        # outdoor_delta (1) are always identifiable from base regression.
-        for i in range(2, self._rls_heat.n):
-            self._rls_heat.frozen[i] = True
-            self._rls_cool.frozen[i] = True
+        # Cold start: freeze features marked frozen_at_init (model inputs).
+        # Intercept and outdoor_delta are always identifiable from base regression.
+        for i, frozen in enumerate(self._features.frozen_mask()):
+            if frozen:
+                self._rls_heat.frozen[i] = True
+                self._rls_cool.frozen[i] = True
 
         # Model input runtime state (values, lag filters, outdoor temp)
         self._inputs = ModelInputManager(
@@ -809,9 +815,7 @@ class PIController:
                 # No frozen_features → estimates everything
             )
 
-        coeff_names = ["intercept", "outdoor_delta"]
-        for m in self._model_inputs:
-            coeff_names.append(m.get("name", "input"))
+        coeff_names = self._features.names
 
         compare_and_report(
             result, current_phys, coeff_names,
@@ -1057,9 +1061,7 @@ class PIController:
         # Compute per-variable variance decomposition to identify which
         # features share ill-conditioned components.  Cached for the
         # multicollinearity repair check.
-        coeff_names_vdp = ["intercept", "outdoor_delta"]
-        for m in self._model_inputs:
-            coeff_names_vdp.append(m.get("name", "input"))
+        coeff_names_vdp = self._features.names
         eligible = [
             o for o in observations
             if o.clamped_reason not in ("no_output", "clamped")
@@ -1132,9 +1134,7 @@ class PIController:
         >= drift_threshold consecutive cycles.
         """
         drifting = []
-        coeff_names = ["intercept", "outdoor_delta"]
-        for m in self._model_inputs:
-            coeff_names.append(m.get("name", "input"))
+        coeff_names = self._features.names
 
         for i, history in enumerate(self._drift_correction_signs):
             if len(history) < self._drift_threshold:
@@ -1595,9 +1595,7 @@ class PIController:
         if not self._pi_enabled:
             return {}
         # RLS coefficient names
-        coeff_names = ["intercept", "outdoor_delta"]
-        for m_input in self._model_inputs:
-            coeff_names.append(m_input.get("name", "unknown"))
+        coeff_names = self._features.names
 
         # Convert from normalized to physical units for display
         heat_phys = self._rls_heat.get_coefficients()
@@ -1706,24 +1704,23 @@ class PIController:
                 )
 
     def _coeff_names(self) -> list[str]:
-        """Build coefficient name list: intercept, outdoor_delta, then model inputs."""
-        names = ["intercept", "outdoor_delta"]
-        for m in self._model_inputs:
-            names.append(m.get("name", "input"))
-        return names
+        """Return coefficient name list from FeatureLayout."""
+        return self._features.names
 
     def _coeff_role(self, index: int) -> str:
         """Map coefficient index to its input_role string.
 
-        Returns "intercept" (0), "outdoor_delta" (1), or the model input's
-        input_role config value (2+).  Default role is "other".
+        Returns the FeatureLayout role for base features, or the model
+        input's input_role config value for model_input features.
+        Out-of-range indices return "other" (defensive).
         """
-        if index == 0:
-            return "intercept"
-        if index == 1:
-            return "outdoor_delta"
-        m_idx = index - 2
-        if m_idx < len(self._model_inputs):
+        if index < 0 or index >= self._features.n:
+            return "other"
+        role = self._features.role(index)
+        if role != "model_input":
+            return role
+        m_idx = index - self._features.model_input_start
+        if 0 <= m_idx < len(self._model_inputs):
             return str(self._model_inputs[m_idx].get("input_role", "other"))
         return "other"
 
@@ -1969,16 +1966,17 @@ class PIController:
 
         frozen_names = []
         active_names = []
-        # Only track model inputs (2+) for learning state; intercept and
-        # outdoor_delta are never frozen by auto-gating.
-        for i in range(2, n):
+        # Only track model inputs for learning state; base features
+        # (intercept, outdoor_delta, etc.) are never frozen by auto-gating.
+        mi_start = self._features.model_input_start
+        for i in range(mi_start, n):
             name = coeff_names[i] if i < len(coeff_names) else f"β{i}"
             if rls.frozen[i]:
                 frozen_names.append(name)
             else:
                 active_names.append(name)
 
-        n_model = n - 2  # Model input features only
+        n_model = n - mi_start  # Model input features only
         n_frozen = len(frozen_names)
         if not self._control_active:
             state = "Observing"
@@ -2302,8 +2300,9 @@ class PIController:
             stats["max_size"] = buf._max_size
             n_features = buf.n_features
             feature_active: dict[str, int] = {}
-            for j in range(2, n_features):
-                input_idx = j - 2
+            mi_start = self._features.model_input_start
+            for j in range(mi_start, n_features):
+                input_idx = j - mi_start
                 name = coeff_names[j] if j < len(coeff_names) else f"feature_{j}"
                 entity_id = self._model_inputs[input_idx].get("entity_id", "") if input_idx < len(self._model_inputs) else ""
                 feature_active[name] = sum(
@@ -2352,20 +2351,23 @@ class PIController:
 
         # FF decomposition: per-feature breakdown of current ff_offset.
         ff_contribs: dict[str, Any] = {}
+        mi_start = self._features.model_input_start
         for i, name in enumerate(coeff_names):
             coef = round(heat_phys[i], 4) if i < len(heat_phys) else 0.0
-            if i == 0:
-                filtered_val = 1.0  # intercept
-            elif i == 1:
-                # outdoor_delta = outdoor_temp - desired_temp (exogenous)
+            role = self._features.role(i)
+            if role == "intercept":
+                filtered_val = 1.0
+            elif role == "outdoor_delta":
                 desired_c = self.desired_temp_celsius
                 if self._inputs.outdoor_temp is not None and desired_c is not None:
                     filtered_val = round(self._inputs.outdoor_temp - desired_c, 4)
                 else:
                     filtered_val = 0.0
-            else:
-                input_idx = i - 2
+            elif role == "model_input":
+                input_idx = i - mi_start
                 filtered_val = round(self._inputs.filtered[input_idx], 4) if input_idx < len(self._inputs.filtered) else 0.0
+            else:
+                filtered_val = 0.0  # placeholder for features without runtime state
             contribution = round(coef * filtered_val, 4)
             ff_contribs[name] = {
                 "coef": coef,
@@ -2765,9 +2767,7 @@ class PIController:
                 continue
             coeffs = rls_model.get_coefficients()
             p_diag = rls_model.get_covariance_diagonal()
-            coeff_names = ["intercept", "outdoor_delta"]
-            for m in self._model_inputs:
-                coeff_names.append(m.get("name", "input"))
+            coeff_names = self._features.names
 
             for i in range(1, rls_model.n):  # skip intercept (no clamp)
                 clamp = clamps[i] if i < len(clamps) else None
@@ -2818,9 +2818,7 @@ class PIController:
             coeffs = rls_model.get_coefficients()
             p_diag = rls_model.get_covariance_diagonal()
             intercept = coeffs.get(0, 0.0)
-            coeff_names = ["intercept", "outdoor_delta"]
-            for m in self._model_inputs:
-                coeff_names.append(m.get("name", "input"))
+            coeff_names = self._features.names
 
             coeff_tuples = []
             for i in range(1, rls_model.n):
@@ -2858,9 +2856,7 @@ class PIController:
             is_heating_active = self._entity._attr_hvac_mode in (HVACMode.HEAT, HVACMode.HEAT_COOL, None)
             active_rls = self._rls_heat if is_heating_active else self._rls_cool
             active_coeffs = active_rls.get_coefficients()
-            coeff_names_list = ["intercept", "outdoor_delta"]
-            for m in self._model_inputs:
-                coeff_names_list.append(m.get("name", "input"))
+            coeff_names_list = self._features.names
 
             n = min(
                 len(self._drift_correction_signs),
@@ -2924,9 +2920,7 @@ class PIController:
         mc_buffer = self._observation_buffer_heat if is_heating_mc else self._observation_buffer_cool
         if len(mc_buffer) >= 20:
             cond_num = mc_buffer.compute_condition_number()
-            coeff_names_mc = ["intercept", "outdoor_delta"]
-            for m in self._model_inputs:
-                coeff_names_mc.append(m.get("name", "input"))
+            coeff_names_mc = self._features.names
             corr_pairs = mc_buffer.get_pairwise_correlations(coeff_names_mc, include_top=True)
 
             counter_key = "multicollinearity"
@@ -3148,9 +3142,7 @@ class PIController:
 
         checks.extend(check_model_drift(self.get_drifting_coefficients()))
 
-        feature_names = ["intercept", "outdoor_delta"]
-        for m in self._model_inputs:
-            feature_names.append(m.get("name", "input"))
+        feature_names = self._features.names
         active_buf = self._active_buffer
         checks.append(check_feature_diversity(
             active_buf.get_all(),
@@ -3159,6 +3151,7 @@ class PIController:
             self.HEALTH_FEATURE_DIVERSITY_MIN,
             self.HEALTH_FEATURE_DIVERSITY_MIN_OBS,
             model_inputs=self._model_inputs,
+            model_input_start=self._features.model_input_start,
         ))
 
         # Assemble results — highest severity wins
@@ -3344,9 +3337,7 @@ class PIController:
         n = self._rls_heat.n  # same for both models
 
         if mode in (None, "heat"):
-            heat_seeds = [self._intercept_seed_heat, -self._outdoor_seed_heat]
-            for m_input in self._model_inputs:
-                heat_seeds.append(-float(m_input.get("seed_heat", 0.0)))
+            heat_seeds = self._features.seeds("heat")
             heat_norm = [
                 heat_seeds[i] * self._feature_scales[i] if i < len(heat_seeds) else 0.0
                 for i in range(n)
@@ -3357,15 +3348,14 @@ class PIController:
                     self._rls_heat.P[i * n + j] = DEFAULT_RLS_P_INIT if i == j else 0.0
             self._rls_heat.observation_count = 0
             self._rls_heat_mature = False
-            # Seed reset re-freezes model input features (confidence invalidated)
-            for i in range(2, n):
-                self._rls_heat.frozen[i] = True
+            # Seed reset re-freezes features marked frozen_at_init
+            for i, frozen in enumerate(self._features.frozen_mask()):
+                if frozen:
+                    self._rls_heat.frozen[i] = True
             self._manual_override_heat = [None] * n
 
         if mode in (None, "cool"):
-            cool_seeds = [self._intercept_seed_cool, -self._outdoor_seed_cool]
-            for m_input in self._model_inputs:
-                cool_seeds.append(-float(m_input.get("seed_cool", 0.0)))
+            cool_seeds = self._features.seeds("cool")
             cool_norm = [
                 cool_seeds[i] * self._feature_scales[i] if i < len(cool_seeds) else 0.0
                 for i in range(n)
@@ -3376,9 +3366,10 @@ class PIController:
                     self._rls_cool.P[i * n + j] = DEFAULT_RLS_P_INIT if i == j else 0.0
             self._rls_cool.observation_count = 0
             self._rls_cool_mature = False
-            # Seed reset re-freezes model input features (confidence invalidated)
-            for i in range(2, n):
-                self._rls_cool.frozen[i] = True
+            # Seed reset re-freezes features marked frozen_at_init
+            for i, frozen in enumerate(self._features.frozen_mask()):
+                if frozen:
+                    self._rls_cool.frozen[i] = True
             self._manual_override_cool = [None] * n
 
     async def async_reset_ff_seeds(self, mode: str | None = None) -> None:
