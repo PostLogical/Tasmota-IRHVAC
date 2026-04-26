@@ -11,6 +11,7 @@ from __future__ import annotations
 import datetime as _dt
 import logging
 import math
+from dataclasses import dataclass
 from typing import Any
 
 from homeassistant.util.unit_conversion import TemperatureConverter
@@ -43,6 +44,90 @@ def tod_features(wall_time: float | None) -> tuple[float, float]:
     hour_frac = dt.hour + dt.minute / 60.0 + dt.second / 3600.0
     angle = _TWO_PI_OVER_24 * hour_frac
     return math.sin(angle), math.cos(angle)
+
+
+# ── Feature layout: single source of truth for feature vector structure ───
+
+
+@dataclass(frozen=True)
+class FeatureSpec:
+    """Metadata for one element of the feature vector.
+
+    Seeds and clamps are in **internal β space** (already negated from
+    user-facing seed convention where positive = warms room).
+    """
+
+    name: str
+    role: str  # "intercept", "outdoor_delta", "time_of_day", "model_input"
+    seed_heat: float
+    seed_cool: float
+    clamp: tuple[float, float] | None
+    scale: float
+    frozen_at_init: bool
+
+
+class FeatureLayout:
+    """Single source of truth for feature vector layout.
+
+    Built once per PIController lifetime; every consumer reads from here
+    instead of reconstructing names/seeds/clamps/scales ad-hoc.
+    """
+
+    def __init__(self, specs: list[FeatureSpec]) -> None:
+        self._specs = list(specs)
+
+    @property
+    def n(self) -> int:
+        """Total feature count including intercept."""
+        return len(self._specs)
+
+    @property
+    def n_inputs(self) -> int:
+        """Feature count excluding intercept (for RLSModel n_inputs)."""
+        return len(self._specs) - 1
+
+    @property
+    def names(self) -> list[str]:
+        return [s.name for s in self._specs]
+
+    def seeds(self, mode: str) -> list[float]:
+        """Return seed list in internal β space for the given mode."""
+        if mode == "cool":
+            return [s.seed_cool for s in self._specs]
+        return [s.seed_heat for s in self._specs]
+
+    def clamps(self) -> list[tuple[float, float] | None]:
+        return [s.clamp for s in self._specs]
+
+    @property
+    def scales(self) -> list[float]:
+        return [s.scale for s in self._specs]
+
+    def role(self, index: int) -> str:
+        if 0 <= index < len(self._specs):
+            return self._specs[index].role
+        return "other"
+
+    def frozen_mask(self) -> list[bool]:
+        return [s.frozen_at_init for s in self._specs]
+
+    @property
+    def model_input_start(self) -> int:
+        """First index that is a user-configured model input."""
+        for i, s in enumerate(self._specs):
+            if s.role == "model_input":
+                return i
+        return len(self._specs)
+
+    def model_input_index(self, feature_index: int) -> int:
+        """Map a feature vector index to its position in the model_inputs config list.
+
+        Raises IndexError if the feature_index is not a model_input.
+        """
+        offset = feature_index - self.model_input_start
+        if offset < 0:
+            raise IndexError(f"Feature {feature_index} is not a model_input")
+        return offset
 
 
 
