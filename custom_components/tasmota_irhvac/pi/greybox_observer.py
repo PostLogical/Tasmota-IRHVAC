@@ -69,9 +69,11 @@ UA_C_BOUNDS = (0.001, 0.1)  # min⁻¹
 # Similar magnitude to ua_c for a well-sized HP.
 K_C_BOUNDS = (0.001, 0.2)  # min⁻¹
 
-# α_c = α_solar/C.  Negative because solar reduces room_rate deficit.
+# α_c = α_solar/C.  Positive because solar adds heat to the room.
+# In the rate equation: room_rate = ua_c*(T_out-T_air) + k_c*hp + α_c*solar
+# Higher solar → faster warming → α_c > 0.
 # Magnitude depends on solar proxy scaling and C.
-ALPHA_C_BOUNDS = (-1.0, 0.0)  # °C/min per unit solar proxy
+ALPHA_C_BOUNDS = (0.0, 1.0)  # °C/min per unit solar proxy
 
 # Minimum observations required for a meaningful fit.
 MIN_OBSERVATIONS = 30
@@ -234,7 +236,7 @@ def fit_greybox(
                     - alpha_c * solar[i]
                     for i in range(m)
                 ]
-            x0 = [0.01, -0.05]
+            x0 = [0.01, 0.05]
             lower = [UA_C_BOUNDS[0], ALPHA_C_BOUNDS[0]]
             upper = [UA_C_BOUNDS[1], ALPHA_C_BOUNDS[1]]
             param_names = ["ua_c", "alpha_c"]
@@ -262,7 +264,7 @@ def fit_greybox(
                     - alpha_c * solar[i]
                     for i in range(m)
                 ]
-            x0 = [0.01, 0.02, -0.05]
+            x0 = [0.01, 0.02, 0.05]
             lower = [UA_C_BOUNDS[0], K_C_BOUNDS[0], ALPHA_C_BOUNDS[0]]
             upper = [UA_C_BOUNDS[1], K_C_BOUNDS[1], ALPHA_C_BOUNDS[1]]
             param_names = ["ua_c", "k_c", "alpha_c"]
@@ -483,7 +485,7 @@ def _check_quality_gates(
     # Gate 3: physical plausibility
     gates["tau_plausible"] = GATE_MIN_TAU <= result.tau_eff <= GATE_MAX_TAU
     gates["k_c_positive"] = result.k_c > 0
-    gates["alpha_c_nonpositive"] = result.alpha_c <= 0.0 or "alpha_c" not in se
+    gates["alpha_c_nonnegative"] = result.alpha_c >= 0.0 or "alpha_c" not in se
 
     # Gate 4: residual quality
     gates["residual_rms"] = result.residual_rms < GATE_MAX_RMS

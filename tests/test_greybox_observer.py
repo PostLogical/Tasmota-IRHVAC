@@ -61,7 +61,7 @@ class TestFitGreybox:
     # True rate coefficients: UA/C=0.3/50, K/C=1/50, α/C=-2/50
     UA_C_TRUE = 0.006
     K_C_TRUE = 0.02
-    ALPHA_C_TRUE = -0.04
+    ALPHA_C_TRUE = 0.04
 
     def _generate_observations(
         self,
@@ -192,7 +192,7 @@ class TestFitGreybox:
         """GreyboxResult.as_dict produces serializable output."""
         result = GreyboxResult(
             n_observations=100, n_hp_on=60, n_hp_off=40,
-            ua_c=0.006, k_c=0.02, alpha_c=-0.04,
+            ua_c=0.006, k_c=0.02, alpha_c=0.04,
             tau_eff=166.7, residual_rms=0.005,
             cost=0.5, n_function_evals=10,
             plant_tau_slow=170.0, tau_agreement_pct=2.0,
@@ -207,7 +207,7 @@ class TestFitGreybox:
         """log_greybox_result should log without errors."""
         result = GreyboxResult(
             n_observations=100, n_hp_on=60, n_hp_off=40,
-            ua_c=0.006, k_c=0.02, alpha_c=-0.04,
+            ua_c=0.006, k_c=0.02, alpha_c=0.04,
             tau_eff=166.7, residual_rms=0.005,
             cost=0.5, n_function_evals=10,
             plant_tau_slow=170.0, tau_agreement_pct=2.0,
@@ -256,7 +256,7 @@ def _make_result(**overrides) -> GreyboxResult:
     """Build a GreyboxResult with sensible defaults, overridable."""
     defaults = dict(
         n_observations=200, n_hp_on=120, n_hp_off=80,
-        ua_c=0.006, k_c=0.02, alpha_c=-0.04,
+        ua_c=0.006, k_c=0.02, alpha_c=0.04,
         tau_eff=166.7, residual_rms=0.005,
         cost=0.5, n_function_evals=10,
         param_std_err={"ua_c": 0.001, "k_c": 0.003, "alpha_c": 0.005},
@@ -316,14 +316,14 @@ class TestQualityGates:
         gates = _check_quality_gates(result)
         assert not gates["k_c_positive"]
 
-    def test_alpha_c_positive_fails(self):
-        """Positive α_c means solar cools the building — wrong sign."""
+    def test_alpha_c_negative_fails(self):
+        """Negative α_c means solar cools the building — wrong sign."""
         result = _make_result(
-            alpha_c=0.01,
+            alpha_c=-0.01,
             param_std_err={"ua_c": 0.001, "k_c": 0.003, "alpha_c": 0.005},
         )
         gates = _check_quality_gates(result)
-        assert not gates["alpha_c_nonpositive"]
+        assert not gates["alpha_c_nonnegative"]
 
     def test_alpha_c_gate_skipped_without_solar(self):
         """No solar fit → α_c gate not checked."""
@@ -332,7 +332,7 @@ class TestQualityGates:
             param_std_err={"ua_c": 0.001, "k_c": 0.003},
         )
         gates = _check_quality_gates(result)
-        assert "alpha_c_nonpositive" not in gates or gates["alpha_c_nonpositive"]
+        assert "alpha_c_nonnegative" not in gates or gates["alpha_c_nonnegative"]
 
     def test_residual_rms_fails(self):
         """High residual → poor model fit."""
@@ -359,11 +359,11 @@ class TestGreyboxToBeta:
 
     def test_solar_mapping(self):
         """β for solar input = -α_c/k_c."""
-        result = _make_result(ua_c=0.006, k_c=0.02, alpha_c=-0.04)
+        result = _make_result(ua_c=0.006, k_c=0.02, alpha_c=0.04)
         bridge = greybox_to_beta(result, model_inputs=[self.SOLAR_INPUT])
-        # β₂ = -(-0.04)/0.02 = 2.0
+        # β₂ = -(0.04)/0.02 = -2.0  (solar warms room → HP backs off)
         assert bridge.beta[2] is not None
-        assert abs(bridge.beta[2] - 2.0) < 1e-10
+        assert abs(bridge.beta[2] - (-2.0)) < 1e-10
 
     def test_non_solar_input_gets_none(self):
         """Non-solar model inputs get None (grey-box doesn't identify them)."""
@@ -427,7 +427,7 @@ class TestGreyboxToBeta:
 
     def test_multiple_model_inputs_only_solar_mapped(self):
         """With mixed inputs, only solar role gets a β value."""
-        result = _make_result(alpha_c=-0.04)
+        result = _make_result(alpha_c=0.04)
         bridge = greybox_to_beta(
             result,
             model_inputs=[self.STOVE_INPUT, self.SOLAR_INPUT],
@@ -435,7 +435,7 @@ class TestGreyboxToBeta:
         # stove (index 2) → None, solar (index 3) → mapped
         assert bridge.beta[2] is None
         assert bridge.beta[3] is not None
-        assert abs(bridge.beta[3] - (-(-0.04) / 0.02)) < 1e-10
+        assert abs(bridge.beta[3] - (-(0.04) / 0.02)) < 1e-10  # -2.0
 
     def test_as_dict_serializable(self):
         """Bridge result should be JSON-serializable."""
@@ -464,7 +464,7 @@ class TestGreyboxBridgeEndToEnd:
 
     UA_C_TRUE = 0.006
     K_C_TRUE = 0.02
-    ALPHA_C_TRUE = -0.04
+    ALPHA_C_TRUE = 0.04
 
     def _generate_observations(self, n: int = 500) -> list[Observation]:
         """Same synthetic data as TestFitGreybox."""
@@ -525,9 +525,9 @@ class TestGreyboxBridgeEndToEnd:
         assert bridge.beta[1] is not None
         assert abs(bridge.beta[1] - (-0.3)) < 0.1
 
-        # β₂ (solar) ≈ 2.0
+        # β₂ (solar) ≈ -2.0  (solar warms room → HP backs off)
         assert bridge.beta[2] is not None
-        assert abs(bridge.beta[2] - 2.0) < 0.5
+        assert abs(bridge.beta[2] - (-2.0)) < 0.5
 
         # Std errors should be finite and reasonable
         assert bridge.beta_std_err[1] < 0.5
