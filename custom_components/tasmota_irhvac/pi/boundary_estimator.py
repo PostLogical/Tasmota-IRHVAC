@@ -378,31 +378,60 @@ class BoundaryEstimator:
         solar_vals: np.ndarray,
         room_rates: np.ndarray,
     ) -> list[tuple[float, float, float]]:
-        """Sweep candidate breakpoints, return [(bp, rms, k_c), ...]."""
+        """Sweep candidate breakpoints using split-model OLS.
+
+        For each candidate bp, fit SEPARATE models on each side:
+          Left (delta < bp):  room_rate = c0 + ua_c*od + k_c*hp_offset + a*solar
+          Right (delta >= bp): room_rate = c0 + ua_c*od + a*solar  (no HP term)
+
+        The split model allows different intercepts for HP-on and HP-off
+        regimes, which removes PI-induced systematic biases that confound
+        the single-model approach.
+
+        Returns [(bp, combined_rms, k_c), ...].
+        """
         n = len(deltas)
+        hp_offset = hp_setpoints - room_temps
         results: list[tuple[float, float, float]] = []
 
         for bp in candidates:
-            # Assign hp_offset based on candidate boundary
-            hp_on_mask = deltas < bp
-            hp_offset = np.where(
-                hp_on_mask,
-                hp_setpoints - room_temps,  # HP on: actual offset
-                0.0,  # HP off
-            )
+            left = deltas < bp
+            right = ~left
+            n_l, n_r = int(left.sum()), int(right.sum())
+            if n_l < self._min_per_side or n_r < self._min_per_side:
+                continue
 
-            # OLS: room_rate = c0 + ua_c*od + k_c*hp_offset + alpha_c*solar
-            X = np.column_stack([
-                np.ones(n), outdoor_deltas, hp_offset, solar_vals,
+            # Left model: with HP term
+            X_l = np.column_stack([
+                np.ones(n_l), outdoor_deltas[left],
+                hp_offset[left], solar_vals[left],
             ])
             try:
-                beta, _, _, _ = np.linalg.lstsq(X, room_rates, rcond=None)
-                predicted = X @ beta
-                rms = float(np.sqrt(np.mean((room_rates - predicted) ** 2)))
-                k_c = float(beta[2])
-                results.append((float(bp), rms, k_c))
+                beta_l, _, _, _ = np.linalg.lstsq(
+                    X_l, room_rates[left], rcond=None,
+                )
+                rms_l = np.mean((room_rates[left] - X_l @ beta_l) ** 2)
+                k_c = float(beta_l[2])
             except np.linalg.LinAlgError:
                 continue
+
+            # Right model: no HP term
+            X_r = np.column_stack([
+                np.ones(n_r), outdoor_deltas[right], solar_vals[right],
+            ])
+            try:
+                beta_r, _, _, _ = np.linalg.lstsq(
+                    X_r, room_rates[right], rcond=None,
+                )
+                rms_r = np.mean((room_rates[right] - X_r @ beta_r) ** 2)
+            except np.linalg.LinAlgError:
+                continue
+
+            # Combined weighted RMS
+            combined_rms = float(
+                math.sqrt((rms_l * n_l + rms_r * n_r) / n)
+            )
+            results.append((float(bp), combined_rms, k_c))
 
         return results
 
