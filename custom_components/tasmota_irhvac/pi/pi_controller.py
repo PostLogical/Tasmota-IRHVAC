@@ -910,12 +910,12 @@ class PIController:
         )
         if be_result.confident:
             _LOGGER.info(
-                "%sBoundary estimator: breakpoint=%.2f°C, gap=%.4f, "
-                "p=%.3f, n=%d (%d/%d), bounds [%.2f, %.2f] → [%.2f, %.2f]",
+                "%sBoundary estimator: breakpoint=%.2f°C (±%.2f), "
+                "slope=%.5f, n=%d (%d/%d), bounds [%.2f, %.2f] → [%.2f, %.2f]",
                 self._log_prefix,
                 be_result.estimated_breakpoint,
-                be_result.gap_magnitude,
-                be_result.p_value or 0.0,
+                be_result.breakpoint_std_err or 0.0,
+                be_result.slope or 0.0,
                 be_result.n_observations,
                 be_result.n_left,
                 be_result.n_right,
@@ -4395,6 +4395,7 @@ class PIController:
             or _be_anomaly
             or _be_clamped
             or self._auto_perturb.offset != 0.0
+            or self._regime_probe.state in (ProbeState.BASELINE, ProbeState.PROBE)
         )
         if not _be_skip:
             # Residualize: subtract modeled environmental contribution

@@ -19,7 +19,9 @@ from __future__ import annotations
 import math
 import time as _time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Callable
+from unittest.mock import patch
 
 from tests.hvac_bench.adapters import TasmotaPIAdapter
 from tests.hvac_bench.house_profiles import PROFILES, PROFILES_2R2C
@@ -29,6 +31,8 @@ from tests.hvac_bench.thermal_model import ThermalModel2R2C
 # ── Constants ────────────────────────────────────────────────────────────
 
 TICK_MINUTES_DEFAULT = 15.0
+# Simulated wall-clock epoch: datetime corresponding to sim_clock=0.
+_SIM_EPOCH = datetime(2026, 1, 15, 0, 0, 0)
 TICKS_PER_HOUR = int(60 / TICK_MINUTES_DEFAULT)
 TICKS_PER_DAY = 24 * TICKS_PER_HOUR  # 96
 BATCH_INTERVAL_HOURS_DEFAULT = 12
@@ -244,6 +248,13 @@ class FullStackResult:
     ticks_uncertain: int  # ticks in uncertain zone (|delta| < cal band)
     ticks_hp_off: int  # ticks where HP definitely idle
     observation_yield_pct: float  # hp_on / (hp_on + uncertain) — usable fraction
+
+    # ── Boundary estimator metrics ──────────────────────────────────
+    final_cal_min: float  # final cal bound (active mode)
+    final_cal_max: float
+    boundary_updates: int  # confident boundary updates applied
+    boundary_stall_count: int
+    boundary_evidence_count: int  # observations in boundary buffer
 
     # ── Setpoint behavior metrics ────────────────────────────────────
     # We send IR setpoints to the HP's thermostat; we don't control the
@@ -556,8 +567,27 @@ def run_full_stack(
             _mock_states[mi.entity_id] = ms
         pi._hass.states.get = lambda eid, _s=_mock_states: _s.get(eid)
 
+        # Mock time.monotonic to sim clock.  Also advance CUSUM
+        # cooldown to sim time — the PI controller uses datetime.now()
+        # for cooldowns, which doesn't advance in fast-sim mode.
+        _sim_dt = _SIM_EPOCH + timedelta(seconds=adapter._sim_clock)
         original = _time.monotonic
         _time.monotonic = lambda: adapter._sim_clock
+        # Patch CUSUM cooldown: if set, re-anchor to sim time
+        if pi._cusum_cooldown_until is not None:
+            # Cooldown was set at some sim time.  Check if enough sim time
+            # has passed by comparing sim_dt against the cooldown target.
+            # On first alarm, we replace the wall-clock cooldown with a
+            # sim-time cooldown so future checks against datetime.now()
+            # (which is wall-clock) expire correctly.
+            if not hasattr(pi, '_cusum_cooldown_sim_end'):
+                # First time seeing a cooldown — record when it should end
+                # in sim time (30 min from now in sim).
+                from custom_components.tasmota_irhvac.pi.health_checks import CUSUM_COOLDOWN_SEC
+                pi._cusum_cooldown_sim_end = adapter._sim_clock + CUSUM_COOLDOWN_SEC
+            if adapter._sim_clock >= pi._cusum_cooldown_sim_end:
+                pi._cusum_cooldown_until = None
+                del pi._cusum_cooldown_sim_end
         try:
             adapter._loop.run_until_complete(pi._pi_tick())
         finally:
@@ -892,6 +922,14 @@ def run_full_stack(
         ticks_uncertain=ticks_uncertain,
         ticks_hp_off=ticks_hp_off,
         observation_yield_pct=obs_yield_pct,
+        # Boundary estimator
+        final_cal_min=(pi._head_calibration_min_heat if config.mode == "heat"
+                       else pi._head_calibration_min_cool),
+        final_cal_max=(pi._head_calibration_max_heat if config.mode == "heat"
+                       else pi._head_calibration_max_cool),
+        boundary_updates=pi._boundary_estimator.updates_applied,
+        boundary_stall_count=pi._boundary_estimator.stall_count,
+        boundary_evidence_count=len(pi._boundary_estimator._buffer),
     )
 
 
