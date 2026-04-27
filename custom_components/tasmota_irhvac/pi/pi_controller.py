@@ -129,6 +129,7 @@ from .health_checks import (
 )
 from .performance_metrics import PerformanceMetrics
 from .auto_perturbation import AutoPerturbation
+from .boundary_estimator import BoundaryEstimator
 from .regime_probe import ProbeState, RegimeProbe
 from .smith_predictor import SmithPredictor
 from .supplemental_controller import SupplementalController
@@ -245,6 +246,10 @@ class PIController:
         self._regime_probe = RegimeProbe(
             enabled=config.get(CONF_PI_AUTO_PERTURB_ENABLED, False),
         )
+
+        # Passive boundary estimation: detects HP on/off transition from
+        # residual room_rate vs delta.  Always on — works in observe-only.
+        self._boundary_estimator = BoundaryEstimator()
 
         # Derive effective Kp/Ki: IMC formula or manual config
         self._pi_kp: float = 0.0
@@ -888,6 +893,60 @@ class PIController:
                     self._pi_ki = gain_update.ki
                     self._imc_lambda = gain_update.imc_lambda
 
+        # ── Passive boundary estimation ──
+        # Use accumulated (delta, residual_rate) evidence to estimate
+        # the HP on/off transition boundary.  Updates cal_min/cal_max.
+        is_heating_batch = e._attr_hvac_mode == HVACMode.HEAT
+        be_cal_min = (
+            self._head_calibration_min_heat if is_heating_batch
+            else self._head_calibration_min_cool
+        )
+        be_cal_max = (
+            self._head_calibration_max_heat if is_heating_batch
+            else self._head_calibration_max_cool
+        )
+        be_result = self._boundary_estimator.estimate_boundary(
+            be_cal_min, be_cal_max,
+        )
+        if be_result.confident:
+            _LOGGER.info(
+                "%sBoundary estimator: breakpoint=%.2f°C, gap=%.4f, "
+                "p=%.3f, n=%d (%d/%d), bounds [%.2f, %.2f] → [%.2f, %.2f]",
+                self._log_prefix,
+                be_result.estimated_breakpoint,
+                be_result.gap_magnitude,
+                be_result.p_value or 0.0,
+                be_result.n_observations,
+                be_result.n_left,
+                be_result.n_right,
+                be_cal_min, be_cal_max,
+                be_result.new_cal_min, be_result.new_cal_max,
+            )
+            if is_heating_batch:
+                self._head_calibration_min_heat = be_result.new_cal_min
+                self._head_calibration_max_heat = be_result.new_cal_max
+            else:
+                self._head_calibration_min_cool = be_result.new_cal_min
+                self._head_calibration_max_cool = be_result.new_cal_max
+        else:
+            _LOGGER.debug(
+                "%sBoundary estimator: not confident (n=%d, stall=%d%s)",
+                self._log_prefix,
+                be_result.n_observations,
+                self._boundary_estimator.stall_count,
+                f", bp={be_result.estimated_breakpoint:.2f}"
+                if be_result.estimated_breakpoint is not None else "",
+            )
+        # If passive estimation has stalled, trigger active probe
+        if self._boundary_estimator.should_trigger_probe:
+            self._regime_probe.request_early_probe()
+            _LOGGER.info(
+                "%sBoundary estimator stalled (%d cycles), "
+                "requesting active probe",
+                self._log_prefix,
+                self._boundary_estimator.stall_count,
+            )
+
         # ── Grey-box fusion ──
         # If bridge available, gates pass, and blending enabled, fuse
         # grey-box β into the batch estimate before blending with the
@@ -1270,6 +1329,7 @@ class PIController:
             head_calibration_min_cool=self._head_calibration_min_cool,
             head_calibration_max_cool=self._head_calibration_max_cool,
             regime_probe_state=self._regime_probe.as_dict(),
+            boundary_estimator_state=self._boundary_estimator.as_dict(),
             exclusion_count=self._exclusion_count,
             auto_perturb_state=self._auto_perturb.as_dict(),
             manual_override_heat=list(self._manual_override_heat),
@@ -1385,6 +1445,8 @@ class PIController:
             )
         if data.regime_probe_state:
             self._regime_probe.restore(data.regime_probe_state)
+        if data.boundary_estimator_state:
+            self._boundary_estimator.restore(data.boundary_estimator_state)
         if (self._head_calibration_min_heat > -2.0 or self._head_calibration_max_heat < 2.0
                 or self._head_calibration_min_cool > -2.0 or self._head_calibration_max_cool < 2.0):
             _LOGGER.debug(
@@ -4317,58 +4379,42 @@ class PIController:
         else:
             self._hp_no_output_ticks = 0
 
-        # Passive calibration evidence from room_rate.  Currently log-only:
-        # the rate signal is confounded (solar, stove, adjacent zones) and
-        # now affects learning gates, not just integration.  Monitor in
-        # production before enabling.
-        # TODO: Once production logs confirm the evidence is reliable,
-        # enable cal_min/cal_max updates here.  Consider: higher tick
-        # threshold (15-20), safety margin on updates, or shrink-only
-        # (no widening from passive evidence).
-        _CAL_EVIDENCE_TICKS = 10
-        if not hp_estimated_active and self._hp_no_output_ticks >= _CAL_EVIDENCE_TICKS:
-            hp_still_on = (
-                (is_heating and self._room_temp_rate >= 0.0)
-                or (is_cooling and self._room_temp_rate <= 0.0)
+        # ── Boundary estimator: per-tick evidence accumulation ──────
+        # Feed (delta, residual_rate) to the passive boundary estimator.
+        # Gate: skip anomaly cooldown, active probe, auto-perturb, clamped.
+        _be_clamped = (
+            self._hp_setpoint <= self._min_temp_c
+            or self._hp_setpoint >= self._max_temp_c
+        )
+        _be_anomaly = (
+            self._cusum_cooldown_until is not None
+            and datetime.now() < self._cusum_cooldown_until
+        )
+        _be_skip = (
+            self._inputs.outdoor_temp is None
+            or _be_anomaly
+            or _be_clamped
+            or self._auto_perturb.offset != 0.0
+        )
+        if not _be_skip:
+            # Residualize: subtract modeled environmental contribution
+            outdoor_delta = self._inputs.outdoor_temp - current_c
+            gb = self._last_greybox_result
+            if gb is not None:
+                residual = self._room_temp_rate - (gb.c0 + gb.ua_c * outdoor_delta)
+                # Enhancement: subtract solar if available
+                for i, m_input in enumerate(self._model_inputs):
+                    if m_input.get("input_role") == "solar" and gb.alpha_c != 0.0:
+                        solar_val = self._inputs.values[i] if i < len(self._inputs.values) else 0.0
+                        if solar_val is not None:
+                            residual -= gb.alpha_c * solar_val
+                        break
+            else:
+                # Bootstrap: raw room_rate (no residualization)
+                residual = self._room_temp_rate
+            self._boundary_estimator.add_evidence(
+                current_to_setpoint_delta, residual, now_mono,
             )
-            hp_confirmed_off = (
-                (is_heating and self._room_temp_rate < 0.0)
-                or (is_cooling and self._room_temp_rate > 0.0)
-            )
-            if hp_still_on:
-                if is_heating and current_to_setpoint_delta > cal_max:
-                    _LOGGER.info(
-                        "%sHead cal passive: HP still on at %.1f°C "
-                        "(would widen cal_max %.1f→%.1f, rate=%.4f)",
-                        self._log_prefix, current_to_setpoint_delta,
-                        cal_max, current_to_setpoint_delta,
-                        self._room_temp_rate,
-                    )
-                elif not is_heating and current_to_setpoint_delta < cal_min:
-                    _LOGGER.info(
-                        "%sHead cal passive: HP still on at %.1f°C "
-                        "(would widen cal_min %.1f→%.1f, rate=%.4f)",
-                        self._log_prefix, current_to_setpoint_delta,
-                        cal_min, current_to_setpoint_delta,
-                        self._room_temp_rate,
-                    )
-            elif hp_confirmed_off:
-                if is_heating and current_to_setpoint_delta < cal_max:
-                    _LOGGER.info(
-                        "%sHead cal passive: HP off at %.1f°C "
-                        "(would shrink cal_max %.1f→%.1f, rate=%.4f)",
-                        self._log_prefix, current_to_setpoint_delta,
-                        cal_max, current_to_setpoint_delta,
-                        self._room_temp_rate,
-                    )
-                elif not is_heating and current_to_setpoint_delta > cal_min:
-                    _LOGGER.info(
-                        "%sHead cal passive: HP off at %.1f°C "
-                        "(would shrink cal_min %.1f→%.1f, rate=%.4f)",
-                        self._log_prefix, current_to_setpoint_delta,
-                        cal_min, current_to_setpoint_delta,
-                        self._room_temp_rate,
-                    )
 
         # ── Regime probe: active boundary detection ────────────────
         # Probe fires when contribution is uncertain + room is stable.
@@ -4411,6 +4457,7 @@ class PIController:
             else:
                 self._head_calibration_min_cool = new_min
                 self._head_calibration_max_cool = new_max
+            self._boundary_estimator.reset_stall()
 
         skip_integration = (
             (is_heating and self._hp_setpoint <= self._min_temp_c and error < 0)

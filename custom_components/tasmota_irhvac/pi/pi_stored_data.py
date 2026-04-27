@@ -59,6 +59,7 @@ class PIExtraStoredData(ExtraStoredData):
     head_calibration_min_cool: float = -2.0
     head_calibration_max_cool: float = 2.0
     regime_probe_state: dict[str, Any] = dataclasses.field(default_factory=dict)  # RegimeProbe.as_dict()
+    boundary_estimator_state: dict[str, Any] = dataclasses.field(default_factory=dict)  # BoundaryEstimator.as_dict()
     exclusion_count: int = 0
     auto_perturb_state: dict[str, Any] = dataclasses.field(default_factory=dict)  # AutoPerturbation.as_dict()
     manual_override_heat: list[bool | None] = dataclasses.field(default_factory=list)
@@ -111,6 +112,7 @@ class PIExtraStoredData(ExtraStoredData):
             "head_calibration_min_cool": self.head_calibration_min_cool,
             "head_calibration_max_cool": self.head_calibration_max_cool,
             "regime_probe_state": self.regime_probe_state,
+            "boundary_estimator_state": self.boundary_estimator_state,
             "exclusion_count": self.exclusion_count,
             "auto_perturb_state": self.auto_perturb_state,
             "manual_override_heat": self.manual_override_heat,
@@ -174,6 +176,7 @@ class PIExtraStoredData(ExtraStoredData):
                 head_calibration_min_cool=float(restored.get("head_calibration_min_cool", -2.0)),
                 head_calibration_max_cool=float(restored.get("head_calibration_max_cool", 2.0)),
                 regime_probe_state=restored.get("regime_probe_state", {}),
+                boundary_estimator_state=restored.get("boundary_estimator_state", {}),
                 exclusion_count=int(restored.get("exclusion_count", 0)),
                 auto_perturb_state=restored.get("auto_perturb_state", {}),
                 manual_override_heat=restored.get("manual_override_heat", []),

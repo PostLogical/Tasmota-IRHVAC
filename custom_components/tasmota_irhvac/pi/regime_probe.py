@@ -438,6 +438,15 @@ class RegimeProbe:
         """Abort any active probe and return to IDLE."""
         self._abort(reason or "external")
 
+    def request_early_probe(self) -> None:
+        """Expire cooldown so next probe can fire immediately.
+
+        Called by boundary estimator when passive estimation has stalled.
+        Only effective when in COOLDOWN state.
+        """
+        if self._state == ProbeState.COOLDOWN:
+            self._cooldown_end_mono = 0.0
+
     # ── Persistence ──────────────────────────────────────────────────
 
     def as_dict(self) -> dict[str, Any]:
