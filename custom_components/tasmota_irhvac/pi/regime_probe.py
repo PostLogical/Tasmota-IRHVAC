@@ -374,16 +374,20 @@ class RegimeProbe:
     ) -> tuple[float, float]:
         """Check evidence and return updated (cal_min, cal_max).
 
-        Call after each probe completes.  Only shrinks the band, never widens.
-        Requires SHRINK_CONFIRMATIONS probes at similar deltas.
+        Call after each probe completes.  Can shrink the band (narrow
+        toward the transition) OR shift it (when all evidence points
+        in one direction, the transition is outside the current band).
 
         Evidence types (stored as current_to_setpoint_delta at probe time):
-        - evidence_above: "HP was contributing" at this delta → transition
-          is above this delta → cal_max stays at or above here.
-          (Shrinks cal_max down toward this delta.)
-        - evidence_below: "HP was NOT contributing" at this delta →
-          transition is below this delta → cal_min stays at or below here.
-          (Shrinks cal_min up toward this delta.)
+        - evidence_above: "HP was NOT contributing" at this delta →
+          transition is below this delta → shrink cal_max down.
+        - evidence_below: "HP WAS contributing" at this delta →
+          transition is above this delta → shrink cal_min up.
+
+        Band shift: if we have SHRINK_CONFIRMATIONS "not contributing"
+        probes and ZERO "contributing" probes, the transition is below
+        the entire band.  Shift cal_min down by SHRINK_FACTOR to
+        search lower.  (Mirror logic for all-contributing.)
         """
         new_min = current_cal_min
         new_max = current_cal_max
@@ -413,6 +417,46 @@ class RegimeProbe:
                 if candidate > new_min:
                     new_min = candidate
                     self._confirmations_total += 1
+
+        # Band shift: if evidence is overwhelmingly one-sided, the
+        # transition is outside the band.  Shift the band to search.
+        # Requires a strong majority (>= 5:1 ratio) with enough probes
+        # to avoid premature shifts from noise.
+        min_for_shift = max(SHRINK_CONFIRMATIONS * 2, 4)
+        n_above = len(self._contribution_evidence_above)
+        n_below = len(self._contribution_evidence_below)
+        total = n_above + n_below
+        shifted = False
+        if total >= min_for_shift:
+            ratio_no_hp = n_above / max(total, 1)
+            ratio_has_hp = n_below / max(total, 1)
+            if ratio_no_hp >= 0.8 and n_above >= min_for_shift:
+                # Overwhelmingly no HP → boundary is below band
+                shift = SHRINK_FACTOR * (current_cal_max - current_cal_min)
+                new_min = current_cal_min - shift
+                new_max = current_cal_max - shift
+                shifted = True
+                _LOGGER.info(
+                    "Regime probe: band shifted down by %.1f°C "
+                    "(%d/%d probes 'no HP')",
+                    shift, n_above, total,
+                )
+            elif ratio_has_hp >= 0.8 and n_below >= min_for_shift:
+                # Overwhelmingly HP contributing → boundary is above band
+                shift = SHRINK_FACTOR * (current_cal_max - current_cal_min)
+                new_min = current_cal_min + shift
+                new_max = current_cal_max + shift
+                shifted = True
+                _LOGGER.info(
+                    "Regime probe: band shifted up by %.1f°C "
+                    "(%d/%d probes 'HP contributing')",
+                    shift, n_below, total,
+                )
+
+        if shifted:
+            # Clear evidence so the next round evaluates the new location
+            self._contribution_evidence_above.clear()
+            self._contribution_evidence_below.clear()
 
         if new_max < current_cal_max:
             _LOGGER.info(

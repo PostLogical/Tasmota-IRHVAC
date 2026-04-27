@@ -329,12 +329,48 @@ class TestCalibrationUpdates:
         assert cal_min > -2.0  # shrunk
         assert cal_max == 2.0  # max unchanged
 
-    def test_never_widens(self):
+    def test_never_widens_without_evidence(self):
         rp = _make()
         rp._no_contribution_count = 10
         cal_min, cal_max = rp.compute_calibration_updates(-2.0, 2.0)
         assert cal_min == -2.0
         assert cal_max == 2.0
+
+    def test_band_shifts_down_when_all_no_hp(self):
+        """All probes say 'no HP' → transition is below band → shift down."""
+        rp = _make()
+        for _ in range(4):  # min_for_shift = max(SHRINK_CONFIRMATIONS*2, 4)
+            rp._contribution_evidence_above.append(0.5)
+        cal_min, cal_max = rp.compute_calibration_updates(-2.0, 2.0)
+        assert cal_min < -2.0, f"Band should shift down, got cal_min={cal_min}"
+        assert cal_max < 2.0, f"Band should shift down, got cal_max={cal_max}"
+        # Band width preserved (shifted, not narrowed)
+        assert abs((cal_max - cal_min) - 4.0) < 0.1
+        # Evidence cleared for next round
+        assert len(rp._contribution_evidence_above) == 0
+
+    def test_band_shifts_up_when_all_hp(self):
+        """All probes say 'HP contributing' → transition is above band → shift up."""
+        rp = _make()
+        for _ in range(4):
+            rp._contribution_evidence_below.append(-1.0)
+        cal_min, cal_max = rp.compute_calibration_updates(-2.0, 2.0)
+        assert cal_min > -2.0
+        assert cal_max > 2.0
+        assert len(rp._contribution_evidence_below) == 0
+
+    def test_mixed_evidence_no_shift(self):
+        """Mixed evidence (below 80% threshold) → shrink only, no shift."""
+        rp = _make()
+        for _ in range(3):
+            rp._contribution_evidence_above.append(0.5)
+        for _ in range(2):
+            rp._contribution_evidence_below.append(-1.0)
+        # 3 no-HP + 2 has-HP = 60% no-HP, below 80% threshold
+        cal_min, cal_max = rp.compute_calibration_updates(-2.0, 2.0)
+        # Should shrink but not shift the whole band
+        assert cal_min >= -2.0  # may have shrunk up from below evidence
+        assert cal_max <= 2.0
 
 
 # ── Persistence ──────────────────────────────────────────────────────
