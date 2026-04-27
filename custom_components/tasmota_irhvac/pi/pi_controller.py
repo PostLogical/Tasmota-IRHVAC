@@ -4651,7 +4651,7 @@ class PIController:
             obs = Observation(
                 timestamp=now_mono,
                 wall_time=time.time(),
-                hp_setpoint=float(self._hp_setpoint) if obs_clamped_reason != "no_output" else None,
+                hp_setpoint=float(self._hp_setpoint),
                 current_c=current_c,
                 desired_c=desired_c,
                 outdoor_temp_c=self._inputs.outdoor_temp,

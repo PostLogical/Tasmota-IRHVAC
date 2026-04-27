@@ -102,6 +102,7 @@ class GreyboxBuffer(DiversityAwareBuffer):
         hp_offset = (
             (obs.hp_setpoint - obs.current_c)
             if obs.hp_setpoint is not None
+            and obs.clamped_reason != "no_output"
             else 0.0
         )
         solar = (

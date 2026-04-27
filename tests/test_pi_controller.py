@@ -4615,7 +4615,12 @@ class TestObservationRecordingZoneModel:
 
     @pytest.mark.asyncio
     async def test_definitely_off_records_no_output(self):
-        """HP definitely off (delta > cal_max) → clamped_reason='no_output'."""
+        """HP definitely off (delta > cal_max) → clamped_reason='no_output'.
+
+        hp_setpoint is always recorded (even for no_output) so the
+        boundary estimator sees the true delta = room - setpoint,
+        not a fabricated delta from desired_c substitution.
+        """
         config = make_pi_config()
         entity = FakePIEntity(config)
         pi = entity._pi
@@ -4632,7 +4637,7 @@ class TestObservationRecordingZoneModel:
         obs = pi._greybox_buffer.get_all()
         no_output = [o for o in obs if o.clamped_reason == "no_output"]
         assert len(no_output) >= 1
-        assert no_output[-1].hp_setpoint is None
+        assert no_output[-1].hp_setpoint is not None
 
     @pytest.mark.asyncio
     async def test_uncertain_zone_records_setpoint(self):
@@ -4706,7 +4711,7 @@ class TestObservationRecordingZoneModel:
         obs = pi._greybox_buffer.get_all()
         no_output = [o for o in obs if o.clamped_reason == "no_output"]
         assert len(no_output) >= 1
-        assert no_output[-1].hp_setpoint is None
+        assert no_output[-1].hp_setpoint is not None
 
 
 class TestBatchWLSApply:
