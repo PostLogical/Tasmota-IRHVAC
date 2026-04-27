@@ -303,3 +303,68 @@ class TestSweepRefinement:
         assert result.confident
         assert abs(result.estimated_breakpoint - 0.3) < 0.25
         assert result.n_candidates > 20  # coarse + fine candidates
+
+
+# ── Test: Data asymmetry detection ────────────────────────────────────
+
+
+class TestDataAsymmetry:
+    """Closed-loop PI can produce heavily skewed observation distributions.
+
+    When the HP is on 93%+ of the time (or off 93%+), the sweep
+    optimizes for observation balance rather than physical truth,
+    converging to the wrong breakpoint with high confidence.
+    The asymmetry check rejects these estimates.
+    """
+
+    def test_asymmetric_data_rejected(self):
+        """Strongly skewed data (95% HP-on) → not confident, data_asymmetric."""
+        est = BoundaryEstimator(
+            min_observations=20, min_per_side=5,
+            max_imbalance=10.0,
+        )
+        # Generate observations where bp is at +4.0, so almost all
+        # deltas in [-5, 4] are below bp → 95%+ HP-on.
+        obs = _make_observations(breakpoint=4.0, n=200, delta_range=(-5.0, 4.5))
+        mi = [{"input_role": "solar", "entity_id": "sensor.solar"}]
+        result = est.estimate_boundary(obs, mi, -2.0, 2.0)
+        assert not result.confident
+        assert result.data_asymmetric
+        assert est.stall_count == 1
+
+    def test_balanced_data_not_flagged(self):
+        """Balanced data (bp near center of delta range) → not asymmetric."""
+        est = BoundaryEstimator(
+            min_observations=20, min_per_side=5,
+            max_imbalance=10.0,
+        )
+        obs = _make_observations(breakpoint=0.0, n=200, delta_range=(-5.0, 4.0))
+        mi = [{"input_role": "solar", "entity_id": "sensor.solar"}]
+        result = est.estimate_boundary(obs, mi, -2.0, 2.0)
+        assert result.confident
+        assert not result.data_asymmetric
+
+    def test_moderate_imbalance_accepted(self):
+        """5:1 imbalance (below 10:1 threshold) → still confident."""
+        est = BoundaryEstimator(
+            min_observations=20, min_per_side=5,
+            max_imbalance=10.0,
+        )
+        # bp at 2.5 with range [-5, 4] → roughly 75% HP-on (ratio ~3:1)
+        obs = _make_observations(breakpoint=2.5, n=200, delta_range=(-5.0, 4.0))
+        mi = [{"input_role": "solar", "entity_id": "sensor.solar"}]
+        result = est.estimate_boundary(obs, mi, -2.0, 2.0)
+        assert result.confident
+        assert not result.data_asymmetric
+
+    def test_asymmetry_stalls_toward_probe(self):
+        """Repeated asymmetric batches accumulate stalls → trigger probe."""
+        est = BoundaryEstimator(
+            min_observations=20, min_per_side=5,
+            max_imbalance=10.0, stall_threshold=3,
+        )
+        obs = _make_observations(breakpoint=4.0, n=200, delta_range=(-5.0, 4.5))
+        mi = [{"input_role": "solar", "entity_id": "sensor.solar"}]
+        for _ in range(3):
+            est.estimate_boundary(obs, mi, -2.0, 2.0)
+        assert est.should_trigger_probe

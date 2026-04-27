@@ -4387,6 +4387,11 @@ class PIController:
         # force_min_setpoint overrides HP to min so we can observe the
         # room rate without HP contribution and resolve the ambiguity.
         probe_prev_state = self._regime_probe.state
+        # Don't report as clamped if the probe itself forced HP to min
+        # on the previous tick — that would abort its own probe.
+        probe_active = probe_prev_state in (
+            ProbeState.BASELINE, ProbeState.PROBE,
+        )
         probe_result = self._regime_probe.tick(
             now_mono=now_mono,
             room_temp_rate=self._room_temp_rate,
@@ -4399,7 +4404,7 @@ class PIController:
             is_clamped=(
                 self._hp_setpoint <= self._min_temp_c
                 or self._hp_setpoint >= self._max_temp_c
-            ),
+            ) and not probe_active,
             learning_suppressed=self._manual_ff_suppress,
             current_hour=datetime.now().hour,
             auto_perturb_active=self._auto_perturb.offset != 0.0,
@@ -4417,12 +4422,14 @@ class PIController:
             new_min, new_max = self._regime_probe.compute_calibration_updates(
                 cal_min, cal_max,
             )
-            if is_heating:
-                self._head_calibration_min_heat = new_min
-                self._head_calibration_max_heat = new_max
-            else:
-                self._head_calibration_min_cool = new_min
-                self._head_calibration_max_cool = new_max
+            # Guard against band inversion from conflicting evidence
+            if new_min < new_max:
+                if is_heating:
+                    self._head_calibration_min_heat = new_min
+                    self._head_calibration_max_heat = new_max
+                else:
+                    self._head_calibration_min_cool = new_min
+                    self._head_calibration_max_cool = new_max
             self._boundary_estimator.reset_stall()
 
         skip_integration = (

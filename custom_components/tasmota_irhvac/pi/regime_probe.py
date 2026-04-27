@@ -134,6 +134,10 @@ class RegimeProbe:
         self._probe_current_c: float = 0.0
         self._probe_is_heating: bool = True
 
+        # Forced probe: bypass uncertainty check when boundary
+        # estimator stalls and probe has never fired (IDLE state).
+        self._forced_probe: bool = False
+
         # Evidence accumulation (persisted)
         self._contribution_evidence_above: list[float] = []
         self._contribution_evidence_below: list[float] = []
@@ -202,7 +206,8 @@ class RegimeProbe:
                 and not is_clamped
                 and not learning_suppressed
             )
-            if hp_uncertain and can_probe and abs(room_temp_rate) < STABILITY_THRESHOLD:
+            trigger = hp_uncertain or self._forced_probe
+            if trigger and can_probe and abs(room_temp_rate) < STABILITY_THRESHOLD:
                 self._begin_baseline(now_mono, hp_setpoint, current_c, is_heating)
 
         # ── BASELINE: collect room_rate readings ─────────────────
@@ -282,6 +287,7 @@ class RegimeProbe:
         self._state = ProbeState.BASELINE
         self._phase_start_mono = now_mono
         self._baseline_rates = []
+        self._forced_probe = False  # consumed
         self._probe_hp_setpoint = hp_setpoint
         self._probe_current_c = current_c
         self._probe_is_heating = is_heating
@@ -439,13 +445,17 @@ class RegimeProbe:
         self._abort(reason or "external")
 
     def request_early_probe(self) -> None:
-        """Expire cooldown so next probe can fire immediately.
+        """Request a probe as soon as conditions allow.
 
         Called by boundary estimator when passive estimation has stalled.
-        Only effective when in COOLDOWN state.
+        - COOLDOWN: expires cooldown timer so next probe fires immediately.
+        - IDLE: sets forced flag so probe fires without requiring the HP
+          to be in the uncertain zone (bypasses _is_uncertain check).
         """
         if self._state == ProbeState.COOLDOWN:
             self._cooldown_end_mono = 0.0
+        elif self._state == ProbeState.IDLE:
+            self._forced_probe = True
 
     # ── Persistence ──────────────────────────────────────────────────
 
@@ -457,6 +467,7 @@ class RegimeProbe:
             "confirmations_total": self._confirmations_total,
             "evidence_above": list(self._contribution_evidence_above),
             "evidence_below": list(self._contribution_evidence_below),
+            "forced_probe": self._forced_probe,
         }
 
     def restore(self, data: dict[str, Any]) -> None:
@@ -470,3 +481,4 @@ class RegimeProbe:
         self._contribution_evidence_below = [
             float(d) for d in data.get("evidence_below", [])
         ]
+        self._forced_probe = bool(data.get("forced_probe", False))

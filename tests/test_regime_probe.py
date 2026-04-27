@@ -488,3 +488,83 @@ class TestWindow:
         rp2 = _make(window_start=20, window_end=6)
         _tick(rp2, 0.0, current_hour=12)
         assert rp2.state == ProbeState.IDLE
+
+
+# ── Forced probe (boundary estimator escalation) ────────────────────
+
+
+class TestForcedProbe:
+    """Forced probe bypasses the uncertainty check when boundary
+    estimator stalls and requests a probe from IDLE state."""
+
+    def test_request_early_probe_from_idle_sets_flag(self):
+        rp = _make()
+        assert rp.state == ProbeState.IDLE
+        assert not rp._forced_probe
+        rp.request_early_probe()
+        assert rp._forced_probe
+
+    def test_forced_probe_fires_outside_uncertain_zone(self):
+        """Probe fires even when delta is outside [cal_min, cal_max]."""
+        rp = _make()
+        rp.request_early_probe()
+        # Delta = 20.5 - 20 = 0.5, within default [-2, 2] — but use
+        # narrow band where delta is definitely NOT uncertain.
+        _tick(rp, 0.0, cal_min=-5.0, cal_max=-4.0)  # delta=0.5 far outside
+        assert rp.state == ProbeState.BASELINE
+
+    def test_forced_flag_cleared_after_baseline_starts(self):
+        rp = _make()
+        rp.request_early_probe()
+        assert rp._forced_probe
+        _tick(rp, 0.0)
+        assert rp.state == ProbeState.BASELINE
+        assert not rp._forced_probe
+
+    def test_forced_probe_still_requires_can_probe_guards(self):
+        """Forced probe doesn't bypass safety guards (clamped, etc.)."""
+        rp = _make()
+        rp.request_early_probe()
+        # is_clamped blocks even with forced flag
+        _tick(rp, 0.0, is_clamped=True)
+        assert rp.state == ProbeState.IDLE
+        assert rp._forced_probe  # flag not consumed
+
+    def test_forced_probe_requires_stability(self):
+        """Forced probe still requires room rate stability."""
+        rp = _make()
+        rp.request_early_probe()
+        _tick(rp, 0.0, room_temp_rate=0.1)  # too fast
+        assert rp.state == ProbeState.IDLE
+
+    def test_request_early_probe_from_cooldown_expires_timer(self):
+        """Original behavior preserved: from COOLDOWN, expires timer."""
+        rp = _make()
+        # Get into cooldown by running a full probe cycle
+        _tick(rp, 0.0)  # IDLE → BASELINE
+        t = _advance_baseline(rp, 0.0)
+        # Now in PROBE — advance through probe phase
+        for _ in range(PROBE_MIN_READINGS + 1):
+            t += PROBE_MIN_DURATION_S / PROBE_MIN_READINGS + 1
+            _tick(rp, t)
+            if rp.state == ProbeState.COOLDOWN:
+                break
+        assert rp.state == ProbeState.COOLDOWN
+        assert rp._cooldown_end_mono > 0
+        rp.request_early_probe()
+        assert rp._cooldown_end_mono == 0.0
+
+    def test_forced_probe_persists(self):
+        rp = _make()
+        rp.request_early_probe()
+        data = rp.as_dict()
+        assert data["forced_probe"] is True
+
+        rp2 = _make()
+        rp2.restore(data)
+        assert rp2._forced_probe is True
+
+    def test_forced_probe_restore_default_false(self):
+        rp = _make()
+        rp.restore({})  # old data without forced_probe key
+        assert rp._forced_probe is False

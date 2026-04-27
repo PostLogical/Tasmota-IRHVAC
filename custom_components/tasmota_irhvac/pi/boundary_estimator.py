@@ -49,6 +49,7 @@ class BoundaryEstimateResult:
     n_left: int  # observations left of breakpoint (HP on side)
     n_right: int  # observations right of breakpoint (HP off side)
     n_candidates: int  # candidates evaluated
+    data_asymmetric: bool = False  # observation balance too skewed for reliable estimate
 
 
 # ── Estimator ───────────────────────────────────────────────────────────
@@ -81,6 +82,7 @@ class BoundaryEstimator:
         min_band_width: float = 0.5,
         safety_margin: float = 0.3,
         stall_threshold: int = 3,
+        max_imbalance: float = 10.0,
     ):
         """Initialize.
 
@@ -96,6 +98,10 @@ class BoundaryEstimator:
             safety_margin: Buffer around estimated breakpoint for bounds.
             stall_threshold: Batch cycles without confident estimate
                 before should_trigger_probe fires.
+            max_imbalance: Maximum allowed ratio of majority/minority
+                observations at the best breakpoint.  Above this, the
+                closed-loop data is too asymmetric for reliable
+                identification and the estimate is rejected.
         """
         self._coarse_step = coarse_step
         self._fine_step = fine_step
@@ -107,6 +113,7 @@ class BoundaryEstimator:
         self._min_band = min_band_width
         self._safety_margin = safety_margin
         self._stall_threshold = stall_threshold
+        self._max_imbalance = max_imbalance
 
         self._stall_count: int = 0
         self._updates_applied: int = 0
@@ -209,6 +216,33 @@ class BoundaryEstimator:
         n_right = n - n_left
 
         # Confidence checks
+        # 0. Data asymmetry: closed-loop PI can produce heavily skewed
+        #    observation distributions (e.g., HP on 93% of ticks).
+        #    The sweep optimizes for observation balance rather than
+        #    physical truth, converging confidently to the wrong bp.
+        #    Refuse to commit when the data can't support identification.
+        minority = min(n_left, n_right)
+        majority = max(n_left, n_right)
+        balance_ratio = majority / max(minority, 1)
+        if balance_ratio > self._max_imbalance:
+            self._stall_count += 1
+            result = BoundaryEstimateResult(
+                confident=False,
+                estimated_breakpoint=float(best_bp),
+                breakpoint_rms=float(best_rms),
+                rms_margin=None,
+                slope_k_c=float(best_kc),
+                new_cal_min=current_cal_min,
+                new_cal_max=current_cal_max,
+                n_observations=n,
+                n_left=n_left,
+                n_right=n_right,
+                n_candidates=len(all_results),
+                data_asymmetric=True,
+            )
+            self._last_result = result
+            return result
+
         # 1. Enough observations on each side
         if n_left < self._min_per_side or n_right < self._min_per_side:
             self._stall_count += 1
