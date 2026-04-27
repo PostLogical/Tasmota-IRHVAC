@@ -894,8 +894,8 @@ class PIController:
                     self._imc_lambda = gain_update.imc_lambda
 
         # ── Passive boundary estimation ──
-        # Use accumulated (delta, residual_rate) evidence to estimate
-        # the HP on/off transition boundary.  Updates cal_min/cal_max.
+        # Sweep candidate breakpoints over the greybox buffer to find
+        # the HP on/off transition.  Updates cal_min/cal_max.
         is_heating_batch = e._attr_hvac_mode == HVACMode.HEAT
         be_cal_min = (
             self._head_calibration_min_heat if is_heating_batch
@@ -906,16 +906,19 @@ class PIController:
             else self._head_calibration_max_cool
         )
         be_result = self._boundary_estimator.estimate_boundary(
+            greybox_observations,
+            self._model_inputs,
             be_cal_min, be_cal_max,
         )
         if be_result.confident:
             _LOGGER.info(
-                "%sBoundary estimator: breakpoint=%.2f°C (±%.2f), "
-                "slope=%.5f, n=%d (%d/%d), bounds [%.2f, %.2f] → [%.2f, %.2f]",
+                "%sBoundary estimator: breakpoint=%.2f°C, "
+                "k_c=%.5f, rms_margin=%.6f, n=%d (%d/%d), "
+                "bounds [%.2f, %.2f] → [%.2f, %.2f]",
                 self._log_prefix,
                 be_result.estimated_breakpoint,
-                be_result.breakpoint_std_err or 0.0,
-                be_result.slope or 0.0,
+                be_result.slope_k_c or 0.0,
+                be_result.rms_margin or 0.0,
                 be_result.n_observations,
                 be_result.n_left,
                 be_result.n_right,
@@ -4378,44 +4381,6 @@ class PIController:
             self._hp_no_output_ticks += 1
         else:
             self._hp_no_output_ticks = 0
-
-        # ── Boundary estimator: per-tick evidence accumulation ──────
-        # Feed (delta, residual_rate) to the passive boundary estimator.
-        # Gate: skip anomaly cooldown, active probe, auto-perturb, clamped.
-        _be_clamped = (
-            self._hp_setpoint <= self._min_temp_c
-            or self._hp_setpoint >= self._max_temp_c
-        )
-        _be_anomaly = (
-            self._cusum_cooldown_until is not None
-            and datetime.now() < self._cusum_cooldown_until
-        )
-        _be_skip = (
-            self._inputs.outdoor_temp is None
-            or _be_anomaly
-            or _be_clamped
-            or self._auto_perturb.offset != 0.0
-            or self._regime_probe.state in (ProbeState.BASELINE, ProbeState.PROBE)
-        )
-        if not _be_skip:
-            # Residualize: subtract modeled environmental contribution
-            outdoor_delta = self._inputs.outdoor_temp - current_c
-            gb = self._last_greybox_result
-            if gb is not None:
-                residual = self._room_temp_rate - (gb.c0 + gb.ua_c * outdoor_delta)
-                # Enhancement: subtract solar if available
-                for i, m_input in enumerate(self._model_inputs):
-                    if m_input.get("input_role") == "solar" and gb.alpha_c != 0.0:
-                        solar_val = self._inputs.values[i] if i < len(self._inputs.values) else 0.0
-                        if solar_val is not None:
-                            residual -= gb.alpha_c * solar_val
-                        break
-            else:
-                # Bootstrap: raw room_rate (no residualization)
-                residual = self._room_temp_rate
-            self._boundary_estimator.add_evidence(
-                current_to_setpoint_delta, residual, now_mono,
-            )
 
         # ── Regime probe: active boundary detection ────────────────
         # Probe fires when contribution is uncertain + room is stable.

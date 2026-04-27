@@ -4267,30 +4267,14 @@ class TestHeadCalibrationZoneModel:
         assert pi._integration_frozen is False
 
     @pytest.mark.asyncio
-    async def test_passive_evidence_collected_by_boundary_estimator(self):
-        """Boundary estimator accumulates evidence during ticks."""
+    async def test_boundary_estimator_initialized(self):
+        """Boundary estimator is initialized on the PI controller."""
         config = make_pi_config()
         entity = FakePIEntity(config)
         pi = entity._pi
-        pi._desired_temp = 21.0
-        pi._sensor_filter_tau = 0  # disable filter so raw temp used directly
-        entity._attr_hvac_mode = HVACMode.HEAT
-        pi._pi_integral = -1.0
-        pi._inputs.outdoor_temp = 5.0  # needed for boundary evidence
-
-        assert len(pi._boundary_estimator._buffer) == 0
-
-        # Room slowly cooling with delta inside [cal_min, cal_max].
-        # Pin hp_setpoint each tick to prevent PI from adjusting it.
-        for i in range(15):
-            entity._attr_current_temperature = 21.5 - i * 0.03
-            pi._hp_setpoint = 20  # delta ≈ 1.5, within cal_max=2.0
-            pi._pi_last_tick_time = float(i * 60)
-            with patch("time.monotonic", return_value=float((i + 1) * 60)):
-                await pi._pi_tick()
-
-        # Boundary estimator should have accumulated evidence
-        assert len(pi._boundary_estimator._buffer) > 0
+        assert pi._boundary_estimator is not None
+        assert pi._boundary_estimator.updates_applied == 0
+        assert pi._boundary_estimator.stall_count == 0
 
     @pytest.mark.asyncio
     async def test_uncertain_zone_still_gates_learning(self):

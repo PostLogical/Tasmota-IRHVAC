@@ -254,7 +254,7 @@ class FullStackResult:
     final_cal_max: float
     boundary_updates: int  # confident boundary updates applied
     boundary_stall_count: int
-    boundary_evidence_count: int  # observations in boundary buffer
+    boundary_last_n_obs: int  # observations used in last sweep
 
     # ── Setpoint behavior metrics ────────────────────────────────────
     # We send IR setpoints to the HP's thermostat; we don't control the
@@ -929,7 +929,8 @@ def run_full_stack(
                        else pi._head_calibration_max_cool),
         boundary_updates=pi._boundary_estimator.updates_applied,
         boundary_stall_count=pi._boundary_estimator.stall_count,
-        boundary_evidence_count=len(pi._boundary_estimator._buffer),
+        boundary_last_n_obs=(pi._boundary_estimator.last_result.n_observations
+                             if pi._boundary_estimator.last_result else 0),
     )
 
 

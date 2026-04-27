@@ -1,23 +1,22 @@
-"""Passive regime boundary estimation from residual rate vs delta.
+"""Passive regime boundary estimation via greybox profile sweep.
 
 Estimates where the HP transitions from actively contributing to idle
-by fitting a piecewise linear ("hockey stick") model to the residual
-room_rate as a function of delta = current_c - hp_setpoint.
+by fitting the greybox energy balance model with different candidate
+boundary locations and selecting the one that minimizes fit residual.
 
-The HP is a proportional controller: its contribution is
-k × max(0, setpoint - room) = k × max(0, -delta + offset).
-This creates a RAMP on the HP-on side, not a binary step.
-The boundary is where the ramp meets the flat HP-off baseline.
+For each candidate breakpoint bp:
+  - Observations with delta < bp get hp_offset = setpoint - room (HP on)
+  - Observations with delta >= bp get hp_offset = 0 (HP off)
+  - Fit: room_rate = c0 + ua_c × outdoor_delta + k_c × hp_offset + α_c × solar
+  - Record fit RMS
 
-Model:  residual = slope × (delta - bp) + baseline   if delta < bp
-        residual = baseline                           if delta >= bp
+The bp with lowest RMS is where hp_offset assignments best explain the
+observed room_rates — i.e., the true HP transition.
 
-Three layers:
-    1. Per-tick evidence accumulation (add_evidence)
-    2. Periodic piecewise linear fit via scipy.optimize.curve_fit
-    3. Stall detection → active probe trigger
+Runs each batch cycle using the greybox observation buffer.  No per-tick
+evidence accumulation needed.
 
-Literature: Muggeo (2003) segmented regression with unknown breakpoint.
+Literature: profile likelihood over a nuisance parameter (boundary location).
 """
 
 from __future__ import annotations
@@ -28,7 +27,6 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
-from scipy.optimize import least_squares
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -37,67 +35,35 @@ _LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
-class BoundaryEvidence:
-    """A single (delta, residual_rate) observation for boundary estimation."""
-
-    delta: float  # current_c - hp_setpoint
-    residual_rate: float  # room_rate minus modeled environmental contribution
-    timestamp: float  # monotonic time
-
-
-@dataclass
 class BoundaryEstimateResult:
     """Result of a boundary estimation cycle."""
 
     confident: bool
     estimated_breakpoint: float | None
-    breakpoint_std_err: float | None  # from curve_fit covariance
-    slope: float | None  # ramp slope (should be negative in heating)
-    baseline: float | None  # flat HP-off residual level
+    breakpoint_rms: float | None  # RMS at the best candidate
+    rms_margin: float | None  # RMS difference between best and runner-up region
+    slope_k_c: float | None  # fitted k_c at the best candidate
     new_cal_min: float
     new_cal_max: float
     n_observations: int
     n_left: int  # observations left of breakpoint (HP on side)
     n_right: int  # observations right of breakpoint (HP off side)
-
-
-# ── Constants ───────────────────────────────────────────────────────────
-
-# Delta diversity binning: observations binned by this width,
-# capped per bin to prevent steady-state redundancy.
-_DELTA_BIN_WIDTH = 0.5  # °C
-_MAX_PER_BIN = 20
-
-
-# ── Piecewise linear model ─────────────────────────────────────────────
-
-
-def _hockey_stick(delta: np.ndarray, slope: float, bp: float,
-                  baseline: float) -> np.ndarray:
-    """Piecewise linear: ramp on HP-on side, flat on HP-off side.
-
-    For heating mode (delta = current_c - hp_setpoint):
-      - delta < bp: HP is on, residual = slope × (delta - bp) + baseline
-      - delta >= bp: HP is off, residual = baseline
-
-    slope should be negative (residual decreases as delta increases
-    toward boundary, because HP contribution shrinks).
-    """
-    return np.where(delta < bp, slope * (delta - bp) + baseline, baseline)
+    n_candidates: int  # candidates evaluated
 
 
 # ── Estimator ───────────────────────────────────────────────────────────
 
 
 class BoundaryEstimator:
-    """Passive regime boundary estimation from residual rate vs delta.
+    """Passive regime boundary estimation via greybox profile sweep.
 
-    Accumulates (delta, residual_rate) evidence per tick and periodically
-    fits a piecewise linear model to estimate the HP on/off boundary.
+    Each batch cycle, sweeps candidate boundary locations and fits
+    an OLS energy balance at each.  The candidate with lowest RMS
+    is the estimated HP transition boundary.
 
     The caller (pi_controller) is responsible for:
-    - Computing the residual_rate (room_rate - modeled environment)
-    - Gating evidence collection (skip anomalies, probes, clamped ticks)
+    - Providing the greybox observation buffer each batch cycle
+    - Providing the model_inputs config (for solar entity lookup)
     - Calling estimate_boundary() each batch cycle
     - Applying the returned bound updates
     """
@@ -105,209 +71,197 @@ class BoundaryEstimator:
     def __init__(
         self,
         *,
-        buffer_max_size: int = 200,
+        coarse_step: float = 0.25,
+        fine_step: float = 0.05,
+        sweep_range: tuple[float, float] = (-5.0, 5.0),
         min_observations: int = 50,
-        min_per_side: int = 5,
+        min_per_side: int = 10,
+        min_rms_margin: float = 0.0001,
         max_step_per_update: float = 0.3,
         min_band_width: float = 0.5,
         safety_margin: float = 0.3,
         stall_threshold: int = 3,
-        bp_std_err_max: float = 1.0,
     ):
         """Initialize.
 
         Args:
-            buffer_max_size: Max evidence observations retained.
-            min_observations: Minimum evidence needed for estimation.
-            min_per_side: Minimum observations on each side of breakpoint.
+            coarse_step: Delta step for initial coarse sweep (°C).
+            fine_step: Delta step for refinement around coarse minimum (°C).
+            sweep_range: (min_delta, max_delta) range to search.
+            min_observations: Minimum greybox buffer observations needed.
+            min_per_side: Minimum observations on each side of candidate.
+            min_rms_margin: Minimum RMS improvement over flat model to accept.
             max_step_per_update: Max cal bound movement per batch cycle.
             min_band_width: Floor for cal_max - cal_min.
             safety_margin: Buffer around estimated breakpoint for bounds.
             stall_threshold: Batch cycles without confident estimate
                 before should_trigger_probe fires.
-            bp_std_err_max: Maximum acceptable breakpoint standard error
-                (°C) from curve_fit.  Above this, estimate is not confident.
         """
-        self._buffer_max = buffer_max_size
-        self._min_observations = min_observations
+        self._coarse_step = coarse_step
+        self._fine_step = fine_step
+        self._sweep_min, self._sweep_max = sweep_range
+        self._min_obs = min_observations
         self._min_per_side = min_per_side
+        self._min_rms_margin = min_rms_margin
         self._max_step = max_step_per_update
         self._min_band = min_band_width
         self._safety_margin = safety_margin
         self._stall_threshold = stall_threshold
-        self._bp_std_err_max = bp_std_err_max
-
-        self._buffer: list[BoundaryEvidence] = []
-        # Delta diversity tracking: bin -> count
-        self._bin_counts: dict[int, int] = {}
 
         self._stall_count: int = 0
         self._updates_applied: int = 0
         self._last_result: BoundaryEstimateResult | None = None
 
-    # ── Layer 1: Per-tick evidence ──────────────────────────────────
-
-    def add_evidence(
-        self, delta: float, residual_rate: float, timestamp: float
-    ) -> None:
-        """Add one (delta, residual_rate) observation.
-
-        The caller gates this: no anomalies, no active probe, no clamped,
-        no auto-perturbation, outdoor_temp available.
-        """
-        if not math.isfinite(delta) or not math.isfinite(residual_rate):
-            return
-
-        # Delta diversity: bin and cap
-        bin_idx = int(math.floor(delta / _DELTA_BIN_WIDTH))
-        count = self._bin_counts.get(bin_idx, 0)
-        if count >= _MAX_PER_BIN:
-            # Bin is full — evict oldest in this bin, then add
-            self._evict_oldest_in_bin(bin_idx)
-        self._bin_counts[bin_idx] = self._bin_counts.get(bin_idx, 0) + 1
-
-        self._buffer.append(BoundaryEvidence(delta, residual_rate, timestamp))
-
-        # Global cap: evict oldest regardless of bin
-        while len(self._buffer) > self._buffer_max:
-            evicted = self._buffer.pop(0)
-            evicted_bin = int(math.floor(evicted.delta / _DELTA_BIN_WIDTH))
-            self._bin_counts[evicted_bin] = max(
-                0, self._bin_counts.get(evicted_bin, 1) - 1
-            )
-
-    def _evict_oldest_in_bin(self, target_bin: int) -> None:
-        """Remove the oldest observation in a specific delta bin."""
-        for i, ev in enumerate(self._buffer):
-            if int(math.floor(ev.delta / _DELTA_BIN_WIDTH)) == target_bin:
-                self._buffer.pop(i)
-                self._bin_counts[target_bin] = max(
-                    0, self._bin_counts.get(target_bin, 1) - 1
-                )
-                return
-
-    # ── Layer 2: Boundary estimation ────────────────────────────────
+    # ── Core estimation ─────────────────────────────────────────────
 
     def estimate_boundary(
         self,
+        observations: list,
+        model_inputs: list[dict],
         current_cal_min: float,
         current_cal_max: float,
     ) -> BoundaryEstimateResult:
         """Estimate the HP on/off transition boundary.
 
-        Fits a piecewise linear model (ramp + flat) to the accumulated
-        evidence.  The breakpoint where the ramp meets the flat baseline
-        is the estimated HP transition.
+        Sweeps candidate breakpoints, fits OLS energy balance at each,
+        selects the candidate with lowest residual RMS.
 
         Args:
+            observations: Greybox buffer observations (Observation objects).
+            model_inputs: PI model_inputs config (for solar entity lookup).
             current_cal_min: Current lower cal bound.
             current_cal_max: Current upper cal bound.
 
         Returns:
             BoundaryEstimateResult with confident flag and proposed bounds.
         """
-        n = len(self._buffer)
         not_confident = BoundaryEstimateResult(
             confident=False,
             estimated_breakpoint=None,
-            breakpoint_std_err=None,
-            slope=None,
-            baseline=None,
+            breakpoint_rms=None,
+            rms_margin=None,
+            slope_k_c=None,
             new_cal_min=current_cal_min,
             new_cal_max=current_cal_max,
-            n_observations=n,
+            n_observations=len(observations),
             n_left=0,
             n_right=0,
+            n_candidates=0,
         )
 
-        if n < self._min_observations:
+        # Precompute arrays from observations
+        arrays = self._build_arrays(observations, model_inputs)
+        if arrays is None or len(arrays[0]) < self._min_obs:
             self._stall_count += 1
             self._last_result = not_confident
             return not_confident
 
-        deltas = np.array([e.delta for e in self._buffer])
-        residuals = np.array([e.residual_rate for e in self._buffer])
+        deltas, outdoor_deltas, hp_setpoints, room_temps, solar_vals, room_rates = arrays
+        n = len(deltas)
 
-        # Initial guess: breakpoint at midpoint of current band,
-        # slope negative, baseline near median of high-delta residuals.
-        bp_guess = (current_cal_min + current_cal_max) / 2.0
-        high_mask = deltas > bp_guess
-        if high_mask.sum() > 0:
-            baseline_guess = float(np.median(residuals[high_mask]))
-        else:
-            baseline_guess = float(np.median(residuals))
-        slope_guess = -0.005  # typical negative slope
+        # Coarse sweep
+        coarse_candidates = np.arange(
+            self._sweep_min, self._sweep_max + self._coarse_step / 2,
+            self._coarse_step,
+        )
+        coarse_results = self._sweep(
+            coarse_candidates, deltas, outdoor_deltas, hp_setpoints,
+            room_temps, solar_vals, room_rates,
+        )
 
-        def residual_fn(params: np.ndarray) -> np.ndarray:
-            return _hockey_stick(deltas, *params) - residuals
-
-        try:
-            result_fit = least_squares(
-                residual_fn,
-                x0=[slope_guess, bp_guess, baseline_guess],
-                loss="huber",
-                f_scale=0.005,  # residual scale for Huber (��C/min)
-                max_nfev=2000,
-            )
-        except (RuntimeError, ValueError):
+        if not coarse_results:
             self._stall_count += 1
             self._last_result = not_confident
             return not_confident
 
-        if not result_fit.success:
+        # Find coarse minimum (k_c must be positive)
+        valid = [(bp, rms, kc) for bp, rms, kc in coarse_results if kc > 0]
+        if not valid:
             self._stall_count += 1
             self._last_result = not_confident
             return not_confident
 
-        slope, bp, baseline = result_fit.x
-        # Standard errors from Jacobian: J^T J ≈ inverse covariance.
-        # Use MAD-based robust variance (consistent with Huber loss)
-        # to avoid outlier inflation.
-        J = result_fit.jac
-        try:
-            mad = float(np.median(np.abs(result_fit.fun)))
-            r_var = (mad * 1.4826) ** 2  # MAD → σ estimate
-            cov = np.linalg.inv(J.T @ J) * r_var
-            diag = np.diag(cov)
-            if diag[1] > 0:
-                bp_se = float(np.sqrt(diag[1]))
-            else:
-                bp_se = float("inf")
-        except np.linalg.LinAlgError:
-            bp_se = float("inf")
+        coarse_best = min(valid, key=lambda x: x[1])
+
+        # Fine sweep around coarse minimum
+        fine_candidates = np.arange(
+            coarse_best[0] - self._coarse_step,
+            coarse_best[0] + self._coarse_step + self._fine_step / 2,
+            self._fine_step,
+        )
+        fine_results = self._sweep(
+            fine_candidates, deltas, outdoor_deltas, hp_setpoints,
+            room_temps, solar_vals, room_rates,
+        )
+
+        all_results = coarse_results + fine_results
+        valid = [(bp, rms, kc) for bp, rms, kc in all_results if kc > 0]
+        if not valid:
+            self._stall_count += 1
+            self._last_result = not_confident
+            return not_confident
+
+        sorted_valid = sorted(valid, key=lambda x: x[1])
+        best_bp, best_rms, best_kc = sorted_valid[0]
 
         # Count observations on each side
-        n_left = int((deltas < bp).sum())
+        n_left = int((deltas < best_bp).sum())
         n_right = n - n_left
 
         # Confidence checks
-        confident = (
-            bp_se < self._bp_std_err_max
-            and n_left >= self._min_per_side
-            and n_right >= self._min_per_side
-            and slope < 0  # ramp must slope downward (HP on → higher residual at lower delta)
-        )
-
-        if not confident:
+        # 1. Enough observations on each side
+        if n_left < self._min_per_side or n_right < self._min_per_side:
             self._stall_count += 1
             result = BoundaryEstimateResult(
                 confident=False,
-                estimated_breakpoint=float(bp),
-                breakpoint_std_err=bp_se,
-                slope=float(slope),
-                baseline=float(baseline),
+                estimated_breakpoint=float(best_bp),
+                breakpoint_rms=float(best_rms),
+                rms_margin=None,
+                slope_k_c=float(best_kc),
                 new_cal_min=current_cal_min,
                 new_cal_max=current_cal_max,
                 n_observations=n,
                 n_left=n_left,
                 n_right=n_right,
+                n_candidates=len(all_results),
+            )
+            self._last_result = result
+            return result
+
+        # 2. RMS margin: best must be meaningfully better than distant candidates.
+        #    Compare best RMS against the RMS at ±2°C away (or edges).
+        distant = [
+            rms for bp, rms, kc in valid
+            if abs(bp - best_bp) > 1.5 and kc > 0
+        ]
+        if distant:
+            rms_margin = float(np.median(distant) - best_rms)
+        else:
+            rms_margin = 0.0
+
+        confident = rms_margin > self._min_rms_margin
+
+        if not confident:
+            self._stall_count += 1
+            result = BoundaryEstimateResult(
+                confident=False,
+                estimated_breakpoint=float(best_bp),
+                breakpoint_rms=float(best_rms),
+                rms_margin=rms_margin,
+                slope_k_c=float(best_kc),
+                new_cal_min=current_cal_min,
+                new_cal_max=current_cal_max,
+                n_observations=n,
+                n_left=n_left,
+                n_right=n_right,
+                n_candidates=len(all_results),
             )
             self._last_result = result
             return result
 
         # Confident — compute new bounds
-        target_min = float(bp) - self._safety_margin
-        target_max = float(bp) + self._safety_margin
+        target_min = float(best_bp) - self._safety_margin
+        target_max = float(best_bp) + self._safety_margin
 
         new_min = self._move_toward(current_cal_min, target_min)
         new_max = self._move_toward(current_cal_max, target_max)
@@ -323,18 +277,100 @@ class BoundaryEstimator:
 
         result = BoundaryEstimateResult(
             confident=True,
-            estimated_breakpoint=float(bp),
-            breakpoint_std_err=bp_se,
-            slope=float(slope),
-            baseline=float(baseline),
+            estimated_breakpoint=float(best_bp),
+            breakpoint_rms=float(best_rms),
+            rms_margin=rms_margin,
+            slope_k_c=float(best_kc),
             new_cal_min=new_min,
             new_cal_max=new_max,
             n_observations=n,
             n_left=n_left,
             n_right=n_right,
+            n_candidates=len(all_results),
         )
         self._last_result = result
         return result
+
+    def _build_arrays(
+        self, observations: list, model_inputs: list[dict],
+    ) -> tuple | None:
+        """Extract numpy arrays from observations."""
+        solar_entity = None
+        for mi in model_inputs:
+            if mi.get("input_role") == "solar":
+                solar_entity = mi["entity_id"]
+                break
+
+        deltas = []
+        outdoor_deltas = []
+        hp_setpoints = []
+        room_temps = []
+        solar_vals = []
+        room_rates = []
+
+        for o in observations:
+            if o.outdoor_temp_c is None:
+                continue
+            sp = o.hp_setpoint if o.hp_setpoint is not None else o.desired_c
+            deltas.append(o.current_c - sp)
+            outdoor_deltas.append(o.outdoor_temp_c - o.current_c)
+            hp_setpoints.append(sp)
+            room_temps.append(o.current_c)
+            solar_v = 0.0
+            if solar_entity:
+                solar_v = o.raw_readings.get(solar_entity, 0.0)
+            solar_vals.append(solar_v)
+            room_rates.append(o.room_rate)
+
+        if not deltas:
+            return None
+
+        return (
+            np.array(deltas),
+            np.array(outdoor_deltas),
+            np.array(hp_setpoints),
+            np.array(room_temps),
+            np.array(solar_vals),
+            np.array(room_rates),
+        )
+
+    def _sweep(
+        self,
+        candidates: np.ndarray,
+        deltas: np.ndarray,
+        outdoor_deltas: np.ndarray,
+        hp_setpoints: np.ndarray,
+        room_temps: np.ndarray,
+        solar_vals: np.ndarray,
+        room_rates: np.ndarray,
+    ) -> list[tuple[float, float, float]]:
+        """Sweep candidate breakpoints, return [(bp, rms, k_c), ...]."""
+        n = len(deltas)
+        results: list[tuple[float, float, float]] = []
+
+        for bp in candidates:
+            # Assign hp_offset based on candidate boundary
+            hp_on_mask = deltas < bp
+            hp_offset = np.where(
+                hp_on_mask,
+                hp_setpoints - room_temps,  # HP on: actual offset
+                0.0,  # HP off
+            )
+
+            # OLS: room_rate = c0 + ua_c*od + k_c*hp_offset + alpha_c*solar
+            X = np.column_stack([
+                np.ones(n), outdoor_deltas, hp_offset, solar_vals,
+            ])
+            try:
+                beta, _, _, _ = np.linalg.lstsq(X, room_rates, rcond=None)
+                predicted = X @ beta
+                rms = float(np.sqrt(np.mean((room_rates - predicted) ** 2)))
+                k_c = float(beta[2])
+                results.append((float(bp), rms, k_c))
+            except np.linalg.LinAlgError:
+                continue
+
+        return results
 
     def _move_toward(self, current: float, target: float) -> float:
         """Move current toward target by at most max_step."""
@@ -343,7 +379,7 @@ class BoundaryEstimator:
             return target
         return current + math.copysign(self._max_step, diff)
 
-    # ── Layer 3: Stall detection ────────────────────────────────────
+    # ── Stall detection ─────────────────────────────────────────────
 
     @property
     def stall_count(self) -> int:
@@ -374,26 +410,11 @@ class BoundaryEstimator:
     def as_dict(self) -> dict[str, Any]:
         """Serialize state for persistence across restarts."""
         return {
-            "buffer": [
-                {"d": e.delta, "r": e.residual_rate, "t": e.timestamp}
-                for e in self._buffer
-            ],
             "stall_count": self._stall_count,
             "updates_applied": self._updates_applied,
         }
 
     def restore(self, data: dict[str, Any]) -> None:
         """Restore state from persisted data."""
-        self._buffer.clear()
-        self._bin_counts.clear()
-        for item in data.get("buffer", []):
-            ev = BoundaryEvidence(
-                delta=float(item["d"]),
-                residual_rate=float(item["r"]),
-                timestamp=float(item["t"]),
-            )
-            bin_idx = int(math.floor(ev.delta / _DELTA_BIN_WIDTH))
-            self._bin_counts[bin_idx] = self._bin_counts.get(bin_idx, 0) + 1
-            self._buffer.append(ev)
         self._stall_count = int(data.get("stall_count", 0))
         self._updates_applied = int(data.get("updates_applied", 0))
