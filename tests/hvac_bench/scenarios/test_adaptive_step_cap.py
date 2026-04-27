@@ -80,6 +80,9 @@ class ModelInputSpec:
     schedule: object = None  # Callable[[int], float]
     # For adjacent_zone: delta_from_room mode?
     delta_from_room: bool = False
+    # Coefficient clamps in seed space (positive = warms room)
+    clamp_min: float | None = None
+    clamp_max: float | None = None
 
 
 @dataclass
@@ -136,7 +139,7 @@ def run_full_system(
     # Build model input config for PIController
     pi_model_inputs = []
     for mi in config.model_inputs:
-        pi_model_inputs.append({
+        entry: dict = {
             "entity_id": mi.entity_id,
             "name": mi.name,
             "input_role": mi.input_role,
@@ -144,7 +147,12 @@ def run_full_system(
             "seed_cool": 0.0,
             "lag_tau": 0,
             "delta_from_room": mi.delta_from_room,
-        })
+        }
+        if mi.clamp_min is not None:
+            entry["clamp_min"] = mi.clamp_min
+        if mi.clamp_max is not None:
+            entry["clamp_max"] = mi.clamp_max
+        pi_model_inputs.append(entry)
 
     # Create adapter with model inputs configured
     adapter = TasmotaPIAdapter({
@@ -401,6 +409,7 @@ SCENARIO_1_CONFIG = ScenarioConfig(
             # to push hard, so observations stay eligible (not clamped).
             true_ff_coef=-3.5,  # HP backs off 3.5°C when solar is at 1.0
             seed_heat=0.0,  # starts at zero — must learn
+            clamp_min=0,  # solar warms room → non-negative in seed space
             schedule=_solar_schedule,
         ),
     ],
@@ -476,6 +485,7 @@ SCENARIO_2_CONFIG = ScenarioConfig(
             true_thermal_effect=0.003,
             true_ff_coef=-3.5,
             seed_heat=0.0,
+            clamp_min=0,  # solar warms room → coef must be non-negative in seed space
             schedule=_solar_schedule,
         ),
         ModelInputSpec(
@@ -546,6 +556,7 @@ SCENARIO_3_CONFIG = ScenarioConfig(
             true_thermal_effect=0.004,  # stronger solar
             true_ff_coef=-4.0,
             seed_heat=0.0,
+            clamp_min=0,
             schedule=_late_solar_schedule,
         ),
     ],
@@ -601,6 +612,7 @@ SCENARIO_4_CONFIG = ScenarioConfig(
             true_thermal_effect=0.003,
             true_ff_coef=-3.5,
             seed_heat=0.0,
+            clamp_min=0,
             schedule=_solar_schedule,
         ),
         ModelInputSpec(
@@ -719,6 +731,7 @@ SCENARIO_6_CONFIG = ScenarioConfig(
             true_thermal_effect=0.003,
             true_ff_coef=-3.5,
             seed_heat=0.0,
+            clamp_min=0,
             schedule=_noisy_solar_schedule,
         ),
     ],
@@ -791,6 +804,7 @@ SCENARIO_7_CONFIG = ScenarioConfig(
             true_thermal_effect=0.003,
             true_ff_coef=-3.5,
             seed_heat=0.0,
+            clamp_min=0,
             schedule=_delayed_solar_schedule,
         ),
     ],

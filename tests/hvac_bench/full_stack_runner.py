@@ -203,15 +203,19 @@ class FullStackResult:
     checkpoint_data: list[dict]
 
     # ── Comfort metrics ──────────────────────────────────────────────
-    comfort_hours_pct: float  # % of ticks within deadband
+    comfort_hours_pct: float  # % of ticks within deadband (total)
+    ctrl_comfort_pct: float  # % of HP-active ticks within deadband
     cold_violations: int  # ticks where room < desired - deadband
     warm_violations: int  # ticks where room > desired + deadband
+    ctrl_violations: int  # violations when HP was outputting
+    unctrl_violations: int  # violations when HP was idle
     worst_undershoot: float  # max (desired - room) when room < desired
     worst_overshoot: float  # max (room - desired) when room > desired
     longest_violation_streak: int  # max consecutive ticks outside deadband
 
     # Per-day comfort rollups
     daily_comfort_pct: list[float]
+    daily_ctrl_comfort_pct: list[float]  # controllable comfort per day
     daily_cold_violations: list[int]
     daily_warm_violations: list[int]
 
@@ -441,6 +445,12 @@ def run_full_stack(
     day_ff_plus_int_sum = 0.0
     day_saturated = 0
     day_start_tick = 0
+    # Controllable/uncontrollable split: HP idle (setpoint <= room in heat,
+    # setpoint >= room in cool) means any error is uncontrollable.
+    ctrl_violations = 0
+    unctrl_violations = 0
+    day_ctrl_viols = 0
+    day_unctrl_viols = 0
 
     daily_itae: list[float] = []
     daily_violations: list[int] = []
@@ -448,6 +458,7 @@ def run_full_stack(
     daily_mae: list[float] = []
     daily_integral_rms: list[float] = []
     daily_comfort_pct: list[float] = []
+    daily_ctrl_comfort_pct: list[float] = []
     daily_cold_violations: list[int] = []
     daily_warm_violations: list[int] = []
     daily_ff_fraction: list[float] = []
@@ -550,6 +561,13 @@ def run_full_stack(
         day_itae += t_hours * deadband_error
         total_itae += tick * tick_min * deadband_error  # absolute
 
+        # HP idle: setpoint at or below room (heat) or at/above room (cool)
+        # means HP is not outputting — any error is uncontrollable.
+        if config.mode == "cool":
+            hp_idle = hp_setpoint >= model.room_temp
+        else:
+            hp_idle = hp_setpoint <= model.room_temp
+
         is_violation = abs_error > DEADBAND
         if is_violation:
             total_violations += 1
@@ -557,6 +575,12 @@ def run_full_stack(
             cur_violation_streak += 1
             if cur_violation_streak > longest_violation_streak:
                 longest_violation_streak = cur_violation_streak
+            if hp_idle:
+                unctrl_violations += 1
+                day_unctrl_viols += 1
+            else:
+                ctrl_violations += 1
+                day_ctrl_viols += 1
             # Asymmetric: cold vs warm
             if error > 0:  # error = desired - room, positive = room too cold
                 cold_violations += 1
@@ -641,9 +665,14 @@ def run_full_stack(
                 math.sqrt(day_integral_sq / ticks_per_day)
             )
 
-            # Comfort
+            # Comfort (total and controllable-only)
             in_deadband = sum(1 for e in day_errors if e <= DEADBAND)
             daily_comfort_pct.append(in_deadband / day_len * 100.0)
+            ctrl_ticks = day_len - day_unctrl_viols
+            ctrl_in_band = ctrl_ticks - day_ctrl_viols
+            daily_ctrl_comfort_pct.append(
+                ctrl_in_band / ctrl_ticks * 100.0 if ctrl_ticks > 0 else 100.0
+            )
             daily_cold_violations.append(day_cold_viols)
             daily_warm_violations.append(day_warm_viols)
 
@@ -673,6 +702,8 @@ def run_full_stack(
             day_violations = 0
             day_cold_viols = 0
             day_warm_viols = 0
+            day_ctrl_viols = 0
+            day_unctrl_viols = 0
             day_integral_sq = 0.0
             day_ff_sum = 0.0
             day_ff_plus_int_sum = 0.0
@@ -754,6 +785,12 @@ def run_full_stack(
     in_deadband_total = sum(1 for h in history
                            if abs(h["room_temp"] - config.desired_c) <= DEADBAND)
     comfort_pct = in_deadband_total / n_ticks * 100.0 if n_ticks else 0.0
+    ctrl_ticks_total = n_ticks - unctrl_violations
+    ctrl_in_band_total = ctrl_ticks_total - ctrl_violations
+    ctrl_comfort_pct = (
+        ctrl_in_band_total / ctrl_ticks_total * 100.0
+        if ctrl_ticks_total > 0 else 100.0
+    )
 
     return FullStackResult(
         history=history,
@@ -779,12 +816,16 @@ def run_full_stack(
         checkpoint_data=checkpoint_data,
         # Comfort
         comfort_hours_pct=comfort_pct,
+        ctrl_comfort_pct=ctrl_comfort_pct,
         cold_violations=cold_violations,
         warm_violations=warm_violations,
+        ctrl_violations=ctrl_violations,
+        unctrl_violations=unctrl_violations,
         worst_undershoot=worst_undershoot,
         worst_overshoot=worst_overshoot,
         longest_violation_streak=longest_violation_streak,
         daily_comfort_pct=daily_comfort_pct,
+        daily_ctrl_comfort_pct=daily_ctrl_comfort_pct,
         daily_cold_violations=daily_cold_violations,
         daily_warm_violations=daily_warm_violations,
         # Learning

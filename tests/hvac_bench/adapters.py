@@ -186,6 +186,11 @@ class _FakeBenchEntity:
 
         self._pi = PIController(self, config)
         self._pi._pi_enabled = True
+        # Assume calibrated: no uncertain zone (HP on/off is known exactly)
+        self._pi._head_calibration_min_heat = 0.0
+        self._pi._head_calibration_max_heat = 0.0
+        self._pi._head_calibration_min_cool = 0.0
+        self._pi._head_calibration_max_cool = 0.0
 
     @property
     def device_info(self):

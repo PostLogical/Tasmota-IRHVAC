@@ -1250,7 +1250,7 @@ class TestGreyboxObserverCoverageGaps:
             pytest.skip("scipy required")
         from custom_components.tasmota_irhvac.pi.greybox_observer import GreyboxResult
         result = GreyboxResult(
-            ua_c=0.01, k_c=0.01, alpha_c=0.001,
+            c0=0.0, ua_c=0.01, k_c=0.01, alpha_c=0.001,
             residual_rms=0.5, n_observations=0,
             n_hp_on=0, n_hp_off=0, tau_eff=85.0,
             param_std_err={}, tau_agreement_pct=None,
@@ -1528,7 +1528,7 @@ class TestGreyboxBridgeBatchScenario:
         # Mock greybox fit result with all needed numeric attributes
         from custom_components.tasmota_irhvac.pi.greybox_observer import GreyboxResult
         mock_gb = GreyboxResult(
-            ua_c=0.01, k_c=0.01, alpha_c=0.001,
+            c0=0.0, ua_c=0.01, k_c=0.01, alpha_c=0.001,
             residual_rms=0.02, n_observations=20,
             n_hp_on=12, n_hp_off=8, tau_eff=85.0,
             param_std_err={"ua_c": 0.005, "k_c": 0.002},
@@ -1579,7 +1579,7 @@ class TestGreyboxBridgeBatchScenario:
 
         from custom_components.tasmota_irhvac.pi.greybox_observer import GreyboxResult
         mock_gb = GreyboxResult(
-            ua_c=0.01, k_c=0.01, alpha_c=0.001,
+            c0=0.0, ua_c=0.01, k_c=0.01, alpha_c=0.001,
             residual_rms=0.02, n_observations=20,
             n_hp_on=12, n_hp_off=8, tau_eff=85.0,
             param_std_err={"ua_c": 0.005},
@@ -2405,7 +2405,7 @@ class TestRemainingPIControllerGaps:
 
         from custom_components.tasmota_irhvac.pi.greybox_observer import GreyboxResult
         mock_gb = GreyboxResult(
-            ua_c=0.01, k_c=0.01, alpha_c=0.001,
+            c0=0.0, ua_c=0.01, k_c=0.01, alpha_c=0.001,
             residual_rms=0.02, n_observations=20,
             n_hp_on=12, n_hp_off=8, tau_eff=85.0,
             param_std_err={"ua_c": 0.005},

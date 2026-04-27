@@ -53,8 +53,9 @@ class HouseProfile2R2C:
             (e.g., exposed brick/concrete). Typical: 60-200 min.
         mass_ratio: C_wall/C_air. Ratio of wall thermal capacitance to
             air capacitance. Higher = more thermal mass (thick masonry,
-            concrete slab). Typical: 5-20. The wall time constant seen
-            from the wall side is τ_couple * mass_ratio.
+            concrete slab). Typical: 3-10 (Bacher & Madsen 2011 found
+            C_s/C_i ≈ 5-10 for residential). The wall time constant
+            seen from the wall side is τ_couple * mass_ratio.
         hp_gain: HP effectiveness (1/min). HP heating rate per °C of
             setpoint above room temp. Typical: 0.02-0.08.
         description: What kind of building this represents.
@@ -176,7 +177,7 @@ PROFILES = {
         name="Standard Residential",
         tau_env=100,
         tau_couple=80,
-        mass_ratio=15,
+        mass_ratio=8,
         hp_gain=0.025,
         description="Modern home, decent insulation, HP sized for -5°C design",
     ),
@@ -184,7 +185,7 @@ PROFILES = {
         name="Well Insulated",
         tau_env=250,
         tau_couple=150,
-        mass_ratio=15,
+        mass_ratio=8,
         hp_gain=0.010,
         description="High-performance envelope, triple glazing, minimal infiltration",
     ),
@@ -192,9 +193,9 @@ PROFILES = {
         name="Heavy Masonry",
         tau_env=200,
         tau_couple=80,
-        mass_ratio=25,
+        mass_ratio=10,
         hp_gain=0.012,
-        description="Brick/concrete construction with very high thermal mass",
+        description="Brick/concrete construction with high thermal mass",
     ),
 }
 
@@ -209,21 +210,24 @@ PROFILES_2R2C = {
         name="Living Room (calibrated)",
         tau_env=100,
         tau_couple=30,
-        mass_ratio=20,
+        mass_ratio=8,
         hp_gain=0.04,
         description="100yo house, single-pane sunroom exposure, mini-split head. "
                     "Calibrated from 48h production data (Apr 2026). "
+                    "mass_ratio reduced from 20→8 per Bacher & Madsen (C_s/C_i ≈ 5-10). "
                     "Design: 66°F at -15°F outdoor (marginal).",
     ),
     "bunkroom": HouseProfile2R2C(
         name="Bunkroom (calibrated)",
         tau_env=170,
         tau_couple=20,
-        mass_ratio=30,
-        hp_gain=0.02,
+        mass_ratio=8,
+        hp_gain=0.025,
         description="100yo house, smaller zone, no direct solar. "
                     "Calibrated from 72h production data (Apr 2026). "
-                    "Design: 63°F at -15°F outdoor (undersized HP). "
+                    "mass_ratio reduced from 30→8 per Bacher & Madsen (C_s/C_i ≈ 5-10). "
+                    "hp_gain 0.02→0.025: g×τ=4.25 (comparable to LR 4.0), "
+                    "sp=28.9°C at -15°C outdoor (modestly undersized). "
                     "tau_env likely over-estimated — April data lacks cold-weather signal.",
     ),
     # dining_room: NOT calibrated — only 41 active heating ticks in Apr data.

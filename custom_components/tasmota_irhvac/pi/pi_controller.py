@@ -388,6 +388,12 @@ class PIController:
             self._cool_seeds.append(-float(m_input.get("seed_cool", 0.0)))
             clamp_min = m_input.get("clamp_min")
             clamp_max = m_input.get("clamp_max")
+            # Auto-clamp: solar and heat_source inputs always warm the room,
+            # so their seed-space coefficient must be ≥ 0 (β ≤ 0).
+            # This matches the sign gate at feature unlock (line ~1894).
+            role = m_input.get("input_role", "other")
+            if role in ("solar", "heat_source") and clamp_min is None:
+                clamp_min = 0
             # Clamps are in seed space (positive = warms room).
             # Internal β = -seed, so negate and flip.
             # Either side can be set independently; missing side → ±inf.
@@ -915,13 +921,19 @@ class PIController:
             kappa = float("inf")
             self._cached_kappa = None
 
-        # Build per-feature step caps: enlarged for recently-unlocked
-        # features when batch quality gates pass.
-        per_feature_caps = self._build_per_feature_step_caps(
-            result, buffer, n_eligible, kappa,
-        )
+        # Step cap: prevents batch WLS from making wild jumps that online
+        # RLS would have to recover from.  When online RLS is off, batch is
+        # the sole estimator so the cap just slows convergence — disable it.
+        if getattr(self, "_rls_online_learning", True):
+            per_feature_caps = self._build_per_feature_step_caps(
+                result, buffer, n_eligible, kappa,
+            )
+            step_cap = 1.0
+        else:
+            per_feature_caps = None
+            step_cap = float("inf")
         compute_blended_update(
-            result, prior_std=1.0, max_step=1.0,
+            result, prior_std=1.0, max_step=step_cap,
             max_step_per_feature=per_feature_caps,
         )
 
@@ -990,6 +1002,12 @@ class PIController:
                         if j != i:
                             rls.P[i * rls.n + j] = 0.0
                             rls.P[j * rls.n + i] = 0.0
+
+            # observation_count = max(online RLS ticks, batch n_eligible).
+            # Online RLS increments it per tick; batch sets the floor here.
+            # The FF seed→learned blend uses this to ramp up trust.
+            if result.n_eligible > rls.observation_count:
+                rls.observation_count = result.n_eligible
 
             # Mark RLS as mature — batch has validated the data geometry
             # and provided a well-conditioned baseline.  Online RLS tracking
@@ -1885,26 +1903,6 @@ class PIController:
                     )
                     continue
 
-            # 5. Partial regression sign check for warming inputs.
-            # Inputs with role "solar" or "heat_source" warm the room,
-            # so their β (internal convention) must be ≤ 0 (HP backs off
-            # when warmer).  A positive β means the partial regression
-            # is confounded — keep frozen until the signal is clean.
-            role = self._coeff_role(i)
-            if role in ("solar", "heat_source"):
-                beta_i = (
-                    full_result.beta_batch[i]
-                    if i < len(full_result.beta_batch)
-                    else 0.0
-                )
-                if beta_i > 0:
-                    _LOGGER.debug(
-                        "%sFeature unlock: %s[%d] — partial β=%.4f > 0 "
-                        "(wrong sign for %s, keeping frozen)",
-                        self._log_prefix, name, i, beta_i, role,
-                    )
-                    continue
-
             # All conditions met — unfreeze
             self.set_frozen(mode, i, frozen=False, manual=False)
             unlocked_any = True
@@ -2043,6 +2041,7 @@ class PIController:
         attrs: dict[str, Any] = {
             "state": state,
             "tau_eff": round(result.tau_eff, 1),
+            "c0": round(result.c0, 6),
             "ua_c": round(result.ua_c, 6),
             "k_c": round(result.k_c, 6),
             "alpha_c": round(result.alpha_c, 6),
@@ -3608,6 +3607,8 @@ class PIController:
         label: str,
     ) -> float:
         """Update RLS model with observation and log. Returns residual."""
+        if not getattr(self, '_rls_online_learning', True):
+            return observed_offset - rls.predict(x)
         beta_before = list(rls.beta)
         residual = rls.update(x, observed_offset)
         _LOGGER.debug(
@@ -4172,15 +4173,14 @@ class PIController:
             x = self._inputs.build_feature_vector(outdoor_delta)
             seeds = self._heat_seeds if is_heating else self._cool_seeds
 
-            # Blend seed prediction with RLS prediction based on observation count.
-            # With few observations the RLS may have learned from narrow conditions
-            # (e.g. only mild weather) and extrapolation can be wrong. The blend
-            # anchors predictions to seeds until enough observations have covered
-            # a representative range of conditions (~1-2 weeks at ~6 obs/day).
-            MIN_RLS_OBS = 50
+            # Blend seed prediction with learned prediction based on data seen.
+            # observation_count reflects max(online RLS ticks, batch n_eligible)
+            # so this works in both online+batch and batch-only modes.
+            # Anchors to seeds until enough data has informed the model.
+            MIN_OBS_FOR_FULL_TRUST = 50
             seed_offset = sum(s * xi for s, xi in zip(seeds, x))
             rls_offset = rls.predict(x)
-            alpha = min(rls.observation_count / MIN_RLS_OBS, 1.0)
+            alpha = min(rls.observation_count / MIN_OBS_FOR_FULL_TRUST, 1.0)
             blended_offset = (1.0 - alpha) * seed_offset + alpha * rls_offset
 
             # Integral-based FF confidence: when the integral opposes the FF
