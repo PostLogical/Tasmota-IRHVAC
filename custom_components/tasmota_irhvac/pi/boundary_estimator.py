@@ -166,7 +166,7 @@ class BoundaryEstimator:
         deltas, outdoor_deltas, hp_setpoints, room_temps, solar_vals, room_rates = arrays
         n = len(deltas)
 
-        # Coarse sweep
+        # Coarse sweep (split model: separate OLS for each side)
         coarse_candidates = np.arange(
             self._sweep_min, self._sweep_max + self._coarse_step / 2,
             self._coarse_step,
@@ -175,14 +175,28 @@ class BoundaryEstimator:
             coarse_candidates, deltas, outdoor_deltas, hp_setpoints,
             room_temps, solar_vals, room_rates,
         )
+        # Also run single-model sweep as fallback — the split model's
+        # separate intercepts can cause k_c to go negative for large
+        # offsets due to endogeneity, but the single model handles
+        # these cases better.
+        coarse_results_single = self._sweep_single(
+            coarse_candidates, deltas, outdoor_deltas, hp_setpoints,
+            room_temps, solar_vals, room_rates,
+        )
 
-        if not coarse_results:
+        if not coarse_results and not coarse_results_single:
             self._stall_count += 1
             self._last_result = not_confident
             return not_confident
 
-        # Find coarse minimum (k_c must be positive)
+        # Find coarse minimum (k_c must be positive).
+        # Prefer split model; fall back to single model when split
+        # produces no valid candidates (all k_c < 0 from endogeneity).
         valid = [(bp, rms, kc) for bp, rms, kc in coarse_results if kc > 0]
+        using_single = False
+        if not valid:
+            valid = [(bp, rms, kc) for bp, rms, kc in coarse_results_single if kc > 0]
+            using_single = True
         if not valid:
             self._stall_count += 1
             self._last_result = not_confident
@@ -190,18 +204,19 @@ class BoundaryEstimator:
 
         coarse_best = min(valid, key=lambda x: x[1])
 
-        # Fine sweep around coarse minimum
+        # Fine sweep around coarse minimum using the same method
         fine_candidates = np.arange(
             coarse_best[0] - self._coarse_step,
             coarse_best[0] + self._coarse_step + self._fine_step / 2,
             self._fine_step,
         )
-        fine_results = self._sweep(
+        sweep_fn = self._sweep_single if using_single else self._sweep
+        fine_results = sweep_fn(
             fine_candidates, deltas, outdoor_deltas, hp_setpoints,
             room_temps, solar_vals, room_rates,
         )
 
-        all_results = coarse_results + fine_results
+        all_results = (coarse_results_single if using_single else coarse_results) + fine_results
         valid = [(bp, rms, kc) for bp, rms, kc in all_results if kc > 0]
         if not valid:
             self._stall_count += 1
@@ -432,6 +447,52 @@ class BoundaryEstimator:
                 math.sqrt((rms_l * n_l + rms_r * n_r) / n)
             )
             results.append((float(bp), combined_rms, k_c))
+
+        return results
+
+    def _sweep_single(
+        self,
+        candidates: np.ndarray,
+        deltas: np.ndarray,
+        outdoor_deltas: np.ndarray,
+        hp_setpoints: np.ndarray,
+        room_temps: np.ndarray,
+        solar_vals: np.ndarray,
+        room_rates: np.ndarray,
+    ) -> list[tuple[float, float, float]]:
+        """Single-model sweep: one OLS with hp_offset = 0 for HP-off side.
+
+        Fallback for large offsets where the split model's separate
+        intercepts cause endogeneity-driven negative k_c.  The single
+        model shares intercept/ua_c across both sides, which is less
+        accurate but more robust to closed-loop confounding.
+        """
+        n = len(deltas)
+        results: list[tuple[float, float, float]] = []
+
+        for bp in candidates:
+            hp_on_mask = deltas < bp
+            n_l = int(hp_on_mask.sum())
+            n_r = n - n_l
+            if n_l < self._min_per_side or n_r < self._min_per_side:
+                continue
+
+            hp_offset = np.where(
+                hp_on_mask,
+                hp_setpoints - room_temps,
+                0.0,
+            )
+            X = np.column_stack([
+                np.ones(n), outdoor_deltas, hp_offset, solar_vals,
+            ])
+            try:
+                beta, _, _, _ = np.linalg.lstsq(X, room_rates, rcond=None)
+                predicted = X @ beta
+                rms = float(math.sqrt(np.mean((room_rates - predicted) ** 2)))
+                k_c = float(beta[2])
+                results.append((float(bp), rms, k_c))
+            except np.linalg.LinAlgError:
+                continue
 
         return results
 
