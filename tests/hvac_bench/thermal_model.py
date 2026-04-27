@@ -225,7 +225,8 @@ class ThermalModel2R2C:
                  noise_seed: int | None = None,
                  hp_lag_minutes: float = 0.0,
                  initial_wall_temp: float | None = None,
-                 solar_gain: float = 0.0, stove_gain: float = 0.0):
+                 solar_gain: float = 0.0, stove_gain: float = 0.0,
+                 head_sensor_offset: float = 0.0):
         self.profile = profile
         self.solar_gain = solar_gain
         self.stove_gain = stove_gain
@@ -238,6 +239,7 @@ class ThermalModel2R2C:
         self._rng = random.Random(noise_seed)
         self.hp_lag_minutes = hp_lag_minutes
         self._effective_setpoint: float = initial_temp
+        self.head_sensor_offset = head_sensor_offset
 
         # Energy tracking
         self.cumulative_kwh = 0.0
@@ -293,13 +295,15 @@ class ThermalModel2R2C:
         q_stove = self.stove_gain * stove_active
         q_extra = extra_heat
 
-        # HP cycling: internal thermostat turns off compressor when room
-        # is at or above setpoint (heating) or at/below setpoint (cooling).
-        # When off, HP contributes zero heat — g_eff = 0.
+        # HP cycling: internal thermostat turns off compressor when its
+        # head sensor (room_temp + offset) is at or above setpoint (heating)
+        # or at/below setpoint (cooling).  The offset models the difference
+        # between the HP's head unit sensor and our room sensor.
+        hp_sensed_temp = self.room_temp + self.head_sensor_offset
         if mode == "heat":
-            hp_active = self.room_temp < self._effective_setpoint
+            hp_active = hp_sensed_temp < self._effective_setpoint
         else:  # cool
-            hp_active = self.room_temp > self._effective_setpoint
+            hp_active = hp_sensed_temp > self._effective_setpoint
         g_eff = g if hp_active else 0.0
 
         # System matrix A and forcing vector b:

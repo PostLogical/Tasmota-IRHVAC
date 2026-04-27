@@ -116,6 +116,16 @@ class FullStackConfig:
     # If None, computed from profile + model inputs.
     true_coefs: dict[str, float] | None = None
 
+    # HP head sensor offset (°C).  The HP's internal sensor reads
+    # room_temp + offset.  Positive = HP thinks room is warmer (idles
+    # sooner in heat mode).  0.0 = perfect sensor match (bench default).
+    head_sensor_offset: float = 0.0
+
+    # Head calibration bounds [min, max] for the uncertain zone.
+    # None = production defaults (±2.0°C).  (0.0, 0.0) = no uncertain
+    # zone (prior bench behavior).
+    head_calibration_bounds: tuple[float, float] | None = None
+
 
 # ── Checkpoint system ────────────────────────────────────────────────────
 
@@ -227,6 +237,13 @@ class FullStackResult:
     # Per-batch snapshots
     batch_kappa: list[float]  # condition number at each batch
     batch_covariance_trace: list[float]  # tr(P) at each batch
+
+    # ── Observation yield metrics ────────────────────────────────────
+    # Zone model classification across all ticks:
+    ticks_hp_on: int  # ticks where HP definitely contributing
+    ticks_uncertain: int  # ticks in uncertain zone (|delta| < cal band)
+    ticks_hp_off: int  # ticks where HP definitely idle
+    observation_yield_pct: float  # hp_on / (hp_on + uncertain) — usable fraction
 
     # ── Setpoint behavior metrics ────────────────────────────────────
     # We send IR setpoints to the HP's thermostat; we don't control the
@@ -367,7 +384,8 @@ def run_full_stack(
         "pi_setpoint_weight": 0.3,
         **config.pi_overrides,
     }
-    adapter = TasmotaPIAdapter(pi_config)
+    adapter = TasmotaPIAdapter(pi_config,
+                               head_calibration_bounds=config.head_calibration_bounds)
     pi = adapter._pi
 
     if config.relax_kappa_gate:
@@ -392,6 +410,7 @@ def run_full_stack(
         noise_seed=config.noise_seed,
         solar_gain=solar_thermal_gain,
         stove_gain=0.0,
+        head_sensor_offset=config.head_sensor_offset,
     )
 
     adapter.set_desired_temp(config.desired_c)
@@ -434,6 +453,11 @@ def run_full_stack(
     cur_violation_streak = 0
     longest_violation_streak = 0
     total_rapid_sp_changes = 0
+
+    # Zone model observation yield tracking
+    ticks_hp_on = 0
+    ticks_uncertain = 0
+    ticks_hp_off = 0
 
     # Per-day accumulators
     day_itae = 0.0
@@ -540,6 +564,26 @@ def run_full_stack(
             _time.monotonic = original
 
         hp_setpoint = float(pi._hp_setpoint)
+
+        # Zone model classification: mirror production logic
+        delta = sensor_reading - hp_setpoint
+        is_heating = (config.mode == "heat")
+        cal_min = (pi._head_calibration_min_heat if is_heating
+                   else pi._head_calibration_min_cool)
+        cal_max = (pi._head_calibration_max_heat if is_heating
+                   else pi._head_calibration_max_cool)
+        if is_heating:
+            _hp_on = delta < cal_min
+            _hp_off = delta > cal_max
+        else:
+            _hp_on = delta > cal_max
+            _hp_off = delta < cal_min
+        if _hp_on:
+            ticks_hp_on += 1
+        elif _hp_off:
+            ticks_hp_off += 1
+        else:
+            ticks_uncertain += 1
 
         # Advance thermal model (solar goes through 2R2C air/wall split)
         model.step(
@@ -792,6 +836,11 @@ def run_full_stack(
         if ctrl_ticks_total > 0 else 100.0
     )
 
+    # Observation yield: hp_on / (hp_on + uncertain) — fraction of
+    # non-HP-off ticks that produce usable observations
+    non_off = ticks_hp_on + ticks_uncertain
+    obs_yield_pct = ticks_hp_on / non_off * 100.0 if non_off > 0 else 100.0
+
     return FullStackResult(
         history=history,
         coef_trajectory=coef_trajectory,
@@ -838,6 +887,11 @@ def run_full_stack(
         daily_setpoint_limited_pct=daily_setpoint_limited_pct,
         daily_rapid_sp_changes=daily_rapid_sp_changes,
         total_rapid_sp_changes=total_rapid_sp_changes,
+        # Observation yield
+        ticks_hp_on=ticks_hp_on,
+        ticks_uncertain=ticks_uncertain,
+        ticks_hp_off=ticks_hp_off,
+        observation_yield_pct=obs_yield_pct,
     )
 
 
