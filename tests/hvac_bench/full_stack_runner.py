@@ -568,12 +568,16 @@ def run_full_stack(
             _mock_states[mi.entity_id] = ms
         pi._hass.states.get = lambda eid, _s=_mock_states: _s.get(eid)
 
-        # Mock time.monotonic to sim clock.  Also advance CUSUM
-        # cooldown to sim time — the PI controller uses datetime.now()
-        # for cooldowns, which doesn't advance in fast-sim mode.
+        # Mock time.monotonic and time.time to sim clock.  The PI
+        # controller uses time.time() for observation wall_time (needed
+        # for sin/cos ToD features) and datetime.now() for cooldowns,
+        # neither of which advance in fast-sim mode.
         _sim_dt = _SIM_EPOCH + timedelta(seconds=adapter._sim_clock)
-        original = _time.monotonic
+        _sim_epoch_ts = _SIM_EPOCH.timestamp()
+        original_monotonic = _time.monotonic
+        original_time = _time.time
         _time.monotonic = lambda: adapter._sim_clock
+        _time.time = lambda: _sim_epoch_ts + adapter._sim_clock
         # Patch CUSUM cooldown: if set, re-anchor to sim time
         if pi._cusum_cooldown_until is not None:
             # Cooldown was set at some sim time.  Check if enough sim time
@@ -592,7 +596,8 @@ def run_full_stack(
         try:
             adapter._loop.run_until_complete(pi._pi_tick())
         finally:
-            _time.monotonic = original
+            _time.monotonic = original_monotonic
+            _time.time = original_time
 
         hp_setpoint = float(pi._hp_setpoint)
 

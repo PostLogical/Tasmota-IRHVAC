@@ -7,12 +7,34 @@ These tests run the real PIController against 2R2C thermal models with
 batch WLS triggering.  They fill the gap identified in the TODO at
 test_pi_controller.py:1206.
 
-Scenarios:
-    1. Wrong seeds → convergence (living room, 30 days)
-    2. Bunkroom slow learner (30 days)
-    3. Q-feedback convergence (formalizes commit 56fccac validation)
-    4. Real weather replay (CSV, @pytest.mark.slow)
-    5. Multi-year stability (@pytest.mark.slow)
+Test tiers
+----------
+**Regression** (unmarked — run every time, ~2 min total):
+    1. TestWrongSeedsConvergence — core learning, wrong→correct (30d LR)
+    2. TestBunkroomSlowLearner — high-τ profile (30d BR)
+    3. TestDisturbanceRejection — CUSUM sensor-grab recovery (30d)
+    4. TestStagedModelInputRollout — feature unlock pipeline (30d)
+    5. TestRecoveryFromBadStates — sign-flip, windup, P-collapse (4×30d)
+
+**Investigation** (@pytest.mark.slow — run with ``-m slow``):
+    6. TestQFeedbackConvergence — q-feedback lock-in across profiles
+       (6 sims × 21d).  Run when changing q-feedback or integral logic.
+    7. TestConvergenceToTruth — seed-factor sweep, convergence to
+       ground-truth (13 sims × 30d).  Run when changing batch WLS,
+       step caps, or seed initialization.
+    8. TestRealWeatherReplay — real open-meteo CSV (3 sims × 14d).
+       Run when changing observation filtering or weather-dependent logic.
+    9. TestMultiYearStability — 365-day drift check (2 sims × 365d).
+       Run when changing forgetting factor, P-matrix, or long-horizon
+       behavior.
+
+To run all tiers::
+
+    pytest tests/hvac_bench/scenarios/test_full_stack_learning.py -m ''
+
+To run only regression::
+
+    pytest tests/hvac_bench/scenarios/test_full_stack_learning.py -m 'not slow'
 """
 
 from __future__ import annotations
@@ -283,6 +305,7 @@ class TestBunkroomSlowLearner:
 # ── Scenario 3: Q-Feedback Convergence ───────────────────────────────────
 
 
+@pytest.mark.slow
 class TestQFeedbackConvergence:
     """Validates that q-feedback=0.0 enables SP lock-in within 2 weeks.
 
@@ -352,6 +375,7 @@ class TestQFeedbackConvergence:
 # ── Scenario: Convergence to true coefficients at varying wrongness ─────
 
 
+@pytest.mark.slow
 class TestConvergenceToTruth:
     """Start with seeds at varying levels of wrongness, validate convergence.
 

@@ -879,9 +879,16 @@ def _solve_joint(
 
     Returns (beta, std_err) or None if the joint solve fails.
     Mathematically equivalent to standard OLS — no approximation.
+
+    When observations span sufficient time diversity, sin/cos
+    time-of-day columns are included as nuisance regressors to
+    decorrelate diurnally confounded features (e.g. solar proxy
+    vs outdoor_delta).  Their coefficients are estimated but
+    discarded — only the decorrelation effect on other features
+    matters.  This is algebraically equivalent to the FWL
+    augmented partialling in ``_solve_fwl``.
     """
     n_active = len(ctx.active_input_indices)
-    n_joint = ctx.n_base + n_active
     m_complete = len(ctx.complete_indices)
 
     # Build joint feature matrix [intercept, outdoor_delta, input_0, ...]
@@ -890,6 +897,33 @@ def _solve_joint(
         joint_cols.append([ctx.X_base[k][j] for k in ctx.complete_indices])
     for fi in ctx.active_input_indices:
         joint_cols.append([ctx.input_values_by_obs[k][fi] for k in ctx.complete_indices])  # type: ignore[misc]  # complete_indices guarantees not-None
+
+    # Augment with sin/cos nuisance columns for diurnal decorrelation.
+    # Same logic as _solve_fwl: skip if observations lack time diversity.
+    # If an active feature is collinear with sin/cos (e.g. a sinusoidal
+    # input schedule), the augmented X'WX is singular → _solve_symmetric
+    # returns None → caller falls back to _solve_fwl, which handles
+    # rank deficiency via staged residualization (FWL theorem).
+    n_tod = 0
+    if m_complete >= 4 and ctx.base_eligible[ctx.complete_indices[0]] is not None:
+        tod_sin = [0.0] * m_complete
+        tod_cos = [0.0] * m_complete
+        for idx, k in enumerate(ctx.complete_indices):
+            obs = ctx.base_eligible[k]
+            wt = obs.wall_time if obs is not None else 0.0
+            s, c = tod_features(wt)
+            tod_sin[idx] = s
+            tod_cos[idx] = c
+        mean_s = sum(tod_sin) / m_complete
+        mean_c = sum(tod_cos) / m_complete
+        var_s = sum((s - mean_s) ** 2 for s in tod_sin) / m_complete
+        var_c = sum((c - mean_c) ** 2 for c in tod_cos) / m_complete
+        if var_s >= 0.001 or var_c >= 0.001:
+            joint_cols.append(tod_sin)
+            joint_cols.append(tod_cos)
+            n_tod = 2
+
+    n_joint = ctx.n_base + n_active + n_tod
 
     # Column normalization
     col_scales = [1.0] * n_joint
@@ -919,7 +953,8 @@ def _solve_joint(
     if beta_norm is None:
         return None
 
-    # Denormalize into full-size beta vector
+    # Denormalize into full-size beta vector.
+    # Sin/cos nuisance coefficients are estimated but discarded.
     beta = [0.0] * ctx.n
     beta[0] = beta_norm[0] / col_scales[0]
     beta[1] = beta_norm[1] / col_scales[1]
@@ -930,11 +965,10 @@ def _solve_joint(
     std_err = [float("inf")] * ctx.n
     cov_diag = _diagonal_of_inverse(XtWX, n_joint)
     if cov_diag is not None:
+        # Residuals use all columns (including nuisance) for correct σ²
+        all_beta_norm = [beta_norm[jj] / col_scales[jj] for jj in range(n_joint)]
         resid = [
-            y[idx] - sum(
-                joint_cols[jj][idx] * (beta[0], beta[1], *[beta[fi + 2] for fi in ctx.active_input_indices])[jj]
-                for jj in range(n_joint)
-            )
+            y[idx] - sum(joint_cols[jj][idx] * all_beta_norm[jj] for jj in range(n_joint))
             for idx in range(m_complete)
         ]
         rms_sq = sum(r * r for r in resid) / max(1, m_complete - n_joint)
