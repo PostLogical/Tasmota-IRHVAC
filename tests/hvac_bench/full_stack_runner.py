@@ -393,6 +393,7 @@ def run_full_stack(
         "pi_kp": 1.5,
         "pi_deadband": DEADBAND,
         "pi_setpoint_weight": 0.3,
+        "pi_rls_online_enabled": False,  # batch-only per online RLS verdict
         **config.pi_overrides,
     }
     adapter = TasmotaPIAdapter(pi_config,

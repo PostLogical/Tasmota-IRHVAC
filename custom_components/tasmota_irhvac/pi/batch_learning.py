@@ -958,6 +958,12 @@ def _solve_fwl(
     individual features have enough observations in their subsets.
     Each feature coefficient is unbiased (base regressors partialled out).
     Base intercept and outdoor_delta are re-estimated afterward.
+
+    Augmented partialling: in addition to [1, outdoor_delta], we partial
+    out [sin_hour, cos_hour] from both z and y_sub.  By the FWL theorem
+    (Frisch-Waugh-Lovell 1933/63) this is algebraically equivalent to
+    including sin/cos in the base regression — decorrelating diurnally
+    confounded features (e.g. solar proxy) without changing n_base.
     """
     beta = [0.0] * ctx.n
     beta[0] = ctx.beta_base[0]
@@ -970,6 +976,25 @@ def _solve_fwl(
         for k in range(ctx.m_base)
     ]
 
+    # Build sin/cos columns for augmented partialling.
+    # Check variance — if observations don't span enough of the day,
+    # fall back to base-only partialling (no diurnal decorrelation).
+    tod_sin = [0.0] * ctx.m_base
+    tod_cos = [0.0] * ctx.m_base
+    _use_tod = False
+    if ctx.m_base >= 4 and ctx.base_eligible[0] is not None:
+        for k in range(ctx.m_base):
+            obs_k = ctx.base_eligible[k]
+            wt = obs_k.wall_time if obs_k is not None else 0.0
+            s, c = tod_features(wt)
+            tod_sin[k] = s
+            tod_cos[k] = c
+        mean_s = sum(tod_sin) / ctx.m_base
+        mean_c = sum(tod_cos) / ctx.m_base
+        var_s = sum((s - mean_s) ** 2 for s in tod_sin) / ctx.m_base
+        var_c = sum((c - mean_c) ** 2 for c in tod_cos) / ctx.m_base
+        _use_tod = var_s >= 0.001 or var_c >= 0.001
+
     for fi in ctx.active_input_indices:
         coeff_idx = fi + 2
         subset_indices = [k for k in range(ctx.m_base) if ctx.input_values_by_obs[k][fi] is not None]
@@ -979,23 +1004,54 @@ def _solve_fwl(
         y_sub = [residuals_base[k] for k in subset_indices]
         X_base_sub = [ctx.X_base[k] for k in subset_indices]
 
-        # Partial out base regressors: regress z on [intercept, outdoor_delta]
-        XtWX_zb = [[0.0] * ctx.n_base for _ in range(ctx.n_base)]
-        XtWy_zb = [0.0] * ctx.n_base
+        # Partial out base + optional sin/cos: regress z on [1, od, sin, cos]
+        n_partial = ctx.n_base + (2 if _use_tod else 0)
+        XtWX_zb = [[0.0] * n_partial for _ in range(n_partial)]
+        XtWy_zb = [0.0] * n_partial
         for i_sub in range(m_sub):
-            for a in range(ctx.n_base):
-                xa = X_base_sub[i_sub][a]
-                XtWy_zb[a] += xa * w_sub[i_sub] * subset_values[i_sub]
-                for b in range(ctx.n_base):
-                    XtWX_zb[a][b] += xa * w_sub[i_sub] * X_base_sub[i_sub][b]
-        for a in range(ctx.n_base):
+            k = subset_indices[i_sub]
+            row: list[float] = list(X_base_sub[i_sub])
+            if _use_tod:
+                row.append(tod_sin[k])
+                row.append(tod_cos[k])
+            for a in range(n_partial):
+                XtWy_zb[a] += row[a] * w_sub[i_sub] * subset_values[i_sub]
+                for b in range(n_partial):
+                    XtWX_zb[a][b] += row[a] * w_sub[i_sub] * row[b]
+        for a in range(n_partial):
             XtWX_zb[a][a] += ctx.ridge
-        gamma = _solve_symmetric(XtWX_zb, XtWy_zb, ctx.n_base)
+        gamma = _solve_symmetric(XtWX_zb, XtWy_zb, n_partial)
 
-        r_z = (
-            [subset_values[i] - sum(gamma[a] * X_base_sub[i][a] for a in range(ctx.n_base)) for i in range(m_sub)]
-            if gamma is not None else subset_values
-        )
+        if gamma is not None:
+            r_z: list[float] = []
+            for i in range(m_sub):
+                k = subset_indices[i]
+                row_p: list[float] = list(X_base_sub[i])
+                if _use_tod:
+                    row_p.append(tod_sin[k])
+                    row_p.append(tod_cos[k])
+                r_z.append(subset_values[i] - sum(gamma[a] * row_p[a] for a in range(n_partial)))
+        else:
+            r_z = list(subset_values)
+
+        # Also partial out sin/cos from y_sub (FWL requires both sides)
+        if _use_tod and gamma is not None:
+            sin_sub = [tod_sin[k] for k in subset_indices]
+            cos_sub = [tod_cos[k] for k in subset_indices]
+            # Regress y_sub on [sin, cos] (no intercept — already residualized)
+            XtWX_y = [[0.0, 0.0], [0.0, 0.0]]
+            XtWy_y = [0.0, 0.0]
+            for i_sub in range(m_sub):
+                sc = [sin_sub[i_sub], cos_sub[i_sub]]
+                for a in range(2):
+                    XtWy_y[a] += sc[a] * w_sub[i_sub] * y_sub[i_sub]
+                    for b in range(2):
+                        XtWX_y[a][b] += sc[a] * w_sub[i_sub] * sc[b]
+            XtWX_y[0][0] += 1e-8
+            XtWX_y[1][1] += 1e-8
+            gamma_y = _solve_symmetric(XtWX_y, XtWy_y, 2)
+            if gamma_y is not None:
+                y_sub = [y_sub[i] - gamma_y[0] * sin_sub[i] - gamma_y[1] * cos_sub[i] for i in range(m_sub)]
 
         if _weighted_variance(r_z, w_sub) < ctx.min_feature_variance:
             held.add(coeff_idx)
