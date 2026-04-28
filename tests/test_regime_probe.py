@@ -604,3 +604,57 @@ class TestForcedProbe:
         rp = _make()
         rp.restore({})  # old data without forced_probe key
         assert rp._forced_probe is False
+
+
+# ── Probe result accessors ────────────────────────────────────────────
+
+
+class TestProbeResultAccessors:
+    """Tests for last_probe_delta/hp_contributing and consume_last_probe."""
+
+    def _run_full_cycle(self, rp, t, baseline_rate=0.005, probe_rate=-0.005):
+        """Run a complete probe cycle and return final time."""
+        _tick(rp, t, room_temp_rate=baseline_rate)
+        assert rp.state == ProbeState.BASELINE
+        for _ in range(BASELINE_MIN_READINGS):
+            t += BASELINE_MIN_DURATION_S / BASELINE_MIN_READINGS + 1
+            _tick(rp, t, room_temp_rate=baseline_rate)
+        assert rp.state == ProbeState.PROBE
+        for _ in range(PROBE_MIN_READINGS):
+            t += PROBE_MIN_DURATION_S / PROBE_MIN_READINGS + 1
+            _tick(rp, t, room_temp_rate=probe_rate)
+        assert rp.state == ProbeState.COOLDOWN
+        return t
+
+    def test_initial_state_is_none(self):
+        rp = _make()
+        assert rp.last_probe_delta is None
+        assert rp.last_probe_hp_contributing is None
+        assert rp.consume_last_probe() is None
+
+    def test_result_set_after_probe(self):
+        rp = _make()
+        # HP was contributing: baseline positive, probe goes negative
+        self._run_full_cycle(rp, 0.0, baseline_rate=0.01, probe_rate=-0.005)
+        assert rp.last_probe_delta is not None
+        assert rp.last_probe_hp_contributing is True
+
+    def test_consume_clears_result(self):
+        rp = _make()
+        self._run_full_cycle(rp, 0.0, baseline_rate=0.01, probe_rate=-0.005)
+        result = rp.consume_last_probe()
+        assert result is not None
+        delta, contributing = result
+        assert isinstance(delta, float)
+        assert contributing is True
+        # Consumed — should be None now
+        assert rp.consume_last_probe() is None
+
+    def test_not_contributing_result(self):
+        rp = _make()
+        # HP NOT contributing: no rate change
+        self._run_full_cycle(rp, 0.0, baseline_rate=0.005, probe_rate=0.005)
+        result = rp.consume_last_probe()
+        assert result is not None
+        _, contributing = result
+        assert contributing is False

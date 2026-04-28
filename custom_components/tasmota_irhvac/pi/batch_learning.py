@@ -53,8 +53,8 @@ class Observation:
     outdoor_temp_c: float | None  # absolute outdoor temperature (°C)
     room_rate: float  # dT/dt in °C/min at observation time
     raw_readings: dict[str, float]  # entity_id → raw sensor value at obs time
-    clamped: bool  # True if HP setpoint was at min or max
-    clamped_reason: str = ""  # "", "no_output", "saturated_low", "saturated_high"
+    clamped: bool  # True if HP output is unusable for learning
+    clamped_reason: str = ""  # "", "no_output", "saturated_low", "saturated_high", "observe_only"
     supplemental_active: bool = False  # supplemental source tracking or assisting
     hp_contribution_uncertain: bool = False  # |hp_offset| within regime margin
 
@@ -260,9 +260,19 @@ class DiversityAwareBuffer:
         """
         before = len(self._buffer)
         if mode == "heat":
-            self._buffer = [o for o in self._buffer if o.hp_setpoint is None or not (o.hp_setpoint < o.current_c)]
+            self._buffer = [
+                o for o in self._buffer
+                if o.clamped_reason == "no_output"
+                or o.hp_setpoint is None
+                or not (o.hp_setpoint < o.current_c)
+            ]
         else:
-            self._buffer = [o for o in self._buffer if o.hp_setpoint is None or not (o.hp_setpoint > o.current_c)]
+            self._buffer = [
+                o for o in self._buffer
+                if o.clamped_reason == "no_output"
+                or o.hp_setpoint is None
+                or not (o.hp_setpoint > o.current_c)
+            ]
         removed = before - len(self._buffer)
         if removed:
             self.recompute_info_matrix()
@@ -574,7 +584,7 @@ class DiversityAwareBuffer:
             return []
 
         names = feature_names or [f"feature_{i}" for i in range(n)]
-        unclamped = [o for o in self._buffer if o.clamped_reason not in ("no_output", "clamped")]
+        unclamped = [o for o in self._buffer if not o.clamped]
         if len(unclamped) < 20:
             return []
 
@@ -1055,10 +1065,9 @@ def weighted_least_squares(
     Returns None if insufficient eligible observations.
     """
     # ── Phase 1: Filter & classify ──────────────────────────────────
-    _EXCLUDE_REASONS = ("no_output", "clamped")
     eligible = [
         o for o in observations
-        if o.clamped_reason not in _EXCLUDE_REASONS
+        if not o.clamped
         and o.hp_setpoint is not None
         and abs(o.room_rate) < room_rate_threshold
         and not o.hp_contribution_uncertain
@@ -1810,7 +1819,7 @@ def analyze_residuals_by_hour(
     hour_residuals: dict[int, list[float]] = {h: [] for h in range(24)}
 
     for o in observations:
-        if o.clamped_reason in ("no_output", "clamped") or o.hp_setpoint is None:
+        if o.clamped or o.hp_setpoint is None:
             continue
         if abs(o.room_rate) >= room_rate_threshold:
             continue

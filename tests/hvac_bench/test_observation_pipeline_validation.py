@@ -104,8 +104,8 @@ def _run_and_collect_observations(outdoor_base: float, n_days: int = 7,
 
     gb_stats = {
         "total": len(gb_obs),
-        "hp_on": sum(1 for o in gb_obs if o.hp_setpoint is not None),
-        "hp_off": sum(1 for o in gb_obs if o.hp_setpoint is None),
+        "hp_on": sum(1 for o in gb_obs if o.clamped_reason != "no_output"),
+        "hp_off": sum(1 for o in gb_obs if o.clamped_reason == "no_output"),
     }
 
     return {

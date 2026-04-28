@@ -551,6 +551,7 @@ class TestFeedforward:
         pi._inputs.outdoor_temp = 5.0
         pi._desired_temp = 22.0
         pi._hp_setpoint = 26  # Well above current → delta < cal_min → HP definitely on
+        pi._last_raw_setpoint = 26.0  # Previous tick wasn't saturated
         pi._pi_integral = 0.5  # Small, stable
         pi._prev_integral_for_rls = 0.5
         pi._ff_settled_ticks = 10
@@ -4083,6 +4084,7 @@ class TestHPNoOutput:
         pi = entity._pi
         pi._desired_temp = 21.0
         pi._hp_setpoint = 23  # above room
+        pi._last_raw_setpoint = 23.0  # Previous tick wasn't saturated
         entity._attr_hvac_mode = HVACMode.HEAT
         entity._attr_current_temperature = 20.0
         pi._pi_integral = 0.0
@@ -5979,6 +5981,7 @@ class TestSubsystemToggles:
         entity._attr_current_temperature = 20.0
         pi._desired_temp = 22.0
         pi._hp_setpoint = 26  # Well above current → HP definitely on
+        pi._last_raw_setpoint = 26.0  # Previous tick wasn't saturated
 
         heat_before = len(pi._observation_buffer_heat.get_all())
         await pi._pi_tick()

@@ -330,7 +330,7 @@ class PIController:
         self._pi_d_filtered: float = 0.0    # Filtered derivative term
         self._pi_last_measurement: float | None = None  # Previous temperature measurement for derivative
         self._sensor_filtered: float | None = None  # Low-pass filtered room temp (°C)
-        self._last_raw_setpoint: float = 0.0  # Pre-quantization setpoint from last tick
+        self._last_raw_setpoint: float = float('nan')  # Pre-quantization setpoint from last tick
 
         # Supplemental heat source selector/override control
         supplemental_sources: list[dict[str, Any]] = config.get("pi_supplemental_sources", [])
@@ -912,12 +912,12 @@ class PIController:
         )
         if be_result.confident:
             _LOGGER.info(
-                "%sBoundary estimator: breakpoint=%.2f°C, "
-                "k_c=%.5f, rms_margin=%.6f, n=%d (%d/%d), "
+                "%sBoundary estimator: bp=%.2f°C (σ=%.2f), "
+                "residual_contrast=%.6f, n=%d (%d/%d), "
                 "bounds [%.2f, %.2f] → [%.2f, %.2f]",
                 self._log_prefix,
-                be_result.estimated_breakpoint,
-                be_result.slope_k_c or 0.0,
+                be_result.estimated_breakpoint or 0.0,
+                be_result.posterior_std or 0.0,
                 be_result.rms_margin or 0.0,
                 be_result.n_observations,
                 be_result.n_left,
@@ -933,12 +933,14 @@ class PIController:
                 self._head_calibration_max_cool = be_result.new_cal_max
         else:
             _LOGGER.debug(
-                "%sBoundary estimator: not confident (n=%d, stall=%d%s)",
+                "%sBoundary estimator: not confident "
+                "(n=%d, stall=%d, μ=%.2f, σ=%.2f%s)",
                 self._log_prefix,
                 be_result.n_observations,
                 self._boundary_estimator.stall_count,
-                f", bp={be_result.estimated_breakpoint:.2f}"
-                if be_result.estimated_breakpoint is not None else "",
+                be_result.posterior_mean or 0.0,
+                be_result.posterior_std or 0.0,
+                ", asymmetric" if be_result.data_asymmetric else "",
             )
         # If passive estimation has stalled, trigger active probe
         if self._boundary_estimator.should_trigger_probe:
@@ -973,7 +975,7 @@ class PIController:
         # Compute and cache κ before blending (needed for per-feature caps).
         n_eligible = sum(
             1 for o in buffer.get_all()
-            if o.clamped_reason not in ("no_output", "clamped")
+            if not o.clamped
             and abs(o.room_rate) < 0.02
         )
         if n_eligible >= 2 * buffer.n_features:
@@ -1142,7 +1144,7 @@ class PIController:
             coeff_names_vdp.append(m.get("name", "input"))
         eligible = [
             o for o in observations
-            if o.clamped_reason not in ("no_output", "clamped")
+            if not o.clamped
             and abs(o.room_rate) < 0.02
             and o.hp_setpoint is not None
         ]
@@ -1246,7 +1248,7 @@ class PIController:
     def buffer_eligible(self) -> int:
         """Count of eligible (unclamped, low-rate) observations in the active buffer."""
         obs = self._active_buffer.get_all()
-        return sum(1 for o in obs if o.clamped_reason not in ("no_output", "clamped") and abs(o.room_rate) < 0.02)
+        return sum(1 for o in obs if not o.clamped and abs(o.room_rate) < 0.02)
 
     @property
     def buffer_total(self) -> int:
@@ -2171,7 +2173,7 @@ class PIController:
         }
         # Multicollinearity per buffer — gate on sufficient data
         for label, buf in [("heat", self._observation_buffer_heat), ("cool", self._observation_buffer_cool)]:
-            n_eligible = sum(1 for o in buf.get_all() if o.clamped_reason not in ("no_output", "clamped") and abs(o.room_rate) < 0.02)
+            n_eligible = sum(1 for o in buf.get_all() if not o.clamped and abs(o.room_rate) < 0.02)
             if n_eligible >= 2 * buf.n_features:
                 cond = buf.compute_condition_number()
                 if not math.isinf(cond):
@@ -2351,7 +2353,7 @@ class PIController:
         def _buf_stats(buf: DiversityAwareBuffer) -> dict[str, Any]:
             obs = buf.get_all()
             n_eligible = sum(
-                1 for o in obs if o.clamped_reason not in ("no_output", "clamped") and abs(o.room_rate) < 0.02
+                1 for o in obs if not o.clamped and abs(o.room_rate) < 0.02
             )
             stats: dict[str, Any] = {"total": len(obs), "eligible": n_eligible}
             scores = buf.get_leverage_scores()
@@ -4358,10 +4360,13 @@ class PIController:
             hp_definitely_off = current_to_setpoint_delta < cal_min
 
         # For learning: observation is usable only when HP is clearly on
-        # AND setpoint isn't saturated at min/max.
+        # AND the previous tick's output wasn't saturated (raw setpoint
+        # beyond min/max means the controller wanted more than the actuator
+        # can deliver — Ljung §13.3).  Uses _last_raw_setpoint so the
+        # saturation check matches the setpoint that was actually in effect.
         hp_observation_usable = (
             hp_definitely_on
-            and self._min_temp_c < self._hp_setpoint < self._max_temp_c
+            and self._min_temp_c <= self._last_raw_setpoint <= self._max_temp_c
         )
 
         # ── Integration freeze: HP estimated active? ────────────────
@@ -4431,6 +4436,17 @@ class PIController:
                     self._head_calibration_min_cool = new_min
                     self._head_calibration_max_cool = new_max
             self._boundary_estimator.reset_stall()
+            # Feed probe result to boundary estimator Bayesian state
+            probe_evidence = self._regime_probe.consume_last_probe()
+            if probe_evidence is not None:
+                self._boundary_estimator.record_probe_evidence(
+                    probe_evidence[0], probe_evidence[1],
+                )
+
+        # Boundary estimator Layer 2: track room_rate after setpoint changes
+        self._boundary_estimator.tick(
+            self._room_temp_rate, current_c, is_heating,
+        )
 
         skip_integration = (
             (is_heating and self._hp_setpoint <= self._min_temp_c and error < 0)
@@ -4618,14 +4634,16 @@ class PIController:
             and not self._any_model_input_unavailable()
         )
 
-        # Clamped status computed unconditionally (used by hysteresis below)
+        # Clamped status computed unconditionally (used by hysteresis below).
+        # Use raw_setpoint (pre-clamp) with strict inequality: being exactly
+        # at the boundary is a valid operating point, not saturation.
         if hp_definitely_off:
             obs_clamped = True
             obs_clamped_reason = "no_output"
-        elif self._hp_setpoint <= self._min_temp_c:
+        elif raw_setpoint < self._min_temp_c:
             obs_clamped = True
             obs_clamped_reason = "saturated_low"
-        elif self._hp_setpoint >= self._max_temp_c:
+        elif raw_setpoint > self._max_temp_c:
             obs_clamped = True
             obs_clamped_reason = "saturated_high"
         else:
@@ -4728,6 +4746,14 @@ class PIController:
                     )
                     self._last_setpoint_change_time = now_mono
                     self._metrics.record_setpoint_change()
+                    # Boundary estimator Layer 2: record setpoint change
+                    self._boundary_estimator.record_setpoint_change(
+                        mono_time=now_mono,
+                        old_setpoint=old_setpoint,
+                        new_setpoint=new_setpoint,
+                        current_c=current_c,
+                        room_rate=self._room_temp_rate,
+                    )
                     # Start τ observation on significant setpoint changes
                     if (self._pi_plant_id_enabled
                             and self._inputs.outdoor_temp is not None

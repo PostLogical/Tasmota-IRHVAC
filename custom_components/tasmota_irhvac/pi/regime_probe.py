@@ -145,6 +145,10 @@ class RegimeProbe:
         self._confirmations_total: int = 0
         self._probes_completed: int = 0
 
+        # Last probe result (for boundary estimator consumption)
+        self._last_probe_delta: float | None = None
+        self._last_probe_hp_contributing: bool | None = None
+
     # ── Properties ───────────────────────────────────────────────────
 
     @property
@@ -158,6 +162,28 @@ class RegimeProbe:
     @property
     def probes_completed(self) -> int:
         return self._probes_completed
+
+    @property
+    def last_probe_delta(self) -> float | None:
+        """Delta (current_c - hp_setpoint) at last completed probe."""
+        return self._last_probe_delta
+
+    @property
+    def last_probe_hp_contributing(self) -> bool | None:
+        """Whether HP was contributing at last probe. None if no probe yet."""
+        return self._last_probe_hp_contributing
+
+    def consume_last_probe(self) -> tuple[float, bool] | None:
+        """Return and clear the last probe result for estimator consumption.
+
+        Returns (delta, hp_was_contributing) or None if no new result.
+        """
+        if self._last_probe_delta is None:
+            return None
+        result = (self._last_probe_delta, self._last_probe_hp_contributing or False)
+        self._last_probe_delta = None
+        self._last_probe_hp_contributing = None
+        return result
 
     # ── Main tick ────────────────────────────────────────────────────
 
@@ -325,6 +351,8 @@ class RegimeProbe:
             hp_was_contributing = rate_change > RATE_CHANGE_THRESHOLD
 
         self._probes_completed += 1
+        self._last_probe_delta = current_to_setpoint_delta
+        self._last_probe_hp_contributing = hp_was_contributing
 
         if not hp_was_contributing:
             # HP was NOT contributing → transition is below this point
