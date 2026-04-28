@@ -167,7 +167,7 @@ def _run_physical_change_comparison() -> PhysicalChangeResult:
                 entity_id="sensor.solar_proxy",
                 input_role="solar",
                 true_thermal_effect=0.005,
-                true_ff_coef=-2.0,
+                _true_ff_coef=-2.0,
                 seed_heat=0.0,
                 lag_tau=120,
                 clamp_min=0,

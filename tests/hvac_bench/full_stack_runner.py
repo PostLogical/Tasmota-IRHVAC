@@ -44,13 +44,28 @@ DEADBAND = 0.5
 
 @dataclass
 class ModelInputSpec:
-    """A model input with ground-truth thermal effect and FF coefficient."""
+    """A model input with ground-truth thermal effect and FF coefficient.
+
+    The ground-truth FF coefficient is derived from the 2R2C steady-state:
+
+        β = -true_thermal_effect / hp_gain
+
+    At equilibrium the wall releases all absorbed heat back to the air,
+    so the full ``true_thermal_effect`` (not just the 30% air fraction)
+    determines the required HP setpoint adjustment.  This mirrors how
+    ``true_seed`` is derived: ``seed = 1 / (hp_gain × τ_env)``.
+
+    For convenience, ``_true_ff_coef`` can be set directly and
+    ``true_thermal_effect`` left at 0 — the runner will back-compute
+    ``true_thermal_effect = abs(_true_ff_coef) * hp_gain`` so both
+    the thermal model and convergence checks stay consistent.
+    """
 
     name: str
     entity_id: str
     input_role: str  # "solar", "adjacent_zone", "heat_source", "other"
-    true_thermal_effect: float  # °C room per unit input per minute
-    true_ff_coef: float  # ground-truth WLS coefficient
+    true_thermal_effect: float = 0.0  # °C/min per unit input (physical heat rate)
+    _true_ff_coef: float | None = None  # override: sets true_thermal_effect from physics
     seed_heat: float = 0.0
     seed_cool: float = 0.0
     schedule: Callable[[int], float] | None = None  # tick -> value
@@ -58,6 +73,19 @@ class ModelInputSpec:
     lag_tau: int = 0
     clamp_min: float | None = None  # min in seed space (positive = warms room)
     clamp_max: float | None = None  # max in seed space
+
+    def resolve(self, hp_gain: float) -> None:
+        """Couple true_thermal_effect and FF coefficient via physics.
+
+        If ``_true_ff_coef`` is set, back-computes ``true_thermal_effect``.
+        Called once by the runner before simulation starts.
+        """
+        if self._true_ff_coef is not None and self.true_thermal_effect == 0.0:
+            self.true_thermal_effect = abs(self._true_ff_coef) * hp_gain
+
+    def true_ff_coef(self, hp_gain: float) -> float:
+        """Ground-truth FF coefficient from 2R2C steady-state physics."""
+        return -self.true_thermal_effect / hp_gain
 
 
 @dataclass
@@ -403,6 +431,10 @@ def run_full_stack(
     if config.relax_kappa_gate:
         pi._batch_kappa_threshold = 10000
 
+    # Resolve model input physics: couple true_thermal_effect ↔ FF coefficient.
+    for mi in config.model_inputs:
+        mi.resolve(profile.hp_gain)
+
     # Compute solar_gain for the thermal model from solar model inputs.
     # The thermal model applies this via 2R2C physics (30% air, 70% wall).
     solar_thermal_gain = sum(
@@ -448,7 +480,7 @@ def run_full_stack(
     if true_coefs is None:
         true_coefs = {"intercept": 0.0, "outdoor_delta": profile.true_seed}
         for mi in config.model_inputs:
-            true_coefs[mi.name] = mi.true_ff_coef
+            true_coefs[mi.name] = mi.true_ff_coef(profile.hp_gain)
 
     # ── Tracking state ───────────────────────────────────────────────
     history: list[dict] = []
