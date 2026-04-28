@@ -44,28 +44,23 @@ DEADBAND = 0.5
 
 @dataclass
 class ModelInputSpec:
-    """A model input with ground-truth thermal effect and FF coefficient.
+    """A model input with ground-truth FF coefficient.
 
-    The ground-truth FF coefficient is derived from the 2R2C steady-state:
+    ``_true_ff_coef`` is the single source of truth — the steady-state
+    FF coefficient the WLS should learn (°C HP-setpoint per unit input).
+    ``true_thermal_effect`` (°C/min per unit input, used by the thermal
+    model to inject heat) is *derived* from physics in :meth:`resolve`:
 
-        β = -true_thermal_effect / hp_gain
+        β = -tte / hp_gain  ⇒  tte = abs(β) × hp_gain
 
-    At equilibrium the wall releases all absorbed heat back to the air,
-    so the full ``true_thermal_effect`` (not just the 30% air fraction)
-    determines the required HP setpoint adjustment.  This mirrors how
-    ``true_seed`` is derived: ``seed = 1 / (hp_gain × τ_env)``.
-
-    For convenience, ``_true_ff_coef`` can be set directly and
-    ``true_thermal_effect`` left at 0 — the runner will back-compute
-    ``true_thermal_effect = abs(_true_ff_coef) * hp_gain`` so both
-    the thermal model and convergence checks stay consistent.
+    The default of -3.0 represents a strong solar signal (HP backs off
+    3°C per unit solar). Tests override per-scenario as needed.
     """
 
     name: str
     entity_id: str
     input_role: str  # "solar", "adjacent_zone", "heat_source", "other"
-    true_thermal_effect: float = 0.0  # °C/min per unit input (physical heat rate)
-    _true_ff_coef: float | None = None  # override: sets true_thermal_effect from physics
+    _true_ff_coef: float = -3.0  # ground-truth β; tte derived from this
     seed_heat: float = 0.0
     seed_cool: float = 0.0
     schedule: Callable[[int], float] | None = None  # tick -> value
@@ -73,19 +68,19 @@ class ModelInputSpec:
     lag_tau: int = 0
     clamp_min: float | None = None  # min in seed space (positive = warms room)
     clamp_max: float | None = None  # max in seed space
+    # Derived by resolve() — not authored by tests.
+    true_thermal_effect: float = field(init=False, default=0.0)
 
     def resolve(self, hp_gain: float) -> None:
-        """Couple true_thermal_effect and FF coefficient via physics.
+        """Derive ``true_thermal_effect`` from ``_true_ff_coef`` × hp_gain.
 
-        If ``_true_ff_coef`` is set, back-computes ``true_thermal_effect``.
         Called once by the runner before simulation starts.
         """
-        if self._true_ff_coef is not None and self.true_thermal_effect == 0.0:
-            self.true_thermal_effect = abs(self._true_ff_coef) * hp_gain
+        self.true_thermal_effect = abs(self._true_ff_coef) * hp_gain
 
     def true_ff_coef(self, hp_gain: float) -> float:
-        """Ground-truth FF coefficient from 2R2C steady-state physics."""
-        return -self.true_thermal_effect / hp_gain
+        """Ground-truth FF coefficient (single source of truth)."""
+        return self._true_ff_coef
 
 
 @dataclass
@@ -549,20 +544,42 @@ def run_full_stack(
         # Update outdoor temp
         model.outdoor_temp = outdoor_fn(tick)
 
-        # Compute model input values
+        # Compute model input values.  Each input role injects heat through
+        # the physical pathway it represents, per Madsen & Holst (1995) and
+        # ASHRAE Handbook of Fundamentals (2021) Ch. 18:
+        #   - "solar"        → 30% air / 70% wall split (radiation through
+        #                      windows, partly absorbed by interior mass)
+        #   - "heat_source"  → 30% air / 70% wall split (radiant stove,
+        #                      ASHRAE convective fraction 0.3-0.5)
+        #   - "adjacent_zone"→ 100% wall (party-wall conduction; heat must
+        #                      pass through wall mass before reaching air)
+        #   - "other"        → 30% air / 70% wall (default split)
+        # The wall node feeds the air node via the existing tau_couple
+        # dynamics, producing realistic lag and damping.
         input_values: dict[str, float] = {}
         solar_proxy_value = 0.0
-        extra_heat_rate = 0.0
+        q_air_extra = 0.0
+        q_wall_extra = 0.0
         for mi in config.model_inputs:
             val = mi.schedule(tick) if mi.schedule is not None else 0.0
             input_values[mi.name] = val
             if mi.input_role == "solar":
-                # Solar goes through the thermal model's 2R2C physics
-                # (30% convective to air, 70% radiative to walls).
+                # Solar handled inside model.step via the 2R2C split.
                 solar_proxy_value += val
+                continue
+            # Heat transfer scales with the FEATURE that drives β.  For
+            # delta_from_room inputs, the schedule reports absolute °C —
+            # convert to delta against current room temp before applying
+            # the per-unit heat rate.
+            feature_val = val - model.room_temp if mi.delta_from_room else val
+            q_total = mi.true_thermal_effect * feature_val
+            if mi.input_role == "adjacent_zone":
+                # Party-wall coupling: all heat enters at the wall node.
+                q_wall_extra += q_total
             else:
-                # Non-solar inputs (stove, adjacent zone) add heat directly
-                extra_heat_rate += mi.true_thermal_effect * val
+                # heat_source / other: ASHRAE 30/70 convective/radiative.
+                q_air_extra += q_total * 0.3
+                q_wall_extra += q_total * 0.7
 
         # Apply disturbances
         room_temp_offset = 0.0
@@ -577,9 +594,8 @@ def run_full_stack(
                         if mi.name == d.field and mi.input_role == "solar":
                             solar_proxy_value = d.value
 
-        # Apply non-solar extra heat directly to room
-        if extra_heat_rate != 0:
-            model.room_temp += extra_heat_rate * tick_min
+        # Non-solar heat enters through model.step() below — no direct
+        # room_temp injection (would bypass wall-node dynamics).
 
         # Read sensor (with optional disturbance offset)
         sensor_reading = model.read_sensor() + room_temp_offset
@@ -589,13 +605,16 @@ def run_full_stack(
         adapter._entity._attr_current_temperature = sensor_reading
         pi._inputs.outdoor_temp = model.outdoor_temp
 
-        # Mock model input entity states
+        # Mock model input entity states.  delta_from_room inputs need a
+        # temperature unit advertised so the controller's model_input_manager
+        # converts the absolute reading into a delta against current room.
         _mock_states: dict = {}
         for mi in config.model_inputs:
             val = input_values[mi.name]
+            unit = "°C" if mi.delta_from_room else None
             ms = type("MockState", (), {
                 "state": str(val),
-                "attributes": {"unit_of_measurement": None},
+                "attributes": {"unit_of_measurement": unit},
             })()
             _mock_states[mi.entity_id] = ms
         pi._hass.states.get = lambda eid, _s=_mock_states: _s.get(eid)
@@ -653,11 +672,15 @@ def run_full_stack(
         else:
             ticks_uncertain += 1
 
-        # Advance thermal model (solar goes through 2R2C air/wall split)
+        # Advance thermal model.  All heat sources enter through the
+        # 2R2C air/wall split (solar inside the model; non-solar via
+        # q_air_extra / q_wall_extra computed above).
         model.step(
             hp_setpoint=hp_setpoint,
             dt_minutes=tick_min,
             solar_proxy=solar_proxy_value,
+            q_air_extra=q_air_extra,
+            q_wall_extra=q_wall_extra,
             tick=tick,
             mode=config.mode,
         )

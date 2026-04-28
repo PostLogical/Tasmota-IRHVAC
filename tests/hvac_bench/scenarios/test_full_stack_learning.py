@@ -93,7 +93,6 @@ class TestWrongSeedsConvergence:
                     name="Solar Proxy",
                     entity_id="sensor.solar_proxy",
                     input_role="solar",
-                    true_thermal_effect=0.01,
                     _true_ff_coef=-3.0,
                     seed_heat=0.0,  # wrong: should be -3.0
                     lag_tau=120,
@@ -585,7 +584,13 @@ def _stove_schedule(tick: int) -> float:
 
 
 def _adjacent_zone_schedule(tick: int) -> float:
-    """Adjacent zone (sunroom) temp delta from room.
+    """Adjacent zone (sunroom) absolute temperature.
+
+    Returns the sunroom's absolute °C reading — the controlled room's
+    desired temp (20.5°C) ± a solar-driven delta.  The controller is
+    configured with ``delta_from_room=True`` to convert this to the
+    delta feature, matching how real installs work (sensor reports
+    absolute, controller computes delta).
 
     Warmer than room during solar hours, cooler at night.
     Correlated with solar — tests collinearity handling.
@@ -593,12 +598,13 @@ def _adjacent_zone_schedule(tick: int) -> float:
     tick_min = 15.0
     hour = (tick * tick_min / 60.0) % 24.0
     day = tick * tick_min / (60.0 * 24.0)
-    # Solar-driven: warm during day, cool at night
+    # Reference desired room temp; actual room fluctuates around it.
+    REFERENCE_ROOM_TEMP = 20.5
     if 8 <= hour <= 18:
         solar_factor = math.sin(math.pi * (hour - 8) / 10)
         cloud = 0.5 + 0.5 * math.cos(2 * math.pi * day / 3.0 + 1.0)
-        return 3.0 * solar_factor * cloud  # up to +3°C warmer
-    return -2.0  # cooler at night
+        return REFERENCE_ROOM_TEMP + 3.0 * solar_factor * cloud  # up to +3°C warmer
+    return REFERENCE_ROOM_TEMP - 2.0  # cooler at night
 
 
 class TestStagedModelInputRollout:
@@ -633,7 +639,6 @@ class TestStagedModelInputRollout:
                     name="Solar Proxy",
                     entity_id="sensor.solar_proxy",
                     input_role="solar",
-                    true_thermal_effect=0.005,
                     _true_ff_coef=-2.0,
                     seed_heat=0.0,
                     lag_tau=120,
@@ -644,7 +649,6 @@ class TestStagedModelInputRollout:
                     name="Sunroom Delta",
                     entity_id="sensor.sunroom_delta",
                     input_role="adjacent_zone",
-                    true_thermal_effect=0.001,
                     _true_ff_coef=-0.5,
                     seed_heat=0.0,
                     schedule=_adjacent_zone_schedule,
@@ -654,7 +658,6 @@ class TestStagedModelInputRollout:
                     name="Pellet Stove",
                     entity_id="sensor.pellet_stove",
                     input_role="heat_source",
-                    true_thermal_effect=0.008,
                     _true_ff_coef=-3.0,
                     seed_heat=0.0,
                     schedule=_stove_schedule,
@@ -956,7 +959,6 @@ class TestRealWeatherReplay:
                     name="Solar Proxy",
                     entity_id="sensor.solar_proxy",
                     input_role="solar",
-                    true_thermal_effect=0.005,
                     _true_ff_coef=-2.0,
                     seed_heat=0.0,
                     lag_tau=120,

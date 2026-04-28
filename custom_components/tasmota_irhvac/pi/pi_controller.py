@@ -543,6 +543,8 @@ class PIController:
         self._greybox_has_been_good: bool = False
         self._last_batch_timestamp: float | None = None
         self._last_batch_wallclock: str = ""  # ISO-8601 wall-clock time
+        self._detected_lag_tau: dict[str, float] = {}  # input name → smoothed detected tau (seconds)
+        self._detected_lag_tau_count: dict[str, int] = {}  # input name → consecutive consistent detections
         self._last_residual_patterns: list[HourlyResidualPattern] = []
         self._has_had_stable_batch: bool = False
         # Batch-first gate: RLS online updates are frozen until the first
@@ -829,6 +831,7 @@ class PIController:
                 feature_order=self._feature_order,
                 model_inputs=self._inputs.model_inputs,
                 # No frozen_features → estimates everything
+                detect_lag=False,  # tau already detected by primary result
             )
 
         coeff_names = self._coeff_names()
@@ -1123,6 +1126,61 @@ class PIController:
         self._last_batch_wallclock = datetime.now().isoformat(timespec="seconds")
         self._metrics.batch_model_rms = result.residual_rms
 
+        # ── Apply detected lag-tau to online path ──
+        # Two-phase gate: accumulate detections per (input, mode), only
+        # apply to the online EMA filter after 2+ consistent readings.
+        # Keyed by (name, mode) because the detection can differ between
+        # heat and cool — different observation mixes, equilibrium points,
+        # and solar interaction directions.  The online path uses the tau
+        # from the currently active mode.
+        _TAU_SMOOTH_ALPHA = 0.3
+        _TAU_CONFIRM_COUNT = 2  # detections needed before applying
+        mode_tag = "heat" if is_heating else "cool"
+        if result.detected_tau:
+            for m_input in self._model_inputs:
+                name = m_input.get("name", m_input.get("entity_id", ""))
+                if name not in result.detected_tau:
+                    continue
+                tau_new = result.detected_tau[name]
+                key = f"{name}:{mode_tag}"
+
+                # Update smoothed estimate (always, for tracking)
+                tau_old = self._detected_lag_tau.get(key)
+                if tau_old is None:
+                    tau_smoothed = tau_new
+                else:
+                    tau_smoothed = _TAU_SMOOTH_ALPHA * tau_new + (1 - _TAU_SMOOTH_ALPHA) * tau_old
+                self._detected_lag_tau[key] = tau_smoothed
+
+                # Count consistent detections: within ±30% of smoothed
+                count = self._detected_lag_tau_count.get(key, 0)
+                if tau_old is None or tau_old < 60:
+                    # First detection or near-zero: always count
+                    count += 1
+                elif abs(tau_new - tau_old) / max(tau_old, 1.0) < 0.3:
+                    count += 1
+                else:
+                    # Inconsistent — reset count, keep smoothed estimate
+                    count = 1
+                self._detected_lag_tau_count[key] = count
+
+                if count >= _TAU_CONFIRM_COUNT:
+                    m_input["lag_tau"] = tau_smoothed
+                    _LOGGER.info(
+                        "%sAuto lag-tau applied: %s [%s] → %.0fs (%.0f min), "
+                        "%d consistent detections",
+                        self._log_prefix, name, mode_tag,
+                        tau_smoothed, tau_smoothed / 60, count,
+                    )
+                else:
+                    _LOGGER.info(
+                        "%sAuto lag-tau pending: %s [%s] → %.0fs (%.0f min), "
+                        "%d/%d detections before applying",
+                        self._log_prefix, name, mode_tag,
+                        tau_smoothed, tau_smoothed / 60,
+                        count, _TAU_CONFIRM_COUNT,
+                    )
+
         # Refresh buffer serialization caches (avoids re-serializing thousands
         # of observations on every 60s state write — only at batch time).
         self._obs_buffer_heat_cache = self._observation_buffer_heat.as_list()
@@ -1351,6 +1409,8 @@ class PIController:
             rls_online_enabled=self._pi_rls_online_enabled,
             batch_wls_enabled=self._pi_batch_wls_enabled,
             plant_id_enabled=self._pi_plant_id_enabled,
+            detected_lag_tau=dict(self._detected_lag_tau),
+            detected_lag_tau_counts=dict(self._detected_lag_tau_count),
         )
 
     def restore_extra_stored_data(self, data: PIExtraStoredData) -> None:
@@ -1546,6 +1606,25 @@ class PIController:
         # Restore lag filter states
         if data.lag_filter_states:
             self._inputs.restore_lag_states(data.lag_filter_states)
+        # Restore detected lag-tau (keyed by "name:mode") and apply the
+        # best confirmed tau for each input.  On restore we don't know
+        # the current mode yet, so apply whichever mode has more
+        # confirmations (the more-exercised estimate).
+        if data.detected_lag_tau:
+            self._detected_lag_tau = dict(data.detected_lag_tau)
+            self._detected_lag_tau_count = dict(data.detected_lag_tau_counts)
+            for m_input in self._model_inputs:
+                name = m_input.get("name", m_input.get("entity_id", ""))
+                best_tau: float | None = None
+                best_count = 0
+                for mode_tag in ("heat", "cool"):
+                    key = f"{name}:{mode_tag}"
+                    cnt = self._detected_lag_tau_count.get(key, 0)
+                    if cnt >= 2 and cnt > best_count and key in self._detected_lag_tau:
+                        best_tau = self._detected_lag_tau[key]
+                        best_count = cnt
+                if best_tau is not None:
+                    m_input["lag_tau"] = best_tau
         # Restore plant estimate and recompute IMC gains
         if self._plant_id.enabled:
             restore_data = data.plant_identifier_state or {}

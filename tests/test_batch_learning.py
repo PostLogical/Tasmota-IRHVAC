@@ -13,9 +13,12 @@ from custom_components.tasmota_irhvac.pi.batch_learning import (
     HourlyResidualPattern,
     Observation,
     BatchResult,
+    _apply_retrospective_ema,
+    _detect_optimal_tau,
     _diagonal_of_inverse,
     _weighted_variance,
     analyze_residuals_by_hour,
+    build_feature_vector_from_raw,
     compare_and_report,
     compute_blended_update,
     fuse_batch_greybox,
@@ -2086,3 +2089,457 @@ class TestBatchLearningCoverageGaps:
         with _patch.object(np.linalg, 'eigvalsh', side_effect=np.linalg.LinAlgError("test")):
             kappa = buf.compute_condition_number()
         assert kappa == float('inf')
+
+
+# ── Retrospective EMA + auto lag-tau detection ─────────────────────────
+
+
+class TestRetrospectiveEMA:
+    """Tests for _apply_retrospective_ema."""
+
+    def test_tau_zero_returns_raw(self):
+        """tau=0 returns raw values without filtering."""
+        obs = [
+            Observation(
+                timestamp=0, wall_time=1000 + i * 900,
+                hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=10.0, room_rate=0.005,
+                raw_readings={"sensor.solar": float(i)},
+                clamped=False,
+            )
+            for i in range(5)
+        ]
+        result = _apply_retrospective_ema(obs, "sensor.solar", tau_seconds=0)
+        assert result == [0.0, 1.0, 2.0, 3.0, 4.0]
+
+    def test_ema_matches_online_formula(self):
+        """Retrospective EMA matches the online alpha = 1 - exp(-dt/tau) formula."""
+        dt = 900.0  # 15 min
+        tau = 3600.0  # 1 hour
+        alpha = 1.0 - math.exp(-dt / tau)
+
+        obs = [
+            Observation(
+                timestamp=0, wall_time=1000 + i * dt,
+                hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=10.0, room_rate=0.005,
+                raw_readings={"sensor.solar": 1.0 if i == 0 else 0.0},
+                clamped=False,
+            )
+            for i in range(5)
+        ]
+        result = _apply_retrospective_ema(obs, "sensor.solar", tau)
+
+        # First observation: ema = raw = 1.0
+        assert result[0] == 1.0
+        # Second: ema = alpha * 0 + (1-alpha) * 1.0
+        expected = (1 - alpha) * 1.0
+        assert abs(result[1] - expected) < 1e-10
+        # Third: ema = alpha * 0 + (1-alpha) * previous
+        expected2 = (1 - alpha) * expected
+        assert abs(result[2] - expected2) < 1e-10
+
+    def test_irregular_spacing_large_gap_resets(self):
+        """Large time gap → alpha near 1.0, effectively resets EMA."""
+        tau = 3600.0  # 1 hour
+        obs = [
+            Observation(
+                timestamp=0, wall_time=1000,
+                hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=10.0, room_rate=0.005,
+                raw_readings={"sensor.solar": 1.0},
+                clamped=False,
+            ),
+            Observation(
+                timestamp=1, wall_time=1000 + 86400,  # 24h later
+                hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=10.0, room_rate=0.005,
+                raw_readings={"sensor.solar": 0.5},
+                clamped=False,
+            ),
+        ]
+        result = _apply_retrospective_ema(obs, "sensor.solar", tau)
+        # alpha = 1 - exp(-86400/3600) ≈ 1.0, so ema ≈ 0.5
+        assert abs(result[1] - 0.5) < 0.01
+
+    def test_missing_readings_skipped(self):
+        """Observations without the entity_id get None, EMA state preserved."""
+        obs = [
+            Observation(
+                timestamp=0, wall_time=1000,
+                hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=10.0, room_rate=0.005,
+                raw_readings={"sensor.solar": 1.0},
+                clamped=False,
+            ),
+            Observation(
+                timestamp=1, wall_time=1900,
+                hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=10.0, room_rate=0.005,
+                raw_readings={},  # missing
+                clamped=False,
+            ),
+            Observation(
+                timestamp=2, wall_time=2800,
+                hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=10.0, room_rate=0.005,
+                raw_readings={"sensor.solar": 0.5},
+                clamped=False,
+            ),
+        ]
+        result = _apply_retrospective_ema(obs, "sensor.solar", 3600.0)
+        assert result[0] == 1.0
+        assert result[1] is None  # missing
+        assert result[2] is not None  # EMA continues from obs[0]
+
+    def test_empty_observations(self):
+        """Empty list returns empty list."""
+        assert _apply_retrospective_ema([], "sensor.solar", 3600.0) == []
+
+    def test_unsorted_observations_handled(self):
+        """Observations not in wall_time order are sorted internally."""
+        obs = [
+            Observation(
+                timestamp=0, wall_time=2000,
+                hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=10.0, room_rate=0.005,
+                raw_readings={"sensor.solar": 0.0},
+                clamped=False,
+            ),
+            Observation(
+                timestamp=1, wall_time=1000,
+                hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=10.0, room_rate=0.005,
+                raw_readings={"sensor.solar": 1.0},
+                clamped=False,
+            ),
+        ]
+        result = _apply_retrospective_ema(obs, "sensor.solar", 3600.0)
+        # obs[1] (wt=1000) is first in time → ema=1.0
+        # obs[0] (wt=2000) is second → blended
+        assert result[1] == 1.0  # first in time
+        assert result[0] is not None and result[0] < 1.0  # blended toward 0.0
+
+
+class TestDetectOptimalTau:
+    """Tests for _detect_optimal_tau."""
+
+    def test_recovers_known_lag(self):
+        """Synthetic data with known lag → detection recovers approximate tau."""
+        import random
+        rng = random.Random(123)
+        tau_true = 7200.0  # 2 hours in seconds
+        dt = 900.0  # 15 min
+        n_obs = 200
+
+        # Generate solar signal and lagged response
+        raw_solar = [max(0, math.sin(2 * math.pi * i / 96)) + rng.gauss(0, 0.1) for i in range(n_obs)]
+        # Apply true EMA to get lagged solar
+        lagged = [raw_solar[0]]
+        for i in range(1, n_obs):
+            alpha = 1 - math.exp(-dt / tau_true)
+            lagged.append(alpha * raw_solar[i] + (1 - alpha) * lagged[-1])
+
+        # y = β_solar * lagged_solar + noise
+        beta_solar = -3.0
+        obs = []
+        y_resid = []
+        weights = []
+        for i in range(n_obs):
+            y = beta_solar * lagged[i] + rng.gauss(0, 0.05)
+            obs.append(Observation(
+                timestamp=float(i), wall_time=1713650000.0 + i * dt,
+                hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=10.0, room_rate=0.005,
+                raw_readings={"sensor.solar": raw_solar[i]},
+                clamped=False,
+            ))
+            y_resid.append(y)
+            weights.append(1.0)
+
+        result = _detect_optimal_tau(obs, y_resid, weights, "sensor.solar")
+        assert result is not None
+        tau_detected, r2, beta = result
+        # Should recover tau within ~30% of true
+        assert abs(tau_detected - tau_true) / tau_true < 0.3, (
+            f"Detected τ={tau_detected:.0f}s, expected ~{tau_true:.0f}s"
+        )
+        # BIC accepted (returned non-zero τ) → r2_improvement is positive.
+        assert r2 > 0
+
+    def test_no_variation_returns_none(self):
+        """Constant input → insufficient variation → returns None."""
+        obs = [
+            Observation(
+                timestamp=float(i), wall_time=1000 + i * 900,
+                hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=10.0, room_rate=0.005,
+                raw_readings={"sensor.solar": 0.5},  # constant
+                clamped=False,
+            )
+            for i in range(50)
+        ]
+        y_resid = [0.1 * i for i in range(50)]
+        weights = [1.0] * 50
+        result = _detect_optimal_tau(obs, y_resid, weights, "sensor.solar")
+        # Should return None (constant → no variation → rss=inf)
+        # or (0, 0, 0) if it detects no improvement
+        assert result is None or result[0] == 0.0
+
+    def test_no_lag_in_data_returns_zero(self):
+        """Data with instantaneous relationship → tau=0."""
+        import random
+        rng = random.Random(456)
+        obs = []
+        y_resid = []
+        weights = []
+        for i in range(100):
+            solar = rng.uniform(0, 1.0)
+            y = -3.0 * solar + rng.gauss(0, 0.01)
+            obs.append(Observation(
+                timestamp=float(i), wall_time=1000 + i * 900,
+                hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=10.0, room_rate=0.005,
+                raw_readings={"sensor.solar": solar},
+                clamped=False,
+            ))
+            y_resid.append(y)
+            weights.append(1.0)
+
+        result = _detect_optimal_tau(obs, y_resid, weights, "sensor.solar")
+        assert result is not None
+        # tau should be near 0 (no lag)
+        assert result[0] < 1800, f"Expected τ≈0, got {result[0]:.0f}s"
+
+    def test_too_few_observations(self):
+        """Fewer than 10 observations → returns None."""
+        obs = [
+            Observation(
+                timestamp=float(i), wall_time=1000 + i * 900,
+                hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=10.0, room_rate=0.005,
+                raw_readings={"sensor.solar": float(i)},
+                clamped=False,
+            )
+            for i in range(5)
+        ]
+        result = _detect_optimal_tau(obs, [1.0] * 5, [1.0] * 5, "sensor.solar")
+        assert result is None
+
+    def test_golden_section_fallback(self):
+        """Pure-Python golden-section fallback produces same result as scipy."""
+        import sys
+        import custom_components.tasmota_irhvac.pi.batch_learning as bl
+        import random
+        rng = random.Random(123)
+        tau_true = 7200.0
+        dt = 900.0
+        n_obs = 200
+
+        raw_solar = [max(0, math.sin(2 * math.pi * i / 96)) + rng.gauss(0, 0.1) for i in range(n_obs)]
+        lagged = [raw_solar[0]]
+        for i in range(1, n_obs):
+            alpha = 1 - math.exp(-dt / tau_true)
+            lagged.append(alpha * raw_solar[i] + (1 - alpha) * lagged[-1])
+
+        obs = []
+        y_resid = []
+        weights = []
+        for i in range(n_obs):
+            y = -3.0 * lagged[i] + rng.gauss(0, 0.05)
+            obs.append(Observation(
+                timestamp=float(i), wall_time=1713650000.0 + i * dt,
+                hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=10.0, room_rate=0.005,
+                raw_readings={"sensor.solar": raw_solar[i]},
+                clamped=False,
+            ))
+            y_resid.append(y)
+            weights.append(1.0)
+
+        # Force golden-section fallback
+        orig_scipy = bl._SCIPY_AVAILABLE
+        try:
+            bl._SCIPY_AVAILABLE = False
+            result_gs = _detect_optimal_tau(obs, y_resid, weights, "sensor.solar")
+        finally:
+            bl._SCIPY_AVAILABLE = orig_scipy
+
+        assert result_gs is not None
+        tau_gs, r2_gs, beta_gs = result_gs
+        # Should still recover tau within 30%
+        assert abs(tau_gs - tau_true) / tau_true < 0.3, (
+            f"Golden-section τ={tau_gs:.0f}s, expected ~{tau_true:.0f}s"
+        )
+
+
+class TestBuildFeatureVectorFilteredOverrides:
+    """Tests for build_feature_vector_from_raw with filtered_overrides."""
+
+    def test_filtered_overrides_used(self):
+        """filtered_overrides replaces raw_readings for matching entity_ids."""
+        obs = Observation(
+            timestamp=0, wall_time=1713650000.0,
+            hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+            outdoor_temp_c=10.0, room_rate=0.005,
+            raw_readings={"sensor.solar": 0.8},
+            clamped=False,
+        )
+        model_inputs = [{"entity_id": "sensor.solar", "name": "solar"}]
+        feature_order = ["intercept", "outdoor_delta", "solar", "sin_hour", "cos_hour"]
+
+        # Without overrides
+        vec_raw = build_feature_vector_from_raw(obs, model_inputs, feature_order)
+        assert vec_raw is not None
+        assert vec_raw[2] == 0.8
+
+        # With overrides
+        vec_filtered = build_feature_vector_from_raw(
+            obs, model_inputs, feature_order,
+            filtered_overrides={"sensor.solar": 0.5},
+        )
+        assert vec_filtered is not None
+        assert vec_filtered[2] == 0.5
+
+    def test_filtered_overrides_none_uses_raw(self):
+        """filtered_overrides=None → raw_readings used (backward compat)."""
+        obs = Observation(
+            timestamp=0, wall_time=1713650000.0,
+            hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+            outdoor_temp_c=10.0, room_rate=0.005,
+            raw_readings={"sensor.solar": 0.8},
+            clamped=False,
+        )
+        model_inputs = [{"entity_id": "sensor.solar", "name": "solar"}]
+        feature_order = ["intercept", "outdoor_delta", "solar", "sin_hour", "cos_hour"]
+        vec = build_feature_vector_from_raw(obs, model_inputs, feature_order, filtered_overrides=None)
+        assert vec is not None
+        assert vec[2] == 0.8
+
+    def test_filtered_overrides_partial(self):
+        """Override only some entities; others use raw."""
+        obs = Observation(
+            timestamp=0, wall_time=1713650000.0,
+            hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+            outdoor_temp_c=10.0, room_rate=0.005,
+            raw_readings={"sensor.solar": 0.8, "sensor.stove": 1.0},
+            clamped=False,
+        )
+        model_inputs = [
+            {"entity_id": "sensor.solar", "name": "solar"},
+            {"entity_id": "sensor.stove", "name": "stove"},
+        ]
+        feature_order = ["intercept", "outdoor_delta", "solar", "stove", "sin_hour", "cos_hour"]
+        vec = build_feature_vector_from_raw(
+            obs, model_inputs, feature_order,
+            filtered_overrides={"sensor.solar": 0.3},  # only solar overridden
+        )
+        assert vec is not None
+        assert vec[2] == 0.3  # solar: overridden
+        assert vec[3] == 1.0  # stove: raw
+
+
+class TestWLSDetectedTau:
+    """Tests for detected_tau in weighted_least_squares."""
+
+    def test_detected_tau_in_result(self):
+        """WLS result contains detected_tau dict."""
+        import random
+        rng = random.Random(789)
+        obs = []
+        for i in range(50):
+            od = rng.uniform(-5, 15)
+            obs.append(Observation(
+                timestamp=float(i), wall_time=1713650000.0 + i * 3600,
+                hp_setpoint=20.0 + 0.3 * od, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=20.0 + od, room_rate=0.005,
+                raw_readings={},
+                clamped=False,
+            ))
+        result = weighted_least_squares(
+            obs, n_features=4,
+            feature_order=["intercept", "outdoor_delta", "sin_hour", "cos_hour"],
+            model_inputs=[],
+        )
+        assert result is not None
+        assert isinstance(result.detected_tau, dict)
+
+    def test_detect_lag_false_skips_detection(self):
+        """detect_lag=False → detected_tau is empty, no filtering applied."""
+        import random
+        rng = random.Random(42)
+        model_inputs = [{"entity_id": "sensor.solar", "name": "solar"}]
+        feature_order = ["intercept", "outdoor_delta", "solar", "sin_hour", "cos_hour"]
+        obs = []
+        for i in range(50):
+            od = rng.uniform(-5, 15)
+            solar = rng.uniform(0, 0.8)
+            y = 0.3 * od - 3.0 * solar
+            obs.append(Observation(
+                timestamp=float(i), wall_time=1713650000.0 + i * 3600,
+                hp_setpoint=20.0 + y, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=20.0 + od, room_rate=0.005,
+                raw_readings={"sensor.solar": solar},
+                clamped=False,
+            ))
+        result = weighted_least_squares(
+            obs, n_features=5, feature_order=feature_order,
+            model_inputs=model_inputs, detect_lag=False,
+        )
+        assert result is not None
+        assert result.detected_tau == {}
+
+    def test_wls_with_lagged_data_improves_coefficient(self):
+        """WLS with detect_lag=True recovers better coefficient for lagged input."""
+        import random
+        rng = random.Random(999)
+        tau_true = 7200.0  # 2h
+        dt = 900.0
+        beta_true = -3.0
+
+        # Generate solar with daily cycle + noise
+        raw_solar = [max(0, math.sin(2 * math.pi * i / 96)) + rng.gauss(0, 0.05) for i in range(300)]
+        # True lagged signal
+        lagged = [raw_solar[0]]
+        for i in range(1, 300):
+            a = 1 - math.exp(-dt / tau_true)
+            lagged.append(a * raw_solar[i] + (1 - a) * lagged[-1])
+
+        obs = []
+        for i in range(300):
+            od = rng.uniform(-5, 10)
+            y = 0.3 * od + beta_true * lagged[i] + rng.gauss(0, 0.02)
+            obs.append(Observation(
+                timestamp=float(i), wall_time=1713650000.0 + i * dt,
+                hp_setpoint=20.0 + y, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=20.0 + od, room_rate=0.005,
+                raw_readings={"sensor.solar": raw_solar[i]},
+                clamped=False,
+            ))
+
+        model_inputs = [{"entity_id": "sensor.solar", "name": "solar"}]
+        feature_order = ["intercept", "outdoor_delta", "solar", "sin_hour", "cos_hour"]
+
+        # Without detection
+        result_raw = weighted_least_squares(
+            obs, n_features=5, feature_order=feature_order,
+            model_inputs=model_inputs, detect_lag=False,
+        )
+        # With detection
+        result_auto = weighted_least_squares(
+            obs, n_features=5, feature_order=feature_order,
+            model_inputs=model_inputs, detect_lag=True,
+        )
+        assert result_raw is not None
+        assert result_auto is not None
+
+        # The auto-detected version should have a solar coefficient
+        # closer to the true value than the raw version
+        beta_raw = result_raw.beta_batch[2]
+        beta_auto = result_auto.beta_batch[2]
+        err_raw = abs(beta_raw - beta_true)
+        err_auto = abs(beta_auto - beta_true)
+        assert err_auto < err_raw, (
+            f"Auto β={beta_auto:.3f} should be closer to true {beta_true} "
+            f"than raw β={beta_raw:.3f}"
+        )

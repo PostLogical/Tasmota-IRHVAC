@@ -5390,6 +5390,7 @@ class TestStoredDataNewFields:
         assert data is not None
         assert data.controllable_itae == 0.0
         assert data.uncontrollable_itae == 0.0
+        assert data.detected_lag_tau == {}
         assert data.controllable_cvh == 0.0
         assert data.uncontrollable_cvh == 0.0
         assert data.ff_load_fraction == 0.5
@@ -5413,6 +5414,20 @@ class TestStoredDataNewFields:
         assert restored.controllable_cvh == pytest.approx(1.5)
         assert restored.uncontrollable_cvh == pytest.approx(3.2)
         assert restored.ff_load_fraction == pytest.approx(0.72)
+
+    def test_detected_lag_tau_round_trip(self):
+        """detected_lag_tau survives as_dict → from_dict round-trip."""
+        data = PIExtraStoredData(
+            pi_integral=1.0,
+            desired_temp=22.0,
+            hp_setpoint=22.0,
+            detected_lag_tau={"solar:heat": 7200.0, "solar:cool": 6800.0},
+            detected_lag_tau_counts={"solar:heat": 3, "solar:cool": 2},
+        )
+        restored = PIExtraStoredData.from_dict(data.as_dict())
+        assert restored is not None
+        assert restored.detected_lag_tau == {"solar:heat": 7200.0, "solar:cool": 6800.0}
+        assert restored.detected_lag_tau_counts == {"solar:heat": 3, "solar:cool": 2}
 
     def test_restore_applies_new_fields_to_controller(self):
         """restore_extra_stored_data loads new fields into PI controller."""

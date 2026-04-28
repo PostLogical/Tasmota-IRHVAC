@@ -73,6 +73,8 @@ class PIExtraStoredData(ExtraStoredData):
     rls_online_enabled: bool = True
     batch_wls_enabled: bool = True
     plant_id_enabled: bool = True
+    detected_lag_tau: dict[str, float] = dataclasses.field(default_factory=dict)  # input name → auto-detected EMA tau (seconds)
+    detected_lag_tau_counts: dict[str, int] = dataclasses.field(default_factory=dict)  # input name → consistent detection count
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize to JSON-compatible dict."""
@@ -125,6 +127,8 @@ class PIExtraStoredData(ExtraStoredData):
             "rls_online_enabled": self.rls_online_enabled,
             "batch_wls_enabled": self.batch_wls_enabled,
             "plant_id_enabled": self.plant_id_enabled,
+            "detected_lag_tau": self.detected_lag_tau,
+            "detected_lag_tau_counts": self.detected_lag_tau_counts,
         }
 
     @classmethod
@@ -189,6 +193,10 @@ class PIExtraStoredData(ExtraStoredData):
                 rls_online_enabled=bool(restored.get("rls_online_enabled", True)),
                 batch_wls_enabled=bool(restored.get("batch_wls_enabled", True)),
                 plant_id_enabled=bool(restored.get("plant_id_enabled", True)),
+                detected_lag_tau=restored.get("detected_lag_tau", {}),
+                detected_lag_tau_counts={
+                    k: int(v) for k, v in restored.get("detected_lag_tau_counts", {}).items()
+                },
             )
         except (KeyError, ValueError, TypeError, AttributeError):
             return None

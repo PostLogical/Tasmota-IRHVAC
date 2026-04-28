@@ -210,8 +210,8 @@ class TestResidualFiltering:
         )
         obs_with_glitch = obs + [glitch]
 
-        result_clean = weighted_least_squares(obs, n_features=3, feature_order=TEST_FEATURE_ORDER[:3], model_inputs=TEST_MODEL_INPUTS[:1])
-        result_glitch = weighted_least_squares(obs_with_glitch, n_features=3, feature_order=TEST_FEATURE_ORDER[:3], model_inputs=TEST_MODEL_INPUTS[:1])
+        result_clean = weighted_least_squares(obs, n_features=3, feature_order=TEST_FEATURE_ORDER[:3], model_inputs=TEST_MODEL_INPUTS[:1], detect_lag=False)
+        result_glitch = weighted_least_squares(obs_with_glitch, n_features=3, feature_order=TEST_FEATURE_ORDER[:3], model_inputs=TEST_MODEL_INPUTS[:1], detect_lag=False)
 
         assert result_glitch is not None
         assert result_glitch.n_outliers_excluded >= 1, "Glitch should be excluded"

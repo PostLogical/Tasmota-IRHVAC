@@ -255,10 +255,17 @@ class ThermalModel2R2C:
 
     def step(self, hp_setpoint: float, dt_minutes: float = 15.0,
              solar_proxy: float = 0.0, stove_active: float = 0.0,
+             q_air_extra: float = 0.0, q_wall_extra: float = 0.0,
              tick: int = 0, mode: str = "heat") -> None:
         """Advance both nodes by one time step.
 
         Same interface as ThermalModel for drop-in compatibility.
+
+        ``q_air_extra`` and ``q_wall_extra`` are generic per-node heat
+        injection rates (°C/min) for sources the runner has already
+        split per ASHRAE convective/radiative convention or party-wall
+        coupling.  They enter the same b1/b2 forcing terms as
+        ``q_solar_air`` and ``q_solar_wall``.
         """
         # HP response lag
         if self.hp_lag_minutes > 0:
@@ -322,8 +329,9 @@ class ThermalModel2R2C:
 
         b1 = (self.outdoor_temp / tau_env_eff
               + g_eff * self._effective_setpoint
-              + q_solar_air + q_stove + q_extra)
-        b2 = q_solar_wall / p.mass_ratio  # Normalized by wall capacitance ratio
+              + q_solar_air + q_stove + q_extra + q_air_extra)
+        # Wall-node forcing normalized by wall capacitance ratio.
+        b2 = (q_solar_wall + q_wall_extra) / p.mass_ratio
 
         # Equilibrium: T_eq = -A^{-1} * b
         det_A = a11 * a22 - a12 * a21

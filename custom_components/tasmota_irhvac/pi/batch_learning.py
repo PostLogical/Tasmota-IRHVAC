@@ -25,6 +25,13 @@ try:
 except ImportError:
     _NUMPY_AVAILABLE = False
 
+try:
+    from scipy.optimize import minimize_scalar as _minimize_scalar
+    _SCIPY_AVAILABLE = True
+except ImportError:
+    _minimize_scalar = None  # type: ignore[assignment]
+    _SCIPY_AVAILABLE = False
+
 from .model_input_manager import tod_features
 
 _LOGGER = logging.getLogger(__name__)
@@ -115,6 +122,7 @@ def build_feature_vector_from_raw(
     obs: Observation,
     model_inputs: list[dict[str, Any]],
     feature_order: list[str],
+    filtered_overrides: dict[str, float] | None = None,
 ) -> list[float] | None:
     """Build a feature vector from raw readings + current config.
 
@@ -132,9 +140,9 @@ def build_feature_vector_from_raw(
     - "sin_hour", "cos_hour": sinusoidal time-of-day features computed from
       obs.wall_time (local fractional hour).
 
-    No EMA is applied — batch WLS operates on raw instantaneous values.
-    The online RLS uses EMA for tick-by-tick smoothing, but the batch
-    fits across many diverse observations where individual noise averages out.
+    When ``filtered_overrides`` is provided, its values replace raw_readings
+    for matching entity_ids.  Used by batch WLS to apply retrospective EMA
+    filtering so the batch regression matches the online filtered signal.
     """
     if obs.outdoor_temp_c is None:
         return None
@@ -149,7 +157,11 @@ def build_feature_vector_from_raw(
         name = m_input.get("name", entity_id)
         if not entity_id or entity_id not in obs.raw_readings:
             return None  # incomplete — skip this observation for this feature set
-        value = obs.raw_readings[entity_id]
+        # Use filtered override if available, else raw reading
+        if filtered_overrides and entity_id in filtered_overrides:
+            value = filtered_overrides[entity_id]
+        else:
+            value = obs.raw_readings[entity_id]
         # Apply delta_from_room: raw_readings stores the °C absolute temp;
         # subtract the observation's room temp to get the delta.
         if m_input.get("delta_from_room"):
@@ -164,6 +176,284 @@ def build_feature_vector_from_raw(
     return [features.get(name, 0.0) for name in feature_order]
 
 
+# ── Retrospective EMA + auto lag-tau detection ─────────────────────────
+#
+# The online path applies EMA filtering tick-by-tick (model_input_manager),
+# but batch WLS regresses against raw instantaneous values.  For inputs
+# with thermal lag (solar through walls), this attenuates the estimated
+# coefficient.  These functions apply EMA retrospectively across the
+# observation buffer and auto-detect the optimal lag per input.
+#
+# Reference: Ljung, "System Identification" — pre-filtering inputs to
+# match plant dynamics before identification.
+
+# Golden-section ratio for pure-Python bracket search.
+_PHI = (math.sqrt(5) - 1) / 2  # ≈ 0.618
+
+# Bounds for tau search in seconds: 0 (no lag) to 8 hours.
+_TAU_SEARCH_MIN = 0.0
+_TAU_SEARCH_MAX = 28800.0
+
+# Minimum detectable tau (seconds).  Lags shorter than observation
+# spacing (~15 min) are indistinguishable from noise — snap to 0.
+_TAU_MIN_MEANINGFUL = 600.0  # 10 minutes
+
+# Acceptance is via BIC test (Schwarz, 1978): accept τ if
+# n·log(RSS_0/RSS_τ) > log(n), i.e. ΔBIC < 0 for one extra parameter.
+# References: Ljung, "System Identification" §16.4; Söderström & Stoica
+# §11.4. The BIC threshold scales with n, so it tightens automatically
+# on small buffers and loosens on large ones — unlike a fixed R² floor.
+
+
+def _apply_retrospective_ema(
+    observations: list[Observation],
+    entity_id: str,
+    tau_seconds: float,
+) -> list[float | None]:
+    """Apply EMA filtering retrospectively across observations.
+
+    Sorts observations by wall_time and applies the same EMA formula as
+    the online path: alpha = 1 - exp(-dt/tau).  Returns a list parallel
+    to the input list with filtered values, or None where the entity_id
+    is missing from raw_readings.
+
+    For tau <= 0, returns raw values (no filtering).
+    """
+    n = len(observations)
+    if n == 0:
+        return []
+
+    # Build (original_index, wall_time, raw_value) sorted by wall_time
+    indexed: list[tuple[int, float, float | None]] = []
+    for i, obs in enumerate(observations):
+        val = obs.raw_readings.get(entity_id)
+        indexed.append((i, obs.wall_time, val))
+    indexed.sort(key=lambda t: t[1])
+
+    result: list[float | None] = [None] * n
+
+    if tau_seconds <= 0:
+        # No filtering — return raw values
+        for orig_idx, _, raw in indexed:
+            result[orig_idx] = raw
+        return result
+
+    ema_state: float | None = None
+    prev_wt: float = 0.0
+
+    for orig_idx, wt, raw in indexed:
+        if raw is None:
+            # Missing reading — propagate None, keep EMA state
+            continue
+
+        if ema_state is None:
+            ema_state = raw
+            prev_wt = wt
+        else:
+            dt = wt - prev_wt
+            if dt > 0:
+                alpha = 1.0 - math.exp(-dt / tau_seconds)
+                ema_state = alpha * raw + (1.0 - alpha) * ema_state
+            # dt == 0: simultaneous observations, keep previous state
+            prev_wt = wt
+
+        result[orig_idx] = ema_state
+
+    return result
+
+
+def _detect_optimal_tau(
+    observations: list[Observation],
+    y_values: list[float],
+    weights: list[float],
+    entity_id: str,
+    delta_from_room: bool = False,
+    base_X: list[list[float]] | None = None,
+    tod_cols: list[tuple[float, float]] | None = None,
+) -> tuple[float, float, float] | None:
+    """Find the optimal EMA tau for a model input via joint regression sweep.
+
+    Builds X = [1, od, sin, cos, EMA(input, τ)] at candidate τ values
+    and picks the τ with lowest weighted RSS from the full joint regression.
+    This avoids the suppression problem where diurnal correlation between
+    solar and outdoor_delta hides the solar signal in partial residuals.
+
+    Returns (tau_optimal, r2_improvement, beta) or None if insufficient data.
+    Uses scipy.optimize.minimize_scalar when available, else golden-section.
+    """
+    n = len(observations)
+    if n < 10:
+        return None
+
+    # Effective regression sample size: observations with a valid raw
+    # reading for this entity (eligibility is τ-invariant — the EMA
+    # cannot create a value where the raw is missing).
+    n_eff = sum(
+        1 for o in observations if o.raw_readings.get(entity_id) is not None
+    )
+    if n_eff < 10:
+        return None
+
+    def _compute_rss(tau: float) -> float:
+        """Weighted RSS from joint regression y ~ [1, od, sin, cos, filtered_input]."""
+        filtered = _apply_retrospective_ema(observations, entity_id, tau)
+
+        # Build rows for observations with valid filtered values
+        rows: list[int] = []
+        x_input: list[float] = []
+        for i in range(n):
+            if filtered[i] is None:
+                continue
+            x_val = filtered[i]
+            if delta_from_room:
+                x_val = x_val - observations[i].current_c  # type: ignore[operator]
+            rows.append(i)
+            x_input.append(x_val)
+
+        m = len(rows)
+        if m < 10:
+            return float("inf")
+
+        if _NUMPY_AVAILABLE and base_X is not None and tod_cols is not None:
+            # Build design matrix: [1, od, sin, cos, input]
+            X = np.empty((m, 5))
+            y_arr = np.empty(m)
+            w_arr = np.empty(m)
+            for j, i in enumerate(rows):
+                X[j, 0] = base_X[i][0]  # intercept
+                X[j, 1] = base_X[i][1]  # outdoor_delta
+                X[j, 2] = tod_cols[i][0]  # sin
+                X[j, 3] = tod_cols[i][1]  # cos
+                X[j, 4] = x_input[j]
+                y_arr[j] = y_values[i]
+                w_arr[j] = weights[i]
+            # Weighted least squares: scale rows by sqrt(w)
+            sw = np.sqrt(w_arr)
+            Xw = X * sw[:, None]
+            yw = y_arr * sw
+            beta, rss_arr, _, _ = np.linalg.lstsq(Xw, yw, rcond=None)
+            if len(rss_arr) > 0:
+                return float(rss_arr[0])
+            # Fallback: compute RSS manually
+            pred = Xw @ beta
+            return float(np.sum((yw - pred) ** 2))
+        else:
+            # Pure-Python 5-feature normal equations
+            p = 5
+            XtWX = [[0.0] * p for _ in range(p)]
+            XtWy = [0.0] * p
+            for j, i in enumerate(rows):
+                od_i = base_X[i][1] if base_X else 0.0
+                s_i, c_i = tod_cols[i] if tod_cols else (0.0, 0.0)
+                row = [1.0, od_i, s_i, c_i, x_input[j]]
+                wi = weights[i]
+                for a in range(p):
+                    XtWy[a] += row[a] * wi * y_values[i]
+                    for b in range(p):
+                        XtWX[a][b] += row[a] * wi * row[b]
+            for a in range(p):
+                XtWX[a][a] += 1e-6
+            beta_pp = _solve_symmetric(XtWX, XtWy, p)
+            if beta_pp is None:
+                return float("inf")
+            rss = 0.0
+            for j, i in enumerate(rows):
+                od_i = base_X[i][1] if base_X else 0.0
+                s_i, c_i = tod_cols[i] if tod_cols else (0.0, 0.0)
+                row = [1.0, od_i, s_i, c_i, x_input[j]]
+                pred = sum(beta_pp[a] * row[a] for a in range(p))
+                rss += weights[i] * (y_values[i] - pred) ** 2
+            return rss
+
+    # Compute RSS at tau=0 (raw) for comparison
+    rss_raw = _compute_rss(0.0)
+
+    if _SCIPY_AVAILABLE and _minimize_scalar is not None:
+        result = _minimize_scalar(
+            _compute_rss,
+            bounds=(_TAU_SEARCH_MIN, _TAU_SEARCH_MAX),
+            method="bounded",
+            options={"xatol": 60.0},  # 1-minute precision
+        )
+        tau_opt = float(result.x)
+        rss_opt = float(result.fun)
+    else:
+        # Pure-Python golden-section search
+        a, b = _TAU_SEARCH_MIN, _TAU_SEARCH_MAX
+        c = b - _PHI * (b - a)
+        d = a + _PHI * (b - a)
+        fc = _compute_rss(c)
+        fd = _compute_rss(d)
+
+        while (b - a) > 60.0:  # 1-minute precision
+            if fc < fd:
+                b = d
+                d, fd = c, fc
+                c = b - _PHI * (b - a)
+                fc = _compute_rss(c)
+            else:
+                a = c
+                c, fc = d, fd
+                d = a + _PHI * (b - a)
+                fd = _compute_rss(d)
+
+        tau_opt = (a + b) / 2
+        rss_opt = _compute_rss(tau_opt)
+
+    # Compute R² improvement (reported only — gate is BIC below).
+    if rss_raw <= 0 or rss_raw == float("inf") or rss_opt <= 0:
+        return None
+
+    r2_improvement = 1.0 - rss_opt / rss_raw
+
+    # BIC test: τ adds one nuisance parameter (k=1).  Accept iff
+    # n·log(RSS_0/RSS_τ) > log(n) (equivalently ΔBIC < 0).  This is
+    # the standard nested-model criterion in system identification —
+    # n-aware so the threshold tightens for small buffers and loosens
+    # as the buffer fills.
+    bic_gain = n_eff * math.log(rss_raw / rss_opt)
+    if bic_gain < math.log(n_eff):
+        # Filtering not justified by the data — keep tau=0
+        return (0.0, 0.0, 0.0)
+
+    # Snap tiny tau to 0: lags shorter than observation spacing
+    # are noise, not real thermal dynamics.
+    if tau_opt < _TAU_MIN_MEANINGFUL:
+        return (0.0, 0.0, 0.0)
+
+    # Recover the input coefficient at tau_opt for logging.
+    # Re-run the joint regression at tau_opt; the input coefficient
+    # is the last element of beta (index 4 in the 5-feature model).
+    filtered = _apply_retrospective_ema(observations, entity_id, tau_opt)
+    rows_f: list[int] = []
+    x_input_f: list[float] = []
+    for i in range(n):
+        if filtered[i] is None:
+            continue
+        x_val = filtered[i]
+        if delta_from_room:
+            x_val = x_val - observations[i].current_c  # type: ignore[operator]
+        rows_f.append(i)
+        x_input_f.append(x_val)
+    m_f = len(rows_f)
+    p = 5
+    XtWX_f = [[0.0] * p for _ in range(p)]
+    XtWy_f = [0.0] * p
+    for j, i in enumerate(rows_f):
+        od_i = base_X[i][1] if base_X else 0.0
+        s_i, c_i = tod_cols[i] if tod_cols else (0.0, 0.0)
+        row = [1.0, od_i, s_i, c_i, x_input_f[j]]
+        wi = weights[i]
+        for a in range(p):
+            XtWy_f[a] += row[a] * wi * y_values[i]
+            for b_idx in range(p):
+                XtWX_f[a][b_idx] += row[a] * wi * row[b_idx]
+    for a in range(p):
+        XtWX_f[a][a] += 1e-6
+    beta_f = _solve_symmetric(XtWX_f, XtWy_f, p)
+    beta_input = beta_f[4] if beta_f else 0.0
+
+    return (tau_opt, r2_improvement, beta_input)
 
 
 class DiversityAwareBuffer:
@@ -823,6 +1113,7 @@ class BatchResult:
     blend_gains: list[float] = field(default_factory=list)  # per-coefficient Kalman gain K_i ∈ [0, 1]
     plant_snapshot: dict[str, Any] = field(default_factory=dict)  # plant ID state at batch time
     feature_vif: list[float] = field(default_factory=list)  # per-feature VIF from regression data
+    detected_tau: dict[str, float] = field(default_factory=dict)  # input name → auto-detected EMA tau (seconds)
 
 
 def _weighted_variance(values: list[float], weights: list[float]) -> float:
@@ -1151,6 +1442,7 @@ def weighted_least_squares(
     feature_order: list[str] | None = None,
     model_inputs: list[dict[str, Any]] | None = None,
     frozen_features: set[int] | None = None,
+    detect_lag: bool = True,
 ) -> BatchResult | None:
     """Run weighted least squares on physical observations.
 
@@ -1160,6 +1452,11 @@ def weighted_least_squares(
     2. **Solve** — joint OLS on complete data (exact), or FWL on partial
        data (unbiased per-feature).  Grey-box solvers plug in here.
     3. **Package** — compute residuals, exclude outliers, return BatchResult.
+
+    When ``detect_lag`` is True, auto-detects optimal EMA tau per model
+    input by minimizing base-regression residuals.  Detected tau values
+    are stored in ``BatchResult.detected_tau`` and used to pre-filter
+    inputs for the main regression.
 
     Returns None if insufficient eligible observations.
     """
@@ -1218,6 +1515,56 @@ def weighted_least_squares(
         return None
     beta_base = [beta_base_norm[i] / col_scales_base[i] for i in range(n_base)]
 
+    # ── Auto lag-tau detection ──────────────────────────────────────
+    # For each model input, detect optimal EMA tau by minimizing
+    # base-regression residuals.  Pre-compute filtered values using
+    # the detected tau for use in the main regression.
+    detected_tau: dict[str, float] = {}
+    # Per-entity filtered values: entity_id → list[float|None] parallel to base_eligible
+    _filtered_cache: dict[str, list[float | None]] = {}
+
+    if detect_lag and m_inputs:
+        # Auto lag-tau via joint regression sweep.  For each model input,
+        # build X = [1, od, sin, cos, EMA(input, τ)] at candidate τ values
+        # and pick the τ with lowest weighted RSS.  This is the profile
+        # likelihood approach — the full joint regression naturally handles
+        # diurnal correlation without needing separate FWL partialling.
+        #
+        # Uses numpy when available (np.linalg.lstsq is ~100× faster than
+        # pure-Python normal equations for the ~200×5 matrices involved).
+        _tod_cols: list[tuple[float, float]] = [
+            tod_features(base_eligible[k].wall_time) for k in range(m_base)
+        ]
+
+        for m_input in m_inputs:
+            entity_id = m_input.get("entity_id", "")
+            name = m_input.get("name", entity_id)
+            dfr = bool(m_input.get("delta_from_room"))
+            if not entity_id:
+                continue
+
+            tau_result = _detect_optimal_tau(
+                base_eligible, y_base, w_base,
+                entity_id=entity_id,
+                delta_from_room=dfr,
+                base_X=X_base,
+                tod_cols=_tod_cols,
+            )
+
+            if tau_result is not None:
+                tau_opt, r2_impr, beta_at_tau = tau_result
+                detected_tau[name] = tau_opt
+                if tau_opt > 0:
+                    _LOGGER.info(
+                        "Lag-tau detection: %s τ=%.0fs (%.0f min), "
+                        "R²_improvement=%.3f, β=%.3f",
+                        name, tau_opt, tau_opt / 60, r2_impr, beta_at_tau,
+                    )
+                # Cache filtered values for this entity
+                _filtered_cache[entity_id] = _apply_retrospective_ema(
+                    base_eligible, entity_id, tau_opt,
+                )
+
     # Classify model input features
     input_entity_ids = [m.get("entity_id", "") for m in m_inputs]
     input_values_by_obs: list[list[float | None]] = []
@@ -1226,7 +1573,11 @@ def weighted_least_squares(
         for feat_idx, m_input in enumerate(m_inputs):
             entity_id = input_entity_ids[feat_idx]
             if entity_id and entity_id in o.raw_readings:
-                value = o.raw_readings[entity_id]
+                # Use filtered value if available, else raw
+                if entity_id in _filtered_cache and _filtered_cache[entity_id][k] is not None:
+                    value = _filtered_cache[entity_id][k]  # type: ignore[assignment]
+                else:
+                    value = o.raw_readings[entity_id]
                 if m_input.get("delta_from_room"):
                     value = value - o.current_c
                 row.append(value)
@@ -1321,8 +1672,19 @@ def weighted_least_squares(
         full_obs: list[Observation] = []
         full_X: list[list[float]] = []
         full_y: list[float] = []
-        for o in base_eligible:
-            vec = build_feature_vector_from_raw(o, m_inputs, feature_order)
+        for k, o in enumerate(base_eligible):
+            # Build per-observation filtered overrides from cache
+            f_overrides: dict[str, float] | None = None
+            if _filtered_cache:
+                fo: dict[str, float] = {}
+                for eid, fvals in _filtered_cache.items():
+                    if k < len(fvals) and fvals[k] is not None:
+                        fo[eid] = fvals[k]  # type: ignore[assignment]
+                if fo:
+                    f_overrides = fo
+            vec = build_feature_vector_from_raw(
+                o, m_inputs, feature_order, filtered_overrides=f_overrides,
+            )
             if vec is not None:
                 assert o.hp_setpoint is not None
                 full_obs.append(o)
@@ -1391,6 +1753,7 @@ def weighted_least_squares(
         held_features=held,
         beta_std_err=std_err,
         feature_vif=vif,
+        detected_tau=detected_tau,
     )
 
 
