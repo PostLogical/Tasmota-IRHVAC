@@ -117,7 +117,7 @@ from ..const import (
 from ..const import DEFAULT_RLS_P_INIT
 from .rls_model import RLSModel
 from .pi_stored_data import PIExtraStoredData
-from .model_input_manager import ModelInputManager
+from .model_input_manager import ModelInputManager, N_TOD_FEATURES, TOD_FEATURE_NAMES
 from .health_checks import (
     check_comfort,
     check_feature_diversity,
@@ -371,7 +371,7 @@ class PIController:
             })
         # Outdoor delta is always the first model input (index 1, after intercept)
         # Other model inputs follow in order of _model_inputs list
-        self._n_model_inputs = 1 + len(self._model_inputs)  # outdoor_delta + configured inputs
+        self._n_model_inputs = 1 + len(self._model_inputs) + N_TOD_FEATURES  # outdoor_delta + configured inputs + sin/cos hour
 
         # Build seed coefficients and clamps
         # Index 0: intercept (direct baseline offset, no negation)
@@ -412,6 +412,14 @@ class PIController:
             self._rls_heat_clamps.append(clamp)
             self._rls_cool_clamps.append(clamp)
 
+        # Time-of-day sinusoidal features: seed=0 (no directional prior),
+        # unclamped (direction depends on house orientation/schedule).
+        for _ in range(N_TOD_FEATURES):
+            self._heat_seeds.append(0.0)
+            self._cool_seeds.append(0.0)
+            self._rls_heat_clamps.append(None)
+            self._rls_cool_clamps.append(None)
+
         # Feature scales = expected σ of each feature (van der Sluis 1969,
         # Haykin Adaptive Filter Theory §13). Normalizes features to O(1)
         # for balanced P-matrix conditioning and learning rates.
@@ -419,6 +427,9 @@ class PIController:
         self._feature_scales = [1.0, 13.0]
         for m_input in self._model_inputs:
             self._feature_scales.append(float(m_input.get("typical_value", 0.5)))
+        # ToD feature scales: σ of sin/cos over 24h = 1/√2 ≈ 0.707
+        for _ in range(N_TOD_FEATURES):
+            self._feature_scales.append(0.7)
 
         # RLS models (separate for heating and cooling)
         self._rls_heat = RLSModel(
@@ -721,7 +732,7 @@ class PIController:
                 and self._inputs.outdoor_temp is not None and desired_c is not None):
             is_heating = e._attr_hvac_mode in (HVACMode.HEAT, HVACMode.HEAT_COOL, None)
             outdoor_delta = self._inputs.outdoor_temp - desired_c
-            x = self._inputs.build_feature_vector(outdoor_delta)
+            x = self._inputs.build_feature_vector(outdoor_delta, wall_time=time.time())
             rls = self._rls_heat if is_heating else self._rls_cool
             self._ff_offset = rls.predict(x)
 
@@ -820,9 +831,7 @@ class PIController:
                 # No frozen_features → estimates everything
             )
 
-        coeff_names = ["intercept", "outdoor_delta"]
-        for m in self._model_inputs:
-            coeff_names.append(m.get("name", "input"))
+        coeff_names = self._coeff_names()
 
         compare_and_report(
             result, current_phys, coeff_names,
@@ -1139,9 +1148,7 @@ class PIController:
         # Compute per-variable variance decomposition to identify which
         # features share ill-conditioned components.  Cached for the
         # multicollinearity repair check.
-        coeff_names_vdp = ["intercept", "outdoor_delta"]
-        for m in self._model_inputs:
-            coeff_names_vdp.append(m.get("name", "input"))
+        coeff_names_vdp = self._coeff_names()
         eligible = [
             o for o in observations
             if not o.clamped
@@ -1214,9 +1221,7 @@ class PIController:
         >= drift_threshold consecutive cycles.
         """
         drifting = []
-        coeff_names = ["intercept", "outdoor_delta"]
-        for m in self._model_inputs:
-            coeff_names.append(m.get("name", "input"))
+        coeff_names = self._coeff_names()
 
         for i, history in enumerate(self._drift_correction_signs):
             if len(history) < self._drift_threshold:
@@ -1680,9 +1685,7 @@ class PIController:
         if not self._pi_enabled:
             return {}
         # RLS coefficient names
-        coeff_names = ["intercept", "outdoor_delta"]
-        for m_input in self._model_inputs:
-            coeff_names.append(m_input.get("name", "unknown"))
+        coeff_names = self._coeff_names()
 
         # Convert from normalized to physical units for display
         heat_phys = self._rls_heat.get_coefficients()
@@ -1791,10 +1794,11 @@ class PIController:
                 )
 
     def _coeff_names(self) -> list[str]:
-        """Build coefficient name list: intercept, outdoor_delta, then model inputs."""
+        """Build coefficient name list: intercept, outdoor_delta, model inputs, ToD."""
         names = ["intercept", "outdoor_delta"]
         for m in self._model_inputs:
             names.append(m.get("name", "input"))
+        names.extend(TOD_FEATURE_NAMES)
         return names
 
     def _coeff_role(self, index: int) -> str:
@@ -2831,9 +2835,7 @@ class PIController:
                 continue
             coeffs = rls_model.get_coefficients()
             p_diag = rls_model.get_covariance_diagonal()
-            coeff_names = ["intercept", "outdoor_delta"]
-            for m in self._model_inputs:
-                coeff_names.append(m.get("name", "input"))
+            coeff_names = self._coeff_names()
 
             for i in range(1, rls_model.n):  # skip intercept (no clamp)
                 clamp = clamps[i] if i < len(clamps) else None
@@ -2884,9 +2886,7 @@ class PIController:
             coeffs = rls_model.get_coefficients()
             p_diag = rls_model.get_covariance_diagonal()
             intercept = coeffs.get(0, 0.0)
-            coeff_names = ["intercept", "outdoor_delta"]
-            for m in self._model_inputs:
-                coeff_names.append(m.get("name", "input"))
+            coeff_names = self._coeff_names()
 
             coeff_tuples = []
             for i in range(1, rls_model.n):
@@ -2924,9 +2924,7 @@ class PIController:
             is_heating_active = self._entity._attr_hvac_mode in (HVACMode.HEAT, HVACMode.HEAT_COOL, None)
             active_rls = self._rls_heat if is_heating_active else self._rls_cool
             active_coeffs = active_rls.get_coefficients()
-            coeff_names_list = ["intercept", "outdoor_delta"]
-            for m in self._model_inputs:
-                coeff_names_list.append(m.get("name", "input"))
+            coeff_names_list = self._coeff_names()
 
             n = min(
                 len(self._drift_correction_signs),
@@ -2990,9 +2988,7 @@ class PIController:
         mc_buffer = self._observation_buffer_heat if is_heating_mc else self._observation_buffer_cool
         if len(mc_buffer) >= 20:
             cond_num = mc_buffer.compute_condition_number()
-            coeff_names_mc = ["intercept", "outdoor_delta"]
-            for m in self._model_inputs:
-                coeff_names_mc.append(m.get("name", "input"))
+            coeff_names_mc = self._coeff_names()
             corr_pairs = mc_buffer.get_pairwise_correlations(coeff_names_mc, include_top=True)
 
             counter_key = "multicollinearity"
@@ -3214,9 +3210,7 @@ class PIController:
 
         checks.extend(check_model_drift(self.get_drifting_coefficients()))
 
-        feature_names = ["intercept", "outdoor_delta"]
-        for m in self._model_inputs:
-            feature_names.append(m.get("name", "input"))
+        feature_names = self._coeff_names()
         active_buf = self._active_buffer
         checks.append(check_feature_diversity(
             active_buf.get_all(),
@@ -3851,7 +3845,7 @@ class PIController:
         if self._pi_ff_enabled and self._inputs.outdoor_temp is not None:
             outdoor_delta = self._inputs.outdoor_temp - desired_c
             self._read_model_input_values()
-            x = self._inputs.build_feature_vector(outdoor_delta)
+            x = self._inputs.build_feature_vector(outdoor_delta, wall_time=time.time())
             rls = self._rls_heat if is_heating else self._rls_cool
             self._ff_offset = rls.predict(x)
         elif not self._pi_ff_enabled:
@@ -4237,7 +4231,7 @@ class PIController:
             outdoor_delta = self._inputs.outdoor_temp - desired_c
 
             # Build feature vector and predict FF offset via RLS model
-            x = self._inputs.build_feature_vector(outdoor_delta)
+            x = self._inputs.build_feature_vector(outdoor_delta, wall_time=time.time())
             seeds = self._heat_seeds if is_heating else self._cool_seeds
 
             # Blend seed prediction with learned prediction based on data seen.

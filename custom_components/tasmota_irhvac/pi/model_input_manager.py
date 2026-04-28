@@ -8,6 +8,7 @@ RLS setup (seeds, clamps, feature scales stay in PIController for RLS init).
 
 from __future__ import annotations
 
+import datetime as _dt
 import logging
 import math
 from typing import Any
@@ -22,6 +23,26 @@ _ACTIVE_STATES = frozenset({
     "on", "heat", "cool", "dry", "fan_only",
     "heating", "cooling", "burning", "igniting",
 })
+
+# Time-of-day feature names (automatic sinusoidal features for diurnal
+# decorrelation — always present, no entity_id or config needed).
+TOD_FEATURE_NAMES: tuple[str, str] = ("sin_hour", "cos_hour")
+N_TOD_FEATURES: int = len(TOD_FEATURE_NAMES)
+_TWO_PI_OVER_24 = 2.0 * math.pi / 24.0
+
+
+def tod_features(wall_time: float | None) -> tuple[float, float]:
+    """Compute sin/cos of local fractional hour from UTC epoch seconds.
+
+    Returns (sin(2π·hour/24), cos(2π·hour/24)) using the system's local
+    timezone, consistent with batch_learning's wall-hour derivation.
+    """
+    if wall_time is None or wall_time <= 0:
+        return 0.0, 0.0
+    dt = _dt.datetime.fromtimestamp(wall_time)
+    hour_frac = dt.hour + dt.minute / 60.0 + dt.second / 3600.0
+    angle = _TWO_PI_OVER_24 * hour_frac
+    return math.sin(angle), math.cos(angle)
 
 
 
@@ -55,8 +76,8 @@ class ModelInputManager:
 
     @property
     def n_model_inputs(self) -> int:
-        """Total feature count: 1 (outdoor_delta) + len(model_inputs)."""
-        return 1 + len(self._model_inputs)
+        """Total non-intercept feature count: outdoor_delta + model_inputs + ToD."""
+        return 1 + len(self._model_inputs) + N_TOD_FEATURES
 
     def update_outdoor_temp(self, state_value: str, unit: str) -> None:
         """Update outdoor temperature from a sensor reading, converting to °C.
@@ -183,11 +204,16 @@ class ModelInputManager:
             else:
                 self.filtered[i] = raw
 
-    def build_feature_vector(self, outdoor_delta: float) -> list[float]:
-        """Build feature vector [1, outdoor_delta, input1_filtered, ...] for RLS."""
+    def build_feature_vector(
+        self, outdoor_delta: float, wall_time: float | None = None,
+    ) -> list[float]:
+        """Build feature vector [1, outdoor_delta, inputs..., sin_hour, cos_hour]."""
         x: list[float] = [1.0, outdoor_delta]
         for i in range(len(self._model_inputs)):
             x.append(self.filtered[i])
+        sin_h, cos_h = tod_features(wall_time)
+        x.append(sin_h)
+        x.append(cos_h)
         return x
 
     def build_feature_names(self) -> list[str]:
@@ -195,9 +221,12 @@ class ModelInputManager:
         names: list[str] = ["intercept", "outdoor_delta"]
         for m_input in self._model_inputs:
             names.append(m_input.get("name", f"input_{len(names) - 2}"))
+        names.extend(TOD_FEATURE_NAMES)
         return names
 
-    def build_named_features(self, outdoor_delta: float) -> dict[str, float]:
+    def build_named_features(
+        self, outdoor_delta: float, wall_time: float | None = None,
+    ) -> dict[str, float]:
         """Build feature dict {name: value} for Observation storage."""
         features: dict[str, float] = {
             "intercept": 1.0,
@@ -206,6 +235,9 @@ class ModelInputManager:
         for i, m_input in enumerate(self._model_inputs):
             name = m_input.get("name", f"input_{i}")
             features[name] = self.filtered[i]
+        sin_h, cos_h = tod_features(wall_time)
+        features["sin_hour"] = sin_h
+        features["cos_hour"] = cos_h
         return features
 
     def build_raw_readings(self) -> dict[str, float]:

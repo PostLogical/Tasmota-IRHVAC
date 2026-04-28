@@ -84,10 +84,11 @@ def _test_model_inputs(n_extra: int) -> list[dict]:
 
 
 def _test_feature_order(n_extra: int) -> list[str]:
-    """Generate feature order: intercept, outdoor_delta, input_0, ..."""
+    """Generate feature order: intercept, outdoor_delta, input_0, ..., sin_hour, cos_hour."""
     order = ["intercept", "outdoor_delta"]
     for i in range(n_extra):
         order.append(f"input_{i}")
+    order.extend(["sin_hour", "cos_hour"])
     return order
 
 

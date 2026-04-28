@@ -2447,8 +2447,8 @@ class TestSupplementalAutoModelInputs:
             }],
         })
         entity = FakePIEntity(config)
-        # 1 (outdoor_delta) + 1 (manual) + 1 (auto) = 3
-        assert entity._pi._n_model_inputs == 3
+        # 1 (outdoor_delta) + 1 (manual) + 1 (auto) + 2 (ToD) = 5
+        assert entity._pi._n_model_inputs == 5
 
 
 # ── Ki-Changed Integral Scaling on Restore (L474-479) ───────────────

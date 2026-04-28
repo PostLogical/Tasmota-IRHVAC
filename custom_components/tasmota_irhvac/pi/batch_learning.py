@@ -25,6 +25,8 @@ try:
 except ImportError:
     _NUMPY_AVAILABLE = False
 
+from .model_input_manager import tod_features
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -127,6 +129,8 @@ def build_feature_vector_from_raw(
     - model inputs: raw_readings[entity_id], with delta_from_room adjustment
       if configured (entity_temp_c - current_c).  raw_readings stores °C
       absolute temps; the delta is computed here at batch time.
+    - "sin_hour", "cos_hour": sinusoidal time-of-day features computed from
+      obs.wall_time (local fractional hour).
 
     No EMA is applied — batch WLS operates on raw instantaneous values.
     The online RLS uses EMA for tick-by-tick smoothing, but the batch
@@ -151,6 +155,11 @@ def build_feature_vector_from_raw(
         if m_input.get("delta_from_room"):
             value = value - obs.current_c
         features[name] = value
+
+    # Time-of-day sinusoidal features from observation wall clock
+    sin_h, cos_h = tod_features(obs.wall_time)
+    features["sin_hour"] = sin_h
+    features["cos_hour"] = cos_h
 
     return [features.get(name, 0.0) for name in feature_order]
 
@@ -1833,7 +1842,8 @@ def analyze_residuals_by_hour(
         x = build_feature_vector_from_raw(o, model_inputs, feature_order)
         if x is None:
             continue
-        predicted = sum(beta[i] * x[i] for i in range(n_features))
+        n_use = min(n_features, len(beta), len(x))
+        predicted = sum(beta[i] * x[i] for i in range(n_use))
         actual = o.hp_setpoint - o.current_c
         residual = actual - predicted
         hour_residuals[wall_hour].append(residual)

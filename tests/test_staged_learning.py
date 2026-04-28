@@ -57,6 +57,7 @@ def _test_feature_order(n_extra: int) -> list[str]:
     order = ["intercept", "outdoor_delta"]
     for i in range(n_extra):
         order.append(f"input_{i}")
+    order.extend(["sin_hour", "cos_hour"])
     return order
 
 
@@ -379,11 +380,15 @@ class TestColdStartFreezing:
             assert pi._rls_heat.frozen[i], f"Feature {i} should be frozen at init"
             assert pi._rls_cool.frozen[i], f"Cool feature {i} should be frozen at init"
 
-    def test_no_model_inputs_no_frozen(self):
-        """With no model inputs, there's nothing to freeze."""
+    def test_no_model_inputs_tod_frozen(self):
+        """With no model inputs, only ToD features are frozen at cold start."""
         entity = FakePIEntity(make_pi_config())
         pi = entity._pi
-        assert not any(pi._rls_heat.frozen)
+        # Intercept and outdoor_delta unfrozen, ToD features (sin/cos) frozen
+        assert not pi._rls_heat.frozen[0]  # intercept
+        assert not pi._rls_heat.frozen[1]  # outdoor_delta
+        assert pi._rls_heat.frozen[2]  # sin_hour
+        assert pi._rls_heat.frozen[3]  # cos_hour
 
 
 class TestResetSemantics:
@@ -718,7 +723,8 @@ class TestLearningState:
         entity = self._make_entity(n_inputs=2)
         state = entity._pi.get_learning_state()
         assert state["state"] == "Learning"
-        assert len(state["frozen_features"]) == 2
+        # 2 model inputs + 2 ToD = 4 frozen features
+        assert len(state["frozen_features"]) == 4
         assert len(state["active_features"]) == 0
 
     def test_learning_state_all_unfrozen(self):
@@ -730,23 +736,27 @@ class TestLearningState:
         state = pi.get_learning_state()
         assert state["state"] == "Optimized"
         assert len(state["frozen_features"]) == 0
-        assert len(state["active_features"]) == 2
+        # 2 model inputs + 2 ToD = 4 active features
+        assert len(state["active_features"]) == 4
 
     def test_learning_state_partial(self):
         """Some frozen, some unfrozen → 'Optimizing'."""
         entity = self._make_entity(n_inputs=2)
         pi = entity._pi
-        pi._rls_heat.frozen[2] = False  # Unfreeze one
+        pi._rls_heat.frozen[2] = False  # Unfreeze one model input
         state = pi.get_learning_state()
         assert state["state"] == "Optimizing"
-        assert len(state["frozen_features"]) == 1
+        # 1 model input + 2 ToD still frozen = 3 frozen
+        assert len(state["frozen_features"]) == 3
         assert len(state["active_features"]) == 1
 
     def test_learning_state_no_inputs(self):
-        """No model inputs → 'Optimized' (nothing to learn)."""
+        """No user model inputs → ToD features still exist and start frozen."""
         entity = FakePIEntity(make_pi_config())
         state = entity._pi.get_learning_state()
-        assert state["state"] == "Optimized"
+        # ToD features are frozen at cold start → "Learning"
+        assert state["state"] == "Learning"
+        assert len(state["frozen_features"]) == 2  # sin_hour, cos_hour
 
     def test_learning_state_attributes(self):
         """State includes expected attributes."""
@@ -1136,13 +1146,16 @@ class TestFeatureUnlockEndToEnd:
         # Verify starts frozen
         assert pi._rls_heat.frozen[2]
 
-        # Populate buffer with good data
+        # Populate buffer with good data — vary wall_time across 24h
+        # so ToD features have variance (otherwise design matrix is rank-deficient)
+        base_time = 1736935200.0  # 2026-01-15 08:00
         for i in range(40):
             od = float(i % 10)
             x1 = float(i % 5)
             sp = 22.0 + od * 0.3 + x1 * 0.5
             pi._observation_buffer_heat.add(_make_obs(
                 [1.0, od, x1], sp=sp, cur=20.0,
+                wall_time=base_time + i * 2160.0,  # 36 min apart → spans 24h
             ))
 
         # Run batch analysis
@@ -1161,10 +1174,12 @@ class TestFeatureUnlockEndToEnd:
         pi = entity._pi
 
         # Populate buffer with data but input always 0
+        base_time = 1736935200.0
         for i in range(40):
             od = float(i % 10)
             pi._observation_buffer_heat.add(_make_obs(
                 [1.0, od, 0.0], sp=22.0 + od * 0.3, cur=20.0,
+                wall_time=base_time + i * 2160.0,
             ))
 
         pi._entity._attr_hvac_mode = HVACMode.HEAT
