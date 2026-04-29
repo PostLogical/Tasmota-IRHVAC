@@ -324,7 +324,7 @@
       },
       "model_inputs_add": {
         "title": "Add Model Input",
-        "description": "Add a factor that influences the feedforward model. The RLS algorithm learns each factor's coefficient over time.",
+        "description": "Add a factor that influences the feedforward model. Best for active heat sources/sinks (pellet stove, oil zone, AC, neighbor heat pump) and adjacent rooms with their own heating. Skip purely passive rooms (a closed-off hallway or unheated guest room) — outdoor temperature and the building's tau already absorb their effect, and the gate will keep them frozen anyway.",
         "data": {
           "model_input_name": "Name",
           "model_input_entity": "Entity",
@@ -348,11 +348,11 @@
           "model_input_clamp_min": "Minimum allowed coefficient value. Prevents nonsensical learning. Leave empty for no minimum.",
           "model_input_clamp_max": "Maximum allowed coefficient value. Leave empty for no maximum.",
           "model_input_lag_tau": "Exponential lag filter time constant in minutes. Use for thermal sources with ramp-up/down (e.g., pellet stove: 30 min). 0 = no filter.",
-          "model_input_suppress_learning": "Block FF coefficient learning while this input is active. Use for heat sources that dominate the HP (e.g., pellet stove in living room) to prevent coefficient contamination.",
+          "model_input_suppress_learning": "Pause coefficient learning while this input is active. Use for events you want the controller to react to but not LEARN from — e.g., a window-open contact sensor, a cooking-detect, a vacation-mode toggle. Don't enable for normal heat sources you want the model to predict, since suppressing during firing prevents the system from learning the source's effect.",
           "model_input_delta_from_room": "Compute input as (entity temperature − room temperature). Use for inter-zone heat transfer where the temperature difference between rooms drives heat flow.",
           "model_input_gate_entity": "Binary sensor or switch that gates this input. When the gate is off (or on if inverted), the input value is forced to zero. Use for mode-switching phenomena like door-gated convective heat transfer.",
           "model_input_gate_invert": "Invert the gate logic: force input to zero when the gate entity is on instead of off.",
-          "model_input_input_role": "How this input enters the building energy balance. Solar Proxy: radiative gain on building envelope. Heat Source: direct heat input (pellet stove, space heater). Adjacent Zone: heat transfer from neighboring room. Other: generic disturbance.",
+          "model_input_input_role": "How this input enters the building energy balance. Solar Proxy: radiative gain (window solar). Heat Source: direct heat input (pellet stove, space heater, oil zone, neighbor HP). Adjacent Zone: heat transfer from a neighboring room (party-wall coupling — pair with 'Delta From Room Temperature' so the controller sees the temperature difference, not the absolute reading). Other: generic disturbance.",
           "model_input_input_enabled": "When disabled, the input value is forced to zero but the configuration (seeds, clamps, lag) is preserved."
         }
       },
@@ -365,7 +365,7 @@
       },
       "model_inputs_edit_form": {
         "title": "Edit Model Input",
-        "description": "Update the settings for this model input.",
+        "description": "Update the settings for this model input. Active heat sources (stove, oil zone) and adjacent rooms with their own heating learn meaningful coefficients. Purely passive rooms stay frozen — their effect is already absorbed by outdoor and tau.",
         "data": {
           "model_input_name": "Name",
           "model_input_entity": "Entity",
@@ -389,11 +389,11 @@
           "model_input_clamp_min": "Minimum allowed coefficient value. Prevents nonsensical learning. Leave empty for no minimum.",
           "model_input_clamp_max": "Maximum allowed coefficient value. Leave empty for no maximum.",
           "model_input_lag_tau": "Exponential lag filter time constant in minutes. Use for thermal sources with ramp-up/down (e.g., pellet stove: 30 min). 0 = no filter.",
-          "model_input_suppress_learning": "Block FF coefficient learning while this input is active. Use for heat sources that dominate the HP (e.g., pellet stove in living room) to prevent coefficient contamination.",
+          "model_input_suppress_learning": "Pause coefficient learning while this input is active. Use for events you want the controller to react to but not LEARN from — e.g., a window-open contact sensor, a cooking-detect, a vacation-mode toggle. Don't enable for normal heat sources you want the model to predict, since suppressing during firing prevents the system from learning the source's effect.",
           "model_input_delta_from_room": "Compute input as (entity temperature − room temperature). Use for inter-zone heat transfer where the temperature difference between rooms drives heat flow.",
           "model_input_gate_entity": "Binary sensor or switch that gates this input. When the gate is off (or on if inverted), the input value is forced to zero. Use for mode-switching phenomena like door-gated convective heat transfer.",
           "model_input_gate_invert": "Invert the gate logic: force input to zero when the gate entity is on instead of off.",
-          "model_input_input_role": "How this input enters the building energy balance. Solar Proxy: radiative gain on building envelope. Heat Source: direct heat input (pellet stove, space heater). Adjacent Zone: heat transfer from neighboring room. Other: generic disturbance.",
+          "model_input_input_role": "How this input enters the building energy balance. Solar Proxy: radiative gain (window solar). Heat Source: direct heat input (pellet stove, space heater, oil zone, neighbor HP). Adjacent Zone: heat transfer from a neighboring room (party-wall coupling — pair with 'Delta From Room Temperature' so the controller sees the temperature difference, not the absolute reading). Other: generic disturbance.",
           "model_input_input_enabled": "When disabled, the input value is forced to zero but the configuration (seeds, clamps, lag) is preserved."
         }
       },
