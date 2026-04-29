@@ -124,6 +124,8 @@ class ThermalModel:
 
         tau = self.profile.tau_env
         hp_gain = self.profile.hp_gain
+        if self.profile.hp_capacity is not None:
+            hp_gain *= self.profile.hp_capacity.factor(self.outdoor_temp, mode)
 
         # Apply disturbances
         extra_heat = 0.0
@@ -281,6 +283,8 @@ class ThermalModel2R2C:
         tau_c = p.tau_couple
         tau_m = p.tau_wall  # tau_couple * mass_ratio
         g = p.hp_gain
+        if p.hp_capacity is not None:
+            g *= p.hp_capacity.factor(self.outdoor_temp, mode)
 
         # Apply disturbances (affect envelope only, like the 1R1C model)
         extra_heat = 0.0

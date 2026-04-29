@@ -10,7 +10,15 @@ import math
 
 import pytest
 
-from tests.hvac_bench.house_profiles import PROFILES_2R2C, HouseProfile2R2C
+from dataclasses import replace
+
+from tests.hvac_bench.house_profiles import (
+    COLD_CLIMATE_HP_CAPACITY,
+    HPCapacityCurve,
+    HouseProfile2R2C,
+    PROFILES_2R2C,
+    STANDARD_HP_CAPACITY,
+)
 from tests.hvac_bench.thermal_model import ThermalModel, ThermalModel2R2C
 
 
@@ -367,3 +375,217 @@ class TestCrossModelAgreement:
         assert temp_range < 0.01, (
             f"Profile {profile_name} not converged: range={temp_range:.4f}"
         )
+
+
+class TestHPCapacityCurve:
+    """HP capacity factor scales with outdoor temperature (#43).
+
+    Real ASHPs lose capacity in cold and gain in mild conditions; the
+    capacity curve adds that envelope to the bench thermal model.
+    """
+
+    # ── factor() unit tests ──────────────────────────────────────────
+
+    def test_heating_anchor_points(self):
+        """Curve passes through the three named anchors."""
+        c = HPCapacityCurve()
+        assert c.factor(c.heating_design_t, "heat") == 0.0
+        assert c.factor(c.heating_rated_t, "heat") == pytest.approx(1.0)
+        assert c.factor(c.heating_mild_t, "heat") == pytest.approx(c.heating_mild_factor)
+
+    def test_heating_clamps_below_design(self):
+        """Below design temp, capacity stays at zero (HP can't run)."""
+        c = HPCapacityCurve()
+        assert c.factor(-30.0, "heat") == 0.0
+        assert c.factor(-100.0, "heat") == 0.0
+
+    def test_heating_clamps_above_mild(self):
+        """Above the mild knee, factor saturates at mild_factor."""
+        c = HPCapacityCurve()
+        assert c.factor(40.0, "heat") == pytest.approx(c.heating_mild_factor)
+
+    def test_heating_linear_below_rated(self):
+        """Halfway between design and rated → 50% capacity."""
+        c = HPCapacityCurve(heating_design_t=-15.0, heating_rated_t=7.0)
+        midpoint = (-15.0 + 7.0) / 2  # -4°C
+        assert c.factor(midpoint, "heat") == pytest.approx(0.5)
+
+    def test_heating_linear_above_rated(self):
+        """Halfway between rated and mild → halfway from 1.0 to mild_factor."""
+        c = HPCapacityCurve(heating_rated_t=7.0, heating_mild_t=20.0,
+                             heating_mild_factor=1.15)
+        midpoint = (7.0 + 20.0) / 2  # 13.5°C
+        expected = 1.0 + 0.5 * (1.15 - 1.0)
+        assert c.factor(midpoint, "heat") == pytest.approx(expected)
+
+    def test_cooling_anchor_points(self):
+        """Cooling mirrors heating with reversed slope."""
+        c = HPCapacityCurve()
+        assert c.factor(c.cooling_design_t, "cool") == 0.0
+        assert c.factor(c.cooling_rated_t, "cool") == pytest.approx(1.0)
+        assert c.factor(c.cooling_mild_t, "cool") == pytest.approx(c.cooling_mild_factor)
+
+    def test_cooling_clamps_above_design(self):
+        """Above cooling design temp (extreme heat), factor is zero."""
+        c = HPCapacityCurve()
+        assert c.factor(60.0, "cool") == 0.0
+
+    def test_cooling_clamps_below_mild(self):
+        """Below cooling mild knee, factor saturates at mild_factor."""
+        c = HPCapacityCurve()
+        assert c.factor(0.0, "cool") == pytest.approx(c.cooling_mild_factor)
+
+    def test_cooling_linear_above_rated(self):
+        """Halfway between cooling rated and design → 50% capacity."""
+        c = HPCapacityCurve(cooling_rated_t=35.0, cooling_design_t=46.0)
+        midpoint = (35.0 + 46.0) / 2  # 40.5°C
+        assert c.factor(midpoint, "cool") == pytest.approx(0.5)
+
+    def test_cooling_linear_below_rated(self):
+        """Halfway between mild and rated → halfway from mild_factor to 1.0."""
+        c = HPCapacityCurve(cooling_mild_t=18.0, cooling_rated_t=35.0,
+                             cooling_mild_factor=1.15)
+        midpoint = (18.0 + 35.0) / 2  # 26.5°C
+        expected = 1.15 + 0.5 * (1.0 - 1.15)
+        assert c.factor(midpoint, "cool") == pytest.approx(expected)
+
+    def test_cold_climate_curve_holds_capacity_below_minus_15(self):
+        """CCASHP curve still delivers >0 capacity at -15°C unlike standard."""
+        assert STANDARD_HP_CAPACITY.factor(-15.0, "heat") == 0.0
+        cc = COLD_CLIMATE_HP_CAPACITY.factor(-15.0, "heat")
+        assert 0.25 < cc < 0.50, (
+            f"CCASHP at -15°C should retain ~30% capacity, got {cc:.3f}"
+        )
+
+    # ── ThermalModel integration ─────────────────────────────────────
+
+    def test_capacity_at_rated_matches_no_capacity(self):
+        """At outdoor=rated_t, capacity=1.0 — model behaves identically."""
+        base = PROFILES_2R2C["living_room"]
+        assert base.hp_capacity is None
+        with_cap = replace(base, hp_capacity=STANDARD_HP_CAPACITY)
+        # rated_t default is 7°C
+        m_no_cap = ThermalModel2R2C(
+            profile=base, initial_temp=20.0, outdoor_temp=7.0,
+            sensor_noise_sigma=0.0,
+        )
+        m_cap = ThermalModel2R2C(
+            profile=with_cap, initial_temp=20.0, outdoor_temp=7.0,
+            sensor_noise_sigma=0.0,
+        )
+        for tick in range(2000):
+            m_no_cap.step(hp_setpoint=25.0, dt_minutes=15.0, mode="heat", tick=tick)
+            m_cap.step(hp_setpoint=25.0, dt_minutes=15.0, mode="heat", tick=tick)
+        assert abs(m_cap.room_temp - m_no_cap.room_temp) < SS_TOL, (
+            f"At rated_t, capacity=1.0 should match fixed-gain: "
+            f"no_cap={m_no_cap.room_temp:.3f} cap={m_cap.room_temp:.3f}"
+        )
+
+    def test_2r2c_capacity_reduces_heating_in_cold(self):
+        """With capacity curve, cold weather → smaller HP contribution → cooler room."""
+        base = PROFILES_2R2C["living_room"]
+        with_cap = replace(base, hp_capacity=STANDARD_HP_CAPACITY)
+        m_no_cap = ThermalModel2R2C(
+            profile=base, initial_temp=20.0, outdoor_temp=-10.0,
+            sensor_noise_sigma=0.0,
+        )
+        m_cap = ThermalModel2R2C(
+            profile=with_cap, initial_temp=20.0, outdoor_temp=-10.0,
+            sensor_noise_sigma=0.0,
+        )
+        for tick in range(500):
+            m_no_cap.step(hp_setpoint=23.0, dt_minutes=15.0, mode="heat", tick=tick)
+            m_cap.step(hp_setpoint=23.0, dt_minutes=15.0, mode="heat", tick=tick)
+        assert m_cap.room_temp < m_no_cap.room_temp - 0.5, (
+            f"Capacity curve should reduce cold-weather room temp: "
+            f"no_cap={m_no_cap.room_temp:.3f} cap={m_cap.room_temp:.3f}"
+        )
+
+    def test_2r2c_capacity_zero_below_design_temp(self):
+        """At outdoor ≤ heating_design_t, HP delivers no heat (room → outdoor)."""
+        base = PROFILES_2R2C["living_room"]
+        with_cap = replace(base, hp_capacity=STANDARD_HP_CAPACITY)
+        # design_t default is -15°C; well below it = -20°C.
+        m_cap = ThermalModel2R2C(
+            profile=with_cap, initial_temp=20.0, outdoor_temp=-20.0,
+            sensor_noise_sigma=0.0,
+        )
+        # Run until decayed; HP commanded ON but capacity=0 → no heat input.
+        for tick in range(500):
+            m_cap.step(hp_setpoint=23.0, dt_minutes=15.0, mode="heat", tick=tick)
+        assert abs(m_cap.room_temp - (-20.0)) < 0.5, (
+            f"Below design temp, room should decay to outdoor: "
+            f"got {m_cap.room_temp:.3f}, expected ~-20.0"
+        )
+
+    def test_1r1c_capacity_reduces_heating_in_cold(self):
+        """1R1C model also respects the capacity curve."""
+        base = PROFILES_2R2C["living_room"]
+        with_cap = replace(base, hp_capacity=STANDARD_HP_CAPACITY)
+        m_no_cap = ThermalModel(
+            profile=base, initial_temp=20.0, outdoor_temp=-10.0,
+            sensor_noise_sigma=0.0,
+        )
+        m_cap = ThermalModel(
+            profile=with_cap, initial_temp=20.0, outdoor_temp=-10.0,
+            sensor_noise_sigma=0.0,
+        )
+        for tick in range(500):
+            m_no_cap.step(hp_setpoint=23.0, dt_minutes=15.0, mode="heat", tick=tick)
+            m_cap.step(hp_setpoint=23.0, dt_minutes=15.0, mode="heat", tick=tick)
+        assert m_cap.room_temp < m_no_cap.room_temp - 0.5
+
+    def test_capacity_boost_above_rated(self):
+        """At outdoor above rated_t, capacity factor > 1 → faster warming."""
+        base = PROFILES_2R2C["living_room"]
+        with_cap = replace(base, hp_capacity=STANDARD_HP_CAPACITY)
+        # mild_t default 20°C — pick a generous boost regime
+        m_no_cap = ThermalModel2R2C(
+            profile=base, initial_temp=15.0, outdoor_temp=18.0,
+            sensor_noise_sigma=0.0,
+        )
+        m_cap = ThermalModel2R2C(
+            profile=with_cap, initial_temp=15.0, outdoor_temp=18.0,
+            sensor_noise_sigma=0.0,
+        )
+        # Run only a short stretch — both will eventually saturate at sp.
+        for tick in range(20):
+            m_no_cap.step(hp_setpoint=22.0, dt_minutes=15.0, mode="heat", tick=tick)
+            m_cap.step(hp_setpoint=22.0, dt_minutes=15.0, mode="heat", tick=tick)
+        assert m_cap.room_temp > m_no_cap.room_temp, (
+            f"Mild outdoor should boost capacity: "
+            f"no_cap={m_no_cap.room_temp:.3f} cap={m_cap.room_temp:.3f}"
+        )
+
+    def test_cooling_capacity_reduces_in_extreme_heat(self):
+        """In cool mode, very hot outdoor reduces HP cooling capacity."""
+        # Build a profile with cooling capacity curve (reuse standard).
+        base = PROFILES_2R2C["living_room"]
+        with_cap = replace(base, hp_capacity=STANDARD_HP_CAPACITY)
+        # outdoor=42°C is between rated (35) and design (46); cap ~36%.
+        m_no_cap = ThermalModel2R2C(
+            profile=base, initial_temp=24.0, outdoor_temp=42.0,
+            sensor_noise_sigma=0.0,
+        )
+        m_cap = ThermalModel2R2C(
+            profile=with_cap, initial_temp=24.0, outdoor_temp=42.0,
+            sensor_noise_sigma=0.0,
+        )
+        # Cool mode, sp=20 (below room) → HP runs.
+        for tick in range(500):
+            m_no_cap.step(hp_setpoint=20.0, dt_minutes=15.0, mode="cool", tick=tick)
+            m_cap.step(hp_setpoint=20.0, dt_minutes=15.0, mode="cool", tick=tick)
+        # With reduced capacity, room stays warmer (less effective cooling).
+        assert m_cap.room_temp > m_no_cap.room_temp + 0.3, (
+            f"Hot outdoor should reduce cooling: "
+            f"no_cap={m_no_cap.room_temp:.3f} cap={m_cap.room_temp:.3f}"
+        )
+
+    def test_living_room_capacity_profile_registered(self):
+        """PROFILES_2R2C['living_room_capacity'] uses STANDARD_HP_CAPACITY."""
+        profile = PROFILES_2R2C["living_room_capacity"]
+        assert profile.hp_capacity is STANDARD_HP_CAPACITY
+        # Same thermal characteristics as base living_room.
+        base = PROFILES_2R2C["living_room"]
+        assert profile.tau_env == base.tau_env
+        assert profile.hp_gain == base.hp_gain
