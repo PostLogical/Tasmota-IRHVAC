@@ -2147,8 +2147,6 @@ class PIController:
         n_frozen = len(frozen_names)
         if not self._control_active:
             state = "Observing"
-        elif n_model == 0:
-            state = "Optimized"  # No model inputs → nothing to learn
         elif n_frozen == n_model:
             state = "Learning"
         elif n_frozen == 0:

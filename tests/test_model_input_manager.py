@@ -617,3 +617,122 @@ class TestTimeOfDayFeatures:
         mgr = ModelInputManager(model_inputs=[STOVE_INPUT], outdoor_temp_sensor=None)
         # 1 (outdoor_delta) + 1 (stove) + 2 (ToD) = 4
         assert mgr.n_model_inputs == 4
+
+
+class TestFeatureLayout:
+    """Direct tests for FeatureLayout / FeatureSpec accessors.
+
+    The class is exercised indirectly through PIController.__init__, but
+    the methods themselves need direct coverage.
+    """
+
+    def _layout(self) -> "FeatureLayout":
+        from custom_components.tasmota_irhvac.pi.model_input_manager import (
+            FeatureLayout, FeatureSpec,
+        )
+        specs = [
+            FeatureSpec(
+                name="intercept", role="intercept",
+                seed_heat=0.0, seed_cool=0.0,
+                clamp=None, scale=1.0, frozen_at_init=False,
+            ),
+            FeatureSpec(
+                name="outdoor_delta", role="outdoor_delta",
+                seed_heat=-0.25, seed_cool=-0.30,
+                clamp=(-2.0, 0.0), scale=13.0, frozen_at_init=False,
+            ),
+            FeatureSpec(
+                name="solar", role="model_input",
+                seed_heat=-1.5, seed_cool=0.0,
+                clamp=(-3.0, 0.0), scale=0.5, frozen_at_init=True,
+            ),
+            FeatureSpec(
+                name="sin_hour", role="time_of_day",
+                seed_heat=0.0, seed_cool=0.0,
+                clamp=None, scale=0.7, frozen_at_init=True,
+            ),
+        ]
+        return FeatureLayout(specs)
+
+    def test_n_includes_intercept(self):
+        layout = self._layout()
+        assert layout.n == 4
+
+    def test_n_inputs_excludes_intercept(self):
+        layout = self._layout()
+        assert layout.n_inputs == 3
+
+    def test_names(self):
+        layout = self._layout()
+        assert layout.names == ["intercept", "outdoor_delta", "solar", "sin_hour"]
+
+    def test_seeds_heat(self):
+        layout = self._layout()
+        assert layout.seeds("heat") == [0.0, -0.25, -1.5, 0.0]
+
+    def test_seeds_cool(self):
+        layout = self._layout()
+        assert layout.seeds("cool") == [0.0, -0.30, 0.0, 0.0]
+
+    def test_seeds_unknown_mode_falls_back_to_heat(self):
+        """Unknown mode strings default to heat (not 'cool' branch)."""
+        layout = self._layout()
+        assert layout.seeds("auto") == [0.0, -0.25, -1.5, 0.0]
+
+    def test_clamps(self):
+        layout = self._layout()
+        assert layout.clamps() == [None, (-2.0, 0.0), (-3.0, 0.0), None]
+
+    def test_scales(self):
+        layout = self._layout()
+        assert layout.scales == [1.0, 13.0, 0.5, 0.7]
+
+    def test_role_returns_role(self):
+        layout = self._layout()
+        assert layout.role(0) == "intercept"
+        assert layout.role(1) == "outdoor_delta"
+        assert layout.role(2) == "model_input"
+        assert layout.role(3) == "time_of_day"
+
+    def test_role_out_of_range_returns_other(self):
+        """Negative or past-end indices return 'other' (defensive)."""
+        layout = self._layout()
+        assert layout.role(99) == "other"
+        assert layout.role(-1) == "other"
+
+    def test_frozen_mask(self):
+        layout = self._layout()
+        assert layout.frozen_mask() == [False, False, True, True]
+
+    def test_model_input_start(self):
+        layout = self._layout()
+        assert layout.model_input_start == 2
+
+    def test_model_input_start_no_model_inputs(self):
+        """When no model_input role exists, returns len(specs) (off-the-end)."""
+        from custom_components.tasmota_irhvac.pi.model_input_manager import (
+            FeatureLayout, FeatureSpec,
+        )
+        layout = FeatureLayout([
+            FeatureSpec(name="intercept", role="intercept",
+                        seed_heat=0.0, seed_cool=0.0,
+                        clamp=None, scale=1.0, frozen_at_init=False),
+            FeatureSpec(name="outdoor_delta", role="outdoor_delta",
+                        seed_heat=-0.25, seed_cool=-0.25,
+                        clamp=None, scale=13.0, frozen_at_init=False),
+        ])
+        assert layout.model_input_start == 2  # = len(specs)
+
+    def test_model_input_index_for_model_input(self):
+        layout = self._layout()
+        # solar is at feature index 2, mi_start=2 → relative index 0
+        assert layout.model_input_index(2) == 0
+
+    def test_model_input_index_raises_for_base_features(self):
+        """Calling model_input_index on intercept/outdoor_delta raises IndexError."""
+        import pytest
+        layout = self._layout()
+        with pytest.raises(IndexError):
+            layout.model_input_index(0)
+        with pytest.raises(IndexError):
+            layout.model_input_index(1)
