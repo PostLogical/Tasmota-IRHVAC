@@ -134,12 +134,20 @@ class RegimeProbe:
         self._probe_current_c: float = 0.0
         self._probe_is_heating: bool = True
 
+        # Forced probe: bypass uncertainty check when boundary
+        # estimator stalls and probe has never fired (IDLE state).
+        self._forced_probe: bool = False
+
         # Evidence accumulation (persisted)
         self._contribution_evidence_above: list[float] = []
         self._contribution_evidence_below: list[float] = []
         self._no_contribution_count: int = 0
         self._confirmations_total: int = 0
         self._probes_completed: int = 0
+
+        # Last probe result (for boundary estimator consumption)
+        self._last_probe_delta: float | None = None
+        self._last_probe_hp_contributing: bool | None = None
 
     # ── Properties ───────────────────────────────────────────────────
 
@@ -154,6 +162,28 @@ class RegimeProbe:
     @property
     def probes_completed(self) -> int:
         return self._probes_completed
+
+    @property
+    def last_probe_delta(self) -> float | None:
+        """Delta (current_c - hp_setpoint) at last completed probe."""
+        return self._last_probe_delta
+
+    @property
+    def last_probe_hp_contributing(self) -> bool | None:
+        """Whether HP was contributing at last probe. None if no probe yet."""
+        return self._last_probe_hp_contributing
+
+    def consume_last_probe(self) -> tuple[float, bool] | None:
+        """Return and clear the last probe result for estimator consumption.
+
+        Returns (delta, hp_was_contributing) or None if no new result.
+        """
+        if self._last_probe_delta is None:
+            return None
+        result = (self._last_probe_delta, self._last_probe_hp_contributing or False)
+        self._last_probe_delta = None
+        self._last_probe_hp_contributing = None
+        return result
 
     # ── Main tick ────────────────────────────────────────────────────
 
@@ -202,7 +232,8 @@ class RegimeProbe:
                 and not is_clamped
                 and not learning_suppressed
             )
-            if hp_uncertain and can_probe and abs(room_temp_rate) < STABILITY_THRESHOLD:
+            trigger = hp_uncertain or self._forced_probe
+            if trigger and can_probe and abs(room_temp_rate) < STABILITY_THRESHOLD:
                 self._begin_baseline(now_mono, hp_setpoint, current_c, is_heating)
 
         # ── BASELINE: collect room_rate readings ─────────────────
@@ -282,6 +313,7 @@ class RegimeProbe:
         self._state = ProbeState.BASELINE
         self._phase_start_mono = now_mono
         self._baseline_rates = []
+        self._forced_probe = False  # consumed
         self._probe_hp_setpoint = hp_setpoint
         self._probe_current_c = current_c
         self._probe_is_heating = is_heating
@@ -319,6 +351,8 @@ class RegimeProbe:
             hp_was_contributing = rate_change > RATE_CHANGE_THRESHOLD
 
         self._probes_completed += 1
+        self._last_probe_delta = current_to_setpoint_delta
+        self._last_probe_hp_contributing = hp_was_contributing
 
         if not hp_was_contributing:
             # HP was NOT contributing → transition is below this point
@@ -368,16 +402,20 @@ class RegimeProbe:
     ) -> tuple[float, float]:
         """Check evidence and return updated (cal_min, cal_max).
 
-        Call after each probe completes.  Only shrinks the band, never widens.
-        Requires SHRINK_CONFIRMATIONS probes at similar deltas.
+        Call after each probe completes.  Can shrink the band (narrow
+        toward the transition) OR shift it (when all evidence points
+        in one direction, the transition is outside the current band).
 
         Evidence types (stored as current_to_setpoint_delta at probe time):
-        - evidence_above: "HP was contributing" at this delta → transition
-          is above this delta → cal_max stays at or above here.
-          (Shrinks cal_max down toward this delta.)
-        - evidence_below: "HP was NOT contributing" at this delta →
-          transition is below this delta → cal_min stays at or below here.
-          (Shrinks cal_min up toward this delta.)
+        - evidence_above: "HP was NOT contributing" at this delta →
+          transition is below this delta → shrink cal_max down.
+        - evidence_below: "HP WAS contributing" at this delta →
+          transition is above this delta → shrink cal_min up.
+
+        Band shift: if we have SHRINK_CONFIRMATIONS "not contributing"
+        probes and ZERO "contributing" probes, the transition is below
+        the entire band.  Shift cal_min down by SHRINK_FACTOR to
+        search lower.  (Mirror logic for all-contributing.)
         """
         new_min = current_cal_min
         new_max = current_cal_max
@@ -407,6 +445,46 @@ class RegimeProbe:
                 if candidate > new_min:
                     new_min = candidate
                     self._confirmations_total += 1
+
+        # Band shift: if evidence is overwhelmingly one-sided, the
+        # transition is outside the band.  Shift the band to search.
+        # Requires a strong majority (>= 5:1 ratio) with enough probes
+        # to avoid premature shifts from noise.
+        min_for_shift = max(SHRINK_CONFIRMATIONS * 2, 4)
+        n_above = len(self._contribution_evidence_above)
+        n_below = len(self._contribution_evidence_below)
+        total = n_above + n_below
+        shifted = False
+        if total >= min_for_shift:
+            ratio_no_hp = n_above / max(total, 1)
+            ratio_has_hp = n_below / max(total, 1)
+            if ratio_no_hp >= 0.8 and n_above >= min_for_shift:
+                # Overwhelmingly no HP → boundary is below band
+                shift = SHRINK_FACTOR * (current_cal_max - current_cal_min)
+                new_min = current_cal_min - shift
+                new_max = current_cal_max - shift
+                shifted = True
+                _LOGGER.info(
+                    "Regime probe: band shifted down by %.1f°C "
+                    "(%d/%d probes 'no HP')",
+                    shift, n_above, total,
+                )
+            elif ratio_has_hp >= 0.8 and n_below >= min_for_shift:
+                # Overwhelmingly HP contributing → boundary is above band
+                shift = SHRINK_FACTOR * (current_cal_max - current_cal_min)
+                new_min = current_cal_min + shift
+                new_max = current_cal_max + shift
+                shifted = True
+                _LOGGER.info(
+                    "Regime probe: band shifted up by %.1f°C "
+                    "(%d/%d probes 'HP contributing')",
+                    shift, n_below, total,
+                )
+
+        if shifted:
+            # Clear evidence so the next round evaluates the new location
+            self._contribution_evidence_above.clear()
+            self._contribution_evidence_below.clear()
 
         if new_max < current_cal_max:
             _LOGGER.info(
@@ -438,6 +516,19 @@ class RegimeProbe:
         """Abort any active probe and return to IDLE."""
         self._abort(reason or "external")
 
+    def request_early_probe(self) -> None:
+        """Request a probe as soon as conditions allow.
+
+        Called by boundary estimator when passive estimation has stalled.
+        - COOLDOWN: expires cooldown timer so next probe fires immediately.
+        - IDLE: sets forced flag so probe fires without requiring the HP
+          to be in the uncertain zone (bypasses _is_uncertain check).
+        """
+        if self._state == ProbeState.COOLDOWN:
+            self._cooldown_end_mono = 0.0
+        elif self._state == ProbeState.IDLE:
+            self._forced_probe = True
+
     # ── Persistence ──────────────────────────────────────────────────
 
     def as_dict(self) -> dict[str, Any]:
@@ -448,6 +539,7 @@ class RegimeProbe:
             "confirmations_total": self._confirmations_total,
             "evidence_above": list(self._contribution_evidence_above),
             "evidence_below": list(self._contribution_evidence_below),
+            "forced_probe": self._forced_probe,
         }
 
     def restore(self, data: dict[str, Any]) -> None:
@@ -461,3 +553,4 @@ class RegimeProbe:
         self._contribution_evidence_below = [
             float(d) for d in data.get("evidence_below", [])
         ]
+        self._forced_probe = bool(data.get("forced_probe", False))

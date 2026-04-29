@@ -6,13 +6,14 @@ Runs alongside the existing WLS batch on the same 12h schedule.
 
 The 1R1C energy balance divided by C_eff:
 
-    dT_air/dt = (UA/C) × (T_out - T_air) + (K_hp/C) × hp_offset + (α/C) × solar
+    dT_air/dt = c₀ + (UA/C) × (T_out - T_air) + (K_hp/C) × hp_offset + (α/C) × solar
 
 Reparameterized as rate coefficients (Bacher & Madsen 2011):
 
-    room_rate = ua_c × (T_out - T_air) + k_c × hp_offset + α_c × solar
+    room_rate = c₀ + ua_c × (T_out - T_air) + k_c × hp_offset + α_c × solar
 
-where ua_c = UA/C, k_c = K_hp/C, α_c = α_solar/C.  These rate
+where c₀ absorbs unmodeled internal gains and measurement bias,
+ua_c = UA/C, k_c = K_hp/C, α_c = α_solar/C.  These rate
 coefficients are directly identifiable from derivative data without
 the scaling ambiguity of the original parameterization.
 
@@ -62,15 +63,21 @@ except ImportError:
 #
 # ua_c = UA/C in min⁻¹.  Typical residential:
 #   τ = 60-300 min → ua_c = 1/300 to 1/60 = 0.003 to 0.017
-#   Allow wider range for unusual buildings.
-UA_C_BOUNDS = (0.001, 0.1)  # min⁻¹
+#   2R2C slow mode can reach 20-100h (Bacher & Madsen 2011),
+#   so lower bound accommodates τ up to 5000 min (83h).
+UA_C_BOUNDS = (0.0002, 0.1)  # min⁻¹
+
+# c0 = constant rate offset (°C/min).  Absorbs unmodeled internal gains,
+# measurement bias, and other constant heat sources/sinks.
+# ±0.05 °C/min ≈ ±3 °C/hr — generous for residential.
+C0_BOUNDS = (-0.05, 0.05)  # °C/min
 
 # k_c = K_hp/C in °C_room / (°C_setpoint_offset × min).
 # Similar magnitude to ua_c for a well-sized HP.
 K_C_BOUNDS = (0.001, 0.2)  # min⁻¹
 
 # α_c = α_solar/C.  Positive because solar adds heat to the room.
-# In the rate equation: room_rate = ua_c*(T_out-T_air) + k_c*hp + α_c*solar
+# In the rate equation: room_rate = c0 + ua_c*(T_out-T_air) + k_c*hp + α_c*solar
 # Higher solar → faster warming → α_c > 0.
 # Magnitude depends on solar proxy scaling and C.
 ALPHA_C_BOUNDS = (0.0, 1.0)  # °C/min per unit solar proxy
@@ -91,6 +98,7 @@ class GreyboxResult:
     n_hp_off: int  # observations where HP was off (hp_offset=0)
 
     # Fitted rate coefficients (÷ C_eff)
+    c0: float  # constant rate offset (°C/min) — internal gains / bias
     ua_c: float  # UA/C envelope rate (min⁻¹)
     k_c: float  # K_hp/C HP gain rate (min⁻¹)
     alpha_c: float  # α_solar/C solar rate (0.0 if no solar input)
@@ -115,6 +123,7 @@ class GreyboxResult:
             "n_observations": self.n_observations,
             "n_hp_on": self.n_hp_on,
             "n_hp_off": self.n_hp_off,
+            "c0": self.c0,
             "ua_c": self.ua_c,
             "k_c": self.k_c,
             "alpha_c": self.alpha_c,
@@ -147,10 +156,12 @@ def fit_greybox(
     Uses all observations (including HP-off) that have valid outdoor_temp_c.
     The energy balance in rate-coefficient form:
 
-        room_rate = ua_c × (T_out - T_air) + k_c × hp_offset + α_c × solar
+        room_rate = c₀ + ua_c × (T_out - T_air) + k_c × hp_offset + α_c × solar
 
-    Rate coefficients are directly identifiable from derivative data
-    (Bacher & Madsen 2011).  Bounded to physically plausible ranges.
+    The intercept c₀ absorbs unmodeled internal gains and bias, preventing
+    them from distorting ua_c.  Rate coefficients are directly identifiable
+    from derivative data (Bacher & Madsen 2011).  Bounded to physically
+    plausible ranges.
 
     Args:
         observations: full buffer contents (all ticks, not pre-filtered).
@@ -224,70 +235,74 @@ def fit_greybox(
 
     if fix_k_c:
         # Fix k_c at a reasonable default (use plant ID K if available).
-        # With k_c fixed, residual only fits ua_c and optionally α_c.
+        # With k_c fixed, residual only fits c0, ua_c and optionally α_c.
         k_c_fixed = 0.01  # ~τ=100min default
         if has_solar:
             def residual_fn(params: list[float]) -> list[float]:
-                ua_c, alpha_c = params
+                c0, ua_c, alpha_c = params
                 return [
                     room_rate[i]
+                    - c0
                     - ua_c * (t_out[i] - t_air[i])
                     - k_c_fixed * hp_offset[i]
                     - alpha_c * solar[i]
                     for i in range(m)
                 ]
-            x0 = [0.01, 0.05]
-            lower = [UA_C_BOUNDS[0], ALPHA_C_BOUNDS[0]]
-            upper = [UA_C_BOUNDS[1], ALPHA_C_BOUNDS[1]]
-            param_names = ["ua_c", "alpha_c"]
+            x0 = [0.0, 0.01, 0.05]
+            lower = [C0_BOUNDS[0], UA_C_BOUNDS[0], ALPHA_C_BOUNDS[0]]
+            upper = [C0_BOUNDS[1], UA_C_BOUNDS[1], ALPHA_C_BOUNDS[1]]
+            param_names = ["c0", "ua_c", "alpha_c"]
         else:
             def residual_fn(params: list[float]) -> list[float]:
-                (ua_c,) = params
+                c0, ua_c = params
                 return [
                     room_rate[i]
+                    - c0
                     - ua_c * (t_out[i] - t_air[i])
                     - k_c_fixed * hp_offset[i]
                     for i in range(m)
                 ]
-            x0 = [0.01]
-            lower = [UA_C_BOUNDS[0]]
-            upper = [UA_C_BOUNDS[1]]
-            param_names = ["ua_c"]
+            x0 = [0.0, 0.01]
+            lower = [C0_BOUNDS[0], UA_C_BOUNDS[0]]
+            upper = [C0_BOUNDS[1], UA_C_BOUNDS[1]]
+            param_names = ["c0", "ua_c"]
     else:
         if has_solar:
             def residual_fn(params: list[float]) -> list[float]:
-                ua_c, k_c, alpha_c = params
+                c0, ua_c, k_c, alpha_c = params
                 return [
                     room_rate[i]
+                    - c0
                     - ua_c * (t_out[i] - t_air[i])
                     - k_c * hp_offset[i]
                     - alpha_c * solar[i]
                     for i in range(m)
                 ]
-            x0 = [0.01, 0.02, 0.05]
-            lower = [UA_C_BOUNDS[0], K_C_BOUNDS[0], ALPHA_C_BOUNDS[0]]
-            upper = [UA_C_BOUNDS[1], K_C_BOUNDS[1], ALPHA_C_BOUNDS[1]]
-            param_names = ["ua_c", "k_c", "alpha_c"]
+            x0 = [0.0, 0.01, 0.02, 0.05]
+            lower = [C0_BOUNDS[0], UA_C_BOUNDS[0], K_C_BOUNDS[0], ALPHA_C_BOUNDS[0]]
+            upper = [C0_BOUNDS[1], UA_C_BOUNDS[1], K_C_BOUNDS[1], ALPHA_C_BOUNDS[1]]
+            param_names = ["c0", "ua_c", "k_c", "alpha_c"]
         else:
             def residual_fn(params: list[float]) -> list[float]:
-                ua_c, k_c = params
+                c0, ua_c, k_c = params
                 return [
                     room_rate[i]
+                    - c0
                     - ua_c * (t_out[i] - t_air[i])
                     - k_c * hp_offset[i]
                     for i in range(m)
                 ]
-            x0 = [0.01, 0.02]
-            lower = [UA_C_BOUNDS[0], K_C_BOUNDS[0]]
-            upper = [UA_C_BOUNDS[1], K_C_BOUNDS[1]]
-            param_names = ["ua_c", "k_c"]
+            x0 = [0.0, 0.01, 0.02]
+            lower = [C0_BOUNDS[0], UA_C_BOUNDS[0], K_C_BOUNDS[0]]
+            upper = [C0_BOUNDS[1], UA_C_BOUNDS[1], K_C_BOUNDS[1]]
+            param_names = ["c0", "ua_c", "k_c"]
 
     # Use plant ID τ_slow to set initial ua_c if available.
-    # τ = 1/ua_c → ua_c = 1/τ
+    # τ = 1/ua_c → ua_c = 1/τ  (ua_c is always at index 1, after c0)
     if plant_tau_slow is not None and plant_tau_slow > 0:
         ua_c_init = 1.0 / plant_tau_slow
         ua_c_init = max(UA_C_BOUNDS[0], min(UA_C_BOUNDS[1], ua_c_init))
-        x0[0] = ua_c_init
+        x0[1] = ua_c_init
 
     # ── Fit ───────────────────────────────────────────────────────────
 
@@ -305,6 +320,7 @@ def fit_greybox(
 
     # Extract fitted parameters.
     params = dict(zip(param_names, result.x))
+    c0 = params.get("c0", 0.0)
     ua_c = params.get("ua_c", 0.01)
     k_c = params.get("k_c", k_c_fixed if fix_k_c else 0.02)
     alpha_c = params.get("alpha_c", 0.0)
@@ -337,6 +353,7 @@ def fit_greybox(
         n_observations=m,
         n_hp_on=n_hp_on,
         n_hp_off=n_hp_off,
+        c0=float(c0),
         ua_c=float(ua_c),
         k_c=float(k_c),
         alpha_c=float(alpha_c),
@@ -361,8 +378,8 @@ def log_greybox_result(
         result.n_hp_off, result.residual_rms,
     )
     _LOGGER.info(
-        "%s  ua_c=%.5f (τ=%.0f min), k_c=%.5f, α_c=%.5f",
-        log_prefix, result.ua_c, result.tau_eff, result.k_c, result.alpha_c,
+        "%s  c0=%.5f, ua_c=%.5f (τ=%.0f min), k_c=%.5f, α_c=%.5f",
+        log_prefix, result.c0, result.ua_c, result.tau_eff, result.k_c, result.alpha_c,
     )
     _LOGGER.info(
         "%s  cost=%.6f, nfev=%d",
@@ -399,7 +416,7 @@ def log_greybox_result(
 
 # Quality gate thresholds
 GATE_MIN_TAU = 30.0    # minutes — faster implies unrealistic building
-GATE_MAX_TAU = 500.0   # minutes — slower implies parameter at bound
+GATE_MAX_TAU = 1500.0  # minutes (25h) — 2R2C slow mode can reach 20-100h
 GATE_MAX_CV = 0.5      # coefficient of variation (std_err / |estimate|)
 GATE_MAX_RMS = 0.02    # °C/min — residual quality threshold
 

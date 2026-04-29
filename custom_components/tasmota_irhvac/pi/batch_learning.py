@@ -25,6 +25,15 @@ try:
 except ImportError:
     _NUMPY_AVAILABLE = False
 
+try:
+    from scipy.optimize import minimize_scalar as _minimize_scalar
+    _SCIPY_AVAILABLE = True
+except ImportError:
+    _minimize_scalar = None  # type: ignore[assignment]
+    _SCIPY_AVAILABLE = False
+
+from .model_input_manager import tod_features
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -53,8 +62,8 @@ class Observation:
     outdoor_temp_c: float | None  # absolute outdoor temperature (°C)
     room_rate: float  # dT/dt in °C/min at observation time
     raw_readings: dict[str, float]  # entity_id → raw sensor value at obs time
-    clamped: bool  # True if HP setpoint was at min or max
-    clamped_reason: str = ""  # "", "no_output", "saturated_low", "saturated_high"
+    clamped: bool  # True if HP output is unusable for learning
+    clamped_reason: str = ""  # "", "no_output", "saturated_low", "saturated_high", "observe_only"
     supplemental_active: bool = False  # supplemental source tracking or assisting
     hp_contribution_uncertain: bool = False  # |hp_offset| within regime margin
 
@@ -113,6 +122,7 @@ def build_feature_vector_from_raw(
     obs: Observation,
     model_inputs: list[dict[str, Any]],
     feature_order: list[str],
+    filtered_overrides: dict[str, float] | None = None,
 ) -> list[float] | None:
     """Build a feature vector from raw readings + current config.
 
@@ -127,10 +137,12 @@ def build_feature_vector_from_raw(
     - model inputs: raw_readings[entity_id], with delta_from_room adjustment
       if configured (entity_temp_c - current_c).  raw_readings stores °C
       absolute temps; the delta is computed here at batch time.
+    - "sin_hour", "cos_hour": sinusoidal time-of-day features computed from
+      obs.wall_time (local fractional hour).
 
-    No EMA is applied — batch WLS operates on raw instantaneous values.
-    The online RLS uses EMA for tick-by-tick smoothing, but the batch
-    fits across many diverse observations where individual noise averages out.
+    When ``filtered_overrides`` is provided, its values replace raw_readings
+    for matching entity_ids.  Used by batch WLS to apply retrospective EMA
+    filtering so the batch regression matches the online filtered signal.
     """
     if obs.outdoor_temp_c is None:
         return None
@@ -145,16 +157,303 @@ def build_feature_vector_from_raw(
         name = m_input.get("name", entity_id)
         if not entity_id or entity_id not in obs.raw_readings:
             return None  # incomplete — skip this observation for this feature set
-        value = obs.raw_readings[entity_id]
+        # Use filtered override if available, else raw reading
+        if filtered_overrides and entity_id in filtered_overrides:
+            value = filtered_overrides[entity_id]
+        else:
+            value = obs.raw_readings[entity_id]
         # Apply delta_from_room: raw_readings stores the °C absolute temp;
         # subtract the observation's room temp to get the delta.
         if m_input.get("delta_from_room"):
             value = value - obs.current_c
         features[name] = value
 
+    # Time-of-day sinusoidal features from observation wall clock
+    sin_h, cos_h = tod_features(obs.wall_time)
+    features["sin_hour"] = sin_h
+    features["cos_hour"] = cos_h
+
     return [features.get(name, 0.0) for name in feature_order]
 
 
+# ── Retrospective EMA + auto lag-tau detection ─────────────────────────
+#
+# The online path applies EMA filtering tick-by-tick (model_input_manager),
+# but batch WLS regresses against raw instantaneous values.  For inputs
+# with thermal lag (solar through walls), this attenuates the estimated
+# coefficient.  These functions apply EMA retrospectively across the
+# observation buffer and auto-detect the optimal lag per input.
+#
+# Reference: Ljung, "System Identification" — pre-filtering inputs to
+# match plant dynamics before identification.
+
+# Golden-section ratio for pure-Python bracket search.
+_PHI = (math.sqrt(5) - 1) / 2  # ≈ 0.618
+
+# Bounds for tau search in seconds: 0 (no lag) to 8 hours.
+_TAU_SEARCH_MIN = 0.0
+_TAU_SEARCH_MAX = 28800.0
+
+# Minimum detectable tau (seconds).  Lags shorter than observation
+# spacing (~15 min) are indistinguishable from noise — snap to 0.
+_TAU_MIN_MEANINGFUL = 600.0  # 10 minutes
+
+# Acceptance is via BIC test (Schwarz, 1978): accept τ if
+# n·log(RSS_0/RSS_τ) > log(n), i.e. ΔBIC < 0 for one extra parameter.
+# References: Ljung, "System Identification" §16.4; Söderström & Stoica
+# §11.4. The BIC threshold scales with n, so it tightens automatically
+# on small buffers and loosens on large ones — unlike a fixed R² floor.
+
+
+def _apply_retrospective_ema(
+    observations: list[Observation],
+    entity_id: str,
+    tau_seconds: float,
+) -> list[float | None]:
+    """Apply EMA filtering retrospectively across observations.
+
+    Sorts observations by wall_time and applies the same EMA formula as
+    the online path: alpha = 1 - exp(-dt/tau).  Returns a list parallel
+    to the input list with filtered values, or None where the entity_id
+    is missing from raw_readings.
+
+    For tau <= 0, returns raw values (no filtering).
+    """
+    n = len(observations)
+    if n == 0:
+        return []
+
+    # Build (original_index, wall_time, raw_value) sorted by wall_time
+    indexed: list[tuple[int, float, float | None]] = []
+    for i, obs in enumerate(observations):
+        val = obs.raw_readings.get(entity_id)
+        indexed.append((i, obs.wall_time, val))
+    indexed.sort(key=lambda t: t[1])
+
+    result: list[float | None] = [None] * n
+
+    if tau_seconds <= 0:
+        # No filtering — return raw values
+        for orig_idx, _, raw in indexed:
+            result[orig_idx] = raw
+        return result
+
+    ema_state: float | None = None
+    prev_wt: float = 0.0
+
+    for orig_idx, wt, raw in indexed:
+        if raw is None:
+            # Missing reading — propagate None, keep EMA state
+            continue
+
+        if ema_state is None:
+            ema_state = raw
+            prev_wt = wt
+        else:
+            dt = wt - prev_wt
+            if dt > 0:
+                alpha = 1.0 - math.exp(-dt / tau_seconds)
+                ema_state = alpha * raw + (1.0 - alpha) * ema_state
+            # dt == 0: simultaneous observations, keep previous state
+            prev_wt = wt
+
+        result[orig_idx] = ema_state
+
+    return result
+
+
+def _detect_optimal_tau(
+    observations: list[Observation],
+    y_values: list[float],
+    weights: list[float],
+    entity_id: str,
+    delta_from_room: bool = False,
+    base_X: list[list[float]] | None = None,
+    tod_cols: list[tuple[float, float]] | None = None,
+) -> tuple[float, float, float] | None:
+    """Find the optimal EMA tau for a model input via joint regression sweep.
+
+    Builds X = [1, od, sin, cos, EMA(input, τ)] at candidate τ values
+    and picks the τ with lowest weighted RSS from the full joint regression.
+    This avoids the suppression problem where diurnal correlation between
+    solar and outdoor_delta hides the solar signal in partial residuals.
+
+    Returns (tau_optimal, r2_improvement, beta) or None if insufficient data.
+    Uses scipy.optimize.minimize_scalar when available, else golden-section.
+    """
+    n = len(observations)
+    if n < 10:
+        return None
+
+    # Effective regression sample size: observations with a valid raw
+    # reading for this entity (eligibility is τ-invariant — the EMA
+    # cannot create a value where the raw is missing).
+    n_eff = sum(
+        1 for o in observations if o.raw_readings.get(entity_id) is not None
+    )
+    if n_eff < 10:
+        return None
+
+    def _compute_rss(tau: float) -> float:
+        """Weighted RSS from joint regression y ~ [1, od, sin, cos, filtered_input]."""
+        filtered = _apply_retrospective_ema(observations, entity_id, tau)
+
+        # Build rows for observations with valid filtered values
+        rows: list[int] = []
+        x_input: list[float] = []
+        for i in range(n):
+            if filtered[i] is None:
+                continue
+            x_val = filtered[i]
+            if delta_from_room:
+                x_val = x_val - observations[i].current_c  # type: ignore[operator]
+            rows.append(i)
+            x_input.append(x_val)
+
+        m = len(rows)
+        if m < 10:
+            return float("inf")
+
+        if _NUMPY_AVAILABLE and base_X is not None and tod_cols is not None:
+            # Build design matrix: [1, od, sin, cos, input]
+            X = np.empty((m, 5))
+            y_arr = np.empty(m)
+            w_arr = np.empty(m)
+            for j, i in enumerate(rows):
+                X[j, 0] = base_X[i][0]  # intercept
+                X[j, 1] = base_X[i][1]  # outdoor_delta
+                X[j, 2] = tod_cols[i][0]  # sin
+                X[j, 3] = tod_cols[i][1]  # cos
+                X[j, 4] = x_input[j]
+                y_arr[j] = y_values[i]
+                w_arr[j] = weights[i]
+            # Weighted least squares: scale rows by sqrt(w)
+            sw = np.sqrt(w_arr)
+            Xw = X * sw[:, None]
+            yw = y_arr * sw
+            beta, rss_arr, _, _ = np.linalg.lstsq(Xw, yw, rcond=None)
+            if len(rss_arr) > 0:
+                return float(rss_arr[0])
+            # Fallback: compute RSS manually
+            pred = Xw @ beta
+            return float(np.sum((yw - pred) ** 2))
+        else:
+            # Pure-Python 5-feature normal equations
+            p = 5
+            XtWX = [[0.0] * p for _ in range(p)]
+            XtWy = [0.0] * p
+            for j, i in enumerate(rows):
+                od_i = base_X[i][1] if base_X else 0.0
+                s_i, c_i = tod_cols[i] if tod_cols else (0.0, 0.0)
+                row = [1.0, od_i, s_i, c_i, x_input[j]]
+                wi = weights[i]
+                for a in range(p):
+                    XtWy[a] += row[a] * wi * y_values[i]
+                    for b in range(p):
+                        XtWX[a][b] += row[a] * wi * row[b]
+            for a in range(p):
+                XtWX[a][a] += 1e-6
+            beta_pp = _solve_symmetric(XtWX, XtWy, p)
+            if beta_pp is None:
+                return float("inf")
+            rss = 0.0
+            for j, i in enumerate(rows):
+                od_i = base_X[i][1] if base_X else 0.0
+                s_i, c_i = tod_cols[i] if tod_cols else (0.0, 0.0)
+                row = [1.0, od_i, s_i, c_i, x_input[j]]
+                pred = sum(beta_pp[a] * row[a] for a in range(p))
+                rss += weights[i] * (y_values[i] - pred) ** 2
+            return rss
+
+    # Compute RSS at tau=0 (raw) for comparison
+    rss_raw = _compute_rss(0.0)
+
+    if _SCIPY_AVAILABLE and _minimize_scalar is not None:
+        result = _minimize_scalar(
+            _compute_rss,
+            bounds=(_TAU_SEARCH_MIN, _TAU_SEARCH_MAX),
+            method="bounded",
+            options={"xatol": 60.0},  # 1-minute precision
+        )
+        tau_opt = float(result.x)
+        rss_opt = float(result.fun)
+    else:
+        # Pure-Python golden-section search
+        a, b = _TAU_SEARCH_MIN, _TAU_SEARCH_MAX
+        c = b - _PHI * (b - a)
+        d = a + _PHI * (b - a)
+        fc = _compute_rss(c)
+        fd = _compute_rss(d)
+
+        while (b - a) > 60.0:  # 1-minute precision
+            if fc < fd:
+                b = d
+                d, fd = c, fc
+                c = b - _PHI * (b - a)
+                fc = _compute_rss(c)
+            else:
+                a = c
+                c, fc = d, fd
+                d = a + _PHI * (b - a)
+                fd = _compute_rss(d)
+
+        tau_opt = (a + b) / 2
+        rss_opt = _compute_rss(tau_opt)
+
+    # Compute R² improvement (reported only — gate is BIC below).
+    if rss_raw <= 0 or rss_raw == float("inf") or rss_opt <= 0:
+        return None
+
+    r2_improvement = 1.0 - rss_opt / rss_raw
+
+    # BIC test: τ adds one nuisance parameter (k=1).  Accept iff
+    # n·log(RSS_0/RSS_τ) > log(n) (equivalently ΔBIC < 0).  This is
+    # the standard nested-model criterion in system identification —
+    # n-aware so the threshold tightens for small buffers and loosens
+    # as the buffer fills.
+    bic_gain = n_eff * math.log(rss_raw / rss_opt)
+    if bic_gain < math.log(n_eff):
+        # Filtering not justified by the data — keep tau=0
+        return (0.0, 0.0, 0.0)
+
+    # Snap tiny tau to 0: lags shorter than observation spacing
+    # are noise, not real thermal dynamics.
+    if tau_opt < _TAU_MIN_MEANINGFUL:
+        return (0.0, 0.0, 0.0)
+
+    # Recover the input coefficient at tau_opt for logging.
+    # Re-run the joint regression at tau_opt; the input coefficient
+    # is the last element of beta (index 4 in the 5-feature model).
+    filtered = _apply_retrospective_ema(observations, entity_id, tau_opt)
+    rows_f: list[int] = []
+    x_input_f: list[float] = []
+    for i in range(n):
+        if filtered[i] is None:
+            continue
+        x_val = filtered[i]
+        if delta_from_room:
+            x_val = x_val - observations[i].current_c  # type: ignore[operator]
+        rows_f.append(i)
+        x_input_f.append(x_val)
+    m_f = len(rows_f)
+    p = 5
+    XtWX_f = [[0.0] * p for _ in range(p)]
+    XtWy_f = [0.0] * p
+    for j, i in enumerate(rows_f):
+        od_i = base_X[i][1] if base_X else 0.0
+        s_i, c_i = tod_cols[i] if tod_cols else (0.0, 0.0)
+        row = [1.0, od_i, s_i, c_i, x_input_f[j]]
+        wi = weights[i]
+        for a in range(p):
+            XtWy_f[a] += row[a] * wi * y_values[i]
+            for b_idx in range(p):
+                XtWX_f[a][b_idx] += row[a] * wi * row[b_idx]
+    for a in range(p):
+        XtWX_f[a][a] += 1e-6
+    beta_f = _solve_symmetric(XtWX_f, XtWy_f, p)
+    beta_input = beta_f[4] if beta_f else 0.0
+
+    return (tau_opt, r2_improvement, beta_input)
 
 
 class DiversityAwareBuffer:
@@ -260,9 +559,19 @@ class DiversityAwareBuffer:
         """
         before = len(self._buffer)
         if mode == "heat":
-            self._buffer = [o for o in self._buffer if o.hp_setpoint is None or not (o.hp_setpoint < o.current_c)]
+            self._buffer = [
+                o for o in self._buffer
+                if o.clamped_reason == "no_output"
+                or o.hp_setpoint is None
+                or not (o.hp_setpoint < o.current_c)
+            ]
         else:
-            self._buffer = [o for o in self._buffer if o.hp_setpoint is None or not (o.hp_setpoint > o.current_c)]
+            self._buffer = [
+                o for o in self._buffer
+                if o.clamped_reason == "no_output"
+                or o.hp_setpoint is None
+                or not (o.hp_setpoint > o.current_c)
+            ]
         removed = before - len(self._buffer)
         if removed:
             self.recompute_info_matrix()
@@ -574,7 +883,7 @@ class DiversityAwareBuffer:
             return []
 
         names = feature_names or [f"feature_{i}" for i in range(n)]
-        unclamped = [o for o in self._buffer if o.clamped_reason not in ("no_output", "clamped")]
+        unclamped = [o for o in self._buffer if not o.clamped]
         if len(unclamped) < 20:
             return []
 
@@ -804,6 +1113,7 @@ class BatchResult:
     blend_gains: list[float] = field(default_factory=list)  # per-coefficient Kalman gain K_i ∈ [0, 1]
     plant_snapshot: dict[str, Any] = field(default_factory=dict)  # plant ID state at batch time
     feature_vif: list[float] = field(default_factory=list)  # per-feature VIF from regression data
+    detected_tau: dict[str, float] = field(default_factory=dict)  # input name → auto-detected EMA tau (seconds)
 
 
 def _weighted_variance(values: list[float], weights: list[float]) -> float:
@@ -860,9 +1170,16 @@ def _solve_joint(
 
     Returns (beta, std_err) or None if the joint solve fails.
     Mathematically equivalent to standard OLS — no approximation.
+
+    When observations span sufficient time diversity, sin/cos
+    time-of-day columns are included as nuisance regressors to
+    decorrelate diurnally confounded features (e.g. solar proxy
+    vs outdoor_delta).  Their coefficients are estimated but
+    discarded — only the decorrelation effect on other features
+    matters.  This is algebraically equivalent to the FWL
+    augmented partialling in ``_solve_fwl``.
     """
     n_active = len(ctx.active_input_indices)
-    n_joint = ctx.n_base + n_active
     m_complete = len(ctx.complete_indices)
 
     # Build joint feature matrix [intercept, outdoor_delta, input_0, ...]
@@ -871,6 +1188,33 @@ def _solve_joint(
         joint_cols.append([ctx.X_base[k][j] for k in ctx.complete_indices])
     for fi in ctx.active_input_indices:
         joint_cols.append([ctx.input_values_by_obs[k][fi] for k in ctx.complete_indices])  # type: ignore[misc]  # complete_indices guarantees not-None
+
+    # Augment with sin/cos nuisance columns for diurnal decorrelation.
+    # Same logic as _solve_fwl: skip if observations lack time diversity.
+    # If an active feature is collinear with sin/cos (e.g. a sinusoidal
+    # input schedule), the augmented X'WX is singular → _solve_symmetric
+    # returns None → caller falls back to _solve_fwl, which handles
+    # rank deficiency via staged residualization (FWL theorem).
+    n_tod = 0
+    if m_complete >= 4 and ctx.base_eligible[ctx.complete_indices[0]] is not None:
+        tod_sin = [0.0] * m_complete
+        tod_cos = [0.0] * m_complete
+        for idx, k in enumerate(ctx.complete_indices):
+            obs = ctx.base_eligible[k]
+            wt = obs.wall_time if obs is not None else 0.0
+            s, c = tod_features(wt)
+            tod_sin[idx] = s
+            tod_cos[idx] = c
+        mean_s = sum(tod_sin) / m_complete
+        mean_c = sum(tod_cos) / m_complete
+        var_s = sum((s - mean_s) ** 2 for s in tod_sin) / m_complete
+        var_c = sum((c - mean_c) ** 2 for c in tod_cos) / m_complete
+        if var_s >= 0.001 or var_c >= 0.001:
+            joint_cols.append(tod_sin)
+            joint_cols.append(tod_cos)
+            n_tod = 2
+
+    n_joint = ctx.n_base + n_active + n_tod
 
     # Column normalization
     col_scales = [1.0] * n_joint
@@ -900,7 +1244,8 @@ def _solve_joint(
     if beta_norm is None:
         return None
 
-    # Denormalize into full-size beta vector
+    # Denormalize into full-size beta vector.
+    # Sin/cos nuisance coefficients are estimated but discarded.
     beta = [0.0] * ctx.n
     beta[0] = beta_norm[0] / col_scales[0]
     beta[1] = beta_norm[1] / col_scales[1]
@@ -911,11 +1256,10 @@ def _solve_joint(
     std_err = [float("inf")] * ctx.n
     cov_diag = _diagonal_of_inverse(XtWX, n_joint)
     if cov_diag is not None:
+        # Residuals use all columns (including nuisance) for correct σ²
+        all_beta_norm = [beta_norm[jj] / col_scales[jj] for jj in range(n_joint)]
         resid = [
-            y[idx] - sum(
-                joint_cols[jj][idx] * (beta[0], beta[1], *[beta[fi + 2] for fi in ctx.active_input_indices])[jj]
-                for jj in range(n_joint)
-            )
+            y[idx] - sum(joint_cols[jj][idx] * all_beta_norm[jj] for jj in range(n_joint))
             for idx in range(m_complete)
         ]
         rms_sq = sum(r * r for r in resid) / max(1, m_complete - n_joint)
@@ -939,6 +1283,12 @@ def _solve_fwl(
     individual features have enough observations in their subsets.
     Each feature coefficient is unbiased (base regressors partialled out).
     Base intercept and outdoor_delta are re-estimated afterward.
+
+    Augmented partialling: in addition to [1, outdoor_delta], we partial
+    out [sin_hour, cos_hour] from both z and y_sub.  By the FWL theorem
+    (Frisch-Waugh-Lovell 1933/63) this is algebraically equivalent to
+    including sin/cos in the base regression — decorrelating diurnally
+    confounded features (e.g. solar proxy) without changing n_base.
     """
     beta = [0.0] * ctx.n
     beta[0] = ctx.beta_base[0]
@@ -951,6 +1301,25 @@ def _solve_fwl(
         for k in range(ctx.m_base)
     ]
 
+    # Build sin/cos columns for augmented partialling.
+    # Check variance — if observations don't span enough of the day,
+    # fall back to base-only partialling (no diurnal decorrelation).
+    tod_sin = [0.0] * ctx.m_base
+    tod_cos = [0.0] * ctx.m_base
+    _use_tod = False
+    if ctx.m_base >= 4 and ctx.base_eligible[0] is not None:
+        for k in range(ctx.m_base):
+            obs_k = ctx.base_eligible[k]
+            wt = obs_k.wall_time if obs_k is not None else 0.0
+            s, c = tod_features(wt)
+            tod_sin[k] = s
+            tod_cos[k] = c
+        mean_s = sum(tod_sin) / ctx.m_base
+        mean_c = sum(tod_cos) / ctx.m_base
+        var_s = sum((s - mean_s) ** 2 for s in tod_sin) / ctx.m_base
+        var_c = sum((c - mean_c) ** 2 for c in tod_cos) / ctx.m_base
+        _use_tod = var_s >= 0.001 or var_c >= 0.001
+
     for fi in ctx.active_input_indices:
         coeff_idx = fi + 2
         subset_indices = [k for k in range(ctx.m_base) if ctx.input_values_by_obs[k][fi] is not None]
@@ -960,23 +1329,54 @@ def _solve_fwl(
         y_sub = [residuals_base[k] for k in subset_indices]
         X_base_sub = [ctx.X_base[k] for k in subset_indices]
 
-        # Partial out base regressors: regress z on [intercept, outdoor_delta]
-        XtWX_zb = [[0.0] * ctx.n_base for _ in range(ctx.n_base)]
-        XtWy_zb = [0.0] * ctx.n_base
+        # Partial out base + optional sin/cos: regress z on [1, od, sin, cos]
+        n_partial = ctx.n_base + (2 if _use_tod else 0)
+        XtWX_zb = [[0.0] * n_partial for _ in range(n_partial)]
+        XtWy_zb = [0.0] * n_partial
         for i_sub in range(m_sub):
-            for a in range(ctx.n_base):
-                xa = X_base_sub[i_sub][a]
-                XtWy_zb[a] += xa * w_sub[i_sub] * subset_values[i_sub]
-                for b in range(ctx.n_base):
-                    XtWX_zb[a][b] += xa * w_sub[i_sub] * X_base_sub[i_sub][b]
-        for a in range(ctx.n_base):
+            k = subset_indices[i_sub]
+            row: list[float] = list(X_base_sub[i_sub])
+            if _use_tod:
+                row.append(tod_sin[k])
+                row.append(tod_cos[k])
+            for a in range(n_partial):
+                XtWy_zb[a] += row[a] * w_sub[i_sub] * subset_values[i_sub]
+                for b in range(n_partial):
+                    XtWX_zb[a][b] += row[a] * w_sub[i_sub] * row[b]
+        for a in range(n_partial):
             XtWX_zb[a][a] += ctx.ridge
-        gamma = _solve_symmetric(XtWX_zb, XtWy_zb, ctx.n_base)
+        gamma = _solve_symmetric(XtWX_zb, XtWy_zb, n_partial)
 
-        r_z = (
-            [subset_values[i] - sum(gamma[a] * X_base_sub[i][a] for a in range(ctx.n_base)) for i in range(m_sub)]
-            if gamma is not None else subset_values
-        )
+        if gamma is not None:
+            r_z: list[float] = []
+            for i in range(m_sub):
+                k = subset_indices[i]
+                row_p: list[float] = list(X_base_sub[i])
+                if _use_tod:
+                    row_p.append(tod_sin[k])
+                    row_p.append(tod_cos[k])
+                r_z.append(subset_values[i] - sum(gamma[a] * row_p[a] for a in range(n_partial)))
+        else:
+            r_z = list(subset_values)
+
+        # Also partial out sin/cos from y_sub (FWL requires both sides)
+        if _use_tod and gamma is not None:
+            sin_sub = [tod_sin[k] for k in subset_indices]
+            cos_sub = [tod_cos[k] for k in subset_indices]
+            # Regress y_sub on [sin, cos] (no intercept — already residualized)
+            XtWX_y = [[0.0, 0.0], [0.0, 0.0]]
+            XtWy_y = [0.0, 0.0]
+            for i_sub in range(m_sub):
+                sc = [sin_sub[i_sub], cos_sub[i_sub]]
+                for a in range(2):
+                    XtWy_y[a] += sc[a] * w_sub[i_sub] * y_sub[i_sub]
+                    for b in range(2):
+                        XtWX_y[a][b] += sc[a] * w_sub[i_sub] * sc[b]
+            XtWX_y[0][0] += 1e-8
+            XtWX_y[1][1] += 1e-8
+            gamma_y = _solve_symmetric(XtWX_y, XtWy_y, 2)
+            if gamma_y is not None:
+                y_sub = [y_sub[i] - gamma_y[0] * sin_sub[i] - gamma_y[1] * cos_sub[i] for i in range(m_sub)]
 
         if _weighted_variance(r_z, w_sub) < ctx.min_feature_variance:
             held.add(coeff_idx)
@@ -1042,6 +1442,7 @@ def weighted_least_squares(
     feature_order: list[str] | None = None,
     model_inputs: list[dict[str, Any]] | None = None,
     frozen_features: set[int] | None = None,
+    detect_lag: bool = True,
 ) -> BatchResult | None:
     """Run weighted least squares on physical observations.
 
@@ -1052,13 +1453,17 @@ def weighted_least_squares(
        data (unbiased per-feature).  Grey-box solvers plug in here.
     3. **Package** — compute residuals, exclude outliers, return BatchResult.
 
+    When ``detect_lag`` is True, auto-detects optimal EMA tau per model
+    input by minimizing base-regression residuals.  Detected tau values
+    are stored in ``BatchResult.detected_tau`` and used to pre-filter
+    inputs for the main regression.
+
     Returns None if insufficient eligible observations.
     """
     # ── Phase 1: Filter & classify ──────────────────────────────────
-    _EXCLUDE_REASONS = ("no_output", "clamped")
     eligible = [
         o for o in observations
-        if o.clamped_reason not in _EXCLUDE_REASONS
+        if not o.clamped
         and o.hp_setpoint is not None
         and abs(o.room_rate) < room_rate_threshold
         and not o.hp_contribution_uncertain
@@ -1110,6 +1515,56 @@ def weighted_least_squares(
         return None
     beta_base = [beta_base_norm[i] / col_scales_base[i] for i in range(n_base)]
 
+    # ── Auto lag-tau detection ──────────────────────────────────────
+    # For each model input, detect optimal EMA tau by minimizing
+    # base-regression residuals.  Pre-compute filtered values using
+    # the detected tau for use in the main regression.
+    detected_tau: dict[str, float] = {}
+    # Per-entity filtered values: entity_id → list[float|None] parallel to base_eligible
+    _filtered_cache: dict[str, list[float | None]] = {}
+
+    if detect_lag and m_inputs:
+        # Auto lag-tau via joint regression sweep.  For each model input,
+        # build X = [1, od, sin, cos, EMA(input, τ)] at candidate τ values
+        # and pick the τ with lowest weighted RSS.  This is the profile
+        # likelihood approach — the full joint regression naturally handles
+        # diurnal correlation without needing separate FWL partialling.
+        #
+        # Uses numpy when available (np.linalg.lstsq is ~100× faster than
+        # pure-Python normal equations for the ~200×5 matrices involved).
+        _tod_cols: list[tuple[float, float]] = [
+            tod_features(base_eligible[k].wall_time) for k in range(m_base)
+        ]
+
+        for m_input in m_inputs:
+            entity_id = m_input.get("entity_id", "")
+            name = m_input.get("name", entity_id)
+            dfr = bool(m_input.get("delta_from_room"))
+            if not entity_id:
+                continue
+
+            tau_result = _detect_optimal_tau(
+                base_eligible, y_base, w_base,
+                entity_id=entity_id,
+                delta_from_room=dfr,
+                base_X=X_base,
+                tod_cols=_tod_cols,
+            )
+
+            if tau_result is not None:
+                tau_opt, r2_impr, beta_at_tau = tau_result
+                detected_tau[name] = tau_opt
+                if tau_opt > 0:
+                    _LOGGER.info(
+                        "Lag-tau detection: %s τ=%.0fs (%.0f min), "
+                        "R²_improvement=%.3f, β=%.3f",
+                        name, tau_opt, tau_opt / 60, r2_impr, beta_at_tau,
+                    )
+                # Cache filtered values for this entity
+                _filtered_cache[entity_id] = _apply_retrospective_ema(
+                    base_eligible, entity_id, tau_opt,
+                )
+
     # Classify model input features
     input_entity_ids = [m.get("entity_id", "") for m in m_inputs]
     input_values_by_obs: list[list[float | None]] = []
@@ -1118,7 +1573,11 @@ def weighted_least_squares(
         for feat_idx, m_input in enumerate(m_inputs):
             entity_id = input_entity_ids[feat_idx]
             if entity_id and entity_id in o.raw_readings:
-                value = o.raw_readings[entity_id]
+                # Use filtered value if available, else raw
+                if entity_id in _filtered_cache and _filtered_cache[entity_id][k] is not None:
+                    value = _filtered_cache[entity_id][k]  # type: ignore[assignment]
+                else:
+                    value = o.raw_readings[entity_id]
                 if m_input.get("delta_from_room"):
                     value = value - o.current_c
                 row.append(value)
@@ -1213,8 +1672,19 @@ def weighted_least_squares(
         full_obs: list[Observation] = []
         full_X: list[list[float]] = []
         full_y: list[float] = []
-        for o in base_eligible:
-            vec = build_feature_vector_from_raw(o, m_inputs, feature_order)
+        for k, o in enumerate(base_eligible):
+            # Build per-observation filtered overrides from cache
+            f_overrides: dict[str, float] | None = None
+            if _filtered_cache:
+                fo: dict[str, float] = {}
+                for eid, fvals in _filtered_cache.items():
+                    if k < len(fvals) and fvals[k] is not None:
+                        fo[eid] = fvals[k]  # type: ignore[assignment]
+                if fo:
+                    f_overrides = fo
+            vec = build_feature_vector_from_raw(
+                o, m_inputs, feature_order, filtered_overrides=f_overrides,
+            )
             if vec is not None:
                 assert o.hp_setpoint is not None
                 full_obs.append(o)
@@ -1283,6 +1753,7 @@ def weighted_least_squares(
         held_features=held,
         beta_std_err=std_err,
         feature_vif=vif,
+        detected_tau=detected_tau,
     )
 
 
@@ -1810,7 +2281,7 @@ def analyze_residuals_by_hour(
     hour_residuals: dict[int, list[float]] = {h: [] for h in range(24)}
 
     for o in observations:
-        if o.clamped_reason in ("no_output", "clamped") or o.hp_setpoint is None:
+        if o.clamped or o.hp_setpoint is None:
             continue
         if abs(o.room_rate) >= room_rate_threshold:
             continue
@@ -1824,7 +2295,8 @@ def analyze_residuals_by_hour(
         x = build_feature_vector_from_raw(o, model_inputs, feature_order)
         if x is None:
             continue
-        predicted = sum(beta[i] * x[i] for i in range(n_features))
+        n_use = min(n_features, len(beta), len(x))
+        predicted = sum(beta[i] * x[i] for i in range(n_use))
         actual = o.hp_setpoint - o.current_c
         residual = actual - predicted
         hour_residuals[wall_hour].append(residual)

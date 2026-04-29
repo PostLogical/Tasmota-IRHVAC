@@ -138,8 +138,15 @@ def _run_simulation(entity, thermal, n_ticks, outdoor_schedule=None,
     def mock_monotonic():
         return sim_clock[0]
 
+    # Wall clock epoch: start at 2026-01-15 08:00 local for realistic ToD features
+    _WALL_EPOCH = 1736935200.0  # approximate epoch for Jan 15 2026 08:00
+
+    def mock_wall_time():
+        return _WALL_EPOCH + sim_clock[0]
+
     with patch("custom_components.tasmota_irhvac.pi.pi_controller.time") as mock_time:
         mock_time.monotonic = mock_monotonic
+        mock_time.time = mock_wall_time
         for tick in range(n_ticks):
             sim_clock[0] = tick * 900.0  # 900s = 15 min per tick
             # Set last tick to previous interval so dt_factor = 1.0
@@ -694,8 +701,14 @@ class TestHPNoOutputScenario:
         def mock_monotonic():
             return sim_clock[0]
 
+        _WALL_EPOCH = 1736935200.0
+
+        def mock_wall_time():
+            return _WALL_EPOCH + sim_clock[0]
+
         with patch("custom_components.tasmota_irhvac.pi.pi_controller.time") as mock_time:
             mock_time.monotonic = mock_monotonic
+            mock_time.time = mock_wall_time
             for tick in range(48):  # 12 hours
                 sim_clock[0] = tick * 900.0
                 pi._pi_last_tick_time = (tick - 1) * 900.0 if tick > 0 else 0

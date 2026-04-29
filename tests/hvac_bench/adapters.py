@@ -20,16 +20,21 @@ class TasmotaPIAdapter:
     for benchmark simulation.
     """
 
-    def __init__(self, config_overrides: dict | None = None):
+    def __init__(self, config_overrides: dict | None = None,
+                 head_calibration_bounds: tuple[float, float] = (0.0, 0.0)):
         """Initialize with optional config overrides.
 
         Args:
             config_overrides: Dict of PI config values to override defaults.
                 Common: {"pi_ki": 0.15, "pi_kd": 0.5, "pi_setpoint_weight": 0.3}
+            head_calibration_bounds: (cal_min, cal_max) for uncertain zone.
+                Default (0.0, 0.0) = no uncertain zone (perfect sensor).
+                Use None for production defaults (±2.0°C).
         """
         config = make_pi_config(config_overrides or {})
         self._config = config
-        self._entity = _FakeBenchEntity(config)
+        self._entity = _FakeBenchEntity(config,
+                                        head_calibration_bounds=head_calibration_bounds)
         self._pi = self._entity._pi
         self._loop = asyncio.new_event_loop()
         self._sim_clock = 0.0
@@ -165,7 +170,7 @@ class TextbookPIController:
 class _FakeBenchEntity:
     """Minimal fake entity for PIController adapter."""
 
-    def __init__(self, config):
+    def __init__(self, config, head_calibration_bounds=None):
         from custom_components.tasmota_irhvac.pi.pi_controller import PIController
 
         self.hass = MagicMock()
@@ -186,6 +191,14 @@ class _FakeBenchEntity:
 
         self._pi = PIController(self, config)
         self._pi._pi_enabled = True
+        # Head calibration bounds: None = production defaults (±2.0°C),
+        # explicit tuple overrides both heat and cool modes.
+        if head_calibration_bounds is not None:
+            cal_min, cal_max = head_calibration_bounds
+            self._pi._head_calibration_min_heat = cal_min
+            self._pi._head_calibration_max_heat = cal_max
+            self._pi._head_calibration_min_cool = cal_min
+            self._pi._head_calibration_max_cool = cal_max
 
     @property
     def device_info(self):

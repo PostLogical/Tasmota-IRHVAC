@@ -59,6 +59,7 @@ class PIExtraStoredData(ExtraStoredData):
     head_calibration_min_cool: float = -2.0
     head_calibration_max_cool: float = 2.0
     regime_probe_state: dict[str, Any] = dataclasses.field(default_factory=dict)  # RegimeProbe.as_dict()
+    boundary_estimator_state: dict[str, Any] = dataclasses.field(default_factory=dict)  # BoundaryEstimator.as_dict()
     exclusion_count: int = 0
     auto_perturb_state: dict[str, Any] = dataclasses.field(default_factory=dict)  # AutoPerturbation.as_dict()
     manual_override_heat: list[bool | None] = dataclasses.field(default_factory=list)
@@ -72,6 +73,8 @@ class PIExtraStoredData(ExtraStoredData):
     rls_online_enabled: bool = True
     batch_wls_enabled: bool = True
     plant_id_enabled: bool = True
+    detected_lag_tau: dict[str, float] = dataclasses.field(default_factory=dict)  # input name → auto-detected EMA tau (seconds)
+    detected_lag_tau_counts: dict[str, int] = dataclasses.field(default_factory=dict)  # input name → consistent detection count
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize to JSON-compatible dict."""
@@ -111,6 +114,7 @@ class PIExtraStoredData(ExtraStoredData):
             "head_calibration_min_cool": self.head_calibration_min_cool,
             "head_calibration_max_cool": self.head_calibration_max_cool,
             "regime_probe_state": self.regime_probe_state,
+            "boundary_estimator_state": self.boundary_estimator_state,
             "exclusion_count": self.exclusion_count,
             "auto_perturb_state": self.auto_perturb_state,
             "manual_override_heat": self.manual_override_heat,
@@ -123,6 +127,8 @@ class PIExtraStoredData(ExtraStoredData):
             "rls_online_enabled": self.rls_online_enabled,
             "batch_wls_enabled": self.batch_wls_enabled,
             "plant_id_enabled": self.plant_id_enabled,
+            "detected_lag_tau": self.detected_lag_tau,
+            "detected_lag_tau_counts": self.detected_lag_tau_counts,
         }
 
     @classmethod
@@ -174,6 +180,7 @@ class PIExtraStoredData(ExtraStoredData):
                 head_calibration_min_cool=float(restored.get("head_calibration_min_cool", -2.0)),
                 head_calibration_max_cool=float(restored.get("head_calibration_max_cool", 2.0)),
                 regime_probe_state=restored.get("regime_probe_state", {}),
+                boundary_estimator_state=restored.get("boundary_estimator_state", {}),
                 exclusion_count=int(restored.get("exclusion_count", 0)),
                 auto_perturb_state=restored.get("auto_perturb_state", {}),
                 manual_override_heat=restored.get("manual_override_heat", []),
@@ -186,6 +193,10 @@ class PIExtraStoredData(ExtraStoredData):
                 rls_online_enabled=bool(restored.get("rls_online_enabled", True)),
                 batch_wls_enabled=bool(restored.get("batch_wls_enabled", True)),
                 plant_id_enabled=bool(restored.get("plant_id_enabled", True)),
+                detected_lag_tau=restored.get("detected_lag_tau", {}),
+                detected_lag_tau_counts={
+                    k: int(v) for k, v in restored.get("detected_lag_tau_counts", {}).items()
+                },
             )
         except (KeyError, ValueError, TypeError, AttributeError):
             return None

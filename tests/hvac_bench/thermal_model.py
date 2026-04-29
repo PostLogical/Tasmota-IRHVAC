@@ -122,8 +122,10 @@ class ThermalModel:
         else:
             self._effective_setpoint = hp_setpoint
 
-        tau = self.profile.tau_minutes
+        tau = self.profile.tau_env
         hp_gain = self.profile.hp_gain
+        if self.profile.hp_capacity is not None:
+            hp_gain *= self.profile.hp_capacity.factor(self.outdoor_temp, mode)
 
         # Apply disturbances
         extra_heat = 0.0
@@ -136,28 +138,42 @@ class ThermalModel:
 
         tau_eff = tau * tau_modifier
 
+        # HP model: proportional controller with idle cutoff.
+        # Inverter mini-splits modulate output ∝ (setpoint - room_temp).
+        # The linear ODE naturally captures this via g*(sp - T) terms.
+        # When room >= setpoint (heating) or room <= setpoint (cooling),
+        # the HP idles — zero contribution, g_eff = 0.
+        if mode == "heat":
+            hp_active = self.room_temp < self._effective_setpoint
+        else:
+            hp_active = self.room_temp > self._effective_setpoint
+        hp_gain_eff = hp_gain if hp_active else 0.0
+
         # Heat inputs
         solar_heat = self.solar_gain * solar_proxy * dt_minutes
         stove_heat = self.stove_gain * stove_active * dt_minutes
 
-        # Equilibrium temperature (where room would settle with constant inputs)
-        total_gain = 1.0 / tau_eff + hp_gain
+        # Equilibrium temperature (where room would settle with constant inputs).
+        # With proportional HP: dT/dt = (T_out - T)/τ + g*(sp - T) + solar + ...
+        # Rearranged: dT/dt = -(1/τ + g)*T + (T_out/τ + g*sp + solar + ...)
+        # Equilibrium: T_eq = (T_out/τ + g*sp + solar) / (1/τ + g)
+        total_gain = 1.0 / tau_eff + hp_gain_eff
         if total_gain == 0:
             return
         t_eq = (
             self.outdoor_temp / tau_eff
-            + hp_gain * self._effective_setpoint
+            + hp_gain_eff * self._effective_setpoint
             + solar_heat / dt_minutes  # Convert back to rate
             + stove_heat / dt_minutes
             + extra_heat / dt_minutes
         ) / total_gain
 
         # Exact exponential decay toward equilibrium
-        decay = math.exp(-dt_minutes / tau_eff)
+        decay = math.exp(-total_gain * dt_minutes)
         self.room_temp = t_eq + (self.room_temp - t_eq) * decay
 
         # Energy tracking
-        thermal_output = abs(self._effective_setpoint - self.room_temp) * hp_gain * dt_minutes
+        thermal_output = abs(self._effective_setpoint - self.room_temp) * hp_gain_eff * dt_minutes
         cop = self.cop_model.cop(self.outdoor_temp, hp_setpoint, mode)
         if cop > 0:
             electrical_input = thermal_output / cop
@@ -211,7 +227,8 @@ class ThermalModel2R2C:
                  noise_seed: int | None = None,
                  hp_lag_minutes: float = 0.0,
                  initial_wall_temp: float | None = None,
-                 solar_gain: float = 0.0, stove_gain: float = 0.0):
+                 solar_gain: float = 0.0, stove_gain: float = 0.0,
+                 head_sensor_offset: float = 0.0):
         self.profile = profile
         self.solar_gain = solar_gain
         self.stove_gain = stove_gain
@@ -224,6 +241,7 @@ class ThermalModel2R2C:
         self._rng = random.Random(noise_seed)
         self.hp_lag_minutes = hp_lag_minutes
         self._effective_setpoint: float = initial_temp
+        self.head_sensor_offset = head_sensor_offset
 
         # Energy tracking
         self.cumulative_kwh = 0.0
@@ -239,10 +257,17 @@ class ThermalModel2R2C:
 
     def step(self, hp_setpoint: float, dt_minutes: float = 15.0,
              solar_proxy: float = 0.0, stove_active: float = 0.0,
+             q_air_extra: float = 0.0, q_wall_extra: float = 0.0,
              tick: int = 0, mode: str = "heat") -> None:
         """Advance both nodes by one time step.
 
         Same interface as ThermalModel for drop-in compatibility.
+
+        ``q_air_extra`` and ``q_wall_extra`` are generic per-node heat
+        injection rates (°C/min) for sources the runner has already
+        split per ASHRAE convective/radiative convention or party-wall
+        coupling.  They enter the same b1/b2 forcing terms as
+        ``q_solar_air`` and ``q_solar_wall``.
         """
         # HP response lag
         if self.hp_lag_minutes > 0:
@@ -258,6 +283,8 @@ class ThermalModel2R2C:
         tau_c = p.tau_couple
         tau_m = p.tau_wall  # tau_couple * mass_ratio
         g = p.hp_gain
+        if p.hp_capacity is not None:
+            g *= p.hp_capacity.factor(self.outdoor_temp, mode)
 
         # Apply disturbances (affect envelope only, like the 1R1C model)
         extra_heat = 0.0
@@ -279,24 +306,36 @@ class ThermalModel2R2C:
         q_stove = self.stove_gain * stove_active
         q_extra = extra_heat
 
+        # HP cycling: internal thermostat turns off compressor when its
+        # head sensor (room_temp + offset) is at or above setpoint (heating)
+        # or at/below setpoint (cooling).  The offset models the difference
+        # between the HP's head unit sensor and our room sensor.
+        hp_sensed_temp = self.room_temp + self.head_sensor_offset
+        if mode == "heat":
+            hp_active = hp_sensed_temp < self._effective_setpoint
+        else:  # cool
+            hp_active = hp_sensed_temp > self._effective_setpoint
+        g_eff = g if hp_active else 0.0
+
         # System matrix A and forcing vector b:
         #   d/dt [T_a, T_w]^T = A * [T_a, T_w]^T + b
         #
-        # A = [[-1/τ_env - g - 1/τ_c,   1/τ_c ],
-        #      [ 1/τ_m,               -1/τ_m  ]]
+        # A = [[-1/τ_env - g_eff - 1/τ_c,   1/τ_c ],
+        #      [ 1/τ_m,                    -1/τ_m  ]]
         #
-        # b = [T_out/τ_env + g*sp + q_solar_air + q_stove + q_extra,
+        # b = [T_out/τ_env + g_eff*sp + q_solar_air + q_stove + q_extra,
         #      q_solar_wall / mass_ratio]
 
-        a11 = -(1.0 / tau_env_eff + g + 1.0 / tau_c)
+        a11 = -(1.0 / tau_env_eff + g_eff + 1.0 / tau_c)
         a12 = 1.0 / tau_c
         a21 = 1.0 / tau_m
         a22 = -1.0 / tau_m
 
         b1 = (self.outdoor_temp / tau_env_eff
-              + g * self._effective_setpoint
-              + q_solar_air + q_stove + q_extra)
-        b2 = q_solar_wall / p.mass_ratio  # Normalized by wall capacitance ratio
+              + g_eff * self._effective_setpoint
+              + q_solar_air + q_stove + q_extra + q_air_extra)
+        # Wall-node forcing normalized by wall capacitance ratio.
+        b2 = (q_solar_wall + q_wall_extra) / p.mass_ratio
 
         # Equilibrium: T_eq = -A^{-1} * b
         det_A = a11 * a22 - a12 * a21
@@ -353,7 +392,7 @@ class ThermalModel2R2C:
         self.wall_temp = t_eq_w + new_dw
 
         # Energy tracking (same approach as 1R1C)
-        thermal_output = abs(self._effective_setpoint - self.room_temp) * g * dt_minutes
+        thermal_output = abs(self._effective_setpoint - self.room_temp) * g_eff * dt_minutes
         cop = self.cop_model.cop(self.outdoor_temp, hp_setpoint, mode)
         if cop > 0:
             electrical_input = thermal_output / cop

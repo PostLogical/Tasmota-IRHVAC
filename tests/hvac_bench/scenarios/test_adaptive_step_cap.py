@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 import pytest
 
 from tests.hvac_bench.adapters import TasmotaPIAdapter
+from tests.hvac_bench.full_stack_runner import ModelInputSpec
 from tests.hvac_bench.house_profiles import PROFILES_2R2C
 from tests.hvac_bench.thermal_model import ThermalModel2R2C
 
@@ -60,26 +61,6 @@ class ScenarioConfig:
     # The thermal model applies the physical effect; the PI controller
     # sees the raw sensor value as a model input.
     model_inputs: list[ModelInputSpec] = field(default_factory=list)
-
-
-@dataclass
-class ModelInputSpec:
-    """Specification for a model input in the scenario."""
-
-    name: str
-    entity_id: str
-    input_role: str  # "solar", "adjacent_zone", "heat_source", "other"
-    # Ground truth: how this input affects room temp in the thermal model.
-    # Positive = warms room.  Units: °C room per unit input per tick.
-    true_thermal_effect: float
-    # Ground truth: the WLS coefficient the batch should converge to.
-    # This is the FF coefficient in °C HP setpoint per unit input.
-    true_ff_coef: float
-    seed_heat: float = 0.0  # starting seed in config
-    # Schedule: callable(tick) -> value
-    schedule: object = None  # Callable[[int], float]
-    # For adjacent_zone: delta_from_room mode?
-    delta_from_room: bool = False
 
 
 @dataclass
@@ -136,7 +117,7 @@ def run_full_system(
     # Build model input config for PIController
     pi_model_inputs = []
     for mi in config.model_inputs:
-        pi_model_inputs.append({
+        entry: dict = {
             "entity_id": mi.entity_id,
             "name": mi.name,
             "input_role": mi.input_role,
@@ -144,7 +125,12 @@ def run_full_system(
             "seed_cool": 0.0,
             "lag_tau": 0,
             "delta_from_room": mi.delta_from_room,
-        })
+        }
+        if mi.clamp_min is not None:
+            entry["clamp_min"] = mi.clamp_min
+        if mi.clamp_max is not None:
+            entry["clamp_max"] = mi.clamp_max
+        pi_model_inputs.append(entry)
 
     # Create adapter with model inputs configured
     adapter = TasmotaPIAdapter({
@@ -163,6 +149,19 @@ def run_full_system(
     # here we test the adaptive step cap behavior specifically.
     pi._batch_kappa_threshold = 10000
 
+    # Resolve model input physics first (single source of truth:
+    # _true_ff_coef drives true_thermal_effect = abs(β) × hp_gain).
+    for mi in config.model_inputs:
+        mi.resolve(profile.hp_gain)
+
+    # Solar heat is summed and passed through the 2R2C 30/70 split inside
+    # model.step().  Non-solar heat is routed via q_air_extra/q_wall_extra
+    # in the per-tick loop below.
+    solar_thermal_gain = sum(
+        mi.true_thermal_effect for mi in config.model_inputs
+        if mi.input_role == "solar"
+    )
+
     # Create thermal model
     model = ThermalModel2R2C(
         profile=profile,
@@ -170,7 +169,7 @@ def run_full_system(
         outdoor_temp=config.outdoor_base_c,
         sensor_noise_sigma=config.noise_sigma,
         noise_seed=config.noise_seed,
-        solar_gain=0.0,  # We'll apply solar manually through model inputs
+        solar_gain=solar_thermal_gain,
         stove_gain=0.0,
     )
 
@@ -188,7 +187,7 @@ def run_full_system(
     # True coefficients for comparison
     true_coefs = {"intercept": 0.0, "outdoor_delta": 0.35}
     for mi in config.model_inputs:
-        true_coefs[mi.name] = mi.true_ff_coef
+        true_coefs[mi.name] = mi.true_ff_coef(profile.hp_gain)
 
     rng = random.Random(config.noise_seed + 1)
 
@@ -198,21 +197,30 @@ def run_full_system(
             tick, config.outdoor_base_c, config.outdoor_diurnal_c,
         )
 
-        # Compute model input values from schedules
+        # Compute model input values from schedules and route heat per
+        # ASHRAE Ch 18 / Madsen & Holst (1995): non-solar inputs split
+        # convective/radiative or enter via party-wall coupling, not
+        # injected directly into the air node.
         input_values = {}
-        extra_heat_rate = 0.0
+        solar_proxy_value = 0.0
+        q_air_extra = 0.0
+        q_wall_extra = 0.0
         for mi in config.model_inputs:
-            if mi.schedule is not None:
-                val = mi.schedule(tick)
-            else:
-                val = 0.0
+            val = mi.schedule(tick) if mi.schedule is not None else 0.0
             input_values[mi.name] = val
-            # Physical effect on thermal model
-            extra_heat_rate += mi.true_thermal_effect * val
+            if mi.input_role == "solar":
+                solar_proxy_value += val
+                continue
+            feature_val = val - model.room_temp if mi.delta_from_room else val
+            q_total = mi.true_thermal_effect * feature_val
+            if mi.input_role == "adjacent_zone":
+                q_wall_extra += q_total  # 100% wall (party-wall coupling)
+            else:
+                q_air_extra += q_total * 0.3  # ASHRAE 30/70 default
+                q_wall_extra += q_total * 0.7
 
-        # Apply extra heat from model inputs to thermal model
-        # (as additional solar/stove gain for this tick)
-        model.room_temp += extra_heat_rate * TICK_MINUTES
+        # Non-solar heat is passed to model.step via q_air_extra/q_wall_extra
+        # below; no direct room_temp injection (would bypass wall dynamics).
 
         # Read sensor
         sensor_reading = model.read_sensor()
@@ -226,12 +234,16 @@ def run_full_system(
         # Set model input values via mock HA entity states so that
         # _resolve_model_input_states → read_values → _raw_for_obs
         # picks up the actual schedule values (not MagicMock defaults).
+        # delta_from_room inputs need a temperature unit advertised so
+        # the controller's model_input_manager converts the absolute
+        # reading into a delta against current room.
         _mock_states: dict = {}
         for mi in config.model_inputs:
             val = input_values[mi.name]
+            unit = "°C" if mi.delta_from_room else None
             ms = type("MockState", (), {
                 "state": str(val),
-                "attributes": {"unit_of_measurement": None},
+                "attributes": {"unit_of_measurement": unit},
             })()
             _mock_states[mi.entity_id] = ms
         pi._hass.states.get = lambda eid: _mock_states.get(eid)
@@ -246,10 +258,15 @@ def run_full_system(
 
         hp_setpoint = float(pi._hp_setpoint)
 
-        # Advance thermal model
+        # Advance thermal model.  Solar enters via solar_proxy (handled
+        # internally by the 30/70 split); non-solar heat enters via
+        # q_air_extra / q_wall_extra computed above.
         model.step(
             hp_setpoint=hp_setpoint,
             dt_minutes=TICK_MINUTES,
+            solar_proxy=solar_proxy_value,
+            q_air_extra=q_air_extra,
+            q_wall_extra=q_wall_extra,
             tick=tick,
             mode="heat",
         )
@@ -395,12 +412,12 @@ SCENARIO_1_CONFIG = ScenarioConfig(
             name="Solar Proxy",
             entity_id="sensor.solar_proxy",
             input_role="solar",
-            true_thermal_effect=0.015,  # °C/min per unit solar
             # At peak solar=0.8: 0.015 * 0.8 * 15 = 0.18°C/tick.
             # Over 6h: ~2.2°C total.  On a -10°C day the HP still needs
             # to push hard, so observations stay eligible (not clamped).
-            true_ff_coef=-3.5,  # HP backs off 3.5°C when solar is at 1.0
+            _true_ff_coef=-3.5,  # HP backs off 3.5°C when solar is at 1.0
             seed_heat=0.0,  # starts at zero — must learn
+            clamp_min=0,  # solar warms room → non-negative in seed space
             schedule=_solar_schedule,
         ),
     ],
@@ -473,17 +490,16 @@ SCENARIO_2_CONFIG = ScenarioConfig(
             name="Solar Proxy",
             entity_id="sensor.solar_proxy",
             input_role="solar",
-            true_thermal_effect=0.003,
-            true_ff_coef=-3.5,
+            _true_ff_coef=-3.5,
             seed_heat=0.0,
+            clamp_min=0,  # solar warms room → coef must be non-negative in seed space
             schedule=_solar_schedule,
         ),
         ModelInputSpec(
             name="Sunroom Temperature",
             entity_id="sensor.sunroom_temp",
             input_role="adjacent_zone",
-            true_thermal_effect=0.0005,  # weak: sunroom warms LR slightly
-            true_ff_coef=-0.5,  # small HP adjustment for sunroom heat
+            _true_ff_coef=-0.5,  # small HP adjustment for sunroom heat
             seed_heat=0.0,
             schedule=_sunroom_schedule,
             delta_from_room=True,
@@ -543,9 +559,9 @@ SCENARIO_3_CONFIG = ScenarioConfig(
             name="Solar Proxy",
             entity_id="sensor.solar_proxy",
             input_role="solar",
-            true_thermal_effect=0.004,  # stronger solar
-            true_ff_coef=-4.0,
+            _true_ff_coef=-4.0,
             seed_heat=0.0,
+            clamp_min=0,
             schedule=_late_solar_schedule,
         ),
     ],
@@ -598,17 +614,16 @@ SCENARIO_4_CONFIG = ScenarioConfig(
             name="Solar Proxy",
             entity_id="sensor.solar_proxy",
             input_role="solar",
-            true_thermal_effect=0.003,
-            true_ff_coef=-3.5,
+            _true_ff_coef=-3.5,
             seed_heat=0.0,
+            clamp_min=0,
             schedule=_solar_schedule,
         ),
         ModelInputSpec(
             name="Sunporch Temperature",
             entity_id="sensor.sunporch_temp",
             input_role="adjacent_zone",
-            true_thermal_effect=0.001,  # moderate heat transfer
-            true_ff_coef=-1.0,  # HP should reduce effort when sunporch warm
+            _true_ff_coef=-1.0,  # HP should reduce effort when sunporch warm
             seed_heat=0.0,
             schedule=_warm_adjacent_schedule,
             delta_from_room=True,
@@ -664,8 +679,7 @@ SCENARIO_5_CONFIG = ScenarioConfig(
             name="Weak Input",
             entity_id="sensor.weak_input",
             input_role="other",
-            true_thermal_effect=0.0002,
-            true_ff_coef=-0.3,  # small coefficient
+            _true_ff_coef=-0.3,  # small coefficient
             seed_heat=0.0,
             schedule=_weak_input_schedule,
         ),
@@ -716,9 +730,9 @@ SCENARIO_6_CONFIG = ScenarioConfig(
             name="Solar Proxy",
             entity_id="sensor.solar_proxy",
             input_role="solar",
-            true_thermal_effect=0.003,
-            true_ff_coef=-3.5,
+            _true_ff_coef=-3.5,
             seed_heat=0.0,
+            clamp_min=0,
             schedule=_noisy_solar_schedule,
         ),
     ],
@@ -778,8 +792,7 @@ SCENARIO_7_CONFIG = ScenarioConfig(
             name="Kitchen Temperature",
             entity_id="sensor.kitchen_temp",
             input_role="adjacent_zone",
-            true_thermal_effect=0.0003,
-            true_ff_coef=-0.4,
+            _true_ff_coef=-0.4,
             seed_heat=0.0,
             schedule=_always_adjacent_schedule,
             delta_from_room=True,
@@ -788,9 +801,9 @@ SCENARIO_7_CONFIG = ScenarioConfig(
             name="Solar Proxy",
             entity_id="sensor.solar_proxy",
             input_role="solar",
-            true_thermal_effect=0.003,
-            true_ff_coef=-3.5,
+            _true_ff_coef=-3.5,
             seed_heat=0.0,
+            clamp_min=0,
             schedule=_delayed_solar_schedule,
         ),
     ],

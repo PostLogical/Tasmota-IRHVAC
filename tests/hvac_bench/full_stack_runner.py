@@ -17,9 +17,12 @@ Usage:
 from __future__ import annotations
 
 import math
+import random
 import time as _time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Callable
+from unittest.mock import patch
 
 from tests.hvac_bench.adapters import TasmotaPIAdapter
 from tests.hvac_bench.house_profiles import PROFILES, PROFILES_2R2C
@@ -29,6 +32,8 @@ from tests.hvac_bench.thermal_model import ThermalModel2R2C
 # ── Constants ────────────────────────────────────────────────────────────
 
 TICK_MINUTES_DEFAULT = 15.0
+# Simulated wall-clock epoch: datetime corresponding to sim_clock=0.
+_SIM_EPOCH = datetime(2026, 1, 15, 0, 0, 0)
 TICKS_PER_HOUR = int(60 / TICK_MINUTES_DEFAULT)
 TICKS_PER_DAY = 24 * TICKS_PER_HOUR  # 96
 BATCH_INTERVAL_HOURS_DEFAULT = 12
@@ -40,13 +45,23 @@ DEADBAND = 0.5
 
 @dataclass
 class ModelInputSpec:
-    """A model input with ground-truth thermal effect and FF coefficient."""
+    """A model input with ground-truth FF coefficient.
+
+    ``_true_ff_coef`` is the single source of truth — the steady-state
+    FF coefficient the WLS should learn (°C HP-setpoint per unit input).
+    ``true_thermal_effect`` (°C/min per unit input, used by the thermal
+    model to inject heat) is *derived* from physics in :meth:`resolve`:
+
+        β = -tte / hp_gain  ⇒  tte = abs(β) × hp_gain
+
+    The default of -3.0 represents a strong solar signal (HP backs off
+    3°C per unit solar). Tests override per-scenario as needed.
+    """
 
     name: str
     entity_id: str
     input_role: str  # "solar", "adjacent_zone", "heat_source", "other"
-    true_thermal_effect: float  # °C room per unit input per minute
-    true_ff_coef: float  # ground-truth WLS coefficient
+    _true_ff_coef: float = -3.0  # ground-truth β; tte derived from this
     seed_heat: float = 0.0
     seed_cool: float = 0.0
     schedule: Callable[[int], float] | None = None  # tick -> value
@@ -54,6 +69,19 @@ class ModelInputSpec:
     lag_tau: int = 0
     clamp_min: float | None = None  # min in seed space (positive = warms room)
     clamp_max: float | None = None  # max in seed space
+    # Derived by resolve() — not authored by tests.
+    true_thermal_effect: float = field(init=False, default=0.0)
+
+    def resolve(self, hp_gain: float) -> None:
+        """Derive ``true_thermal_effect`` from ``_true_ff_coef`` × hp_gain.
+
+        Called once by the runner before simulation starts.
+        """
+        self.true_thermal_effect = abs(self._true_ff_coef) * hp_gain
+
+    def true_ff_coef(self, hp_gain: float) -> float:
+        """Ground-truth FF coefficient (single source of truth)."""
+        return self._true_ff_coef
 
 
 @dataclass
@@ -109,12 +137,27 @@ class FullStackConfig:
     # Disturbances to inject
     disturbances: list[Disturbance] = field(default_factory=list)
 
+    # Thermal-model disturbances (heat-loss/heat-gain perturbations applied
+    # via the 2R2C model's own disturbance mechanism — used for window-open,
+    # cooking events, etc. that affect physics but aren't model inputs).
+    thermal_disturbances: list = field(default_factory=list)
+
     # If True, relax κ gate (for short sims with limited diversity)
     relax_kappa_gate: bool = False
 
     # True coefficients for convergence checking.
     # If None, computed from profile + model inputs.
     true_coefs: dict[str, float] | None = None
+
+    # HP head sensor offset (°C).  The HP's internal sensor reads
+    # room_temp + offset.  Positive = HP thinks room is warmer (idles
+    # sooner in heat mode).  0.0 = perfect sensor match (bench default).
+    head_sensor_offset: float = 0.0
+
+    # Head calibration bounds [min, max] for the uncertain zone.
+    # None = production defaults (±2.0°C).  (0.0, 0.0) = no uncertain
+    # zone (prior bench behavior).
+    head_calibration_bounds: tuple[float, float] | None = None
 
 
 # ── Checkpoint system ────────────────────────────────────────────────────
@@ -203,15 +246,19 @@ class FullStackResult:
     checkpoint_data: list[dict]
 
     # ── Comfort metrics ──────────────────────────────────────────────
-    comfort_hours_pct: float  # % of ticks within deadband
+    comfort_hours_pct: float  # % of ticks within deadband (total)
+    ctrl_comfort_pct: float  # % of HP-active ticks within deadband
     cold_violations: int  # ticks where room < desired - deadband
     warm_violations: int  # ticks where room > desired + deadband
+    ctrl_violations: int  # violations when HP was outputting
+    unctrl_violations: int  # violations when HP was idle
     worst_undershoot: float  # max (desired - room) when room < desired
     worst_overshoot: float  # max (room - desired) when room > desired
     longest_violation_streak: int  # max consecutive ticks outside deadband
 
     # Per-day comfort rollups
     daily_comfort_pct: list[float]
+    daily_ctrl_comfort_pct: list[float]  # controllable comfort per day
     daily_cold_violations: list[int]
     daily_warm_violations: list[int]
 
@@ -223,6 +270,20 @@ class FullStackResult:
     # Per-batch snapshots
     batch_kappa: list[float]  # condition number at each batch
     batch_covariance_trace: list[float]  # tr(P) at each batch
+
+    # ── Observation yield metrics ────────────────────────────────────
+    # Zone model classification across all ticks:
+    ticks_hp_on: int  # ticks where HP definitely contributing
+    ticks_uncertain: int  # ticks in uncertain zone (|delta| < cal band)
+    ticks_hp_off: int  # ticks where HP definitely idle
+    observation_yield_pct: float  # hp_on / (hp_on + uncertain) — usable fraction
+
+    # ── Boundary estimator metrics ──────────────────────────────────
+    final_cal_min: float  # final cal bound (active mode)
+    final_cal_max: float
+    boundary_updates: int  # confident boundary updates applied
+    boundary_stall_count: int
+    boundary_last_n_obs: int  # observations used in last sweep
 
     # ── Setpoint behavior metrics ────────────────────────────────────
     # We send IR setpoints to the HP's thermostat; we don't control the
@@ -236,31 +297,106 @@ class FullStackResult:
 # ── Default weather schedules ────────────────────────────────────────────
 
 
-def diurnal_outdoor(tick: int, base_c: float, amplitude_c: float,
-                    tick_minutes: float = TICK_MINUTES_DEFAULT) -> float:
+class WeatherState:
+    """AR(1) shared weather state driving both outdoor offset and solar attenuation.
+
+    Real weather couples cloud cover and outdoor temperature through shared causes
+    (frontal passages, pressure systems). The synthetic default has them as
+    independent oscillators, so solar β identifies too cleanly. This class produces
+    a single ~N(0, 1) trajectory W(tick) with autocorrelation half-life
+    ``persistence_hours``; callers feed it into :func:`diurnal_outdoor` and
+    :func:`diurnal_solar` so both schedules share residual variance.
+
+    Calibrated to reproduce hourly residual T-vs-S correlation in the 0.10–0.30
+    band measured from real Open-Meteo data (44°N, 71.5°W). See
+    project_wls_buffer_literature_review.md for context.
+    """
+
+    def __init__(
+        self,
+        n_ticks: int,
+        seed: int = 42,
+        persistence_hours: float = 36.0,
+        tick_minutes: float = TICK_MINUTES_DEFAULT,
+    ):
+        self._n_ticks = n_ticks
+        self._tick_minutes = tick_minutes
+        ticks_per_persistence = persistence_hours * 60.0 / tick_minutes
+        # Half-life persistence: phi^ticks = 0.5 at autocorrelation half-life
+        self._phi = 0.5 ** (1.0 / ticks_per_persistence)
+        sigma_eps = math.sqrt(1.0 - self._phi**2)
+        rng = random.Random(seed)
+        self._W = [0.0] * n_ticks
+        # Burn-in 200 ticks so initial state is at stationary distribution
+        burn = 0.0
+        for _ in range(200):
+            burn = self._phi * burn + sigma_eps * rng.gauss(0.0, 1.0)
+        self._W[0] = burn
+        for t in range(1, n_ticks):
+            self._W[t] = self._phi * self._W[t - 1] + sigma_eps * rng.gauss(0.0, 1.0)
+
+    def __call__(self, tick: int) -> float:
+        if tick < 0:
+            return self._W[0]
+        if tick >= self._n_ticks:
+            return self._W[-1]
+        return self._W[tick]
+
+
+def diurnal_outdoor(
+    tick: int,
+    base_c: float,
+    amplitude_c: float,
+    tick_minutes: float = TICK_MINUTES_DEFAULT,
+    weather_state: Callable[[int], float] | None = None,
+    weather_amp_c: float = 2.0,
+) -> float:
     """Sinusoidal outdoor temp with multi-day weather-front drift.
 
-    Coldest at 6AM, warmest at 3PM. Includes ±8°C 5-day weather drift
-    to provide outdoor_delta diversity for batch WLS.
+    Coldest at 6AM, warmest at 3PM. With ``weather_state=None`` (legacy) uses a
+    pure 8.0°C 5-day sine drift. With a ``WeatherState`` instance, drift becomes
+    a 7.0°C *independent* 5-day sine plus ``weather_amp_c × W(tick)`` *shared*
+    with the solar cloud factor. The shared term is intentionally smaller than
+    the independent drift so the residual T-vs-S correlation lands near 0.20
+    (average of real Open-Meteo seasons fall=0.30, winter=0.10, spring=0.26),
+    not at saturation.
     """
     hour = (tick * tick_minutes / 60.0) % 24.0
     day = tick * tick_minutes / (60.0 * 24.0)
-    weather_drift = 8.0 * math.sin(2 * math.pi * day / 5.0)
+    if weather_state is not None:
+        weather_drift = 7.0 * math.sin(2 * math.pi * day / 5.0) + weather_amp_c * weather_state(tick)
+    else:
+        weather_drift = 8.0 * math.sin(2 * math.pi * day / 5.0)
     return base_c + weather_drift + amplitude_c * math.cos(
         2 * math.pi * (hour - 15) / 24
     )
 
 
-def diurnal_solar(tick: int, peak: float = 0.8,
-                  tick_minutes: float = TICK_MINUTES_DEFAULT) -> float:
-    """Solar proxy: 0 at night, peaks at noon. Variable cloud cover."""
+def diurnal_solar(
+    tick: int,
+    peak: float = 0.8,
+    tick_minutes: float = TICK_MINUTES_DEFAULT,
+    weather_state: Callable[[int], float] | None = None,
+    cloud_coupling: float = 0.5,
+    sunrise_hour: float = 6.0,
+    sunset_hour: float = 18.0,
+) -> float:
+    """Solar proxy: 0 at night, peaks at noon. Variable cloud cover.
+
+    With ``weather_state=None`` (legacy) uses a smooth 3-day cosine cloud cycle.
+    With a ``WeatherState`` instance, the cloud factor is ``clip(0.7 +
+    cloud_coupling × W(tick), 0.2, 1.0)`` — bursty stretches of clear/cloudy days
+    emerge from AR(1) persistence, and the same W also shifts outdoor temp.
+    """
     hour = (tick * tick_minutes / 60.0) % 24.0
-    day = tick * tick_minutes / (60.0 * 24.0)
-    if hour < 6 or hour > 18:
+    if hour < sunrise_hour or hour > sunset_hour:
         return 0.0
-    base = peak * math.sin(math.pi * (hour - 6) / 12)
-    # Cloud factor varies by day (different period than weather drift)
-    cloud = 0.5 + 0.5 * math.cos(2 * math.pi * day / 3.0 + 1.0)
+    base = peak * math.sin(math.pi * (hour - sunrise_hour) / (sunset_hour - sunrise_hour))
+    if weather_state is not None:
+        cloud = max(0.2, min(1.0, 0.7 + cloud_coupling * weather_state(tick)))
+    else:
+        day = tick * tick_minutes / (60.0 * 24.0)
+        cloud = 0.5 + 0.5 * math.cos(2 * math.pi * day / 3.0 + 1.0)
     return base * cloud
 
 
@@ -361,13 +497,19 @@ def run_full_stack(
         "pi_kp": 1.5,
         "pi_deadband": DEADBAND,
         "pi_setpoint_weight": 0.3,
+        "pi_rls_online_enabled": False,  # batch-only per online RLS verdict
         **config.pi_overrides,
     }
-    adapter = TasmotaPIAdapter(pi_config)
+    adapter = TasmotaPIAdapter(pi_config,
+                               head_calibration_bounds=config.head_calibration_bounds)
     pi = adapter._pi
 
     if config.relax_kappa_gate:
         pi._batch_kappa_threshold = 10000
+
+    # Resolve model input physics: couple true_thermal_effect ↔ FF coefficient.
+    for mi in config.model_inputs:
+        mi.resolve(profile.hp_gain)
 
     # Compute solar_gain for the thermal model from solar model inputs.
     # The thermal model applies this via 2R2C physics (30% air, 70% wall).
@@ -388,7 +530,12 @@ def run_full_stack(
         noise_seed=config.noise_seed,
         solar_gain=solar_thermal_gain,
         stove_gain=0.0,
+        head_sensor_offset=config.head_sensor_offset,
     )
+
+    # Wire any thermal-model disturbances (window-open, cooking, etc.)
+    for td in config.thermal_disturbances:
+        model.add_disturbance(td)
 
     adapter.set_desired_temp(config.desired_c)
     adapter.set_mode(config.mode)
@@ -413,7 +560,7 @@ def run_full_stack(
     if true_coefs is None:
         true_coefs = {"intercept": 0.0, "outdoor_delta": profile.true_seed}
         for mi in config.model_inputs:
-            true_coefs[mi.name] = mi.true_ff_coef
+            true_coefs[mi.name] = mi.true_ff_coef(profile.hp_gain)
 
     # ── Tracking state ───────────────────────────────────────────────
     history: list[dict] = []
@@ -431,6 +578,11 @@ def run_full_stack(
     longest_violation_streak = 0
     total_rapid_sp_changes = 0
 
+    # Zone model observation yield tracking
+    ticks_hp_on = 0
+    ticks_uncertain = 0
+    ticks_hp_off = 0
+
     # Per-day accumulators
     day_itae = 0.0
     day_violations = 0
@@ -441,6 +593,12 @@ def run_full_stack(
     day_ff_plus_int_sum = 0.0
     day_saturated = 0
     day_start_tick = 0
+    # Controllable/uncontrollable split: HP idle (setpoint <= room in heat,
+    # setpoint >= room in cool) means any error is uncontrollable.
+    ctrl_violations = 0
+    unctrl_violations = 0
+    day_ctrl_viols = 0
+    day_unctrl_viols = 0
 
     daily_itae: list[float] = []
     daily_violations: list[int] = []
@@ -448,6 +606,7 @@ def run_full_stack(
     daily_mae: list[float] = []
     daily_integral_rms: list[float] = []
     daily_comfort_pct: list[float] = []
+    daily_ctrl_comfort_pct: list[float] = []
     daily_cold_violations: list[int] = []
     daily_warm_violations: list[int] = []
     daily_ff_fraction: list[float] = []
@@ -470,20 +629,42 @@ def run_full_stack(
         # Update outdoor temp
         model.outdoor_temp = outdoor_fn(tick)
 
-        # Compute model input values
+        # Compute model input values.  Each input role injects heat through
+        # the physical pathway it represents, per Madsen & Holst (1995) and
+        # ASHRAE Handbook of Fundamentals (2021) Ch. 18:
+        #   - "solar"        → 30% air / 70% wall split (radiation through
+        #                      windows, partly absorbed by interior mass)
+        #   - "heat_source"  → 30% air / 70% wall split (radiant stove,
+        #                      ASHRAE convective fraction 0.3-0.5)
+        #   - "adjacent_zone"→ 100% wall (party-wall conduction; heat must
+        #                      pass through wall mass before reaching air)
+        #   - "other"        → 30% air / 70% wall (default split)
+        # The wall node feeds the air node via the existing tau_couple
+        # dynamics, producing realistic lag and damping.
         input_values: dict[str, float] = {}
         solar_proxy_value = 0.0
-        extra_heat_rate = 0.0
+        q_air_extra = 0.0
+        q_wall_extra = 0.0
         for mi in config.model_inputs:
             val = mi.schedule(tick) if mi.schedule is not None else 0.0
             input_values[mi.name] = val
             if mi.input_role == "solar":
-                # Solar goes through the thermal model's 2R2C physics
-                # (30% convective to air, 70% radiative to walls).
+                # Solar handled inside model.step via the 2R2C split.
                 solar_proxy_value += val
+                continue
+            # Heat transfer scales with the FEATURE that drives β.  For
+            # delta_from_room inputs, the schedule reports absolute °C —
+            # convert to delta against current room temp before applying
+            # the per-unit heat rate.
+            feature_val = val - model.room_temp if mi.delta_from_room else val
+            q_total = mi.true_thermal_effect * feature_val
+            if mi.input_role == "adjacent_zone":
+                # Party-wall coupling: all heat enters at the wall node.
+                q_wall_extra += q_total
             else:
-                # Non-solar inputs (stove, adjacent zone) add heat directly
-                extra_heat_rate += mi.true_thermal_effect * val
+                # heat_source / other: ASHRAE 30/70 convective/radiative.
+                q_air_extra += q_total * 0.3
+                q_wall_extra += q_total * 0.7
 
         # Apply disturbances
         room_temp_offset = 0.0
@@ -498,9 +679,8 @@ def run_full_stack(
                         if mi.name == d.field and mi.input_role == "solar":
                             solar_proxy_value = d.value
 
-        # Apply non-solar extra heat directly to room
-        if extra_heat_rate != 0:
-            model.room_temp += extra_heat_rate * tick_min
+        # Non-solar heat enters through model.step() below — no direct
+        # room_temp injection (would bypass wall-node dynamics).
 
         # Read sensor (with optional disturbance offset)
         sensor_reading = model.read_sensor() + room_temp_offset
@@ -510,31 +690,82 @@ def run_full_stack(
         adapter._entity._attr_current_temperature = sensor_reading
         pi._inputs.outdoor_temp = model.outdoor_temp
 
-        # Mock model input entity states
+        # Mock model input entity states.  delta_from_room inputs need a
+        # temperature unit advertised so the controller's model_input_manager
+        # converts the absolute reading into a delta against current room.
         _mock_states: dict = {}
         for mi in config.model_inputs:
             val = input_values[mi.name]
+            unit = "°C" if mi.delta_from_room else None
             ms = type("MockState", (), {
                 "state": str(val),
-                "attributes": {"unit_of_measurement": None},
+                "attributes": {"unit_of_measurement": unit},
             })()
             _mock_states[mi.entity_id] = ms
         pi._hass.states.get = lambda eid, _s=_mock_states: _s.get(eid)
 
-        original = _time.monotonic
+        # Mock time.monotonic and time.time to sim clock.  The PI
+        # controller uses time.time() for observation wall_time (needed
+        # for sin/cos ToD features) and datetime.now() for cooldowns,
+        # neither of which advance in fast-sim mode.
+        _sim_dt = _SIM_EPOCH + timedelta(seconds=adapter._sim_clock)
+        _sim_epoch_ts = _SIM_EPOCH.timestamp()
+        original_monotonic = _time.monotonic
+        original_time = _time.time
         _time.monotonic = lambda: adapter._sim_clock
+        _time.time = lambda: _sim_epoch_ts + adapter._sim_clock
+        # Patch CUSUM cooldown: if set, re-anchor to sim time
+        if pi._cusum_cooldown_until is not None:
+            # Cooldown was set at some sim time.  Check if enough sim time
+            # has passed by comparing sim_dt against the cooldown target.
+            # On first alarm, we replace the wall-clock cooldown with a
+            # sim-time cooldown so future checks against datetime.now()
+            # (which is wall-clock) expire correctly.
+            if not hasattr(pi, '_cusum_cooldown_sim_end'):
+                # First time seeing a cooldown — record when it should end
+                # in sim time (30 min from now in sim).
+                from custom_components.tasmota_irhvac.pi.health_checks import CUSUM_COOLDOWN_SEC
+                pi._cusum_cooldown_sim_end = adapter._sim_clock + CUSUM_COOLDOWN_SEC
+            if adapter._sim_clock >= pi._cusum_cooldown_sim_end:
+                pi._cusum_cooldown_until = None
+                del pi._cusum_cooldown_sim_end
         try:
             adapter._loop.run_until_complete(pi._pi_tick())
         finally:
-            _time.monotonic = original
+            _time.monotonic = original_monotonic
+            _time.time = original_time
 
         hp_setpoint = float(pi._hp_setpoint)
 
-        # Advance thermal model (solar goes through 2R2C air/wall split)
+        # Zone model classification: mirror production logic
+        delta = sensor_reading - hp_setpoint
+        is_heating = (config.mode == "heat")
+        cal_min = (pi._head_calibration_min_heat if is_heating
+                   else pi._head_calibration_min_cool)
+        cal_max = (pi._head_calibration_max_heat if is_heating
+                   else pi._head_calibration_max_cool)
+        if is_heating:
+            _hp_on = delta < cal_min
+            _hp_off = delta > cal_max
+        else:
+            _hp_on = delta > cal_max
+            _hp_off = delta < cal_min
+        if _hp_on:
+            ticks_hp_on += 1
+        elif _hp_off:
+            ticks_hp_off += 1
+        else:
+            ticks_uncertain += 1
+
+        # Advance thermal model.  All heat sources enter through the
+        # 2R2C air/wall split (solar inside the model; non-solar via
+        # q_air_extra / q_wall_extra computed above).
         model.step(
             hp_setpoint=hp_setpoint,
             dt_minutes=tick_min,
             solar_proxy=solar_proxy_value,
+            q_air_extra=q_air_extra,
+            q_wall_extra=q_wall_extra,
             tick=tick,
             mode=config.mode,
         )
@@ -550,6 +781,13 @@ def run_full_stack(
         day_itae += t_hours * deadband_error
         total_itae += tick * tick_min * deadband_error  # absolute
 
+        # HP idle: setpoint at or below room (heat) or at/above room (cool)
+        # means HP is not outputting — any error is uncontrollable.
+        if config.mode == "cool":
+            hp_idle = hp_setpoint >= model.room_temp
+        else:
+            hp_idle = hp_setpoint <= model.room_temp
+
         is_violation = abs_error > DEADBAND
         if is_violation:
             total_violations += 1
@@ -557,6 +795,12 @@ def run_full_stack(
             cur_violation_streak += 1
             if cur_violation_streak > longest_violation_streak:
                 longest_violation_streak = cur_violation_streak
+            if hp_idle:
+                unctrl_violations += 1
+                day_unctrl_viols += 1
+            else:
+                ctrl_violations += 1
+                day_ctrl_viols += 1
             # Asymmetric: cold vs warm
             if error > 0:  # error = desired - room, positive = room too cold
                 cold_violations += 1
@@ -641,9 +885,14 @@ def run_full_stack(
                 math.sqrt(day_integral_sq / ticks_per_day)
             )
 
-            # Comfort
+            # Comfort (total and controllable-only)
             in_deadband = sum(1 for e in day_errors if e <= DEADBAND)
             daily_comfort_pct.append(in_deadband / day_len * 100.0)
+            ctrl_ticks = day_len - day_unctrl_viols
+            ctrl_in_band = ctrl_ticks - day_ctrl_viols
+            daily_ctrl_comfort_pct.append(
+                ctrl_in_band / ctrl_ticks * 100.0 if ctrl_ticks > 0 else 100.0
+            )
             daily_cold_violations.append(day_cold_viols)
             daily_warm_violations.append(day_warm_viols)
 
@@ -673,6 +922,8 @@ def run_full_stack(
             day_violations = 0
             day_cold_viols = 0
             day_warm_viols = 0
+            day_ctrl_viols = 0
+            day_unctrl_viols = 0
             day_integral_sq = 0.0
             day_ff_sum = 0.0
             day_ff_plus_int_sum = 0.0
@@ -754,6 +1005,17 @@ def run_full_stack(
     in_deadband_total = sum(1 for h in history
                            if abs(h["room_temp"] - config.desired_c) <= DEADBAND)
     comfort_pct = in_deadband_total / n_ticks * 100.0 if n_ticks else 0.0
+    ctrl_ticks_total = n_ticks - unctrl_violations
+    ctrl_in_band_total = ctrl_ticks_total - ctrl_violations
+    ctrl_comfort_pct = (
+        ctrl_in_band_total / ctrl_ticks_total * 100.0
+        if ctrl_ticks_total > 0 else 100.0
+    )
+
+    # Observation yield: hp_on / (hp_on + uncertain) — fraction of
+    # non-HP-off ticks that produce usable observations
+    non_off = ticks_hp_on + ticks_uncertain
+    obs_yield_pct = ticks_hp_on / non_off * 100.0 if non_off > 0 else 100.0
 
     return FullStackResult(
         history=history,
@@ -779,12 +1041,16 @@ def run_full_stack(
         checkpoint_data=checkpoint_data,
         # Comfort
         comfort_hours_pct=comfort_pct,
+        ctrl_comfort_pct=ctrl_comfort_pct,
         cold_violations=cold_violations,
         warm_violations=warm_violations,
+        ctrl_violations=ctrl_violations,
+        unctrl_violations=unctrl_violations,
         worst_undershoot=worst_undershoot,
         worst_overshoot=worst_overshoot,
         longest_violation_streak=longest_violation_streak,
         daily_comfort_pct=daily_comfort_pct,
+        daily_ctrl_comfort_pct=daily_ctrl_comfort_pct,
         daily_cold_violations=daily_cold_violations,
         daily_warm_violations=daily_warm_violations,
         # Learning
@@ -797,6 +1063,20 @@ def run_full_stack(
         daily_setpoint_limited_pct=daily_setpoint_limited_pct,
         daily_rapid_sp_changes=daily_rapid_sp_changes,
         total_rapid_sp_changes=total_rapid_sp_changes,
+        # Observation yield
+        ticks_hp_on=ticks_hp_on,
+        ticks_uncertain=ticks_uncertain,
+        ticks_hp_off=ticks_hp_off,
+        observation_yield_pct=obs_yield_pct,
+        # Boundary estimator
+        final_cal_min=(pi._head_calibration_min_heat if config.mode == "heat"
+                       else pi._head_calibration_min_cool),
+        final_cal_max=(pi._head_calibration_max_heat if config.mode == "heat"
+                       else pi._head_calibration_max_cool),
+        boundary_updates=pi._boundary_estimator.updates_applied,
+        boundary_stall_count=pi._boundary_estimator.stall_count,
+        boundary_last_n_obs=(pi._boundary_estimator.last_result.n_observations
+                             if pi._boundary_estimator.last_result else 0),
     )
 
 

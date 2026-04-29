@@ -2704,13 +2704,14 @@ class TestSeedChangeDetection:
         pi = entity._pi
 
         # Simulate learned state (set in normalized space: phys * scale)
+        n = pi._rls_heat.n
         scale = pi._rls_heat.feature_scales[1]
-        pi._rls_heat.beta = [0.1, 0.42 * scale]  # Learned outdoor_delta=0.42 (phys)
-        pi._rls_heat.beta_seed = [0.0, 0.3 * scale]  # Old seed was 0.3
+        pi._rls_heat.beta = [0.1, 0.42 * scale] + [0.0] * (n - 2)
+        pi._rls_heat.beta_seed = [0.0, 0.3 * scale] + [0.0] * (n - 2)
 
         # New seeds: user changed outdoor_delta seed to 0.5
-        old_seeds = [0.0, 0.3]
-        new_seeds = [0.0, 0.5]
+        old_seeds = [0.0, 0.3] + [0.0] * (n - 2)
+        new_seeds = [0.0, 0.5] + [0.0] * (n - 2)
 
         pi._apply_seed_changes(old_seeds, new_seeds, pi._rls_heat)
 
@@ -2729,12 +2730,13 @@ class TestSeedChangeDetection:
         entity = FakePIEntity(config)
         pi = entity._pi
 
+        n = pi._rls_heat.n
         scale = pi._rls_heat.feature_scales[1]
-        pi._rls_heat.beta = [0.1, 0.42 * scale]
+        pi._rls_heat.beta = [0.1, 0.42 * scale] + [0.0] * (n - 2)
         old_P = pi._rls_heat.P[1 * pi._rls_heat.n + 1]
 
-        old_seeds = [0.0, 0.3]
-        new_seeds = [0.0, 0.3]  # Same
+        old_seeds = [0.0, 0.3] + [0.0] * (n - 2)
+        new_seeds = [0.0, 0.3] + [0.0] * (n - 2)  # Same
 
         pi._apply_seed_changes(old_seeds, new_seeds, pi._rls_heat)
 
@@ -2749,10 +2751,11 @@ class TestSeedChangeDetection:
         entity = FakePIEntity(config)
         pi = entity._pi
 
+        n = pi._rls_heat.n
         scale = pi._rls_heat.feature_scales[1]
-        pi._rls_heat.beta = [0.1, 0.42 * scale]
+        pi._rls_heat.beta = [0.1, 0.42 * scale] + [0.0] * (n - 2)
 
-        pi._apply_seed_changes([], [0.0, 0.3], pi._rls_heat)
+        pi._apply_seed_changes([], [0.0, 0.3] + [0.0] * (n - 2), pi._rls_heat)
 
         assert pi._rls_heat.get_coefficients()[1] == pytest.approx(0.42)  # Unchanged
 
@@ -2916,8 +2919,8 @@ class TestSaveLearnedSeedsButton:
         pi = entity._pi
 
         # Give the RLS model some observations so available=True
-        pi._rls_heat.update([1.0, 10.0], 5.0)
-        pi._rls_cool.update([1.0, 10.0], 3.0)
+        pi._rls_heat.update([1.0, 10.0, 0.0, 0.0], 5.0)
+        pi._rls_cool.update([1.0, 10.0, 0.0, 0.0], 3.0)
 
         # Find the save button
         from custom_components.tasmota_irhvac.button import SaveLearnedSeedsButton
@@ -2987,8 +2990,8 @@ class TestSaveLearnedSeedsButton:
 
         # Give RLS observations
         for _ in range(5):
-            pi._rls_heat.update([1.0, 10.0], 5.0)
-            pi._rls_cool.update([1.0, 10.0], 3.0)
+            pi._rls_heat.update([1.0, 10.0, 0.0, 0.0], 5.0)
+            pi._rls_cool.update([1.0, 10.0, 0.0, 0.0], 3.0)
 
         from custom_components.tasmota_irhvac.button import SaveLearnedSeedsButton
         from homeassistant.helpers.entity_platform import async_get_platforms
@@ -5542,7 +5545,7 @@ class TestTauEstimatorGaps:
             model_inputs=[{"entity_id": "sensor.a"}, {"entity_id": "sensor.b"}],
             outdoor_temp_sensor="sensor.out",
         )
-        assert mgr.n_model_inputs == 3  # 1 (outdoor_delta) + 2 model inputs
+        assert mgr.n_model_inputs == 5  # 1 (outdoor_delta) + 2 model inputs + 2 ToD
 
     def test_small_expected_change_cancels_observation(self):
         """Step magnitude <0.5°C cancels the observation (insufficient excitation)."""

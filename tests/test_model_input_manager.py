@@ -125,13 +125,19 @@ class TestFeatureVector:
         mgr = ModelInputManager(model_inputs=[STOVE_INPUT], outdoor_temp_sensor=None)
         mgr.filtered[0] = 0.75
         x = mgr.build_feature_vector(10.0)
-        assert x == [1.0, 10.0, 0.75]
+        # [intercept, outdoor_delta, stove_filtered, sin_hour, cos_hour]
+        assert x[:3] == [1.0, 10.0, 0.75]
+        assert len(x) == 5  # +2 for ToD features (sin_hour, cos_hour)
+        # wall_time=None → ToD features are 0.0
+        assert x[3] == 0.0
+        assert x[4] == 0.0
 
     def test_empty_inputs(self):
-        """No model inputs → vector is just [1, outdoor_delta]."""
+        """No model inputs → vector is [1, outdoor_delta, sin_hour, cos_hour]."""
         mgr = ModelInputManager(model_inputs=[], outdoor_temp_sensor=None)
         x = mgr.build_feature_vector(5.0)
-        assert x == [1.0, 5.0]
+        assert x[:2] == [1.0, 5.0]
+        assert len(x) == 4  # intercept + outdoor_delta + 2 ToD
 
 
 class TestOutdoorTemp:
@@ -536,7 +542,7 @@ class TestNamedFeatures:
             outdoor_temp_sensor=None,
         )
         names = mgr.build_feature_names()
-        assert names == ["intercept", "outdoor_delta", "Stove", "LR Delta"]
+        assert names == ["intercept", "outdoor_delta", "Stove", "LR Delta", "sin_hour", "cos_hour"]
 
     def test_build_named_features(self):
         mgr = ModelInputManager(
@@ -545,4 +551,69 @@ class TestNamedFeatures:
         )
         mgr.filtered[0] = 0.75
         features = mgr.build_named_features(10.0)
-        assert features == {"intercept": 1.0, "outdoor_delta": 10.0, "Stove": 0.75}
+        assert features["intercept"] == 1.0
+        assert features["outdoor_delta"] == 10.0
+        assert features["Stove"] == 0.75
+        assert features["sin_hour"] == 0.0  # wall_time=None → 0.0
+        assert features["cos_hour"] == 0.0
+
+
+class TestTimeOfDayFeatures:
+    """Tests for automatic time-of-day sinusoidal features."""
+
+    def test_tod_features_none_returns_zeros(self):
+        """wall_time=None produces (0, 0)."""
+        from custom_components.tasmota_irhvac.pi.model_input_manager import tod_features
+        assert tod_features(None) == (0.0, 0.0)
+
+    def test_tod_features_zero_returns_zeros(self):
+        """wall_time=0 produces (0, 0)."""
+        from custom_components.tasmota_irhvac.pi.model_input_manager import tod_features
+        assert tod_features(0.0) == (0.0, 0.0)
+
+    def test_tod_features_midnight(self):
+        """At midnight local, sin=0, cos=1."""
+        import datetime as _dt
+        from custom_components.tasmota_irhvac.pi.model_input_manager import tod_features
+        # Find a UTC epoch that corresponds to midnight local
+        midnight = _dt.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        wt = midnight.timestamp()
+        sin_h, cos_h = tod_features(wt)
+        assert abs(sin_h) < 0.01  # sin(0) = 0
+        assert abs(cos_h - 1.0) < 0.01  # cos(0) = 1
+
+    def test_tod_features_noon(self):
+        """At noon local, sin≈0, cos≈-1."""
+        import datetime as _dt
+        from custom_components.tasmota_irhvac.pi.model_input_manager import tod_features
+        noon = _dt.datetime.now().replace(hour=12, minute=0, second=0, microsecond=0)
+        wt = noon.timestamp()
+        sin_h, cos_h = tod_features(wt)
+        assert abs(sin_h) < 0.01  # sin(π) ≈ 0
+        assert abs(cos_h + 1.0) < 0.01  # cos(π) ≈ -1
+
+    def test_tod_features_6am(self):
+        """At 6am local, sin=1, cos=0."""
+        import datetime as _dt
+        from custom_components.tasmota_irhvac.pi.model_input_manager import tod_features
+        six_am = _dt.datetime.now().replace(hour=6, minute=0, second=0, microsecond=0)
+        wt = six_am.timestamp()
+        sin_h, cos_h = tod_features(wt)
+        assert abs(sin_h - 1.0) < 0.01  # sin(π/2) = 1
+        assert abs(cos_h) < 0.01  # cos(π/2) = 0
+
+    def test_feature_vector_with_wall_time(self):
+        """Feature vector includes non-zero ToD when wall_time is provided."""
+        import datetime as _dt
+        mgr = ModelInputManager(model_inputs=[], outdoor_temp_sensor=None)
+        six_am = _dt.datetime.now().replace(hour=6, minute=0, second=0, microsecond=0)
+        x = mgr.build_feature_vector(5.0, wall_time=six_am.timestamp())
+        assert len(x) == 4  # intercept + outdoor_delta + 2 ToD
+        assert abs(x[2] - 1.0) < 0.01  # sin(6h) ≈ 1
+        assert abs(x[3]) < 0.01  # cos(6h) ≈ 0
+
+    def test_n_model_inputs_includes_tod(self):
+        """n_model_inputs counts outdoor_delta + model inputs + 2 ToD features."""
+        mgr = ModelInputManager(model_inputs=[STOVE_INPUT], outdoor_temp_sensor=None)
+        # 1 (outdoor_delta) + 1 (stove) + 2 (ToD) = 4
+        assert mgr.n_model_inputs == 4

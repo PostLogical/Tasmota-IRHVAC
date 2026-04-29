@@ -551,6 +551,7 @@ class TestFeedforward:
         pi._inputs.outdoor_temp = 5.0
         pi._desired_temp = 22.0
         pi._hp_setpoint = 26  # Well above current → delta < cal_min → HP definitely on
+        pi._last_raw_setpoint = 26.0  # Previous tick wasn't saturated
         pi._pi_integral = 0.5  # Small, stable
         pi._prev_integral_for_rls = 0.5
         pi._ff_settled_ticks = 10
@@ -2446,8 +2447,8 @@ class TestSupplementalAutoModelInputs:
             }],
         })
         entity = FakePIEntity(config)
-        # 1 (outdoor_delta) + 1 (manual) + 1 (auto) = 3
-        assert entity._pi._n_model_inputs == 3
+        # 1 (outdoor_delta) + 1 (manual) + 1 (auto) + 2 (ToD) = 5
+        assert entity._pi._n_model_inputs == 5
 
 
 # ── Ki-Changed Integral Scaling on Restore (L474-479) ───────────────
@@ -3326,6 +3327,7 @@ class TestGreyboxAttributes:
             n_observations=100,
             n_hp_on=60,
             n_hp_off=40,
+            c0=0.001,
             ua_c=0.012,
             k_c=0.015,
             alpha_c=0.003,
@@ -3357,6 +3359,7 @@ class TestGreyboxAttributes:
             n_observations=50,
             n_hp_on=30,
             n_hp_off=20,
+            c0=0.0,
             ua_c=0.01,
             k_c=0.012,
             alpha_c=0.002,
@@ -4081,6 +4084,7 @@ class TestHPNoOutput:
         pi = entity._pi
         pi._desired_temp = 21.0
         pi._hp_setpoint = 23  # above room
+        pi._last_raw_setpoint = 23.0  # Previous tick wasn't saturated
         entity._attr_hvac_mode = HVACMode.HEAT
         entity._attr_current_temperature = 20.0
         pi._pi_integral = 0.0
@@ -4265,33 +4269,14 @@ class TestHeadCalibrationZoneModel:
         assert pi._integration_frozen is False
 
     @pytest.mark.asyncio
-    async def test_passive_evidence_logs_but_does_not_act(self, caplog):
-        """Passive rate evidence logs 'would' messages, doesn't change cal bounds."""
-        import logging
+    async def test_boundary_estimator_initialized(self):
+        """Boundary estimator is initialized on the PI controller."""
         config = make_pi_config()
         entity = FakePIEntity(config)
         pi = entity._pi
-        pi._desired_temp = 21.0
-        pi._sensor_filter_tau = 0  # disable filter so raw temp used directly
-        entity._attr_hvac_mode = HVACMode.HEAT
-        pi._pi_integral = -1.0
-
-        cal_max_before = pi._head_calibration_max_heat
-
-        # Room slowly cooling with delta inside [cal_min, cal_max] → HP confirmed off.
-        # Need: hp_no_output_ticks >= 10, room_temp_rate < 0, delta < cal_max.
-        # Pin hp_setpoint each tick to prevent PI from adjusting it.
-        with caplog.at_level(logging.INFO):
-            for i in range(15):
-                entity._attr_current_temperature = 21.5 - i * 0.03
-                pi._hp_setpoint = 20  # delta ≈ 1.5, within cal_max=2.0
-                pi._pi_last_tick_time = float(i * 60)
-                with patch("time.monotonic", return_value=float((i + 1) * 60)):
-                    await pi._pi_tick()
-
-        assert pi._head_calibration_max_heat == cal_max_before
-        passive_msgs = [r for r in caplog.records if "Head cal passive" in r.message]
-        assert len(passive_msgs) >= 1, "Should log passive calibration evidence"
+        assert pi._boundary_estimator is not None
+        assert pi._boundary_estimator.updates_applied == 0
+        assert pi._boundary_estimator.stall_count == 0
 
     @pytest.mark.asyncio
     async def test_uncertain_zone_still_gates_learning(self):
@@ -4632,7 +4617,12 @@ class TestObservationRecordingZoneModel:
 
     @pytest.mark.asyncio
     async def test_definitely_off_records_no_output(self):
-        """HP definitely off (delta > cal_max) → clamped_reason='no_output'."""
+        """HP definitely off (delta > cal_max) → clamped_reason='no_output'.
+
+        hp_setpoint is always recorded (even for no_output) so the
+        boundary estimator sees the true delta = room - setpoint,
+        not a fabricated delta from desired_c substitution.
+        """
         config = make_pi_config()
         entity = FakePIEntity(config)
         pi = entity._pi
@@ -4649,7 +4639,7 @@ class TestObservationRecordingZoneModel:
         obs = pi._greybox_buffer.get_all()
         no_output = [o for o in obs if o.clamped_reason == "no_output"]
         assert len(no_output) >= 1
-        assert no_output[-1].hp_setpoint is None
+        assert no_output[-1].hp_setpoint is not None
 
     @pytest.mark.asyncio
     async def test_uncertain_zone_records_setpoint(self):
@@ -4723,7 +4713,7 @@ class TestObservationRecordingZoneModel:
         obs = pi._greybox_buffer.get_all()
         no_output = [o for o in obs if o.clamped_reason == "no_output"]
         assert len(no_output) >= 1
-        assert no_output[-1].hp_setpoint is None
+        assert no_output[-1].hp_setpoint is not None
 
 
 class TestBatchWLSApply:
@@ -5400,6 +5390,7 @@ class TestStoredDataNewFields:
         assert data is not None
         assert data.controllable_itae == 0.0
         assert data.uncontrollable_itae == 0.0
+        assert data.detected_lag_tau == {}
         assert data.controllable_cvh == 0.0
         assert data.uncontrollable_cvh == 0.0
         assert data.ff_load_fraction == 0.5
@@ -5423,6 +5414,20 @@ class TestStoredDataNewFields:
         assert restored.controllable_cvh == pytest.approx(1.5)
         assert restored.uncontrollable_cvh == pytest.approx(3.2)
         assert restored.ff_load_fraction == pytest.approx(0.72)
+
+    def test_detected_lag_tau_round_trip(self):
+        """detected_lag_tau survives as_dict → from_dict round-trip."""
+        data = PIExtraStoredData(
+            pi_integral=1.0,
+            desired_temp=22.0,
+            hp_setpoint=22.0,
+            detected_lag_tau={"solar:heat": 7200.0, "solar:cool": 6800.0},
+            detected_lag_tau_counts={"solar:heat": 3, "solar:cool": 2},
+        )
+        restored = PIExtraStoredData.from_dict(data.as_dict())
+        assert restored is not None
+        assert restored.detected_lag_tau == {"solar:heat": 7200.0, "solar:cool": 6800.0}
+        assert restored.detected_lag_tau_counts == {"solar:heat": 3, "solar:cool": 2}
 
     def test_restore_applies_new_fields_to_controller(self):
         """restore_extra_stored_data loads new fields into PI controller."""
@@ -5991,6 +5996,7 @@ class TestSubsystemToggles:
         entity._attr_current_temperature = 20.0
         pi._desired_temp = 22.0
         pi._hp_setpoint = 26  # Well above current → HP definitely on
+        pi._last_raw_setpoint = 26.0  # Previous tick wasn't saturated
 
         heat_before = len(pi._observation_buffer_heat.get_all())
         await pi._pi_tick()

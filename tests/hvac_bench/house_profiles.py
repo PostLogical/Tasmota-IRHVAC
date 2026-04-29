@@ -10,6 +10,77 @@ from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
+class HPCapacityCurve:
+    """Piecewise linear HP capacity factor vs outdoor temperature.
+
+    Real air-source heat pumps lose capacity in cold (heating) and at high
+    outdoor temps (cooling). Without this scaling, a fixed-gain bench
+    underestimates how often the HP rails in cold and overestimates control
+    authority during cold snaps — exactly the regime Tobit (#40) is meant
+    to handle. NEEP cold-climate ASHP datasets show ~50–70% of rated
+    heating capacity below design temp; standard ASHPs lose more.
+
+    Heating curve (mode="heat"):
+        outdoor ≤ heating_design_t        → 0 (HP cannot heat)
+        heating_design_t .. heating_rated_t → linear 0 → 1.0
+        heating_rated_t  .. heating_mild_t  → linear 1.0 → heating_mild_factor
+        outdoor ≥ heating_mild_t           → heating_mild_factor
+
+    Cooling curve (mode="cool"): mirror with opposite slope.
+
+    Defaults represent a typical residential ASHP rated at AHRI 7°C heating
+    / 35°C cooling, with capacity zeroed at -15°C heating / 46°C cooling.
+    """
+    heating_design_t: float = -15.0
+    heating_rated_t: float = 7.0
+    heating_mild_t: float = 20.0
+    heating_mild_factor: float = 1.15
+    cooling_mild_t: float = 18.0
+    cooling_rated_t: float = 35.0
+    cooling_design_t: float = 46.0
+    cooling_mild_factor: float = 1.15
+
+    def factor(self, outdoor_c: float, mode: str = "heat") -> float:
+        """Capacity factor (≥ 0) at the given outdoor temperature."""
+        if mode == "heat":
+            if outdoor_c <= self.heating_design_t:
+                return 0.0
+            if outdoor_c >= self.heating_mild_t:
+                return self.heating_mild_factor
+            if outdoor_c <= self.heating_rated_t:
+                span = self.heating_rated_t - self.heating_design_t
+                return (outdoor_c - self.heating_design_t) / span
+            span = self.heating_mild_t - self.heating_rated_t
+            frac = (outdoor_c - self.heating_rated_t) / span
+            return 1.0 + frac * (self.heating_mild_factor - 1.0)
+        # cooling
+        if outdoor_c >= self.cooling_design_t:
+            return 0.0
+        if outdoor_c <= self.cooling_mild_t:
+            return self.cooling_mild_factor
+        if outdoor_c >= self.cooling_rated_t:
+            span = self.cooling_design_t - self.cooling_rated_t
+            return 1.0 - (outdoor_c - self.cooling_rated_t) / span
+        span = self.cooling_rated_t - self.cooling_mild_t
+        frac = (outdoor_c - self.cooling_mild_t) / span
+        return self.cooling_mild_factor + frac * (1.0 - self.cooling_mild_factor)
+
+
+# Default curves keyed for convenience.  STANDARD_HP_CAPACITY mirrors a
+# typical residential ASHP (no cold-climate spec); COLD_CLIMATE_HP_CAPACITY
+# represents a CCASHP that holds capacity well below design temp (NEEP
+# cold-climate listing typical: 75% at -15°C, ~50% at -25°C).
+STANDARD_HP_CAPACITY = HPCapacityCurve()
+
+COLD_CLIMATE_HP_CAPACITY = HPCapacityCurve(
+    heating_design_t=-25.0,
+    heating_rated_t=7.0,
+    heating_mild_t=20.0,
+    heating_mild_factor=1.10,
+)
+
+
+@dataclass(frozen=True)
 class HouseProfile:
     """Thermal characteristics of a building zone (1R1C model).
 
@@ -20,12 +91,15 @@ class HouseProfile:
         hp_gain: Heat pump effectiveness (°C/min per °C setpoint above equilibrium).
             Derived from tau: gain ≈ 1 / (tau * some_factor). Higher = smaller room
             or more powerful HP.
+        hp_capacity: Optional capacity curve scaling hp_gain by outdoor temp.
+            None = legacy fixed-gain behavior.
         description: What kind of building this represents.
     """
     name: str
     tau_minutes: float
     hp_gain: float
     description: str = ""
+    hp_capacity: HPCapacityCurve | None = None
 
 
 @dataclass(frozen=True)
@@ -53,8 +127,9 @@ class HouseProfile2R2C:
             (e.g., exposed brick/concrete). Typical: 60-200 min.
         mass_ratio: C_wall/C_air. Ratio of wall thermal capacitance to
             air capacitance. Higher = more thermal mass (thick masonry,
-            concrete slab). Typical: 5-20. The wall time constant seen
-            from the wall side is τ_couple * mass_ratio.
+            concrete slab). Typical: 3-10 (Bacher & Madsen 2011 found
+            C_s/C_i ≈ 5-10 for residential). The wall time constant
+            seen from the wall side is τ_couple * mass_ratio.
         hp_gain: HP effectiveness (1/min). HP heating rate per °C of
             setpoint above room temp. Typical: 0.02-0.08.
         description: What kind of building this represents.
@@ -65,6 +140,7 @@ class HouseProfile2R2C:
     mass_ratio: float
     hp_gain: float
     description: str = ""
+    hp_capacity: HPCapacityCurve | None = None
 
     @property
     def true_seed(self) -> float:
@@ -176,7 +252,7 @@ PROFILES = {
         name="Standard Residential",
         tau_env=100,
         tau_couple=80,
-        mass_ratio=15,
+        mass_ratio=8,
         hp_gain=0.025,
         description="Modern home, decent insulation, HP sized for -5°C design",
     ),
@@ -184,7 +260,7 @@ PROFILES = {
         name="Well Insulated",
         tau_env=250,
         tau_couple=150,
-        mass_ratio=15,
+        mass_ratio=8,
         hp_gain=0.010,
         description="High-performance envelope, triple glazing, minimal infiltration",
     ),
@@ -192,9 +268,9 @@ PROFILES = {
         name="Heavy Masonry",
         tau_env=200,
         tau_couple=80,
-        mass_ratio=25,
+        mass_ratio=10,
         hp_gain=0.012,
-        description="Brick/concrete construction with very high thermal mass",
+        description="Brick/concrete construction with high thermal mass",
     ),
 }
 
@@ -209,23 +285,55 @@ PROFILES_2R2C = {
         name="Living Room (calibrated)",
         tau_env=100,
         tau_couple=30,
-        mass_ratio=20,
+        mass_ratio=8,
         hp_gain=0.04,
         description="100yo house, single-pane sunroom exposure, mini-split head. "
                     "Calibrated from 48h production data (Apr 2026). "
+                    "mass_ratio reduced from 20→8 per Bacher & Madsen (C_s/C_i ≈ 5-10). "
                     "Design: 66°F at -15°F outdoor (marginal).",
     ),
     "bunkroom": HouseProfile2R2C(
         name="Bunkroom (calibrated)",
         tau_env=170,
         tau_couple=20,
-        mass_ratio=30,
-        hp_gain=0.02,
+        mass_ratio=8,
+        hp_gain=0.025,
         description="100yo house, smaller zone, no direct solar. "
                     "Calibrated from 72h production data (Apr 2026). "
-                    "Design: 63°F at -15°F outdoor (undersized HP). "
+                    "mass_ratio reduced from 30→8 per Bacher & Madsen (C_s/C_i ≈ 5-10). "
+                    "hp_gain 0.02→0.025: g×τ=4.25 (comparable to LR 4.0), "
+                    "sp=28.9°C at -15°C outdoor (modestly undersized). "
                     "tau_env likely over-estimated — April data lacks cold-weather signal.",
     ),
     # dining_room: NOT calibrated — only 41 active heating ticks in Apr data.
     # HP barely ran (solar/stove heated the zone). Needs winter data.
 }
+
+# Capacity-curve variants of the calibrated profiles, for benches that need
+# realistic cold-snap saturation (#43).  Same thermal/HP-gain parameters as
+# the rated-conditions profiles above; the capacity curve scales hp_gain
+# down as outdoor temp drops, so winter scenarios saturate more.  These are
+# opt-in — existing tests using the non-capacity profiles are unchanged.
+PROFILES_2R2C["living_room_capacity"] = HouseProfile2R2C(
+    name="Living Room (calibrated, capacity curve)",
+    tau_env=100,
+    tau_couple=30,
+    mass_ratio=8,
+    hp_gain=0.04,
+    description="living_room with STANDARD_HP_CAPACITY for cold-snap realism. "
+                "Use when the test cares about HP saturation/Tobit-style "
+                "censoring, not coefficient convergence under fixed gain.",
+    hp_capacity=STANDARD_HP_CAPACITY,
+)
+
+PROFILES_2R2C["bunkroom_capacity"] = HouseProfile2R2C(
+    name="Bunkroom (calibrated, capacity curve)",
+    tau_env=170,
+    tau_couple=20,
+    mass_ratio=8,
+    hp_gain=0.025,
+    description="bunkroom with STANDARD_HP_CAPACITY for cold-snap realism. "
+                "Already 'modestly undersized' at -15°C per calibration; "
+                "with capacity curve, deep cold makes HP effectively zero.",
+    hp_capacity=STANDARD_HP_CAPACITY,
+)

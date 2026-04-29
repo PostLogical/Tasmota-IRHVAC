@@ -329,12 +329,48 @@ class TestCalibrationUpdates:
         assert cal_min > -2.0  # shrunk
         assert cal_max == 2.0  # max unchanged
 
-    def test_never_widens(self):
+    def test_never_widens_without_evidence(self):
         rp = _make()
         rp._no_contribution_count = 10
         cal_min, cal_max = rp.compute_calibration_updates(-2.0, 2.0)
         assert cal_min == -2.0
         assert cal_max == 2.0
+
+    def test_band_shifts_down_when_all_no_hp(self):
+        """All probes say 'no HP' → transition is below band → shift down."""
+        rp = _make()
+        for _ in range(4):  # min_for_shift = max(SHRINK_CONFIRMATIONS*2, 4)
+            rp._contribution_evidence_above.append(0.5)
+        cal_min, cal_max = rp.compute_calibration_updates(-2.0, 2.0)
+        assert cal_min < -2.0, f"Band should shift down, got cal_min={cal_min}"
+        assert cal_max < 2.0, f"Band should shift down, got cal_max={cal_max}"
+        # Band width preserved (shifted, not narrowed)
+        assert abs((cal_max - cal_min) - 4.0) < 0.1
+        # Evidence cleared for next round
+        assert len(rp._contribution_evidence_above) == 0
+
+    def test_band_shifts_up_when_all_hp(self):
+        """All probes say 'HP contributing' → transition is above band → shift up."""
+        rp = _make()
+        for _ in range(4):
+            rp._contribution_evidence_below.append(-1.0)
+        cal_min, cal_max = rp.compute_calibration_updates(-2.0, 2.0)
+        assert cal_min > -2.0
+        assert cal_max > 2.0
+        assert len(rp._contribution_evidence_below) == 0
+
+    def test_mixed_evidence_no_shift(self):
+        """Mixed evidence (below 80% threshold) → shrink only, no shift."""
+        rp = _make()
+        for _ in range(3):
+            rp._contribution_evidence_above.append(0.5)
+        for _ in range(2):
+            rp._contribution_evidence_below.append(-1.0)
+        # 3 no-HP + 2 has-HP = 60% no-HP, below 80% threshold
+        cal_min, cal_max = rp.compute_calibration_updates(-2.0, 2.0)
+        # Should shrink but not shift the whole band
+        assert cal_min >= -2.0  # may have shrunk up from below evidence
+        assert cal_max <= 2.0
 
 
 # ── Persistence ──────────────────────────────────────────────────────
@@ -488,3 +524,137 @@ class TestWindow:
         rp2 = _make(window_start=20, window_end=6)
         _tick(rp2, 0.0, current_hour=12)
         assert rp2.state == ProbeState.IDLE
+
+
+# ── Forced probe (boundary estimator escalation) ────────────────────
+
+
+class TestForcedProbe:
+    """Forced probe bypasses the uncertainty check when boundary
+    estimator stalls and requests a probe from IDLE state."""
+
+    def test_request_early_probe_from_idle_sets_flag(self):
+        rp = _make()
+        assert rp.state == ProbeState.IDLE
+        assert not rp._forced_probe
+        rp.request_early_probe()
+        assert rp._forced_probe
+
+    def test_forced_probe_fires_outside_uncertain_zone(self):
+        """Probe fires even when delta is outside [cal_min, cal_max]."""
+        rp = _make()
+        rp.request_early_probe()
+        # Delta = 20.5 - 20 = 0.5, within default [-2, 2] — but use
+        # narrow band where delta is definitely NOT uncertain.
+        _tick(rp, 0.0, cal_min=-5.0, cal_max=-4.0)  # delta=0.5 far outside
+        assert rp.state == ProbeState.BASELINE
+
+    def test_forced_flag_cleared_after_baseline_starts(self):
+        rp = _make()
+        rp.request_early_probe()
+        assert rp._forced_probe
+        _tick(rp, 0.0)
+        assert rp.state == ProbeState.BASELINE
+        assert not rp._forced_probe
+
+    def test_forced_probe_still_requires_can_probe_guards(self):
+        """Forced probe doesn't bypass safety guards (clamped, etc.)."""
+        rp = _make()
+        rp.request_early_probe()
+        # is_clamped blocks even with forced flag
+        _tick(rp, 0.0, is_clamped=True)
+        assert rp.state == ProbeState.IDLE
+        assert rp._forced_probe  # flag not consumed
+
+    def test_forced_probe_requires_stability(self):
+        """Forced probe still requires room rate stability."""
+        rp = _make()
+        rp.request_early_probe()
+        _tick(rp, 0.0, room_temp_rate=0.1)  # too fast
+        assert rp.state == ProbeState.IDLE
+
+    def test_request_early_probe_from_cooldown_expires_timer(self):
+        """Original behavior preserved: from COOLDOWN, expires timer."""
+        rp = _make()
+        # Get into cooldown by running a full probe cycle
+        _tick(rp, 0.0)  # IDLE → BASELINE
+        t = _advance_baseline(rp, 0.0)
+        # Now in PROBE — advance through probe phase
+        for _ in range(PROBE_MIN_READINGS + 1):
+            t += PROBE_MIN_DURATION_S / PROBE_MIN_READINGS + 1
+            _tick(rp, t)
+            if rp.state == ProbeState.COOLDOWN:
+                break
+        assert rp.state == ProbeState.COOLDOWN
+        assert rp._cooldown_end_mono > 0
+        rp.request_early_probe()
+        assert rp._cooldown_end_mono == 0.0
+
+    def test_forced_probe_persists(self):
+        rp = _make()
+        rp.request_early_probe()
+        data = rp.as_dict()
+        assert data["forced_probe"] is True
+
+        rp2 = _make()
+        rp2.restore(data)
+        assert rp2._forced_probe is True
+
+    def test_forced_probe_restore_default_false(self):
+        rp = _make()
+        rp.restore({})  # old data without forced_probe key
+        assert rp._forced_probe is False
+
+
+# ── Probe result accessors ────────────────────────────────────────────
+
+
+class TestProbeResultAccessors:
+    """Tests for last_probe_delta/hp_contributing and consume_last_probe."""
+
+    def _run_full_cycle(self, rp, t, baseline_rate=0.005, probe_rate=-0.005):
+        """Run a complete probe cycle and return final time."""
+        _tick(rp, t, room_temp_rate=baseline_rate)
+        assert rp.state == ProbeState.BASELINE
+        for _ in range(BASELINE_MIN_READINGS):
+            t += BASELINE_MIN_DURATION_S / BASELINE_MIN_READINGS + 1
+            _tick(rp, t, room_temp_rate=baseline_rate)
+        assert rp.state == ProbeState.PROBE
+        for _ in range(PROBE_MIN_READINGS):
+            t += PROBE_MIN_DURATION_S / PROBE_MIN_READINGS + 1
+            _tick(rp, t, room_temp_rate=probe_rate)
+        assert rp.state == ProbeState.COOLDOWN
+        return t
+
+    def test_initial_state_is_none(self):
+        rp = _make()
+        assert rp.last_probe_delta is None
+        assert rp.last_probe_hp_contributing is None
+        assert rp.consume_last_probe() is None
+
+    def test_result_set_after_probe(self):
+        rp = _make()
+        # HP was contributing: baseline positive, probe goes negative
+        self._run_full_cycle(rp, 0.0, baseline_rate=0.01, probe_rate=-0.005)
+        assert rp.last_probe_delta is not None
+        assert rp.last_probe_hp_contributing is True
+
+    def test_consume_clears_result(self):
+        rp = _make()
+        self._run_full_cycle(rp, 0.0, baseline_rate=0.01, probe_rate=-0.005)
+        result = rp.consume_last_probe()
+        assert result is not None
+        delta, contributing = result
+        assert isinstance(delta, float)
+        assert contributing is True
+        # Consumed — should be None now
+        assert rp.consume_last_probe() is None
+
+    def test_not_contributing_result(self):
+        rp = _make()
+        # HP NOT contributing: no rate change
+        self._run_full_cycle(rp, 0.0, baseline_rate=0.005, probe_rate=0.005)
+        result = rp.consume_last_probe()
+        assert result is not None
+        _, contributing = result
+        assert contributing is False

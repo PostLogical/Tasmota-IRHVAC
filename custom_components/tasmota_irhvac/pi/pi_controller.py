@@ -117,7 +117,12 @@ from ..const import (
 from ..const import DEFAULT_RLS_P_INIT
 from .rls_model import RLSModel
 from .pi_stored_data import PIExtraStoredData
-from .model_input_manager import FeatureLayout, FeatureSpec, ModelInputManager
+from .model_input_manager import (
+    FeatureLayout,
+    FeatureSpec,
+    ModelInputManager,
+    TOD_FEATURE_NAMES,
+)
 from .health_checks import (
     check_comfort,
     check_feature_diversity,
@@ -129,6 +134,7 @@ from .health_checks import (
 )
 from .performance_metrics import PerformanceMetrics
 from .auto_perturbation import AutoPerturbation
+from .boundary_estimator import BoundaryEstimator
 from .regime_probe import ProbeState, RegimeProbe
 from .smith_predictor import SmithPredictor
 from .supplemental_controller import SupplementalController
@@ -246,6 +252,10 @@ class PIController:
             enabled=config.get(CONF_PI_AUTO_PERTURB_ENABLED, False),
         )
 
+        # Passive boundary estimation: detects HP on/off transition from
+        # residual room_rate vs delta.  Always on — works in observe-only.
+        self._boundary_estimator = BoundaryEstimator()
+
         # Derive effective Kp/Ki: IMC formula or manual config
         self._pi_kp: float = 0.0
         self._pi_ki: float = 0.0
@@ -325,7 +335,7 @@ class PIController:
         self._pi_d_filtered: float = 0.0    # Filtered derivative term
         self._pi_last_measurement: float | None = None  # Previous temperature measurement for derivative
         self._sensor_filtered: float | None = None  # Low-pass filtered room temp (°C)
-        self._last_raw_setpoint: float = 0.0  # Pre-quantization setpoint from last tick
+        self._last_raw_setpoint: float = float('nan')  # Pre-quantization setpoint from last tick
 
         # Supplemental heat source selector/override control
         supplemental_sources: list[dict[str, Any]] = config.get("pi_supplemental_sources", [])
@@ -368,6 +378,9 @@ class PIController:
         # Convention: user-facing seeds are positive for "warms room".
         # Internal β = -seed (HP backs off when source warms room).
         # Intercept is not directional — stored as-is.
+        # Feature scales = expected σ of each feature (van der Sluis 1969,
+        # Haykin Adaptive Filter Theory §13). Normalize features to O(1)
+        # for balanced P-matrix conditioning and learning rates.
         thermal_clamp_min = config.get(CONF_PI_OUTDOOR_SEED_CLAMP_MIN, DEFAULT_PI_OUTDOOR_SEED_CLAMP_MIN)
         thermal_clamp_max = config.get(CONF_PI_OUTDOOR_SEED_CLAMP_MAX, DEFAULT_PI_OUTDOOR_SEED_CLAMP_MAX)
         beta_clamp = (-thermal_clamp_max, -thermal_clamp_min)
@@ -388,6 +401,15 @@ class PIController:
         for m_input in self._model_inputs:
             clamp_min = m_input.get("clamp_min")
             clamp_max = m_input.get("clamp_max")
+            # Auto-clamp: solar and heat_source inputs always warm the room,
+            # so their seed-space coefficient must be ≥ 0 (β ≤ 0).
+            # This matches the sign gate at feature unlock.
+            role = m_input.get("input_role", "other")
+            if role in ("solar", "heat_source") and clamp_min is None:
+                clamp_min = 0
+            # Clamps are in seed space (positive = warms room).
+            # Internal β = -seed, so negate and flip.
+            # Either side can be set independently; missing side → ±inf.
             mi_clamp: tuple[float, float] | None
             if clamp_min is not None or clamp_max is not None:
                 seed_lo = float(clamp_min) if clamp_min is not None else -math.inf
@@ -403,6 +425,16 @@ class PIController:
                 clamp=mi_clamp,
                 scale=float(m_input.get("typical_value", 0.5)),
                 frozen_at_init=True,
+            ))
+        # Time-of-day sinusoidal features: automatic diurnal decorrelation.
+        # Seeds=0 (no directional prior — direction depends on orientation/
+        # schedule), unclamped, scale=0.7 (σ of sin/cos over 24h = 1/√2),
+        # frozen at cold start (unlocks on first batch cycle).
+        for tod_name in TOD_FEATURE_NAMES:
+            specs.append(FeatureSpec(
+                name=tod_name, role="time_of_day",
+                seed_heat=0.0, seed_cool=0.0,
+                clamp=None, scale=0.7, frozen_at_init=True,
             ))
         self._features = FeatureLayout(specs)
 
@@ -527,6 +559,8 @@ class PIController:
         self._greybox_has_been_good: bool = False
         self._last_batch_timestamp: float | None = None
         self._last_batch_wallclock: str = ""  # ISO-8601 wall-clock time
+        self._detected_lag_tau: dict[str, float] = {}  # input name → smoothed detected tau (seconds)
+        self._detected_lag_tau_count: dict[str, int] = {}  # input name → consecutive consistent detections
         self._last_residual_patterns: list[HourlyResidualPattern] = []
         self._has_had_stable_batch: bool = False
         # Batch-first gate: RLS online updates are frozen until the first
@@ -716,7 +750,7 @@ class PIController:
                 and self._inputs.outdoor_temp is not None and desired_c is not None):
             is_heating = e._attr_hvac_mode in (HVACMode.HEAT, HVACMode.HEAT_COOL, None)
             outdoor_delta = self._inputs.outdoor_temp - desired_c
-            x = self._inputs.build_feature_vector(outdoor_delta)
+            x = self._inputs.build_feature_vector(outdoor_delta, wall_time=time.time())
             rls = self._rls_heat if is_heating else self._rls_cool
             self._ff_offset = rls.predict(x)
 
@@ -813,6 +847,7 @@ class PIController:
                 feature_order=self._feature_order,
                 model_inputs=self._inputs.model_inputs,
                 # No frozen_features → estimates everything
+                detect_lag=False,  # tau already detected by primary result
             )
 
         coeff_names = self._features.names
@@ -886,6 +921,65 @@ class PIController:
                     self._pi_ki = gain_update.ki
                     self._imc_lambda = gain_update.imc_lambda
 
+        # ── Passive boundary estimation ──
+        # Sweep candidate breakpoints over the greybox buffer to find
+        # the HP on/off transition.  Updates cal_min/cal_max.
+        is_heating_batch = e._attr_hvac_mode == HVACMode.HEAT
+        be_cal_min = (
+            self._head_calibration_min_heat if is_heating_batch
+            else self._head_calibration_min_cool
+        )
+        be_cal_max = (
+            self._head_calibration_max_heat if is_heating_batch
+            else self._head_calibration_max_cool
+        )
+        be_result = self._boundary_estimator.estimate_boundary(
+            greybox_observations,
+            self._model_inputs,
+            be_cal_min, be_cal_max,
+        )
+        if be_result.confident:
+            _LOGGER.info(
+                "%sBoundary estimator: bp=%.2f°C (σ=%.2f), "
+                "residual_contrast=%.6f, n=%d (%d/%d), "
+                "bounds [%.2f, %.2f] → [%.2f, %.2f]",
+                self._log_prefix,
+                be_result.estimated_breakpoint or 0.0,
+                be_result.posterior_std or 0.0,
+                be_result.rms_margin or 0.0,
+                be_result.n_observations,
+                be_result.n_left,
+                be_result.n_right,
+                be_cal_min, be_cal_max,
+                be_result.new_cal_min, be_result.new_cal_max,
+            )
+            if is_heating_batch:
+                self._head_calibration_min_heat = be_result.new_cal_min
+                self._head_calibration_max_heat = be_result.new_cal_max
+            else:
+                self._head_calibration_min_cool = be_result.new_cal_min
+                self._head_calibration_max_cool = be_result.new_cal_max
+        else:
+            _LOGGER.debug(
+                "%sBoundary estimator: not confident "
+                "(n=%d, stall=%d, μ=%.2f, σ=%.2f%s)",
+                self._log_prefix,
+                be_result.n_observations,
+                self._boundary_estimator.stall_count,
+                be_result.posterior_mean or 0.0,
+                be_result.posterior_std or 0.0,
+                ", asymmetric" if be_result.data_asymmetric else "",
+            )
+        # If passive estimation has stalled, trigger active probe
+        if self._boundary_estimator.should_trigger_probe:
+            self._regime_probe.request_early_probe()
+            _LOGGER.info(
+                "%sBoundary estimator stalled (%d cycles), "
+                "requesting active probe",
+                self._log_prefix,
+                self._boundary_estimator.stall_count,
+            )
+
         # ── Grey-box fusion ──
         # If bridge available, gates pass, and blending enabled, fuse
         # grey-box β into the batch estimate before blending with the
@@ -909,7 +1003,7 @@ class PIController:
         # Compute and cache κ before blending (needed for per-feature caps).
         n_eligible = sum(
             1 for o in buffer.get_all()
-            if o.clamped_reason not in ("no_output", "clamped")
+            if not o.clamped
             and abs(o.room_rate) < 0.02
         )
         if n_eligible >= 2 * buffer.n_features:
@@ -919,13 +1013,19 @@ class PIController:
             kappa = float("inf")
             self._cached_kappa = None
 
-        # Build per-feature step caps: enlarged for recently-unlocked
-        # features when batch quality gates pass.
-        per_feature_caps = self._build_per_feature_step_caps(
-            result, buffer, n_eligible, kappa,
-        )
+        # Step cap: prevents batch WLS from making wild jumps that online
+        # RLS would have to recover from.  When online RLS is off, batch is
+        # the sole estimator so the cap just slows convergence — disable it.
+        if getattr(self, "_rls_online_learning", True):
+            per_feature_caps = self._build_per_feature_step_caps(
+                result, buffer, n_eligible, kappa,
+            )
+            step_cap = 1.0
+        else:
+            per_feature_caps = None
+            step_cap = float("inf")
         compute_blended_update(
-            result, prior_std=1.0, max_step=1.0,
+            result, prior_std=1.0, max_step=step_cap,
             max_step_per_feature=per_feature_caps,
         )
 
@@ -995,6 +1095,12 @@ class PIController:
                             rls.P[i * rls.n + j] = 0.0
                             rls.P[j * rls.n + i] = 0.0
 
+            # observation_count = max(online RLS ticks, batch n_eligible).
+            # Online RLS increments it per tick; batch sets the floor here.
+            # The FF seed→learned blend uses this to ramp up trust.
+            if result.n_eligible > rls.observation_count:
+                rls.observation_count = result.n_eligible
+
             # Mark RLS as mature — batch has validated the data geometry
             # and provided a well-conditioned baseline.  Online RLS tracking
             # is now safe to run.
@@ -1036,6 +1142,61 @@ class PIController:
         self._last_batch_wallclock = datetime.now().isoformat(timespec="seconds")
         self._metrics.batch_model_rms = result.residual_rms
 
+        # ── Apply detected lag-tau to online path ──
+        # Two-phase gate: accumulate detections per (input, mode), only
+        # apply to the online EMA filter after 2+ consistent readings.
+        # Keyed by (name, mode) because the detection can differ between
+        # heat and cool — different observation mixes, equilibrium points,
+        # and solar interaction directions.  The online path uses the tau
+        # from the currently active mode.
+        _TAU_SMOOTH_ALPHA = 0.3
+        _TAU_CONFIRM_COUNT = 2  # detections needed before applying
+        mode_tag = "heat" if is_heating else "cool"
+        if result.detected_tau:
+            for m_input in self._model_inputs:
+                name = m_input.get("name", m_input.get("entity_id", ""))
+                if name not in result.detected_tau:
+                    continue
+                tau_new = result.detected_tau[name]
+                key = f"{name}:{mode_tag}"
+
+                # Update smoothed estimate (always, for tracking)
+                tau_old = self._detected_lag_tau.get(key)
+                if tau_old is None:
+                    tau_smoothed = tau_new
+                else:
+                    tau_smoothed = _TAU_SMOOTH_ALPHA * tau_new + (1 - _TAU_SMOOTH_ALPHA) * tau_old
+                self._detected_lag_tau[key] = tau_smoothed
+
+                # Count consistent detections: within ±30% of smoothed
+                count = self._detected_lag_tau_count.get(key, 0)
+                if tau_old is None or tau_old < 60:
+                    # First detection or near-zero: always count
+                    count += 1
+                elif abs(tau_new - tau_old) / max(tau_old, 1.0) < 0.3:
+                    count += 1
+                else:
+                    # Inconsistent — reset count, keep smoothed estimate
+                    count = 1
+                self._detected_lag_tau_count[key] = count
+
+                if count >= _TAU_CONFIRM_COUNT:
+                    m_input["lag_tau"] = tau_smoothed
+                    _LOGGER.info(
+                        "%sAuto lag-tau applied: %s [%s] → %.0fs (%.0f min), "
+                        "%d consistent detections",
+                        self._log_prefix, name, mode_tag,
+                        tau_smoothed, tau_smoothed / 60, count,
+                    )
+                else:
+                    _LOGGER.info(
+                        "%sAuto lag-tau pending: %s [%s] → %.0fs (%.0f min), "
+                        "%d/%d detections before applying",
+                        self._log_prefix, name, mode_tag,
+                        tau_smoothed, tau_smoothed / 60,
+                        count, _TAU_CONFIRM_COUNT,
+                    )
+
         # Refresh buffer serialization caches (avoids re-serializing thousands
         # of observations on every 60s state write — only at batch time).
         self._obs_buffer_heat_cache = self._observation_buffer_heat.as_list()
@@ -1064,7 +1225,7 @@ class PIController:
         coeff_names_vdp = self._features.names
         eligible = [
             o for o in observations
-            if o.clamped_reason not in ("no_output", "clamped")
+            if not o.clamped
             and abs(o.room_rate) < 0.02
             and o.hp_setpoint is not None
         ]
@@ -1166,7 +1327,7 @@ class PIController:
     def buffer_eligible(self) -> int:
         """Count of eligible (unclamped, low-rate) observations in the active buffer."""
         obs = self._active_buffer.get_all()
-        return sum(1 for o in obs if o.clamped_reason not in ("no_output", "clamped") and abs(o.room_rate) < 0.02)
+        return sum(1 for o in obs if not o.clamped and abs(o.room_rate) < 0.02)
 
     @property
     def buffer_total(self) -> int:
@@ -1252,6 +1413,7 @@ class PIController:
             head_calibration_min_cool=self._head_calibration_min_cool,
             head_calibration_max_cool=self._head_calibration_max_cool,
             regime_probe_state=self._regime_probe.as_dict(),
+            boundary_estimator_state=self._boundary_estimator.as_dict(),
             exclusion_count=self._exclusion_count,
             auto_perturb_state=self._auto_perturb.as_dict(),
             manual_override_heat=list(self._manual_override_heat),
@@ -1263,6 +1425,8 @@ class PIController:
             rls_online_enabled=self._pi_rls_online_enabled,
             batch_wls_enabled=self._pi_batch_wls_enabled,
             plant_id_enabled=self._pi_plant_id_enabled,
+            detected_lag_tau=dict(self._detected_lag_tau),
+            detected_lag_tau_counts=dict(self._detected_lag_tau_count),
         )
 
     def restore_extra_stored_data(self, data: PIExtraStoredData) -> None:
@@ -1367,6 +1531,8 @@ class PIController:
             )
         if data.regime_probe_state:
             self._regime_probe.restore(data.regime_probe_state)
+        if data.boundary_estimator_state:
+            self._boundary_estimator.restore(data.boundary_estimator_state)
         if (self._head_calibration_min_heat > -2.0 or self._head_calibration_max_heat < 2.0
                 or self._head_calibration_min_cool > -2.0 or self._head_calibration_max_cool < 2.0):
             _LOGGER.debug(
@@ -1456,6 +1622,25 @@ class PIController:
         # Restore lag filter states
         if data.lag_filter_states:
             self._inputs.restore_lag_states(data.lag_filter_states)
+        # Restore detected lag-tau (keyed by "name:mode") and apply the
+        # best confirmed tau for each input.  On restore we don't know
+        # the current mode yet, so apply whichever mode has more
+        # confirmations (the more-exercised estimate).
+        if data.detected_lag_tau:
+            self._detected_lag_tau = dict(data.detected_lag_tau)
+            self._detected_lag_tau_count = dict(data.detected_lag_tau_counts)
+            for m_input in self._model_inputs:
+                name = m_input.get("name", m_input.get("entity_id", ""))
+                best_tau: float | None = None
+                best_count = 0
+                for mode_tag in ("heat", "cool"):
+                    key = f"{name}:{mode_tag}"
+                    cnt = self._detected_lag_tau_count.get(key, 0)
+                    if cnt >= 2 and cnt > best_count and key in self._detected_lag_tau:
+                        best_tau = self._detected_lag_tau[key]
+                        best_count = cnt
+                if best_tau is not None:
+                    m_input["lag_tau"] = best_tau
         # Restore plant estimate and recompute IMC gains
         if self._plant_id.enabled:
             restore_data = data.plant_identifier_state or {}
@@ -1882,26 +2067,6 @@ class PIController:
                     )
                     continue
 
-            # 5. Partial regression sign check for warming inputs.
-            # Inputs with role "solar" or "heat_source" warm the room,
-            # so their β (internal convention) must be ≤ 0 (HP backs off
-            # when warmer).  A positive β means the partial regression
-            # is confounded — keep frozen until the signal is clean.
-            role = self._coeff_role(i)
-            if role in ("solar", "heat_source"):
-                beta_i = (
-                    full_result.beta_batch[i]
-                    if i < len(full_result.beta_batch)
-                    else 0.0
-                )
-                if beta_i > 0:
-                    _LOGGER.debug(
-                        "%sFeature unlock: %s[%d] — partial β=%.4f > 0 "
-                        "(wrong sign for %s, keeping frozen)",
-                        self._log_prefix, name, i, beta_i, role,
-                    )
-                    continue
-
             # All conditions met — unfreeze
             self.set_frozen(mode, i, frozen=False, manual=False)
             unlocked_any = True
@@ -1966,17 +2131,19 @@ class PIController:
 
         frozen_names = []
         active_names = []
-        # Only track model inputs for learning state; base features
-        # (intercept, outdoor_delta, etc.) are never frozen by auto-gating.
-        mi_start = self._features.model_input_start
-        for i in range(mi_start, n):
+        # Track features that start frozen (model_inputs + time_of_day).
+        # Base features (intercept, outdoor_delta) are always identifiable
+        # and never auto-frozen — they don't represent "learning progress."
+        for i, frozen_at_init in enumerate(self._features.frozen_mask()):
+            if not frozen_at_init or i >= n:
+                continue
             name = coeff_names[i] if i < len(coeff_names) else f"β{i}"
             if rls.frozen[i]:
                 frozen_names.append(name)
             else:
                 active_names.append(name)
 
-        n_model = n - mi_start  # Model input features only
+        n_model = len(frozen_names) + len(active_names)  # Learnable features
         n_frozen = len(frozen_names)
         if not self._control_active:
             state = "Observing"
@@ -2041,6 +2208,7 @@ class PIController:
         attrs: dict[str, Any] = {
             "state": state,
             "tau_eff": round(result.tau_eff, 1),
+            "c0": round(result.c0, 6),
             "ua_c": round(result.ua_c, 6),
             "k_c": round(result.k_c, 6),
             "alpha_c": round(result.alpha_c, 6),
@@ -2105,7 +2273,7 @@ class PIController:
         }
         # Multicollinearity per buffer — gate on sufficient data
         for label, buf in [("heat", self._observation_buffer_heat), ("cool", self._observation_buffer_cool)]:
-            n_eligible = sum(1 for o in buf.get_all() if o.clamped_reason not in ("no_output", "clamped") and abs(o.room_rate) < 0.02)
+            n_eligible = sum(1 for o in buf.get_all() if not o.clamped and abs(o.room_rate) < 0.02)
             if n_eligible >= 2 * buf.n_features:
                 cond = buf.compute_condition_number()
                 if not math.isinf(cond):
@@ -2285,7 +2453,7 @@ class PIController:
         def _buf_stats(buf: DiversityAwareBuffer) -> dict[str, Any]:
             obs = buf.get_all()
             n_eligible = sum(
-                1 for o in obs if o.clamped_reason not in ("no_output", "clamped") and abs(o.room_rate) < 0.02
+                1 for o in obs if not o.clamped and abs(o.room_rate) < 0.02
             )
             stats: dict[str, Any] = {"total": len(obs), "eligible": n_eligible}
             scores = buf.get_leverage_scores()
@@ -3599,6 +3767,8 @@ class PIController:
         label: str,
     ) -> float:
         """Update RLS model with observation and log. Returns residual."""
+        if not getattr(self, '_rls_online_learning', True):
+            return observed_offset - rls.predict(x)
         beta_before = list(rls.beta)
         residual = rls.update(x, observed_offset)
         _LOGGER.debug(
@@ -3774,7 +3944,7 @@ class PIController:
         if self._pi_ff_enabled and self._inputs.outdoor_temp is not None:
             outdoor_delta = self._inputs.outdoor_temp - desired_c
             self._read_model_input_values()
-            x = self._inputs.build_feature_vector(outdoor_delta)
+            x = self._inputs.build_feature_vector(outdoor_delta, wall_time=time.time())
             rls = self._rls_heat if is_heating else self._rls_cool
             self._ff_offset = rls.predict(x)
         elif not self._pi_ff_enabled:
@@ -4160,18 +4330,17 @@ class PIController:
             outdoor_delta = self._inputs.outdoor_temp - desired_c
 
             # Build feature vector and predict FF offset via RLS model
-            x = self._inputs.build_feature_vector(outdoor_delta)
+            x = self._inputs.build_feature_vector(outdoor_delta, wall_time=time.time())
             seeds = self._heat_seeds if is_heating else self._cool_seeds
 
-            # Blend seed prediction with RLS prediction based on observation count.
-            # With few observations the RLS may have learned from narrow conditions
-            # (e.g. only mild weather) and extrapolation can be wrong. The blend
-            # anchors predictions to seeds until enough observations have covered
-            # a representative range of conditions (~1-2 weeks at ~6 obs/day).
-            MIN_RLS_OBS = 50
+            # Blend seed prediction with learned prediction based on data seen.
+            # observation_count reflects max(online RLS ticks, batch n_eligible)
+            # so this works in both online+batch and batch-only modes.
+            # Anchors to seeds until enough data has informed the model.
+            MIN_OBS_FOR_FULL_TRUST = 50
             seed_offset = sum(s * xi for s, xi in zip(seeds, x))
             rls_offset = rls.predict(x)
-            alpha = min(rls.observation_count / MIN_RLS_OBS, 1.0)
+            alpha = min(rls.observation_count / MIN_OBS_FOR_FULL_TRUST, 1.0)
             blended_offset = (1.0 - alpha) * seed_offset + alpha * rls_offset
 
             # Integral-based FF confidence: when the integral opposes the FF
@@ -4284,10 +4453,13 @@ class PIController:
             hp_definitely_off = current_to_setpoint_delta < cal_min
 
         # For learning: observation is usable only when HP is clearly on
-        # AND setpoint isn't saturated at min/max.
+        # AND the previous tick's output wasn't saturated (raw setpoint
+        # beyond min/max means the controller wanted more than the actuator
+        # can deliver — Ljung §13.3).  Uses _last_raw_setpoint so the
+        # saturation check matches the setpoint that was actually in effect.
         hp_observation_usable = (
             hp_definitely_on
-            and self._min_temp_c < self._hp_setpoint < self._max_temp_c
+            and self._min_temp_c <= self._last_raw_setpoint <= self._max_temp_c
         )
 
         # ── Integration freeze: HP estimated active? ────────────────
@@ -4308,64 +4480,16 @@ class PIController:
         else:
             self._hp_no_output_ticks = 0
 
-        # Passive calibration evidence from room_rate.  Currently log-only:
-        # the rate signal is confounded (solar, stove, adjacent zones) and
-        # now affects learning gates, not just integration.  Monitor in
-        # production before enabling.
-        # TODO: Once production logs confirm the evidence is reliable,
-        # enable cal_min/cal_max updates here.  Consider: higher tick
-        # threshold (15-20), safety margin on updates, or shrink-only
-        # (no widening from passive evidence).
-        _CAL_EVIDENCE_TICKS = 10
-        if not hp_estimated_active and self._hp_no_output_ticks >= _CAL_EVIDENCE_TICKS:
-            hp_still_on = (
-                (is_heating and self._room_temp_rate >= 0.0)
-                or (is_cooling and self._room_temp_rate <= 0.0)
-            )
-            hp_confirmed_off = (
-                (is_heating and self._room_temp_rate < 0.0)
-                or (is_cooling and self._room_temp_rate > 0.0)
-            )
-            if hp_still_on:
-                if is_heating and current_to_setpoint_delta > cal_max:
-                    _LOGGER.info(
-                        "%sHead cal passive: HP still on at %.1f°C "
-                        "(would widen cal_max %.1f→%.1f, rate=%.4f)",
-                        self._log_prefix, current_to_setpoint_delta,
-                        cal_max, current_to_setpoint_delta,
-                        self._room_temp_rate,
-                    )
-                elif not is_heating and current_to_setpoint_delta < cal_min:
-                    _LOGGER.info(
-                        "%sHead cal passive: HP still on at %.1f°C "
-                        "(would widen cal_min %.1f→%.1f, rate=%.4f)",
-                        self._log_prefix, current_to_setpoint_delta,
-                        cal_min, current_to_setpoint_delta,
-                        self._room_temp_rate,
-                    )
-            elif hp_confirmed_off:
-                if is_heating and current_to_setpoint_delta < cal_max:
-                    _LOGGER.info(
-                        "%sHead cal passive: HP off at %.1f°C "
-                        "(would shrink cal_max %.1f→%.1f, rate=%.4f)",
-                        self._log_prefix, current_to_setpoint_delta,
-                        cal_max, current_to_setpoint_delta,
-                        self._room_temp_rate,
-                    )
-                elif not is_heating and current_to_setpoint_delta > cal_min:
-                    _LOGGER.info(
-                        "%sHead cal passive: HP off at %.1f°C "
-                        "(would shrink cal_min %.1f→%.1f, rate=%.4f)",
-                        self._log_prefix, current_to_setpoint_delta,
-                        cal_min, current_to_setpoint_delta,
-                        self._room_temp_rate,
-                    )
-
         # ── Regime probe: active boundary detection ────────────────
         # Probe fires when contribution is uncertain + room is stable.
         # force_min_setpoint overrides HP to min so we can observe the
         # room rate without HP contribution and resolve the ambiguity.
         probe_prev_state = self._regime_probe.state
+        # Don't report as clamped if the probe itself forced HP to min
+        # on the previous tick — that would abort its own probe.
+        probe_active = probe_prev_state in (
+            ProbeState.BASELINE, ProbeState.PROBE,
+        )
         probe_result = self._regime_probe.tick(
             now_mono=now_mono,
             room_temp_rate=self._room_temp_rate,
@@ -4378,7 +4502,7 @@ class PIController:
             is_clamped=(
                 self._hp_setpoint <= self._min_temp_c
                 or self._hp_setpoint >= self._max_temp_c
-            ),
+            ) and not probe_active,
             learning_suppressed=self._manual_ff_suppress,
             current_hour=datetime.now().hour,
             auto_perturb_active=self._auto_perturb.offset != 0.0,
@@ -4396,12 +4520,26 @@ class PIController:
             new_min, new_max = self._regime_probe.compute_calibration_updates(
                 cal_min, cal_max,
             )
-            if is_heating:
-                self._head_calibration_min_heat = new_min
-                self._head_calibration_max_heat = new_max
-            else:
-                self._head_calibration_min_cool = new_min
-                self._head_calibration_max_cool = new_max
+            # Guard against band inversion from conflicting evidence
+            if new_min < new_max:
+                if is_heating:
+                    self._head_calibration_min_heat = new_min
+                    self._head_calibration_max_heat = new_max
+                else:
+                    self._head_calibration_min_cool = new_min
+                    self._head_calibration_max_cool = new_max
+            self._boundary_estimator.reset_stall()
+            # Feed probe result to boundary estimator Bayesian state
+            probe_evidence = self._regime_probe.consume_last_probe()
+            if probe_evidence is not None:
+                self._boundary_estimator.record_probe_evidence(
+                    probe_evidence[0], probe_evidence[1],
+                )
+
+        # Boundary estimator Layer 2: track room_rate after setpoint changes
+        self._boundary_estimator.tick(
+            self._room_temp_rate, current_c, is_heating,
+        )
 
         skip_integration = (
             (is_heating and self._hp_setpoint <= self._min_temp_c and error < 0)
@@ -4589,14 +4727,16 @@ class PIController:
             and not self._any_model_input_unavailable()
         )
 
-        # Clamped status computed unconditionally (used by hysteresis below)
+        # Clamped status computed unconditionally (used by hysteresis below).
+        # Use raw_setpoint (pre-clamp) with strict inequality: being exactly
+        # at the boundary is a valid operating point, not saturation.
         if hp_definitely_off:
             obs_clamped = True
             obs_clamped_reason = "no_output"
-        elif self._hp_setpoint <= self._min_temp_c:
+        elif raw_setpoint < self._min_temp_c:
             obs_clamped = True
             obs_clamped_reason = "saturated_low"
-        elif self._hp_setpoint >= self._max_temp_c:
+        elif raw_setpoint > self._max_temp_c:
             obs_clamped = True
             obs_clamped_reason = "saturated_high"
         else:
@@ -4622,7 +4762,7 @@ class PIController:
             obs = Observation(
                 timestamp=now_mono,
                 wall_time=time.time(),
-                hp_setpoint=float(self._hp_setpoint) if obs_clamped_reason != "no_output" else None,
+                hp_setpoint=float(self._hp_setpoint),
                 current_c=current_c,
                 desired_c=desired_c,
                 outdoor_temp_c=self._inputs.outdoor_temp,
@@ -4699,6 +4839,14 @@ class PIController:
                     )
                     self._last_setpoint_change_time = now_mono
                     self._metrics.record_setpoint_change()
+                    # Boundary estimator Layer 2: record setpoint change
+                    self._boundary_estimator.record_setpoint_change(
+                        mono_time=now_mono,
+                        old_setpoint=old_setpoint,
+                        new_setpoint=new_setpoint,
+                        current_c=current_c,
+                        room_rate=self._room_temp_rate,
+                    )
                     # Start τ observation on significant setpoint changes
                     if (self._pi_plant_id_enabled
                             and self._inputs.outdoor_temp is not None

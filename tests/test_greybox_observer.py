@@ -52,9 +52,9 @@ class TestFitGreybox:
     """Test 1R1C energy balance fitting on synthetic data.
 
     True model (rate-coefficient form):
-        room_rate = ua_c × (T_out - T_air) + k_c × hp_offset + α_c × solar
+        room_rate = c0 + ua_c × (T_out - T_air) + k_c × hp_offset + α_c × solar
 
-    With ua_c=0.006 (τ=167 min), k_c=0.02, α_c=+0.04.
+    With c0=0.0, ua_c=0.006 (τ=167 min), k_c=0.02, α_c=+0.04.
     These correspond to UA=0.3, K_hp=1.0, α_solar=+2.0, C_eff=50.0.
     """
 
@@ -192,13 +192,14 @@ class TestFitGreybox:
         """GreyboxResult.as_dict produces serializable output."""
         result = GreyboxResult(
             n_observations=100, n_hp_on=60, n_hp_off=40,
-            ua_c=0.006, k_c=0.02, alpha_c=0.04,
+            c0=0.001, ua_c=0.006, k_c=0.02, alpha_c=0.04,
             tau_eff=166.7, residual_rms=0.005,
             cost=0.5, n_function_evals=10,
             plant_tau_slow=170.0, tau_agreement_pct=2.0,
             param_std_err={"ua_c": 0.001, "k_c": 0.003},
         )
         d = result.as_dict()
+        assert d["c0"] == 0.001
         assert d["ua_c"] == 0.006
         assert d["plant_tau_slow"] == 170.0
         assert d["param_std_err"]["ua_c"] == 0.001
@@ -207,7 +208,7 @@ class TestFitGreybox:
         """log_greybox_result should log without errors."""
         result = GreyboxResult(
             n_observations=100, n_hp_on=60, n_hp_off=40,
-            ua_c=0.006, k_c=0.02, alpha_c=0.04,
+            c0=0.001, ua_c=0.006, k_c=0.02, alpha_c=0.04,
             tau_eff=166.7, residual_rms=0.005,
             cost=0.5, n_function_evals=10,
             plant_tau_slow=170.0, tau_agreement_pct=2.0,
@@ -256,7 +257,7 @@ def _make_result(**overrides) -> GreyboxResult:
     """Build a GreyboxResult with sensible defaults, overridable."""
     defaults = dict(
         n_observations=200, n_hp_on=120, n_hp_off=80,
-        ua_c=0.006, k_c=0.02, alpha_c=0.04,
+        c0=0.001, ua_c=0.006, k_c=0.02, alpha_c=0.04,
         tau_eff=166.7, residual_rms=0.005,
         cost=0.5, n_function_evals=10,
         param_std_err={"ua_c": 0.001, "k_c": 0.003, "alpha_c": 0.005},
@@ -305,8 +306,8 @@ class TestQualityGates:
         assert not gates["tau_plausible"]
 
     def test_tau_plausibility_too_slow(self):
-        """τ > 500 min → parameter at bound."""
-        result = _make_result(ua_c=0.0015, tau_eff=667.0)
+        """τ > 1500 min (25h) → beyond plausible 2R2C slow mode."""
+        result = _make_result(ua_c=0.0005, tau_eff=2000.0)
         gates = _check_quality_gates(result)
         assert not gates["tau_plausible"]
 

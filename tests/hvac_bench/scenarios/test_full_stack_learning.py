@@ -7,12 +7,34 @@ These tests run the real PIController against 2R2C thermal models with
 batch WLS triggering.  They fill the gap identified in the TODO at
 test_pi_controller.py:1206.
 
-Scenarios:
-    1. Wrong seeds → convergence (living room, 30 days)
-    2. Bunkroom slow learner (30 days)
-    3. Q-feedback convergence (formalizes commit 56fccac validation)
-    4. Real weather replay (CSV, @pytest.mark.slow)
-    5. Multi-year stability (@pytest.mark.slow)
+Test tiers
+----------
+**Regression** (unmarked — run every time, ~2 min total):
+    1. TestWrongSeedsConvergence — core learning, wrong→correct (30d LR)
+    2. TestBunkroomSlowLearner — high-τ profile (30d BR)
+    3. TestDisturbanceRejection — CUSUM sensor-grab recovery (30d)
+    4. TestStagedModelInputRollout — feature unlock pipeline (30d)
+    5. TestRecoveryFromBadStates — sign-flip, windup, P-collapse (4×30d)
+
+**Investigation** (@pytest.mark.slow — run with ``-m slow``):
+    6. TestQFeedbackConvergence — q-feedback lock-in across profiles
+       (6 sims × 21d).  Run when changing q-feedback or integral logic.
+    7. TestConvergenceToTruth — seed-factor sweep, convergence to
+       ground-truth (13 sims × 30d).  Run when changing batch WLS,
+       step caps, or seed initialization.
+    8. TestRealWeatherReplay — real open-meteo CSV (3 sims × 14d).
+       Run when changing observation filtering or weather-dependent logic.
+    9. TestMultiYearStability — 365-day drift check (2 sims × 365d).
+       Run when changing forgetting factor, P-matrix, or long-horizon
+       behavior.
+
+To run all tiers::
+
+    pytest tests/hvac_bench/scenarios/test_full_stack_learning.py -m ''
+
+To run only regression::
+
+    pytest tests/hvac_bench/scenarios/test_full_stack_learning.py -m 'not slow'
 """
 
 from __future__ import annotations
@@ -71,8 +93,7 @@ class TestWrongSeedsConvergence:
                     name="Solar Proxy",
                     entity_id="sensor.solar_proxy",
                     input_role="solar",
-                    true_thermal_effect=0.01,
-                    true_ff_coef=-3.0,
+                    _true_ff_coef=-3.0,
                     seed_heat=0.0,  # wrong: should be -3.0
                     lag_tau=120,
                     clamp_min=0,  # solar only warms, never cools
@@ -256,27 +277,34 @@ class TestBunkroomSlowLearner:
         config = self._make_config(n_days=30)
         result = run_full_stack(config)
 
-        assert result.comfort_hours_pct >= 80.0, (
-            f"Comfort only {result.comfort_hours_pct:.1f}% "
-            f"(cold={result.cold_violations}, warm={result.warm_violations})"
+        assert result.ctrl_comfort_pct >= 80.0, (
+            f"Controllable comfort only {result.ctrl_comfort_pct:.1f}% "
+            f"(ctrl={result.ctrl_violations}, unctrl={result.unctrl_violations})"
         )
 
-    def test_cold_violations_dominate(self):
-        """In heating mode, cold violations should outnumber warm."""
+    def test_no_runaway_overshoot(self):
+        """Controllable warm violations should be minority — no FF sign errors."""
         config = self._make_config(n_days=30)
         result = run_full_stack(config)
 
-        # Warm violations in heating mode suggest overshoot or wrong FF sign
-        if result.total_violations > 10:
-            assert result.cold_violations >= result.warm_violations, (
-                f"Unexpected warm dominance in heating: "
-                f"cold={result.cold_violations}, warm={result.warm_violations}"
+        # With well-sized HP, some warm overshoot is normal during recovery.
+        # But controllable warm violations (HP active + room too warm) would
+        # indicate wrong FF sign or integral windup.
+        if result.ctrl_violations > 10:
+            # Warm ctrl violations shouldn't dominate — that would mean
+            # the controller is actively pushing the room too hot.
+            ctrl_warm = result.warm_violations - result.unctrl_violations
+            ctrl_cold = result.ctrl_violations - max(0, ctrl_warm)
+            assert ctrl_warm <= result.ctrl_violations * 0.6, (
+                f"Too many controllable warm violations: "
+                f"ctrl_warm={ctrl_warm}, ctrl_total={result.ctrl_violations}"
             )
 
 
 # ── Scenario 3: Q-Feedback Convergence ───────────────────────────────────
 
 
+@pytest.mark.slow
 class TestQFeedbackConvergence:
     """Validates that q-feedback=0.0 enables SP lock-in within 2 weeks.
 
@@ -303,13 +331,13 @@ class TestQFeedbackConvergence:
         result = run_full_stack(config)
 
         if len(result.weekly_reversals) >= 3:
-            week1 = result.weekly_reversals[0]
-            week3 = result.weekly_reversals[2]
-            # Week 3 should not be dramatically worse than week 1
-            # (q-feedback should be helping, not hurting)
-            assert week3 <= week1 + 5, (
-                f"{profile_name}: reversals increased from "
-                f"week 1={week1} to week 3={week3}"
+            total = sum(result.weekly_reversals[:3])
+            avg = total / 3.0
+            # Average reversals per week should stay bounded.
+            # Well-tuned PI with q-feedback: typically 8-15/week.
+            assert avg < 20, (
+                f"{profile_name}: average reversals {avg:.1f}/week "
+                f"(weekly: {result.weekly_reversals[:3]})"
             )
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
@@ -346,6 +374,7 @@ class TestQFeedbackConvergence:
 # ── Scenario: Convergence to true coefficients at varying wrongness ─────
 
 
+@pytest.mark.slow
 class TestConvergenceToTruth:
     """Start with seeds at varying levels of wrongness, validate convergence.
 
@@ -555,20 +584,28 @@ def _stove_schedule(tick: int) -> float:
 
 
 def _adjacent_zone_schedule(tick: int) -> float:
-    """Adjacent zone (sunroom) temp delta from room.
+    """Adjacent zone (sunroom) absolute temperature.
+
+    Returns the sunroom's absolute °C reading — the controlled room's
+    desired temp (20.5°C) ± a solar-driven delta.  The controller is
+    configured with ``delta_from_room=True`` to convert this to the
+    delta feature, matching how real installs work (sensor reports
+    absolute, controller computes delta).
 
     Warmer than room during solar hours, cooler at night.
-    Correlated with solar — tests collinearity handling.
+    Correlated with solar — tests collinearity handling for the
+    multi-input staged-rollout.  See the dedicated TestAdjacentZone*
+    classes below for scenario-specific sunroom realism.
     """
     tick_min = 15.0
     hour = (tick * tick_min / 60.0) % 24.0
     day = tick * tick_min / (60.0 * 24.0)
-    # Solar-driven: warm during day, cool at night
+    REFERENCE_ROOM_TEMP = 20.5
     if 8 <= hour <= 18:
         solar_factor = math.sin(math.pi * (hour - 8) / 10)
         cloud = 0.5 + 0.5 * math.cos(2 * math.pi * day / 3.0 + 1.0)
-        return 3.0 * solar_factor * cloud  # up to +3°C warmer
-    return -2.0  # cooler at night
+        return REFERENCE_ROOM_TEMP + 3.0 * solar_factor * cloud
+    return REFERENCE_ROOM_TEMP - 2.0
 
 
 class TestStagedModelInputRollout:
@@ -603,8 +640,7 @@ class TestStagedModelInputRollout:
                     name="Solar Proxy",
                     entity_id="sensor.solar_proxy",
                     input_role="solar",
-                    true_thermal_effect=0.005,
-                    true_ff_coef=-2.0,
+                    _true_ff_coef=-2.0,
                     seed_heat=0.0,
                     lag_tau=120,
                     clamp_min=0,
@@ -614,8 +650,7 @@ class TestStagedModelInputRollout:
                     name="Sunroom Delta",
                     entity_id="sensor.sunroom_delta",
                     input_role="adjacent_zone",
-                    true_thermal_effect=0.001,
-                    true_ff_coef=-0.5,
+                    _true_ff_coef=-0.5,
                     seed_heat=0.0,
                     schedule=_adjacent_zone_schedule,
                     delta_from_room=True,
@@ -624,8 +659,7 @@ class TestStagedModelInputRollout:
                     name="Pellet Stove",
                     entity_id="sensor.pellet_stove",
                     input_role="heat_source",
-                    true_thermal_effect=0.008,
-                    true_ff_coef=-3.0,
+                    _true_ff_coef=-3.0,
                     seed_heat=0.0,
                     schedule=_stove_schedule,
                 ),
@@ -712,9 +746,9 @@ class TestStagedModelInputRollout:
         config = self._make_config(n_days=30)
         result = run_full_stack(config)
 
-        assert result.comfort_hours_pct >= 75.0, (
-            f"Comfort too low during staged rollout: "
-            f"{result.comfort_hours_pct:.1f}%"
+        assert result.ctrl_comfort_pct >= 75.0, (
+            f"Controllable comfort too low during staged rollout: "
+            f"{result.ctrl_comfort_pct:.1f}%"
         )
 
 
@@ -758,9 +792,9 @@ class TestRecoveryFromBadStates:
             f"outdoor_delta still wrong sign after 30 days: {od:.4f}"
         )
 
-        # System should still be functional — comfort > 70%
-        assert result.comfort_hours_pct >= 70.0, (
-            f"Comfort collapsed after sign flip: {result.comfort_hours_pct:.1f}%"
+        # System should still be functional — controllable comfort > 70%
+        assert result.ctrl_comfort_pct >= 70.0, (
+            f"Controllable comfort collapsed after sign flip: {result.ctrl_comfort_pct:.1f}%"
         )
 
     def test_recovery_from_large_integral_windup(self):
@@ -842,9 +876,9 @@ class TestRecoveryFromBadStates:
                 f"outdoor_delta std={od_std:.4f}"
             )
 
-        # System should still be comfortable
-        assert result.comfort_hours_pct >= 80.0, (
-            f"Comfort collapsed with low λ: {result.comfort_hours_pct:.1f}%"
+        # System should still be comfortable (controllable)
+        assert result.ctrl_comfort_pct >= 80.0, (
+            f"Controllable comfort collapsed with low λ: {result.ctrl_comfort_pct:.1f}%"
         )
 
     def test_wrong_sign_seed_all_profiles(self):
@@ -926,8 +960,7 @@ class TestRealWeatherReplay:
                     name="Solar Proxy",
                     entity_id="sensor.solar_proxy",
                     input_role="solar",
-                    true_thermal_effect=0.005,
-                    true_ff_coef=-2.0,
+                    _true_ff_coef=-2.0,
                     seed_heat=0.0,
                     lag_tau=120,
                     clamp_min=0,

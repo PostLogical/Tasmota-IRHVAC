@@ -1250,7 +1250,7 @@ class TestGreyboxObserverCoverageGaps:
             pytest.skip("scipy required")
         from custom_components.tasmota_irhvac.pi.greybox_observer import GreyboxResult
         result = GreyboxResult(
-            ua_c=0.01, k_c=0.01, alpha_c=0.001,
+            c0=0.0, ua_c=0.01, k_c=0.01, alpha_c=0.001,
             residual_rms=0.5, n_observations=0,
             n_hp_on=0, n_hp_off=0, tau_eff=85.0,
             param_std_err={}, tau_agreement_pct=None,
@@ -1528,7 +1528,7 @@ class TestGreyboxBridgeBatchScenario:
         # Mock greybox fit result with all needed numeric attributes
         from custom_components.tasmota_irhvac.pi.greybox_observer import GreyboxResult
         mock_gb = GreyboxResult(
-            ua_c=0.01, k_c=0.01, alpha_c=0.001,
+            c0=0.0, ua_c=0.01, k_c=0.01, alpha_c=0.001,
             residual_rms=0.02, n_observations=20,
             n_hp_on=12, n_hp_off=8, tau_eff=85.0,
             param_std_err={"ua_c": 0.005, "k_c": 0.002},
@@ -1579,7 +1579,7 @@ class TestGreyboxBridgeBatchScenario:
 
         from custom_components.tasmota_irhvac.pi.greybox_observer import GreyboxResult
         mock_gb = GreyboxResult(
-            ua_c=0.01, k_c=0.01, alpha_c=0.001,
+            c0=0.0, ua_c=0.01, k_c=0.01, alpha_c=0.001,
             residual_rms=0.02, n_observations=20,
             n_hp_on=12, n_hp_off=8, tau_eff=85.0,
             param_std_err={"ua_c": 0.005},
@@ -2405,7 +2405,7 @@ class TestRemainingPIControllerGaps:
 
         from custom_components.tasmota_irhvac.pi.greybox_observer import GreyboxResult
         mock_gb = GreyboxResult(
-            ua_c=0.01, k_c=0.01, alpha_c=0.001,
+            c0=0.0, ua_c=0.01, k_c=0.01, alpha_c=0.001,
             residual_rms=0.02, n_observations=20,
             n_hp_on=12, n_hp_off=8, tau_eff=85.0,
             param_std_err={"ua_c": 0.005},
@@ -2532,28 +2532,12 @@ class TestRemainingPIControllerGaps:
         assert pi._head_calibration_max_cool == cal_max_before  # log-only, no change
 
     @pytest.mark.asyncio
-    async def test_cooling_passive_evidence_hp_still_on(self, caplog):
-        """Cooling mode: HP still on (room cooling) logs passive evidence."""
-        import logging
+    async def test_cooling_boundary_estimator_initialized(self):
+        """Cooling mode: boundary estimator exists on PI controller."""
         entity = _make_pi()
         pi = entity._pi
-        pi._desired_temp = 24.0
-        pi._hp_setpoint = 24
-        entity._attr_hvac_mode = HVACMode.COOL
-        pi._inputs.outdoor_temp = 30.0
-        # delta = 21 - 24 = -3 < cal_min(-2.0) → hp_still_on path
-        entity._attr_current_temperature = 21.0
-        pi._room_temp_rate = -0.01  # room cooling → HP might still be on
-        pi._hp_no_output_ticks = 15
-        pi._integration_frozen = True
-        pi._pi_last_tick_time = time.monotonic() - 900
-
-        cal_min_before = pi._head_calibration_min_cool
-        with caplog.at_level(logging.INFO):
-            await pi._pi_tick()
-        assert pi._head_calibration_min_cool == cal_min_before  # log-only
-        still_on_msgs = [r for r in caplog.records if "HP still on" in r.message]
-        assert len(still_on_msgs) >= 1
+        assert pi._boundary_estimator is not None
+        assert pi._boundary_estimator.updates_applied == 0
 
     @pytest.mark.asyncio
     async def test_integration_frozen_at_min_not_deadband(self):
