@@ -593,18 +593,19 @@ def _adjacent_zone_schedule(tick: int) -> float:
     absolute, controller computes delta).
 
     Warmer than room during solar hours, cooler at night.
-    Correlated with solar — tests collinearity handling.
+    Correlated with solar — tests collinearity handling for the
+    multi-input staged-rollout.  See the dedicated TestAdjacentZone*
+    classes below for scenario-specific sunroom realism.
     """
     tick_min = 15.0
     hour = (tick * tick_min / 60.0) % 24.0
     day = tick * tick_min / (60.0 * 24.0)
-    # Reference desired room temp; actual room fluctuates around it.
     REFERENCE_ROOM_TEMP = 20.5
     if 8 <= hour <= 18:
         solar_factor = math.sin(math.pi * (hour - 8) / 10)
         cloud = 0.5 + 0.5 * math.cos(2 * math.pi * day / 3.0 + 1.0)
-        return REFERENCE_ROOM_TEMP + 3.0 * solar_factor * cloud  # up to +3°C warmer
-    return REFERENCE_ROOM_TEMP - 2.0  # cooler at night
+        return REFERENCE_ROOM_TEMP + 3.0 * solar_factor * cloud
+    return REFERENCE_ROOM_TEMP - 2.0
 
 
 class TestStagedModelInputRollout:

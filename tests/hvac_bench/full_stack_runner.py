@@ -136,6 +136,11 @@ class FullStackConfig:
     # Disturbances to inject
     disturbances: list[Disturbance] = field(default_factory=list)
 
+    # Thermal-model disturbances (heat-loss/heat-gain perturbations applied
+    # via the 2R2C model's own disturbance mechanism — used for window-open,
+    # cooking events, etc. that affect physics but aren't model inputs).
+    thermal_disturbances: list = field(default_factory=list)
+
     # If True, relax κ gate (for short sims with limited diversity)
     relax_kappa_gate: bool = False
 
@@ -451,6 +456,10 @@ def run_full_stack(
         stove_gain=0.0,
         head_sensor_offset=config.head_sensor_offset,
     )
+
+    # Wire any thermal-model disturbances (window-open, cooking, etc.)
+    for td in config.thermal_disturbances:
+        model.add_disturbance(td)
 
     adapter.set_desired_temp(config.desired_c)
     adapter.set_mode(config.mode)
