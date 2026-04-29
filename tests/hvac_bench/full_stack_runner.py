@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import math
+import random
 import time as _time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -296,31 +297,106 @@ class FullStackResult:
 # ── Default weather schedules ────────────────────────────────────────────
 
 
-def diurnal_outdoor(tick: int, base_c: float, amplitude_c: float,
-                    tick_minutes: float = TICK_MINUTES_DEFAULT) -> float:
+class WeatherState:
+    """AR(1) shared weather state driving both outdoor offset and solar attenuation.
+
+    Real weather couples cloud cover and outdoor temperature through shared causes
+    (frontal passages, pressure systems). The synthetic default has them as
+    independent oscillators, so solar β identifies too cleanly. This class produces
+    a single ~N(0, 1) trajectory W(tick) with autocorrelation half-life
+    ``persistence_hours``; callers feed it into :func:`diurnal_outdoor` and
+    :func:`diurnal_solar` so both schedules share residual variance.
+
+    Calibrated to reproduce hourly residual T-vs-S correlation in the 0.10–0.30
+    band measured from real Open-Meteo data (44°N, 71.5°W). See
+    project_wls_buffer_literature_review.md for context.
+    """
+
+    def __init__(
+        self,
+        n_ticks: int,
+        seed: int = 42,
+        persistence_hours: float = 36.0,
+        tick_minutes: float = TICK_MINUTES_DEFAULT,
+    ):
+        self._n_ticks = n_ticks
+        self._tick_minutes = tick_minutes
+        ticks_per_persistence = persistence_hours * 60.0 / tick_minutes
+        # Half-life persistence: phi^ticks = 0.5 at autocorrelation half-life
+        self._phi = 0.5 ** (1.0 / ticks_per_persistence)
+        sigma_eps = math.sqrt(1.0 - self._phi**2)
+        rng = random.Random(seed)
+        self._W = [0.0] * n_ticks
+        # Burn-in 200 ticks so initial state is at stationary distribution
+        burn = 0.0
+        for _ in range(200):
+            burn = self._phi * burn + sigma_eps * rng.gauss(0.0, 1.0)
+        self._W[0] = burn
+        for t in range(1, n_ticks):
+            self._W[t] = self._phi * self._W[t - 1] + sigma_eps * rng.gauss(0.0, 1.0)
+
+    def __call__(self, tick: int) -> float:
+        if tick < 0:
+            return self._W[0]
+        if tick >= self._n_ticks:
+            return self._W[-1]
+        return self._W[tick]
+
+
+def diurnal_outdoor(
+    tick: int,
+    base_c: float,
+    amplitude_c: float,
+    tick_minutes: float = TICK_MINUTES_DEFAULT,
+    weather_state: Callable[[int], float] | None = None,
+    weather_amp_c: float = 2.0,
+) -> float:
     """Sinusoidal outdoor temp with multi-day weather-front drift.
 
-    Coldest at 6AM, warmest at 3PM. Includes ±8°C 5-day weather drift
-    to provide outdoor_delta diversity for batch WLS.
+    Coldest at 6AM, warmest at 3PM. With ``weather_state=None`` (legacy) uses a
+    pure 8.0°C 5-day sine drift. With a ``WeatherState`` instance, drift becomes
+    a 7.0°C *independent* 5-day sine plus ``weather_amp_c × W(tick)`` *shared*
+    with the solar cloud factor. The shared term is intentionally smaller than
+    the independent drift so the residual T-vs-S correlation lands near 0.20
+    (average of real Open-Meteo seasons fall=0.30, winter=0.10, spring=0.26),
+    not at saturation.
     """
     hour = (tick * tick_minutes / 60.0) % 24.0
     day = tick * tick_minutes / (60.0 * 24.0)
-    weather_drift = 8.0 * math.sin(2 * math.pi * day / 5.0)
+    if weather_state is not None:
+        weather_drift = 7.0 * math.sin(2 * math.pi * day / 5.0) + weather_amp_c * weather_state(tick)
+    else:
+        weather_drift = 8.0 * math.sin(2 * math.pi * day / 5.0)
     return base_c + weather_drift + amplitude_c * math.cos(
         2 * math.pi * (hour - 15) / 24
     )
 
 
-def diurnal_solar(tick: int, peak: float = 0.8,
-                  tick_minutes: float = TICK_MINUTES_DEFAULT) -> float:
-    """Solar proxy: 0 at night, peaks at noon. Variable cloud cover."""
+def diurnal_solar(
+    tick: int,
+    peak: float = 0.8,
+    tick_minutes: float = TICK_MINUTES_DEFAULT,
+    weather_state: Callable[[int], float] | None = None,
+    cloud_coupling: float = 0.5,
+    sunrise_hour: float = 6.0,
+    sunset_hour: float = 18.0,
+) -> float:
+    """Solar proxy: 0 at night, peaks at noon. Variable cloud cover.
+
+    With ``weather_state=None`` (legacy) uses a smooth 3-day cosine cloud cycle.
+    With a ``WeatherState`` instance, the cloud factor is ``clip(0.7 +
+    cloud_coupling × W(tick), 0.2, 1.0)`` — bursty stretches of clear/cloudy days
+    emerge from AR(1) persistence, and the same W also shifts outdoor temp.
+    """
     hour = (tick * tick_minutes / 60.0) % 24.0
-    day = tick * tick_minutes / (60.0 * 24.0)
-    if hour < 6 or hour > 18:
+    if hour < sunrise_hour or hour > sunset_hour:
         return 0.0
-    base = peak * math.sin(math.pi * (hour - 6) / 12)
-    # Cloud factor varies by day (different period than weather drift)
-    cloud = 0.5 + 0.5 * math.cos(2 * math.pi * day / 3.0 + 1.0)
+    base = peak * math.sin(math.pi * (hour - sunrise_hour) / (sunset_hour - sunrise_hour))
+    if weather_state is not None:
+        cloud = max(0.2, min(1.0, 0.7 + cloud_coupling * weather_state(tick)))
+    else:
+        day = tick * tick_minutes / (60.0 * 24.0)
+        cloud = 0.5 + 0.5 * math.cos(2 * math.pi * day / 3.0 + 1.0)
     return base * cloud
 
 
