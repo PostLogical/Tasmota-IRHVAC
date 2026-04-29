@@ -21,6 +21,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import pytest
+
 from tests.hvac_bench.full_stack_runner import (
     FullStackConfig, FullStackResult, ModelInputSpec,
     diurnal_solar, run_full_stack,
@@ -198,8 +200,15 @@ def _bunkroom_config(n_days: int = 30) -> FullStackConfig:
 # ── Test class ───────────────────────────────────────────────────────────
 
 
+@pytest.mark.design
 class TestOnlineRLSValue:
-    """Compare online RLS + batch vs batch-only across scenarios."""
+    """Compare online RLS + batch vs batch-only across scenarios.
+
+    Marked ``design``: verdict captured in ``project_online_rls_verdict.md``
+    (online RLS adds no value across 5 scenarios). Asserts are weak
+    regression-guard floors, not strict pass criteria. Re-run only when
+    revisiting the online-RLS deprecation.
+    """
 
     def test_correct_seeds(self):
         """With correct seeds, online RLS should not degrade performance."""

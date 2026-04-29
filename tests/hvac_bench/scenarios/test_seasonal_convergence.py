@@ -362,13 +362,15 @@ def seasonal_results() -> dict[str, FullStackResult]:
 class TestSeasonalConvergence:
     """Compare batch WLS convergence and final coefficients across heating seasons."""
 
+    @pytest.mark.design
     def test_print_summary(self, seasonal_results):
         """Print the comparison table — always passes, the artifact is the output.
 
-        Run with ``pytest -s -m slow`` to see the table.
+        Run with ``pytest -s -m design`` to see the table.
         """
         _print_summary(seasonal_results)
 
+    @pytest.mark.design
     def test_print_solar_drift_diagnostic(self, seasonal_results):
         """Per-batch trajectory of Solar Proxy + outdoor + intercept + buffer.
 

@@ -21,6 +21,8 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+import pytest
+
 from tests.hvac_bench.adapters import TasmotaPIAdapter
 from tests.hvac_bench.full_stack_runner import (
     FullStackConfig, ModelInputSpec,
@@ -233,8 +235,15 @@ def _run_spring_scenario(mode: str, n_days: int = 60) -> dict:
     }
 
 
+@pytest.mark.design
 class TestWLSvsGreybox:
-    """Compare WLS-only, grey-box-only, and fused estimators."""
+    """Compare WLS-only, grey-box-only, and fused estimators.
+
+    Marked ``design``: validation harness for #47 (2R2C grey-box upgrade);
+    not a current verdict producer because 1R1C grey-box rails at τ=1000
+    and tau_plausible blocks every batch. See
+    ``project_greybox_1r1c_limitation.md``.
+    """
 
     def test_spring_comparison(self):
         """Spring scenario with HP cycling — grey-box should have data."""

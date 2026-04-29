@@ -6,6 +6,7 @@ log_format = "%(asctime)s %(levelname)-8s %(name)s: %(message)s"
 log_date_format = "%H:%M:%S"
 markers = [
     "slow: marks tests as slow (run with -m slow, deselect with -m 'not slow')",
+    "design: design-time / verdict-in-memo / long-horizon studies (run with -m design, deselect with -m 'not design')",
 ]
 
 [tool.mypy]

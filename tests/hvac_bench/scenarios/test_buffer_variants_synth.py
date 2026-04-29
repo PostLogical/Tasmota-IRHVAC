@@ -66,9 +66,15 @@ def synth_variant_results() -> dict[str, dict[str, FullStackResult]]:
         pi_logger.setLevel(prev)
 
 
-@pytest.mark.slow
+@pytest.mark.design
 class TestBufferVariantsSynth:
-    """Buffer size + policy sweep against synth AR(1) weather."""
+    """Buffer size + policy sweep against synth AR(1) weather.
+
+    Marked ``design`` (not ``slow``): synth-only sibling of
+    ``test_buffer_variants``, kept for parameter sweeps where reproducible
+    knobs matter. See ``feedback_synthetic_vs_real_bench.md`` — the
+    FIFO/leverage verdict comes from the real-weather sibling, not this one.
+    """
 
     def test_print_summary(self, synth_variant_results):
         """All-in-one: final coefs, trajectory, fill rate. Always passes."""

@@ -196,9 +196,15 @@ def _print_buffer_fill(results: dict[str, dict[str, FullStackResult]]) -> None:
 # ── Tests ────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.slow
+@pytest.mark.design
 class TestBufferVariants:
-    """Compare buffer size + policy across heating seasons (real weather)."""
+    """Compare buffer size + policy across heating seasons (real weather).
+
+    Marked ``design`` (not ``slow``): the FIFO-vs-leverage verdict is
+    captured in ``project_buffer_seasonal_findings.md``. Production only
+    uses ``DiversityAwareBuffer-2000``, exercised by ``test_seasonal_convergence``.
+    Re-run this study only when revisiting buffer policy.
+    """
 
     def test_print_summary(self, variant_results):
         """All-in-one: final coefs, trajectory, fill rate. Always passes."""

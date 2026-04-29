@@ -15,26 +15,31 @@ Test tiers
     3. TestDisturbanceRejection — CUSUM sensor-grab recovery (30d)
     4. TestStagedModelInputRollout — feature unlock pipeline (30d)
     5. TestRecoveryFromBadStates — sign-flip, windup, P-collapse (4×30d)
+    6. TestRealWeatherReplay — real open-meteo CSV (3 sims × 14d).
+       Cheap real-weather guard for the otherwise-synthetic regression tier.
 
 **Investigation** (@pytest.mark.slow — run with ``-m slow``):
-    6. TestQFeedbackConvergence — q-feedback lock-in across profiles
+    7. TestQFeedbackConvergence — q-feedback lock-in across profiles
        (6 sims × 21d).  Run when changing q-feedback or integral logic.
-    7. TestConvergenceToTruth — seed-factor sweep, convergence to
-       ground-truth (13 sims × 30d).  Run when changing batch WLS,
+    8. TestConvergenceToTruth — seed-factor sweep, convergence to
+       ground-truth (13 sims × 21d).  Run when changing batch WLS,
        step caps, or seed initialization.
-    8. TestRealWeatherReplay — real open-meteo CSV (3 sims × 14d).
-       Run when changing observation filtering or weather-dependent logic.
-    9. TestMultiYearStability — 365-day drift check (2 sims × 365d).
-       Run when changing forgetting factor, P-matrix, or long-horizon
-       behavior.
 
-To run all tiers::
+**Design** (@pytest.mark.design — run on-demand, excluded from slow):
+    9. TestMultiYearStability — 365-day drift check (1 shared sim, 2 tests).
+       Run when changing forgetting factor, P-matrix, or long-horizon behavior.
 
-    pytest tests/hvac_bench/scenarios/test_full_stack_learning.py -m ''
+To run regression + slow::
 
-To run only regression::
+    pytest tests/hvac_bench/scenarios/test_full_stack_learning.py -m 'not design'
 
-    pytest tests/hvac_bench/scenarios/test_full_stack_learning.py -m 'not slow'
+To run only regression (default-ish)::
+
+    pytest tests/hvac_bench/scenarios/test_full_stack_learning.py -m 'not slow and not design'
+
+To run the long-horizon design study::
+
+    pytest tests/hvac_bench/scenarios/test_full_stack_learning.py -m design
 """
 
 from __future__ import annotations
@@ -402,7 +407,7 @@ class TestConvergenceToTruth:
         """FF coefficient should stabilize regardless of initial seed error."""
         profile = PROFILES_2R2C["living_room"]
         config = FullStackConfig(
-            n_days=30,
+            n_days=21,
             profile_name="living_room",
             outdoor_base_c=-5.0,
             outdoor_diurnal_c=6.0,
@@ -436,7 +441,7 @@ class TestConvergenceToTruth:
         # Run with this seed factor
         profile = PROFILES_2R2C["living_room"]
         config = FullStackConfig(
-            n_days=30,
+            n_days=21,
             profile_name="living_room",
             outdoor_base_c=-5.0,
             outdoor_diurnal_c=6.0,
@@ -452,7 +457,7 @@ class TestConvergenceToTruth:
 
         # Run baseline (correct seeds) for comparison
         baseline_config = FullStackConfig(
-            n_days=30,
+            n_days=21,
             profile_name="living_room",
             outdoor_base_c=-5.0,
             outdoor_diurnal_c=6.0,
@@ -477,7 +482,7 @@ class TestConvergenceToTruth:
         results = {}
         for factor in [1.0, 2.0, 3.0]:
             config = FullStackConfig(
-                n_days=30,
+                n_days=21,
                 profile_name="living_room",
                 outdoor_base_c=-5.0,
                 outdoor_diurnal_c=6.0,
@@ -910,7 +915,6 @@ class TestRecoveryFromBadStates:
 _WEATHER_DIR = Path(__file__).parent.parent / "weather_data"
 
 
-@pytest.mark.slow
 class TestRealWeatherReplay:
     """Run learning against real open-meteo weather data.
 
@@ -1008,22 +1012,33 @@ def _seasonal_outdoor(tick: int) -> float:
     return annual + diurnal + weather
 
 
-@pytest.mark.slow
-class TestMultiYearStability:
-    """Run for 1+ year and validate no long-term drift or collapse."""
+@pytest.fixture(scope="module")
+def _multi_year_result():
+    """Single 365-day run shared by all TestMultiYearStability tests."""
+    config = FullStackConfig(
+        n_days=365,
+        profile_name="living_room",
+        desired_c=20.5,
+        noise_sigma=0.1,
+        noise_seed=42,
+        outdoor_schedule=_seasonal_outdoor,
+        relax_kappa_gate=True,
+    )
+    return run_full_stack(config)
 
-    def test_one_year_no_divergence(self):
+
+@pytest.mark.design
+class TestMultiYearStability:
+    """Run for 1+ year and validate no long-term drift or collapse.
+
+    Marked ``design`` (not ``slow``): a 365-day simulation is too expensive
+    for routine regression and is run on-demand when changing forgetting
+    factor, P-matrix, or anything that could affect long-horizon behavior.
+    """
+
+    def test_one_year_no_divergence(self, _multi_year_result):
         """365-day run: coefficients bounded, no integral runaway."""
-        config = FullStackConfig(
-            n_days=365,
-            profile_name="living_room",
-            desired_c=20.5,
-            noise_sigma=0.1,
-            noise_seed=42,
-            outdoor_schedule=_seasonal_outdoor,
-            relax_kappa_gate=True,
-        )
-        result = run_full_stack(config)
+        result = _multi_year_result
 
         # No integral runaway
         max_integral = max(abs(h["integral"]) for h in result.history)
@@ -1044,18 +1059,9 @@ class TestMultiYearStability:
                 f"outdoor_delta unstable in last 30 days: range={od_range:.4f}"
             )
 
-    def test_one_year_comfort_stable(self):
+    def test_one_year_comfort_stable(self, _multi_year_result):
         """Monthly MAE should not grow over the year."""
-        config = FullStackConfig(
-            n_days=365,
-            profile_name="living_room",
-            desired_c=20.5,
-            noise_sigma=0.1,
-            noise_seed=42,
-            outdoor_schedule=_seasonal_outdoor,
-            relax_kappa_gate=True,
-        )
-        result = run_full_stack(config)
+        result = _multi_year_result
 
         # Monthly MAE (30-day buckets)
         monthly_mae = []

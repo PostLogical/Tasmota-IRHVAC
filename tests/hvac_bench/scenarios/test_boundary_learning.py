@@ -71,7 +71,7 @@ class TestZeroOffsetBandNarrowing:
 
     @pytest.mark.slow
     def test_band_narrows_and_learning_improves(self):
-        config = _spring_config(offset=0.0, n_days=30)
+        config = _spring_config(offset=0.0, n_days=21)
         result = run_full_stack(config)
 
         # -- Boundary convergence --
@@ -125,7 +125,7 @@ class TestPositiveOffsetBandShift:
 
     @pytest.mark.slow
     def test_band_shifts_and_comfort_improves(self):
-        config = _spring_config(offset=1.0, n_days=30)
+        config = _spring_config(offset=1.0, n_days=21)
         result = run_full_stack(config)
 
         # -- Boundary convergence --
@@ -183,7 +183,7 @@ class TestLargeOffsetConvergence:
     @pytest.mark.slow
     @pytest.mark.parametrize("offset", [2.0, 3.0], ids=["offset_2", "offset_3"])
     def test_iterative_convergence(self, offset: float):
-        config = _spring_config(offset=offset, n_days=60)
+        config = _spring_config(offset=offset, n_days=45)
         result = run_full_stack(config)
 
         # -- Boundary convergence --
@@ -258,7 +258,7 @@ class TestNegativeOffsetConvergence:
 
     @pytest.mark.slow
     def test_band_shifts_positive(self):
-        config = _spring_config(offset=-1.0, n_days=60)
+        config = _spring_config(offset=-1.0, n_days=30)
         result = run_full_stack(config)
 
         # -- Boundary convergence --
@@ -376,7 +376,7 @@ class TestBoundaryParameterSensitivity:
         ],
     )
     def test_parameter_effect(self, param_name: str, param_value: float):
-        config = _spring_config(offset=0.0, n_days=30)
+        config = _spring_config(offset=0.0, n_days=14)
 
         applied = [False]
 

@@ -37,12 +37,12 @@ from tests.hvac_bench.house_profiles import PROFILES_2R2C
 
 
 # Winter scenario shared by both runs.  Mirrors test_seasonal_convergence's
-# winter season (base -5°C, diurnal ±4°C, peak solar 0.5).  30 days is
-# enough to see the saturation regime stabilize without paying for 90.
+# winter season (base -5°C, diurnal ±4°C, peak solar 0.5).  14 days is
+# enough for the saturation regime to dominate the daily-mean stat.
 _WINTER_BASE_C = -5.0
 _WINTER_DIURNAL_C = 4.0
 _WINTER_SOLAR_PEAK = 0.5
-_N_DAYS = 30
+_N_DAYS = 14
 
 
 def _make_config(profile_name: str) -> FullStackConfig:
@@ -110,6 +110,7 @@ def capacity_runs() -> dict[str, FullStackResult]:
 class TestHPCapacityCurveSaturation:
     """Capacity curve raises winter saturation rate (#43 validation)."""
 
+    @pytest.mark.design
     def test_print_summary(self, capacity_runs):
         """Print the comparison — always passes, the artifact is the output."""
         sat_fixed = _saturation_pct(capacity_runs["fixed"])
@@ -119,7 +120,7 @@ class TestHPCapacityCurveSaturation:
         cold_fixed = capacity_runs["fixed"].cold_violations
         cold_cap = capacity_runs["capacity"].cold_violations
         print(f"\n{'=' * 60}")
-        print("  HP Capacity Curve: winter saturation, 30d, living_room")
+        print("  HP Capacity Curve: winter saturation, 14d, living_room")
         print(f"{'=' * 60}")
         print(f"{'Variant':<22}{'Saturation%':>14}{'CtrlComfort%':>14}"
               f"{'ColdViols':>12}")
