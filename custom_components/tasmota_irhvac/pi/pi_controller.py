@@ -2131,17 +2131,19 @@ class PIController:
 
         frozen_names = []
         active_names = []
-        # Only track model inputs for learning state; base features
-        # (intercept, outdoor_delta, etc.) are never frozen by auto-gating.
-        mi_start = self._features.model_input_start
-        for i in range(mi_start, n):
+        # Track features that start frozen (model_inputs + time_of_day).
+        # Base features (intercept, outdoor_delta) are always identifiable
+        # and never auto-frozen — they don't represent "learning progress."
+        for i, frozen_at_init in enumerate(self._features.frozen_mask()):
+            if not frozen_at_init or i >= n:
+                continue
             name = coeff_names[i] if i < len(coeff_names) else f"β{i}"
             if rls.frozen[i]:
                 frozen_names.append(name)
             else:
                 active_names.append(name)
 
-        n_model = n - mi_start  # Model input features only
+        n_model = len(frozen_names) + len(active_names)  # Learnable features
         n_frozen = len(frozen_names)
         if not self._control_active:
             state = "Observing"
