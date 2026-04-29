@@ -174,6 +174,69 @@ class TestClosedLoopFit:
         assert result[0].value == pytest.approx(15.0, abs=15.0)
         assert result[1].value == pytest.approx(90.0, abs=45.0)
 
+    def test_timeout_triggers_fit_attempt(self):
+        """Past _MAX_DURATION_MIN, observation closes and fit is attempted."""
+        from custom_components.tasmota_irhvac.pi.providers.closed_loop import (
+            _MAX_DURATION_MIN,
+        )
+        p = ClosedLoopProvider(response_lag=0.0)
+        p.start_observation(_ctx(step=2.0))
+        # Feed observations up to just before timeout — observation still active.
+        for i in range(1, 25):
+            t = i * 15.0 * 60.0
+            p.accumulate(t, 20.0 + 0.01 * i, hp_setpoint_c=22.0)
+        assert p._active is True
+        # One tick past _MAX_DURATION_MIN: observation closes, fit attempted.
+        timeout_t = (_MAX_DURATION_MIN + 1.0) * 60.0
+        p.accumulate(timeout_t, 21.5, hp_setpoint_c=22.0)
+        assert p._active is False
+
+    def test_settles_at_90pct_triggers_fit(self):
+        """Once response reaches 90% of step magnitude, fit is attempted."""
+        p = ClosedLoopProvider(response_lag=0.0)
+        p.start_observation(_ctx(step=2.0, temp=20.0))
+        # Feed observations with response that hits 90% of step (Δ=1.8 → 21.8).
+        # Need _MIN_DATA_POINTS records at >= _MIN_DURATION_MIN before 90% gate
+        # is checked.
+        from custom_components.tasmota_irhvac.pi.providers.closed_loop import (
+            _MIN_DURATION_MIN, _MIN_DATA_POINTS,
+        )
+        n = max(_MIN_DATA_POINTS + 2, 20)
+        dt_per_step = max(_MIN_DURATION_MIN, 30.0) / n
+        for i in range(1, n + 1):
+            t = i * dt_per_step * 60.0
+            # Linear ramp toward 21.8 (90% of 2.0 step)
+            temp = 20.0 + 1.8 * (i / n)
+            p.accumulate(t, temp, hp_setpoint_c=22.0)
+        # After enough settled time + data, observation closed by fit attempt.
+        assert p._active is False
+
+    def test_negative_k_candidate_rejected(self):
+        """Anti-correlated y_obs vs y_pred → k computed negative → candidate skipped (line 224).
+
+        Forces the analytical K solver to produce a negative gain by giving
+        observations whose response is exactly opposite the SOPDT step
+        (room cooled when setpoint stepped UP). The non-physical guard
+        rejects every grid point → fit returns None.
+        """
+        p = ClosedLoopProvider(response_lag=0.0)
+        p.start_observation(_ctx(step=2.0, temp=20.0))
+        # Inject anti-correlated data: setpoint stepped up but room cools
+        for i in range(1, 16):
+            t = i * 15.0 * 60.0
+            # Negative response to positive step → makes K analytically negative
+            temp = 20.0 - 0.1 * i
+            p.accumulate(t, temp, hp_setpoint_c=22.0)
+        # Force completion by exceeding _MAX_DURATION_MIN
+        from custom_components.tasmota_irhvac.pi.providers.closed_loop import (
+            _MAX_DURATION_MIN,
+        )
+        result = p.accumulate(
+            (_MAX_DURATION_MIN + 1.0) * 60.0, 18.0, hp_setpoint_c=22.0,
+        )
+        # All grid points produced k ≤ 0 (non-physical) → fit returns None
+        assert result is None
+
     def test_rejects_poor_fit(self):
         """Rejects fit when R² is too low (random/noisy data)."""
         p = ClosedLoopProvider(response_lag=0.0)

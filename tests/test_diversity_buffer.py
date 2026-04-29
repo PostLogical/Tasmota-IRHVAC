@@ -783,3 +783,61 @@ class TestBufferClear:
         for i in range(5):
             buf.add(_make_obs(t=100.0 + i, outdoor_delta=15.0))
         assert len(buf) == 5
+
+
+class TestMulticollinearityWithFewFeatures:
+    """compute_condition_number / compute_vif fall back when n_features < 3."""
+
+    def test_condition_number_two_features_returns_one(self):
+        """With intercept + outdoor_delta only, no feature-feature κ."""
+        buf = DiversityAwareBuffer(
+            n_features=2, max_size=20,
+            feature_order=["intercept", "outdoor_delta"],
+            model_inputs=[],
+        )
+        for i in range(15):
+            buf.add(_make_obs(t=float(i), outdoor_delta=5.0 + i * 0.1, n_features=2))
+        # n_features=2 → returns 1.0 (no collinearity to compute)
+        assert buf.compute_condition_number() == 1.0
+
+    def test_vif_two_features_returns_ones(self):
+        """VIF with n_features<3 falls back to [1.0]*n."""
+        buf = DiversityAwareBuffer(
+            n_features=2, max_size=20,
+            feature_order=["intercept", "outdoor_delta"],
+            model_inputs=[],
+        )
+        for i in range(15):
+            buf.add(_make_obs(t=float(i), outdoor_delta=5.0 + i * 0.1, n_features=2))
+        vifs = buf.compute_vif()
+        assert vifs == [1.0, 1.0]
+
+    def test_correlations_include_top_pair_when_below_threshold(self):
+        """include_top=True returns the strongest pair even if no |r| > 0.7."""
+        buf = DiversityAwareBuffer(
+            n_features=4, max_size=80,
+            feature_order=["intercept", "outdoor_delta", "solar", "pellet"],
+            model_inputs=[
+                {"entity_id": _SOLAR_ENTITY, "name": "solar"},
+                {"entity_id": _PELLET_ENTITY, "name": "pellet"},
+            ],
+        )
+        # Independent random-ish features → no |r| crosses 0.7
+        import random
+        rng = random.Random(42)
+        for i in range(60):
+            buf.add(_make_obs(
+                t=float(i),
+                outdoor_delta=rng.uniform(-2.0, 2.0),
+                solar=rng.uniform(0.0, 1.0),
+                pellet=rng.uniform(0.0, 0.5),
+                n_features=4,
+            ))
+        names = ["intercept", "outdoor_delta", "solar", "pellet"]
+        # Without include_top: empty (no pair > 0.7)
+        regular = buf.get_pairwise_correlations(names, include_top=False)
+        assert regular == []
+        # With include_top: returns the single strongest pair
+        with_top = buf.get_pairwise_correlations(names, include_top=True)
+        assert len(with_top) == 1
+        assert with_top[0][0] in names and with_top[0][1] in names

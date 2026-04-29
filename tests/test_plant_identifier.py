@@ -107,6 +107,22 @@ class TestPlantIdentifier:
         assert pi.plant.tau_slow.source == "seed"
         assert pi.plant.tau_slow.value == 60.0
 
+    def test_area_provider_estimate_updates_tau_slow(self):
+        """When area_provider returns a tau_slow estimate, plant updates."""
+        from custom_components.tasmota_irhvac.pi.plant_model import ParameterEstimate
+        pi = self._make(tau=60.0, lag=15.0)
+        pi.start_observation(0.0, 20.0, 22.0, 2.0)
+        # Stub the area provider to fire a tau_slow estimate on next check.
+        new_tau_slow = ParameterEstimate(
+            value=180.0, source="area_method", confidence=1.0
+        )
+        pi._area_provider.accumulate = lambda *a, **kw: new_tau_slow
+        gain_update = pi.check_observation(3000.0, 21.0)
+        assert pi.plant.tau_slow.source == "area_method"
+        assert pi.plant.tau_slow.value == 180.0
+        assert gain_update is not None
+        assert gain_update.tau_slow == 180.0
+
 
 class TestPlantIdentifierPersistence:
     """Tests for save/restore round-trip."""

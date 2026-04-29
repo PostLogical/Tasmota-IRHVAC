@@ -221,7 +221,7 @@ class ClosedLoopProvider:
                     continue
                 k = num / den
                 if k <= 0:
-                    continue  # Non-physical
+                    continue  # Non-physical (anti-correlated data)
 
                 # Compute residual sum of squares
                 rss = sum(

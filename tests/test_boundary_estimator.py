@@ -480,3 +480,200 @@ class TestSplitModelSweep:
         result = est.estimate_boundary(obs, mi, -2.0, 2.0)
         assert result.slope_k_c is not None
         assert result.slope_k_c > 0
+
+
+class TestEdgeCases:
+    """Defensive branches and rarely-hit paths."""
+
+    def test_skips_observations_without_outdoor_temp(self):
+        """Observations with outdoor_temp_c=None are silently skipped."""
+        est = BoundaryEstimator(min_observations=10, min_per_side=3)
+        obs = _make_observations(n=50)
+        # Replace ~10 observations with outdoor-temp-missing (still build_arrays
+        # should drop them and proceed with the rest).
+        for i in range(10):
+            obs[i] = FakeObs(
+                current_c=obs[i].current_c, hp_setpoint=obs[i].hp_setpoint,
+                desired_c=obs[i].desired_c, outdoor_temp_c=None,
+                room_rate=obs[i].room_rate, raw_readings=obs[i].raw_readings,
+            )
+        result = est.estimate_boundary(
+            obs, [{"input_role": "solar", "entity_id": "sensor.solar"}],
+            -2.0, 2.0,
+        )
+        # Estimator should still complete (rows with None outdoor were filtered)
+        assert result.n_observations == 40
+
+    def test_empty_coarse_results_stalls(self):
+        """If sweep produces no candidates with valid splits, stall counter rises."""
+        # Force min_per_side larger than any valid split: with 25 obs, no
+        # candidate breakpoint can split into ≥20 on each side.
+        est = BoundaryEstimator(min_observations=20, min_per_side=20)
+        obs = _make_observations(n=25)
+        result = est.estimate_boundary(obs, [], -2.0, 2.0)
+        assert not result.confident
+        assert est.stall_count >= 1
+
+    def test_low_score_returns_unconfident_result(self):
+        """When best_score ≤ 0, result reports the candidate but isn't confident.
+
+        Pure linear-in-outdoor signal with no HP gating: null model
+        (intercept + outdoor_delta + solar) fits perfectly. Split models
+        also fit perfectly but with more parameters, so rss_null = rss_l +
+        rss_r = 0 → best_score = 0, falls into the unconfident branch.
+        """
+        est = BoundaryEstimator(min_observations=20, min_per_side=5)
+        rng = np.random.default_rng(7)
+        obs = []
+        for _ in range(80):
+            delta = rng.uniform(-2.0, 2.0)
+            outdoor = 10.0 + rng.normal(0, 1.0)
+            room = 20.5 + rng.normal(0, 0.05)
+            outdoor_delta = outdoor - room
+            # Pure linear: rate = 0.001 × outdoor_delta. No HP, no solar, no noise.
+            obs.append(FakeObs(
+                current_c=room, hp_setpoint=room - delta,
+                desired_c=20.5, outdoor_temp_c=outdoor,
+                room_rate=0.001 * outdoor_delta,
+                raw_readings={},
+            ))
+        result = est.estimate_boundary(obs, [], -2.0, 2.0)
+        assert not result.confident
+        # Whatever breakpoint the sweep landed on is reported
+        assert result.estimated_breakpoint is not None
+        assert result.rms_margin is not None
+
+    def test_pending_setpoint_evidence_consumed_on_estimate(self):
+        """Pending setpoint-change evidence is incorporated into Bayesian update."""
+        est = BoundaryEstimator(min_observations=20, min_per_side=5)
+        # Inject pending evidence directly (bypassing the tick machinery)
+        est._setpoint_evidence.append((0.5, 0.8))
+        assert len(est._setpoint_evidence) == 1
+        obs = _make_observations(breakpoint=0.0, n=100)
+        est.estimate_boundary(
+            obs, [{"input_role": "solar", "entity_id": "sensor.solar"}],
+            -2.0, 2.0,
+        )
+        # After estimate, pending evidence should be consumed.
+        assert len(est._setpoint_evidence) == 0
+
+    def test_analyze_empty_response_event_returns_early(self):
+        """Setpoint-change event with no post-change rates is silently ignored."""
+        from custom_components.tasmota_irhvac.pi.boundary_estimator import (
+            SetpointChangeEvent,
+        )
+        est = BoundaryEstimator()
+        event = SetpointChangeEvent(
+            mono_time=0.0,
+            old_setpoint=22, new_setpoint=21,
+            delta_before=-2.0,
+            room_rate_before=0.001,
+            current_c_at_change=20.0,
+            room_rates_after=[],  # ← no ticks accumulated yet
+        )
+        # Should return without recording any evidence
+        est._analyze_setpoint_response(event, is_heating=True)
+        assert len(est._setpoint_evidence) == 0
+
+    def test_lstsq_failure_on_null_model_stalls(self):
+        """LinAlgError on null-model lstsq → stall + not-confident result."""
+        from unittest.mock import patch as _patch
+        est = BoundaryEstimator(min_observations=20, min_per_side=5)
+        obs = _make_observations(n=80)
+        # Force np.linalg.lstsq to raise LinAlgError on the very first call
+        # (the null-model fit). estimate_boundary catches it, increments
+        # stall, and returns the not-confident sentinel.
+        original_lstsq = np.linalg.lstsq
+
+        def fail_first(X, y, rcond=None):
+            fail_first.calls += 1
+            if fail_first.calls == 1:
+                raise np.linalg.LinAlgError("forced for test")
+            return original_lstsq(X, y, rcond=rcond)
+        fail_first.calls = 0
+
+        with _patch.object(np.linalg, "lstsq", side_effect=fail_first):
+            result = est.estimate_boundary(obs, [], -2.0, 2.0)
+        assert result is not None
+        assert not result.confident
+        assert est.stall_count == 1
+
+    def test_lstsq_failure_on_left_fit_skips_candidate(self):
+        """LinAlgError on left-side fit makes that candidate fall out of the sweep."""
+        from unittest.mock import patch as _patch
+        est = BoundaryEstimator(min_observations=20, min_per_side=5)
+        obs = _make_observations(n=120)
+        original = np.linalg.lstsq
+        # Skip the null-model call (first), then raise on every other call
+        # (alternating left/right). Catches the left handler at lines 424-425.
+        def lstsq_split_fail(X, y, rcond=None):
+            lstsq_split_fail.calls += 1
+            if lstsq_split_fail.calls == 1:
+                return original(X, y, rcond=rcond)
+            raise np.linalg.LinAlgError("forced left-fit failure")
+        lstsq_split_fail.calls = 0
+        with _patch.object(np.linalg, "lstsq", side_effect=lstsq_split_fail):
+            result = est.estimate_boundary(obs, [], -2.0, 2.0)
+        assert not result.confident
+        assert est.stall_count == 1
+
+    def test_lstsq_failure_on_right_fit_skips_candidate(self):
+        """LinAlgError on right-side fit makes that candidate fall out (lines 435-436)."""
+        from unittest.mock import patch as _patch
+        est = BoundaryEstimator(min_observations=20, min_per_side=5)
+        obs = _make_observations(n=120)
+        original = np.linalg.lstsq
+        # Skip the null-model call (first), then alternate: left fits succeed
+        # (call # is 2, 4, 6, ...) but right fits fail (3, 5, 7, ...).
+        def lstsq_right_fail(X, y, rcond=None):
+            lstsq_right_fail.calls += 1
+            if lstsq_right_fail.calls == 1:
+                return original(X, y, rcond=rcond)
+            # Even calls = left, odd = right (after the null)
+            if lstsq_right_fail.calls % 2 == 0:
+                return original(X, y, rcond=rcond)
+            raise np.linalg.LinAlgError("forced right-fit failure")
+        lstsq_right_fail.calls = 0
+        with _patch.object(np.linalg, "lstsq", side_effect=lstsq_right_fail):
+            result = est.estimate_boundary(obs, [], -2.0, 2.0)
+        assert not result.confident
+        assert est.stall_count == 1
+
+    def test_low_score_unconfident_when_split_no_better_than_null(self):
+        """When split RSS ≥ null RSS for all candidates, best_score≤0 path fires."""
+        from unittest.mock import patch as _patch
+        est = BoundaryEstimator(min_observations=20, min_per_side=5)
+        obs = _make_observations(n=80)
+        # Patch _split_model_sweep to return candidates whose score is non-positive
+        original_sweep = est._split_model_sweep
+        def neg_score_sweep(*args, **kwargs):
+            results = original_sweep(*args, **kwargs)
+            # Force all scores negative
+            return [(bp, -abs(score) - 0.001, k_c) for (bp, score, k_c) in results]
+        with _patch.object(est, "_split_model_sweep", side_effect=neg_score_sweep):
+            result = est.estimate_boundary(obs, [], -2.0, 2.0)
+        assert not result.confident
+        assert result.estimated_breakpoint is not None
+        assert result.rms_margin is not None
+        assert result.rms_margin <= 0  # negative score reported back
+
+    def test_min_band_enforcement_when_step_clipped(self):
+        """min_band protection fires when max_step_per_update prevents reaching half-band targets."""
+        # Existing cal band is small (1°C); min_band requires 5°C; max_step
+        # caps movement so move_toward can only shift each endpoint by 0.1°C
+        # toward the wider targets. Result: post-step band is still ~1°C,
+        # below min_band → line 648-651 widens it to min_band centered on
+        # the (post-step) midpoint.
+        est = BoundaryEstimator(
+            prior_mean=0.0, prior_std=0.001,
+            safety_margin=0.0,
+            min_band_width=5.0,
+            max_step_per_update=0.1,
+        )
+        new_min, new_max = est._posterior_to_bounds(-1.0, 0.0)
+        # Band must respect min_band_width
+        assert new_max - new_min >= 5.0 - 1e-6
+        # Centered on the post-step midpoint (originally -0.5, then both
+        # shifted toward target by max_step=0.1, midpoint stays near -0.4).
+        midpoint = (new_min + new_max) / 2.0
+        assert -1.0 < midpoint < 0.0

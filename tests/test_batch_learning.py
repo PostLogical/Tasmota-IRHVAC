@@ -1503,6 +1503,24 @@ class TestResidualsByHour:
                 feature_order=_test_feature_order(0), model_inputs=_test_model_inputs(0))
         assert len(patterns) == 0
 
+    def test_skips_high_room_rate(self):
+        """Observations above room_rate_threshold are excluded from residual analysis."""
+        beta = [1.0, 0.3]
+        obs = []
+        # All high-rate observations — none should be binned
+        for hour in range(24):
+            for _ in range(8):
+                obs.append(self._make_obs(
+                    features=[1.0, 5.0], sp=25.0, cur=20.0,
+                    wall_hour=hour, rate=0.05,  # well above default 0.01 threshold
+                ))
+        patterns = analyze_residuals_by_hour(
+            obs, beta, n_features=2,
+            feature_order=_test_feature_order(0),
+            model_inputs=_test_model_inputs(0),
+        )
+        assert len(patterns) == 0
+
     def test_insufficient_obs_per_hour(self):
         """Hours with fewer than min_obs_per_hour are not flagged."""
         beta = [1.0, 0.3]
@@ -2543,3 +2561,476 @@ class TestWLSDetectedTau:
             f"Auto β={beta_auto:.3f} should be closer to true {beta_true} "
             f"than raw β={beta_raw:.3f}"
         )
+
+
+class TestAutoLagTauDeltaFromRoom:
+    """Auto lag-tau detection for delta_from_room model inputs.
+
+    Covers _compute_rss line 309 / line 435 where filtered values are
+    converted to deltas before participating in the joint regression.
+    """
+
+    def test_delta_from_room_input_lag_tau_path(self):
+        """delta_from_room input through auto lag-tau detection runs cleanly."""
+        import datetime as _dt
+        from custom_components.tasmota_irhvac.pi.batch_learning import (
+            weighted_least_squares,
+        )
+        obs = []
+        for hour in range(24):
+            for k in range(4):
+                wt = _dt.datetime(2026, 4, 20, hour, k * 15, 0).timestamp()
+                obs.append(Observation(
+                    timestamp=hour * 3600.0 + k * 900.0, wall_time=wt,
+                    hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+                    outdoor_temp_c=15.0,
+                    room_rate=0.001,
+                    raw_readings={"sensor.adjacent": 22.0},
+                    clamped=False,
+                ))
+        model_inputs = [{
+            "entity_id": "sensor.adjacent", "name": "adj",
+            "delta_from_room": True,
+        }]
+        feature_order = [
+            "intercept", "outdoor_delta", "adj", "sin_hour", "cos_hour",
+        ]
+        # Just exercise the path — detect_lag=True (default) runs auto-detect
+        result = weighted_least_squares(
+            obs, n_features=3, min_observations=20,
+            feature_order=feature_order, model_inputs=model_inputs,
+        )
+        # Either a successful BatchResult or None (insufficient signal); both
+        # exercise the delta_from_room branch we care about.
+        assert result is None or isinstance(result.beta_batch, list)
+
+
+class TestToDFWLPartialling:
+    """ToD augmented FWL partialling fires when _solve_joint is forced None
+    AND observations span 24 hours. Lines 1340-1382 in _solve_fwl partial
+    sin/cos from x and y for the model-input regression.
+    """
+
+    def test_fwl_tod_path_with_diurnal_observations(self):
+        import datetime as _dt
+        from unittest.mock import patch as _patch
+        from custom_components.tasmota_irhvac.pi.batch_learning import (
+            weighted_least_squares,
+        )
+        # 24 hours of observations → tod variance > threshold inside _solve_fwl
+        obs = []
+        for hour in range(24):
+            for k in range(5):
+                wt = _dt.datetime(2026, 4, 20, hour, k * 12, 0).timestamp()
+                solar_val = max(0.0, 1.0 - abs(hour - 12) / 6.0)
+                obs.append(Observation(
+                    timestamp=hour * 3600.0 + k * 720.0, wall_time=wt,
+                    hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+                    outdoor_temp_c=15.0,
+                    room_rate=0.001 - 0.0008 * solar_val,
+                    raw_readings={"sensor.solar": solar_val},
+                    clamped=False,
+                ))
+        model_inputs = [{
+            "entity_id": "sensor.solar", "name": "solar", "lag_tau": 1800,
+        }]
+        feature_order = [
+            "intercept", "outdoor_delta", "solar", "sin_hour", "cos_hour",
+        ]
+        # Force _solve_joint → None so the FWL fallback fires.
+        # _solve_fwl with 24-hour-spanning observations sees high sin/cos
+        # variance → _use_tod=True → augmented partialling lines 1340-1382 run.
+        with _patch(
+            "custom_components.tasmota_irhvac.pi.batch_learning._solve_joint",
+            return_value=None,
+        ):
+            result = weighted_least_squares(
+                obs, n_features=3, min_observations=20,
+                feature_order=feature_order, model_inputs=model_inputs,
+            )
+        assert result is not None
+        assert len(result.beta_batch) >= 3
+
+
+class TestBatchLearningDefensivePaths:
+    """Mock-driven tests for defensive code paths in batch_learning.
+
+    These exercise exception handlers and rare-but-real code branches
+    that natural test data doesn't reach.
+    """
+
+    def test_scipy_unavailable_falls_back_to_golden_section(self):
+        """When scipy isn't importable (line 31-33), code uses golden-section search."""
+        import importlib
+        import sys
+        import custom_components.tasmota_irhvac.pi.batch_learning as bl
+        # Save current state
+        saved_scipy = sys.modules.get("scipy.optimize")
+        saved_minimize = sys.modules.get("scipy.optimize.minimize_scalar")
+        original_avail = bl._SCIPY_AVAILABLE
+        original_minimize = bl._minimize_scalar
+        try:
+            # Force the ImportError path on next reimport
+            sys.modules["scipy.optimize"] = None  # will raise ImportError
+            importlib.reload(bl)
+            assert bl._SCIPY_AVAILABLE is False
+            assert bl._minimize_scalar is None
+        finally:
+            # Restore
+            if saved_scipy is not None:
+                sys.modules["scipy.optimize"] = saved_scipy
+            else:
+                sys.modules.pop("scipy.optimize", None)
+            if saved_minimize is not None:
+                sys.modules["scipy.optimize.minimize_scalar"] = saved_minimize
+            importlib.reload(bl)
+            bl._SCIPY_AVAILABLE = original_avail
+            bl._minimize_scalar = original_minimize
+
+    def test_compute_rss_returns_inf_on_too_few_rows(self):
+        """If filtered values leave <10 valid rows, _compute_rss returns inf (line 315)."""
+        import datetime as _dt
+        from custom_components.tasmota_irhvac.pi.batch_learning import (
+            _detect_optimal_tau,
+        )
+        # 12 obs but only 5 with the entity in raw_readings (rest missing)
+        # → eligibility passes initial check (n_eff = 12 ≥ 10), but the
+        # filtered values for missing entries are None → m < 10 inside
+        # _compute_rss → inf return.
+        # Actually n_eff counts raw_readings hits, so we need n_eff ≥ 10.
+        # Use 11 obs with the entity present, but make _apply_retrospective_ema
+        # filter out enough that m < 10 in the inner loop.
+        obs = []
+        for i in range(11):
+            wt = _dt.datetime(2026, 4, 20, i % 24, 0, 0).timestamp()
+            obs.append(Observation(
+                timestamp=float(i * 60), wall_time=wt,
+                hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=15.0,
+                room_rate=0.001,
+                raw_readings={"sensor.s": 0.5},
+                clamped=False,
+            ))
+        # Patch _apply_retrospective_ema to return mostly Nones so the inner
+        # loop drops them and m < 10.
+        from unittest.mock import patch as _patch
+        with _patch(
+            "custom_components.tasmota_irhvac.pi.batch_learning."
+            "_apply_retrospective_ema",
+            return_value=[None] * 11,
+        ):
+            y = [o.room_rate for o in obs]
+            w = [1.0] * len(obs)
+            base_X = [[1.0, 0.0] for _ in obs]
+            from custom_components.tasmota_irhvac.pi.model_input_manager import (
+                tod_features,
+            )
+            tod_cols = [tod_features(o.wall_time) for o in obs]
+            result = _detect_optimal_tau(
+                obs, y, w, entity_id="sensor.s",
+                base_X=base_X, tod_cols=tod_cols,
+            )
+            # All rows filtered → RSS=inf at all τ → r2_improvement degenerate
+            # → returns None at line 405.
+            assert result is None
+
+    def test_compute_rss_inf_when_solve_symmetric_fails(self):
+        """Pure-Python branch: _solve_symmetric returning None makes _compute_rss inf (line 358)."""
+        import datetime as _dt
+        from unittest.mock import patch as _patch
+        import custom_components.tasmota_irhvac.pi.batch_learning as bl
+        # Build a normal scenario but force _NUMPY_AVAILABLE=False AND
+        # _solve_symmetric=None to take the singular-matrix branch.
+        obs = []
+        for i in range(60):
+            wt = _dt.datetime(2026, 4, 20, i % 24, (i % 4) * 15, 0).timestamp()
+            obs.append(Observation(
+                timestamp=float(i * 900), wall_time=wt,
+                hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=15.0,
+                room_rate=0.001,
+                raw_readings={"sensor.s": 0.5},
+                clamped=False,
+            ))
+        y = [o.room_rate for o in obs]
+        w = [1.0] * len(obs)
+        base_X = [[1.0, 0.0] for _ in obs]
+        from custom_components.tasmota_irhvac.pi.model_input_manager import (
+            tod_features,
+        )
+        tod_cols = [tod_features(o.wall_time) for o in obs]
+        original_avail = bl._NUMPY_AVAILABLE
+        try:
+            bl._NUMPY_AVAILABLE = False
+            with _patch.object(bl, "_solve_symmetric", return_value=None):
+                # _compute_rss returns inf for every τ → rss_raw == inf at line
+                # 404 → _detect_optimal_tau returns None.
+                result = bl._detect_optimal_tau(
+                    obs, y, w, entity_id="sensor.s",
+                    base_X=base_X, tod_cols=tod_cols,
+                )
+                assert result is None
+        finally:
+            bl._NUMPY_AVAILABLE = original_avail
+
+    def test_detect_optimal_tau_returns_none_on_zero_rss_raw(self):
+        """rss_raw == 0 (perfect fit at τ=0) → returns None (line 405)."""
+        import datetime as _dt
+        from unittest.mock import patch as _patch
+        from custom_components.tasmota_irhvac.pi.batch_learning import (
+            _detect_optimal_tau,
+        )
+        obs = []
+        for i in range(40):
+            wt = _dt.datetime(2026, 4, 20, i % 24, 0, 0).timestamp()
+            obs.append(Observation(
+                timestamp=float(i * 60), wall_time=wt,
+                hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=15.0,
+                room_rate=0.001,
+                raw_readings={"sensor.s": 0.5},
+                clamped=False,
+            ))
+        y = [o.room_rate for o in obs]
+        w = [1.0] * len(obs)
+        base_X = [[1.0, 0.0] for _ in obs]
+        from custom_components.tasmota_irhvac.pi.model_input_manager import (
+            tod_features,
+        )
+        tod_cols = [tod_features(o.wall_time) for o in obs]
+        # Patch _compute_rss to return 0 → rss_raw <= 0 branch fires.
+        # We can't patch the inner closure directly, but we can patch
+        # _apply_retrospective_ema to a series that makes RSS exactly 0.
+        # Easier: directly patch the result of the inner closure via
+        # `_apply_retrospective_ema` returning constant values that
+        # produce rss=0 in the joint regression.
+        # Cleanest path: patch np.linalg.lstsq to return a perfect fit.
+        import numpy as np
+        original_lstsq = np.linalg.lstsq
+        def perfect_fit(X, y_arr, rcond=None):
+            beta, _, rank, sv = original_lstsq(X, y_arr, rcond=rcond)
+            # Override rss to 0 in the second slot (residual)
+            return beta, np.array([0.0]), rank, sv
+        with _patch.object(np.linalg, "lstsq", side_effect=perfect_fit):
+            result = _detect_optimal_tau(
+                obs, y, w, entity_id="sensor.s",
+                base_X=base_X, tod_cols=tod_cols,
+            )
+            # rss_raw = 0 → degenerate-fit guard fires → None
+            assert result is None
+
+    def test_detect_optimal_tau_snaps_tiny_tau_to_zero(self):
+        """BIC accepts but tau_opt < _TAU_MIN_MEANINGFUL → (0,0,0) (line 422).
+
+        Construct: minimize_scalar returns a tau below 600s, AND patched
+        _apply_retrospective_ema returns near-perfect predictor at non-zero
+        tau, so BIC accepts. Then the tau-too-small guard fires.
+        """
+        import datetime as _dt
+        from unittest.mock import patch as _patch, MagicMock
+        import custom_components.tasmota_irhvac.pi.batch_learning as bl
+        obs = []
+        for i in range(60):
+            wt = _dt.datetime(2026, 4, 20, i % 24, (i % 4) * 15, 0).timestamp()
+            obs.append(Observation(
+                timestamp=float(i * 900), wall_time=wt,
+                hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=15.0,
+                room_rate=float(i % 7) * 0.001,
+                raw_readings={"sensor.s": 0.5 + (i % 5) * 0.1},
+                clamped=False,
+            ))
+        y = [o.room_rate for o in obs]
+        w = [1.0] * len(obs)
+        base_X = [[1.0, float(i % 3)] for i in range(len(obs))]
+        from custom_components.tasmota_irhvac.pi.model_input_manager import (
+            tod_features,
+        )
+        tod_cols = [tod_features(o.wall_time) for o in obs]
+        # rss_opt must be > 0 (line 404 guard) AND small enough that
+        # bic_gain = n_eff·log(rss_raw/rss_opt) > log(n_eff) → BIC accept.
+        fake_result = MagicMock(x=bl._TAU_MIN_MEANINGFUL / 3, fun=1e-10)
+        original_ema = bl._apply_retrospective_ema
+        def fake_ema(observations, entity_id, tau):
+            if tau < 1.0:
+                return original_ema(observations, entity_id, tau)
+            return [o.room_rate * 1000.0 for o in observations]
+        with _patch.object(bl, "_minimize_scalar") as mock_min, \
+             _patch.object(bl, "_apply_retrospective_ema", side_effect=fake_ema):
+            mock_min.return_value = fake_result
+            result = bl._detect_optimal_tau(
+                obs, y, w, entity_id="sensor.s",
+                base_X=base_X, tod_cols=tod_cols,
+            )
+        # tau (200s) < _TAU_MIN_MEANINGFUL (600s) → snap-to-zero
+        assert result == (0.0, 0.0, 0.0)
+
+    def test_detect_optimal_tau_refit_with_delta_from_room(self):
+        """Re-fit at tau_opt with delta_from_room subtraction (lines 432, 435)."""
+        import datetime as _dt
+        from unittest.mock import patch as _patch, MagicMock
+        import custom_components.tasmota_irhvac.pi.batch_learning as bl
+        obs = []
+        for i in range(60):
+            wt = _dt.datetime(2026, 4, 20, i % 24, (i % 4) * 15, 0).timestamp()
+            obs.append(Observation(
+                timestamp=float(i * 900), wall_time=wt,
+                hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=15.0,
+                room_rate=float(i % 7) * 0.001,
+                raw_readings={"sensor.adj": 22.0 + (i % 5) * 0.5},
+                clamped=False,
+            ))
+        y = [o.room_rate for o in obs]
+        w = [1.0] * len(obs)
+        base_X = [[1.0, float(i % 3)] for i in range(len(obs))]
+        from custom_components.tasmota_irhvac.pi.model_input_manager import (
+            tod_features,
+        )
+        tod_cols = [tod_features(o.wall_time) for o in obs]
+        fake_result = MagicMock(x=bl._TAU_MIN_MEANINGFUL * 5, fun=1e-10)
+        original_ema = bl._apply_retrospective_ema
+        def fake_ema(observations, entity_id, tau):
+            if tau < 1.0:
+                return original_ema(observations, entity_id, tau)
+            vals = [o.room_rate * 1000.0 for o in observations]
+            vals[0] = None  # exercise filtered[i] is None branch (line 432)
+            return vals
+        with _patch.object(bl, "_minimize_scalar") as mock_min, \
+             _patch.object(bl, "_apply_retrospective_ema", side_effect=fake_ema):
+            mock_min.return_value = fake_result
+            result = bl._detect_optimal_tau(
+                obs, y, w,
+                entity_id="sensor.adj",
+                delta_from_room=True,  # ← exercises line 435
+                base_X=base_X, tod_cols=tod_cols,
+            )
+        # tau is above threshold → re-fit branch runs (lines 424-) — result
+        # is a (tau, r2, beta) tuple from successful re-regression.
+        assert isinstance(result, tuple)
+        assert result[0] == bl._TAU_MIN_MEANINGFUL * 5
+
+    def test_analyze_residuals_handles_none_args_defensively(self):
+        """analyze_residuals_by_hour returns empty when feature_order/model_inputs is None."""
+        from custom_components.tasmota_irhvac.pi.batch_learning import (
+            analyze_residuals_by_hour,
+        )
+        import datetime as _dt
+        # Build observations with positive room_rate but pass None for
+        # feature_order — defensive guard at line 2293 should skip them all.
+        obs = []
+        for hour in range(24):
+            wt = _dt.datetime(2026, 4, 20, hour, 0, 0).timestamp()
+            obs.append(Observation(
+                timestamp=float(hour * 3600), wall_time=wt,
+                hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=15.0,
+                room_rate=0.001,
+                raw_readings={},
+                clamped=False,
+            ))
+        # feature_order=None → defensive continue path
+        patterns = analyze_residuals_by_hour(
+            obs, [1.0, 0.3], n_features=2,
+            feature_order=None, model_inputs=[{"entity_id": "x"}],
+        )
+        assert patterns == []
+        # model_inputs=None → defensive continue path
+        patterns = analyze_residuals_by_hour(
+            obs, [1.0, 0.3], n_features=2,
+            feature_order=["intercept", "outdoor_delta"], model_inputs=None,
+        )
+        assert patterns == []
+
+    def test_solve_fwl_partial_out_singular_falls_to_raw(self):
+        """When the partial-out solve fails, _solve_fwl falls back to raw subset (line 1360)."""
+        from unittest.mock import patch as _patch
+        import datetime as _dt
+        from custom_components.tasmota_irhvac.pi.batch_learning import (
+            weighted_least_squares,
+        )
+        obs = []
+        for hour in range(24):
+            for k in range(5):
+                wt = _dt.datetime(2026, 4, 20, hour, k * 12, 0).timestamp()
+                obs.append(Observation(
+                    timestamp=hour * 3600.0 + k * 720.0, wall_time=wt,
+                    hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+                    outdoor_temp_c=15.0,
+                    room_rate=0.001,
+                    raw_readings={"sensor.s": 0.3 + 0.1 * (hour % 2)},
+                    clamped=False,
+                ))
+        feature_order = [
+            "intercept", "outdoor_delta", "s", "sin_hour", "cos_hour",
+        ]
+        model_inputs = [{"entity_id": "sensor.s", "name": "s", "lag_tau": 1800}]
+
+        # Force _solve_joint → None to enter _solve_fwl, then make the
+        # partial-out _solve_symmetric call (n=4: intercept+od+sin+cos)
+        # return None so gamma is None and the raw-fallback (line 1360)
+        # fires. Only n=4 calls are blocked — n=2 base-solve calls must
+        # succeed for WLS to even reach _solve_fwl.
+        import custom_components.tasmota_irhvac.pi.batch_learning as bl
+        original_solve = bl._solve_symmetric
+        def fail_only_n4(A, b, n):
+            if n == 4:
+                return None
+            return original_solve(A, b, n)
+        with _patch.object(bl, "_solve_joint", return_value=None), \
+             _patch.object(bl, "_solve_symmetric", side_effect=fail_only_n4):
+            result = weighted_least_squares(
+                obs, n_features=3, min_observations=20,
+                feature_order=feature_order, model_inputs=model_inputs,
+            )
+        # The fallback path runs without crashing — coverage win.
+        assert result is None or isinstance(result.beta_batch, list)
+
+    def test_solve_fwl_holds_when_input_collinear_with_base(self):
+        """Input collinear with outdoor_delta → r_z variance ≈ 0 → held (1382-1383).
+
+        Pre-filter (line 1615) requires input variance ≥ min_feature_variance,
+        so a truly constant input is dropped before _solve_fwl. To exercise
+        the in-loop held branch, give the input the SAME numeric values as
+        outdoor_delta — variance > 0 (so it's active), but partialling it
+        out against [1, od, sin, cos] leaves zero residual.
+        """
+        import datetime as _dt
+        from unittest.mock import patch as _patch
+        from custom_components.tasmota_irhvac.pi.batch_learning import (
+            weighted_least_squares,
+        )
+        obs = []
+        for hour in range(24):
+            for k in range(5):
+                wt = _dt.datetime(2026, 4, 20, hour, k * 12, 0).timestamp()
+                # outdoor temp drifts a bit hour-to-hour
+                outdoor = 10.0 + (hour % 12) * 0.5
+                room = 20.0
+                outdoor_delta_val = outdoor - room
+                obs.append(Observation(
+                    timestamp=hour * 3600.0 + k * 720.0, wall_time=wt,
+                    hp_setpoint=22.0, current_c=room, desired_c=20.0,
+                    outdoor_temp_c=outdoor,
+                    room_rate=0.001 + 0.0001 * outdoor_delta_val,
+                    # Input value matches outdoor_delta exactly → fully collinear
+                    raw_readings={"sensor.coll": outdoor_delta_val},
+                    clamped=False,
+                ))
+        feature_order = [
+            "intercept", "outdoor_delta", "coll", "sin_hour", "cos_hour",
+        ]
+        model_inputs = [{"entity_id": "sensor.coll", "name": "coll", "lag_tau": 0}]
+        with _patch(
+            "custom_components.tasmota_irhvac.pi.batch_learning._solve_joint",
+            return_value=None,
+        ):
+            result = weighted_least_squares(
+                obs, n_features=3, min_observations=20,
+                feature_order=feature_order, model_inputs=model_inputs,
+            )
+        # Collinear input is held → its position in held_features.
+        assert result is not None
+        held_set = set(result.held_features)
+        # held_features uses indices, not names — index 2 is "coll".
+        assert 2 in held_set
