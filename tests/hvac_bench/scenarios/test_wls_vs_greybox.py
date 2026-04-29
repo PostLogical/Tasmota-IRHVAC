@@ -7,6 +7,13 @@ to separate ua_c from k_c.
 The grey-box observer needs both HP-on (to identify k_c) and HP-off
 (to identify ua_c) observations.  Pure winter heating rarely provides
 HP-off data; spring/shoulder season does.
+
+NOTE: this scenario is currently gated by the 1R1C structural limitation
+(grey-box rails at τ=1000 → tau_plausible gate blocks every batch).
+Until the 2R2C grey-box upgrade lands (future_work prompt #47), the
+grey-box-only and fused arms produce no meaningful coefficient delta vs
+WLS-only.  This file is the validation harness for #47, not a current
+verdict producer.  See project_greybox_1r1c_limitation.md.
 """
 
 from __future__ import annotations

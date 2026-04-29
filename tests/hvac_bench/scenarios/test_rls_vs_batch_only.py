@@ -7,6 +7,14 @@ _rls_online_learning=True vs False and compares:
 - Coefficient trajectory stability (oscillation)
 - Comfort (% time in deadband)
 - Integral RMS (lower = better FF)
+
+VERDICT (captured in project_online_rls_verdict.md, 2026-04-26): online
+RLS adds no value across 5 scenarios.  The assertions in this file are
+intentionally weak ("not catastrophically worse") — they're regression-
+guard floors, not strict pass criteria.  The win/loss verdict comes from
+the printed metrics, not the asserts.  Don't strengthen the assertions
+to match the verdict; the win is small (1.3% comfort delta in the most
+favorable RLS case) and tightening would cause flakes.
 """
 
 from __future__ import annotations
