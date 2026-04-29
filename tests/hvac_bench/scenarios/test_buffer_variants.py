@@ -1,21 +1,18 @@
-"""Buffer size and policy sweep — diagnostic for the seasonal solar drift.
+"""Buffer variant sweep — canonical real-weather scenarios (#45).
 
-Reuses the seasonal scenarios from ``test_seasonal_convergence`` but varies
-the diversity buffer along two axes:
+Default weather source is real Open-Meteo CSV per ``_make_config`` in
+``test_seasonal_convergence`` (#45, 2026-04-29). Compares Solar Proxy and
+outdoor_delta convergence across (variant × season) for the calibrated
+living_room profile under three buffer sizes (1000/2000/4000) and FIFO
+vs leverage-scored eviction.
 
-  Size:    default (2000), half (1000), double (4000)
-  Policy:  leverage-scored (default) vs FIFO (oldest-eviction)
-
-Compares Solar Proxy and outdoor_delta convergence and final values across
-(variant × season).  Goal: figure out whether the day-30 → day-90 solar
-drift seen in test_seasonal_convergence is caused by:
-  - The leverage-scored eviction policy itself
-  - Buffer size (filling too fast → leverage mode kicks in too early)
-  - Or something else (e.g., observation eligibility, multicollinearity)
-
-Reads as: if FIFO at 2000 doesn't drift, the policy is the issue.
-If double-leverage doesn't drift, the timing/fill rate is the issue.
-If everything drifts, the buffer isn't the cause.
+Real cloud clustering, weather fronts, dawn/dusk gradients, and seasonal
+day-length shifts are exactly the distributional features a leverage policy
+could be sensitive to — the synthetic v1 of this test produced a clean
+finding (FIFO recovers solar truth) that real weather inverted (see
+``feedback_synthetic_vs_real_bench.md``). This file is the verdict source;
+``test_buffer_variants_synth.py`` is reserved for synth-only parameter
+sweeps where reproducible knobs matter more than realism.
 """
 
 from __future__ import annotations
@@ -32,7 +29,7 @@ from tests.hvac_bench.adapters import TasmotaPIAdapter
 from tests.hvac_bench.full_stack_runner import FullStackResult, run_full_stack
 from tests.hvac_bench.scenarios.test_seasonal_convergence import (
     SEASONS,
-    _make_config,
+    _make_config,  # default: real CSV
 )
 
 
@@ -84,21 +81,6 @@ def _replace_buffers(pi, *, max_size: int, fifo: bool) -> None:
     )
 
 
-def _run_with_variant(season, *, max_size: int, fifo: bool, n_days: int = 90):
-    """Run a season with patched buffer config."""
-    orig_init = TasmotaPIAdapter.__init__
-
-    def patched(self, *args, **kwargs):
-        orig_init(self, *args, **kwargs)
-        _replace_buffers(self._pi, max_size=max_size, fifo=fifo)
-
-    TasmotaPIAdapter.__init__ = patched
-    try:
-        return run_full_stack(_make_config(season, n_days=n_days))
-    finally:
-        TasmotaPIAdapter.__init__ = orig_init
-
-
 VARIANTS: list[tuple[str, int, bool]] = [
     ("default-2000",  2000, False),
     ("half-1000",     1000, False),
@@ -107,12 +89,28 @@ VARIANTS: list[tuple[str, int, bool]] = [
 ]
 
 
+def _run_with_variant(season_name: str, *, max_size: int, fifo: bool,
+                      n_days: int = 90) -> FullStackResult:
+    """Run a season (real CSV) with patched buffer config."""
+    orig_init = TasmotaPIAdapter.__init__
+
+    def patched(self, *args, **kwargs):
+        orig_init(self, *args, **kwargs)
+        _replace_buffers(self._pi, max_size=max_size, fifo=fifo)
+
+    TasmotaPIAdapter.__init__ = patched
+    try:
+        return run_full_stack(_make_config(season_name, n_days=n_days))
+    finally:
+        TasmotaPIAdapter.__init__ = orig_init
+
+
 # ── Fixture ──────────────────────────────────────────────────────────────
 
 
 @pytest.fixture(scope="module")
 def variant_results() -> dict[str, dict[str, FullStackResult]]:
-    """Run all (variant × season) combos once.  12 sims, ~8 minutes total."""
+    """Run all (variant × season) combos once. 12 sims, ~8 minutes total."""
     pi_logger = logging.getLogger("custom_components.tasmota_irhvac")
     prev = pi_logger.level
     pi_logger.setLevel(logging.ERROR)
@@ -120,9 +118,9 @@ def variant_results() -> dict[str, dict[str, FullStackResult]]:
         out: dict[str, dict[str, FullStackResult]] = {}
         for vname, size, fifo in VARIANTS:
             out[vname] = {}
-            for sname, season in SEASONS.items():
+            for sname in SEASONS:
                 out[vname][sname] = _run_with_variant(
-                    season, max_size=size, fifo=fifo, n_days=90,
+                    sname, max_size=size, fifo=fifo, n_days=90,
                 )
         return out
     finally:
@@ -200,10 +198,10 @@ def _print_buffer_fill(results: dict[str, dict[str, FullStackResult]]) -> None:
 
 @pytest.mark.slow
 class TestBufferVariants:
-    """Compare buffer size + policy across heating seasons."""
+    """Compare buffer size + policy across heating seasons (real weather)."""
 
     def test_print_summary(self, variant_results):
-        """All-in-one: final coefs, trajectory, fill rate.  Always passes."""
+        """All-in-one: final coefs, trajectory, fill rate. Always passes."""
         _print_buffer_fill(variant_results)
         _print_final_table(variant_results, "outdoor_delta", truth=-0.25)
         _print_final_table(variant_results, "Solar Proxy", truth=-2.0)

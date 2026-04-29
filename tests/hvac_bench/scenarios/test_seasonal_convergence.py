@@ -13,6 +13,14 @@ a single season. This test checks both:
 Cooling season (summer) is excluded — the per-mode buffer split keeps cooling
 observations separate from heating.
 
+WEATHER SOURCE (#45, 2026-04-29): real Open-Meteo CSVs (44°N 71.5°W) are
+the *default* — any verdict must come from real weather. Synthetic AR(1)
+weather is opt-in via :func:`_make_synth_config` and reserved for parameter
+sweeps where reproducible knobs (varying ``weather_amp_c``, sweeping seeds)
+matter more than realism. ``feedback_synthetic_vs_real_bench.md`` explains
+the inversion: synth misled us once on the FIFO/leverage finding and clean
+synthetic distributions can produce results that don't survive real weather.
+
 CAVEAT — what this test can and can't show:
 - Bench physics is linear by construction (2R2C). So same coefficients across
   seasons here ≠ "real world is seasonally stable" — the bench can't falsify
@@ -30,9 +38,11 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
+from tests.hvac_bench.csv_adapters import csv_to_schedules, from_open_meteo_csv
 from tests.hvac_bench.full_stack_runner import (
     FullStackConfig,
     FullStackResult,
@@ -42,6 +52,9 @@ from tests.hvac_bench.full_stack_runner import (
     run_full_stack,
 )
 from tests.hvac_bench.house_profiles import PROFILES_2R2C
+
+
+_WEATHER_DIR = Path(__file__).parent.parent / "weather_data"
 
 
 # ── Seasonal weather profiles ────────────────────────────────────────────
@@ -133,8 +146,17 @@ def _make_outdoor_schedule(
     return schedule
 
 
-def _make_config(season: SeasonProfile, n_days: int = 90) -> FullStackConfig:
-    """Same building, same noise seed, same wrong starting seed — vary weather."""
+def _make_synth_config(season_name: str, n_days: int = 90) -> FullStackConfig:
+    """Synthetic AR(1) config — opt-in for parameter sweeps and reproducible knobs.
+
+    Same building, same noise seed, same wrong starting seed — vary weather.
+    AR(1) shared weather state produces residual T-vs-S correlation in the
+    0.10–0.30 band measured from real Open-Meteo data. Use this for tests
+    that need to vary ``weather_amp_c``, sweep seeds, or otherwise hold
+    weather as a controllable parameter; for verdict-producing tests, use
+    :func:`_make_real_config` (the default :func:`_make_config`).
+    """
+    season = SEASONS[season_name]
     profile = PROFILES_2R2C["living_room"]
     tick_min = 15.0
     n_ticks = int(n_days * 24 * 60 / tick_min)
@@ -168,6 +190,59 @@ def _make_config(season: SeasonProfile, n_days: int = 90) -> FullStackConfig:
         },
         relax_kappa_gate=True,
     )
+
+
+def _make_real_config(season_name: str, n_days: int = 90) -> FullStackConfig:
+    """Open-Meteo CSV-driven config — the canonical default (#45).
+
+    Reads ``new_england_{season}_90d.csv`` from ``tests/hvac_bench/weather_data``
+    (44°N 71.5°W). Same building/seed/wrong-starting-seed as the synth path so
+    only the weather distribution differs. Produces verdicts that survive
+    real cloud clustering, weather fronts, and seasonal day-length shifts.
+    """
+    csv_path = _WEATHER_DIR / f"new_england_{season_name}_90d.csv"
+    csv_data = from_open_meteo_csv(csv_path)
+    schedules = csv_to_schedules(csv_data)
+    outdoor_fn = schedules["outdoor_c"]
+    raw_solar_fn = schedules["solar_w_m2"]
+    # Open-meteo direct_radiation is W/m² (peak ~700-1000); normalize to 0-1
+    # proxy to match the synth convention the thermal model expects.
+    solar_fn = lambda t, _f=raw_solar_fn: _f(t) / 1000.0
+
+    n_hours = len(csv_data.get("outdoor_c", [])) - 1
+    n_days_max = max(1, n_hours // 24)
+    n_days = min(n_days, n_days_max)
+
+    profile = PROFILES_2R2C["living_room"]
+    return FullStackConfig(
+        n_days=n_days,
+        profile_name="living_room",
+        desired_c=20.5,
+        noise_sigma=0.1,
+        noise_seed=42,
+        outdoor_schedule=outdoor_fn,
+        model_inputs=[
+            ModelInputSpec(
+                name="Solar Proxy",
+                entity_id="sensor.solar_proxy",
+                input_role="solar",
+                _true_ff_coef=-2.0,
+                seed_heat=0.0,
+                lag_tau=120,
+                clamp_min=0,
+                schedule=solar_fn,
+            ),
+        ],
+        pi_overrides={
+            "pi_outdoor_seed_heat": profile.true_seed * 2.0,
+        },
+        relax_kappa_gate=True,
+    )
+
+
+# Default canonical config: real CSV. Tests that need synthetic reproducibility
+# (parameter sweeps, seed scans) call ``_make_synth_config`` directly.
+_make_config = _make_real_config
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -264,16 +339,17 @@ def _print_summary(results: dict[str, FullStackResult]) -> None:
 def seasonal_results() -> dict[str, FullStackResult]:
     """Run all heating seasons (90 days each) once for the whole test module.
 
-    Silences PI/batch loggers during the runs so the printed summary table
-    is the only artifact when invoked with ``-s``.
+    Uses real Open-Meteo CSVs by default (#45). Silences PI/batch loggers
+    during the runs so the printed summary table is the only artifact when
+    invoked with ``-s``.
     """
     pi_logger = logging.getLogger("custom_components.tasmota_irhvac")
     prev_level = pi_logger.level
     pi_logger.setLevel(logging.ERROR)
     try:
         return {
-            name: run_full_stack(_make_config(season, n_days=90))
-            for name, season in SEASONS.items()
+            name: run_full_stack(_make_config(name, n_days=90))
+            for name in SEASONS
         }
     finally:
         pi_logger.setLevel(prev_level)
