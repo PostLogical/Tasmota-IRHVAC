@@ -2515,7 +2515,46 @@ class PIController:
                 for p in self._last_residual_patterns
             ]
 
+        # Boundary estimator + regime probe state — needed for production
+        # debug bundles when the boundary band has shifted unexpectedly,
+        # probes are stuck/escalating, or observation yield drops.
+        # as_dict() carries persistence-relevant counters; we add live
+        # state (last result, current cal band, probe state) on top.
+        be = self._boundary_estimator
+        be_diag = be.as_dict()
+        be_diag["should_trigger_probe"] = be.should_trigger_probe
+        if be.last_result is not None:
+            be_diag["last_result"] = {
+                "confident": be.last_result.confident,
+                "estimated_breakpoint": be.last_result.estimated_breakpoint,
+                "breakpoint_rms": be.last_result.breakpoint_rms,
+                "n_observations": be.last_result.n_observations,
+            }
+        else:
+            be_diag["last_result"] = None
+        is_heating = self._entity._attr_hvac_mode != HVACMode.COOL
+        be_diag["cal_band"] = {
+            "min": (self._head_calibration_min_heat if is_heating
+                    else self._head_calibration_min_cool),
+            "max": (self._head_calibration_max_heat if is_heating
+                    else self._head_calibration_max_cool),
+            "mode": "heat" if is_heating else "cool",
+        }
+        result["boundary_estimator"] = be_diag
+
+        rp = self._regime_probe
+        rp_diag = rp.as_dict()
+        rp_diag["state"] = rp.state.name if hasattr(rp.state, "name") else str(rp.state)
+        rp_diag["enabled"] = rp.enabled
+        rp_diag["last_probe_delta"] = rp.last_probe_delta
+        rp_diag["last_probe_hp_contributing"] = rp.last_probe_hp_contributing
+        result["regime_probe"] = rp_diag
+
         # FF decomposition: per-feature breakdown of current ff_offset.
+        # Compute the live ToD sin/cos once so time_of_day features show
+        # their actual contribution (not a 0.0 placeholder).
+        from .model_input_manager import tod_features
+        sin_now, cos_now = tod_features(time.time())
         ff_contribs: dict[str, Any] = {}
         mi_start = self._features.model_input_start
         for i, name in enumerate(coeff_names):
@@ -2532,6 +2571,13 @@ class PIController:
             elif role == "model_input":
                 input_idx = i - mi_start
                 filtered_val = round(self._inputs.filtered[input_idx], 4) if input_idx < len(self._inputs.filtered) else 0.0
+            elif role == "time_of_day":
+                if name == "sin_hour":
+                    filtered_val = round(sin_now, 4)
+                elif name == "cos_hour":
+                    filtered_val = round(cos_now, 4)
+                else:
+                    filtered_val = 0.0
             else:
                 filtered_val = 0.0  # placeholder for features without runtime state
             contribution = round(coef * filtered_val, 4)

@@ -5749,6 +5749,59 @@ class TestSubsystemToggles:
         assert diag["config"]["batch_wls_enabled"] is False
         assert diag["config"]["plant_id_enabled"] is True
 
+    def test_diagnostics_include_boundary_estimator(self):
+        """Full diagnostics include boundary estimator state for debug bundles."""
+        entity = FakePIEntity(make_pi_config())
+        diag = entity._pi.get_full_diagnostics()
+        be = diag["boundary_estimator"]
+        # Persistence-side counters (from as_dict)
+        assert "stall_count" in be
+        assert "updates_applied" in be
+        assert "posterior_mean" in be
+        assert "posterior_std" in be
+        # Live state added by get_full_diagnostics
+        assert "should_trigger_probe" in be
+        assert "last_result" in be  # None on cold start
+        assert be["last_result"] is None
+        assert "cal_band" in be
+        assert be["cal_band"]["mode"] in ("heat", "cool")
+        assert "min" in be["cal_band"]
+        assert "max" in be["cal_band"]
+
+    def test_diagnostics_include_regime_probe(self):
+        """Full diagnostics include regime probe state for debug bundles."""
+        entity = FakePIEntity(make_pi_config())
+        diag = entity._pi.get_full_diagnostics()
+        rp = diag["regime_probe"]
+        # Persistence-side counters
+        assert "probes_completed" in rp
+        assert "evidence_above" in rp
+        assert "evidence_below" in rp
+        # Live state added by get_full_diagnostics
+        assert "state" in rp
+        assert isinstance(rp["state"], str)  # ProbeState.IDLE → "IDLE"
+        assert "enabled" in rp
+        assert "last_probe_delta" in rp  # None on cold start
+        assert "last_probe_hp_contributing" in rp
+
+    def test_diagnostics_tod_ff_contributions_use_live_sin_cos(self):
+        """ToD features in ff_contributions show live sin/cos values, not 0.0."""
+        entity = FakePIEntity(make_pi_config())
+        diag = entity._pi.get_full_diagnostics()
+        contribs = diag["ff_contributions"]
+        # Both ToD features should be present in the breakdown.
+        assert "sin_hour" in contribs
+        assert "cos_hour" in contribs
+        # At least one of sin/cos is non-trivially non-zero at any wall time
+        # (sin² + cos² = 1, so the maximum of |sin| and |cos| is ≥ 1/√2 ≈ 0.71).
+        sin_val = contribs["sin_hour"]["filtered"]
+        cos_val = contribs["cos_hour"]["filtered"]
+        assert max(abs(sin_val), abs(cos_val)) > 0.7, (
+            f"Expected live sin/cos values, got sin={sin_val} cos={cos_val}"
+        )
+        # And they obey sin² + cos² ≈ 1 within rounding tolerance.
+        assert abs(sin_val ** 2 + cos_val ** 2 - 1.0) < 0.01
+
     def test_extra_state_attributes_expose_ff_enabled(self):
         """Entity state attributes include ff_enabled."""
         config = make_pi_config({"pi_ff_enabled": False})
