@@ -255,6 +255,23 @@ class FullStackResult:
     worst_undershoot: float  # max (desired - room) when room < desired
     worst_overshoot: float  # max (room - desired) when room > desired
     longest_violation_streak: int  # max consecutive ticks outside deadband
+    # Controllable-only severity/duration: same metrics restricted to ticks
+    # where the HP was actively driving (hp_idle = False). Use these when a
+    # test wants to assert controller behavior independent of weather windows
+    # the HP can't reach (e.g. overnight cold tail past min setpoint).
+    ctrl_worst_undershoot: float
+    ctrl_worst_overshoot: float
+    ctrl_longest_violation_streak: int
+    # HP capacity-limited violations: HP active AND setpoint pinned at the
+    # pushing limit (max in heat, min in cool) AND room outside band. The
+    # controller is doing everything it can; outdoor conditions exceed HP
+    # capacity. Distinct from `unctrl_*` (HP idle by setpoint choice) and
+    # from headroom-`ctrl_*` (HP active with modulation room left).
+    hp_capacity_violations: int
+    # Signed (room - desired) at the worst capacity-limited tick. Negative in
+    # heat mode (room below desired); positive in cool mode (room above).
+    worst_hp_capacity_error: float
+    longest_hp_capacity_streak: int
 
     # Per-day comfort rollups
     daily_comfort_pct: list[float]
@@ -576,6 +593,14 @@ def run_full_stack(
     worst_overshoot = 0.0
     cur_violation_streak = 0
     longest_violation_streak = 0
+    ctrl_worst_undershoot = 0.0
+    ctrl_worst_overshoot = 0.0
+    cur_ctrl_violation_streak = 0
+    ctrl_longest_violation_streak = 0
+    hp_capacity_violations = 0
+    worst_hp_capacity_error = 0.0  # signed (room - desired) at worst tick
+    cur_hp_capacity_streak = 0
+    longest_hp_capacity_streak = 0
     total_rapid_sp_changes = 0
 
     # Zone model observation yield tracking
@@ -798,22 +823,52 @@ def run_full_stack(
             if hp_idle:
                 unctrl_violations += 1
                 day_unctrl_viols += 1
+                # HP idle resets controllable streak: a violation the HP
+                # can't act on doesn't extend "how long was the controller
+                # stuck violating".
+                cur_ctrl_violation_streak = 0
             else:
                 ctrl_violations += 1
                 day_ctrl_viols += 1
+                cur_ctrl_violation_streak += 1
+                if cur_ctrl_violation_streak > ctrl_longest_violation_streak:
+                    ctrl_longest_violation_streak = cur_ctrl_violation_streak
             # Asymmetric: cold vs warm
             if error > 0:  # error = desired - room, positive = room too cold
                 cold_violations += 1
                 day_cold_viols += 1
                 if error > worst_undershoot:
                     worst_undershoot = error
+                if not hp_idle and error > ctrl_worst_undershoot:
+                    ctrl_worst_undershoot = error
             else:
                 warm_violations += 1
                 day_warm_viols += 1
                 if -error > worst_overshoot:
                     worst_overshoot = -error
+                if not hp_idle and -error > ctrl_worst_overshoot:
+                    ctrl_worst_overshoot = -error
+            # HP capacity-limited: HP active and pinned at its pushing limit
+            # (max in heat, min in cool) while still violating — outdoor has
+            # exceeded what the HP can deliver.
+            at_capacity_limit = (
+                hp_setpoint >= pi._max_temp_c if config.mode == "heat"
+                else hp_setpoint <= pi._min_temp_c
+            )
+            if not hp_idle and at_capacity_limit:
+                hp_capacity_violations += 1
+                cur_hp_capacity_streak += 1
+                if cur_hp_capacity_streak > longest_hp_capacity_streak:
+                    longest_hp_capacity_streak = cur_hp_capacity_streak
+                signed_err = model.room_temp - config.desired_c
+                if abs(signed_err) > abs(worst_hp_capacity_error):
+                    worst_hp_capacity_error = signed_err
+            else:
+                cur_hp_capacity_streak = 0
         else:
             cur_violation_streak = 0
+            cur_ctrl_violation_streak = 0
+            cur_hp_capacity_streak = 0
 
         # FF fraction: |FF| / (|FF| + |integral|)
         ff_abs = abs(pi._ff_offset)
@@ -1049,6 +1104,12 @@ def run_full_stack(
         worst_undershoot=worst_undershoot,
         worst_overshoot=worst_overshoot,
         longest_violation_streak=longest_violation_streak,
+        ctrl_worst_undershoot=ctrl_worst_undershoot,
+        ctrl_worst_overshoot=ctrl_worst_overshoot,
+        ctrl_longest_violation_streak=ctrl_longest_violation_streak,
+        hp_capacity_violations=hp_capacity_violations,
+        worst_hp_capacity_error=worst_hp_capacity_error,
+        longest_hp_capacity_streak=longest_hp_capacity_streak,
         daily_comfort_pct=daily_comfort_pct,
         daily_ctrl_comfort_pct=daily_ctrl_comfort_pct,
         daily_cold_violations=daily_cold_violations,
@@ -1220,14 +1281,24 @@ def print_full_stack_summary(
     print("-" * 58)
     print(f"{'Comfort hours %':<22}{result.comfort_hours_pct:>11.2f}%")
     print(f"{'Controllable %':<22}{result.ctrl_comfort_pct:>11.2f}%")
+    # Display undershoot/overshoot as signed (room - desired): undershoot
+    # prints negative (room below desired), overshoot prints positive.
     print(f"{'Cold violations':<22}{result.cold_violations:>12d}    "
-          f"(worst undershoot {result.worst_undershoot:+.2f}°C)")
+          f"(worst undershoot {-result.worst_undershoot:+.2f}°C, "
+          f"ctrl {-result.ctrl_worst_undershoot:+.2f}°C)")
     print(f"{'Warm violations':<22}{result.warm_violations:>12d}    "
-          f"(worst overshoot {result.worst_overshoot:+.2f}°C)")
+          f"(worst overshoot {result.worst_overshoot:+.2f}°C, "
+          f"ctrl {result.ctrl_worst_overshoot:+.2f}°C)")
     print(f"{'Ctrl/Unctrl viols':<22}"
           f"{result.ctrl_violations:>5d} / {result.unctrl_violations:<5d}")
     print(f"{'Longest streak':<22}{result.longest_violation_streak:>12d}    "
-          f"ticks outside deadband")
+          f"ticks outside deadband (ctrl "
+          f"{result.ctrl_longest_violation_streak:d})")
+    if result.hp_capacity_violations > 0:
+        print(f"{'HP capacity-limited':<22}"
+              f"{result.hp_capacity_violations:>12d}    "
+              f"violations (worst {result.worst_hp_capacity_error:+.2f}°C, "
+              f"longest streak {result.longest_hp_capacity_streak:d} ticks)")
 
     # ── Integral & FF/I balance (early vs late means) ───────────────
     daily_rms = result.daily_integral_rms
