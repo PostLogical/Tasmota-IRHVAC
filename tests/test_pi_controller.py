@@ -3050,20 +3050,24 @@ class TestIMCGainScheduling:
         assert pi._pi_ki == 0.15
 
     def test_imc_enabled_with_tau(self):
-        """When τ > 0, Kp and Ki are derived via IMC formula."""
+        """When pi_tau_estimate > 0 (legacy enable flag), IMC formula is used."""
+        from custom_components.tasmota_irhvac.const import DEFAULT_TAU_SLOW_SEED
         config = make_pi_config({"pi_tau_estimate": 120.0, "pi_response_lag": 15.0})
         entity = FakePIEntity(config)
         pi = entity._pi
         assert pi._plant_id.enabled
-        # IMC: Kp = τ / (K_eff * (λ + L))
+        # IMC: Kp = τ_slow_seed / (K_eff * (λ + L))
+        # τ_slow_seed = DEFAULT_TAU_SLOW_SEED (config value no longer used as a τ).
         # λ = L/3 = 5, L = 15, K_eff = 1.0
-        # Kp = 120 / (1.0 * (5 + 15)) = 120/20 = 6.0
-        assert abs(pi._pi_kp - 6.0) < 0.01
-        # Ki = 3 * Kp / τ = 3 * 6.0 / 120 = 0.15
-        assert abs(pi._pi_ki - 3.0 * 6.0 / 120.0) < 0.001
+        # Kp = 60 / (1.0 * (5 + 15)) = 3.0
+        expected_kp = DEFAULT_TAU_SLOW_SEED / (5 + 15)
+        assert abs(pi._pi_kp - expected_kp) < 0.01
+        # Ki = 3 * Kp / τ = 3 / (λ + L) = 0.15 (independent of τ_slow)
+        assert abs(pi._pi_ki - 3.0 / (5 + 15)) < 0.001
 
     def test_imc_custom_lambda(self):
         """Custom λ overrides the default τ/2."""
+        from custom_components.tasmota_irhvac.const import DEFAULT_TAU_SLOW_SEED
         config = make_pi_config({
             "pi_tau_estimate": 120.0,
             "pi_response_lag": 15.0,
@@ -3071,18 +3075,20 @@ class TestIMCGainScheduling:
         })
         entity = FakePIEntity(config)
         pi = entity._pi
-        # Kp = 120 / (1 * (30 + 15)) = 120/45 ≈ 2.667
-        assert abs(pi._pi_kp - 120.0 / 45.0) < 0.01
-        assert abs(pi._pi_ki - 3.0 * pi._pi_kp / 120.0) < 0.001
+        # Kp = τ_slow_seed / (1 * (30 + 15))
+        expected_kp = DEFAULT_TAU_SLOW_SEED / (30 + 15)
+        assert abs(pi._pi_kp - expected_kp) < 0.01
+        assert abs(pi._pi_ki - 3.0 * expected_kp / DEFAULT_TAU_SLOW_SEED) < 0.001
 
-    def test_imc_tau_floor(self):
-        """τ estimate is floored at 1 min to prevent division issues."""
-        config = make_pi_config({"pi_tau_estimate": 0.5, "pi_response_lag": 15.0})
+    def test_imc_zero_disables(self):
+        """pi_tau_estimate=0 keeps the legacy "use manual Kp/Ki" path."""
+        config = make_pi_config({"pi_tau_estimate": 0.0})
         entity = FakePIEntity(config)
         pi = entity._pi
-        # τ floored to 1.0, λ = L/3 = 5.0
-        # Kp = 1.0 / (1.0 * (5.0 + 15.0)) = 1/20 = 0.05
-        assert abs(pi._pi_kp - 0.05) < 0.01
+        assert not pi._plant_id.enabled
+        # Manual gains from config (conftest defaults: kp=1.5, ki=0.15)
+        assert pi._pi_kp == 1.5
+        assert pi._pi_ki == 0.15
 
     def test_manual_kp_ki_ignored_when_imc_enabled(self):
         """When IMC is enabled, config Kp/Ki are overridden."""
@@ -3098,15 +3104,15 @@ class TestIMCGainScheduling:
         assert pi._pi_kp_config == 99.0  # Config values preserved
 
     def test_recompute_uses_tau_slow_for_kp(self):
-        """Kp derives from tau_slow (seed), not tau_fast (observed)."""
+        """Kp derives from tau_slow seed, not tau_fast (observed)."""
         config = make_pi_config({"pi_tau_estimate": 120.0, "pi_response_lag": 15.0})
         entity = FakePIEntity(config)
         pi = entity._pi
         kp_from_seed = pi._pi_kp
-        # Restore a different tau_fast — Kp should NOT change (uses tau_slow=seed)
+        # Restore tau_fast (legacy single-tau key restores into tau_fast).
+        # Kp depends on tau_slow seed, not tau_fast → unchanged.
         pi._plant_id.restore({"tau_estimate": 60.0, "tau_observations": 1})
         pi._recompute_imc_gains()
-        # Kp still from tau_slow=120: Kp = 120/(1*(5+15)) = 6.0
         assert pi._pi_kp == pytest.approx(kp_from_seed, abs=0.01)
 
 
@@ -3114,7 +3120,13 @@ class TestTauGainIntegration:
     """Integration test: τ observation applies gains to PIController."""
 
     def test_tau_observation_updates_smith_not_kp(self):
-        """After τ_fast observation, Smith predictor updates but Kp stays stable."""
+        """After τ_fast observation, Smith predictor updates but Kp stays stable.
+
+        Kp scales with τ_slow, not τ_fast.  This test also exercises the
+        maturity gate: even though τ_fast got a single observation, the
+        gate keeps Smith predictor on the seed value until 3+ observations.
+        """
+        from custom_components.tasmota_irhvac.const import DEFAULT_TAU_SLOW_SEED
         config = make_pi_config({"pi_tau_estimate": 120.0, "pi_response_lag": 15.0})
         entity = FakePIEntity(config)
         pi = entity._pi
@@ -3122,11 +3134,11 @@ class TestTauGainIntegration:
         pi._plant_id.start_observation(0.0, 20.0, 22.0, 2.0)
         gain_update = pi._plant_id.check_observation(4800.0, 21.27)
         assert gain_update is not None
-        # tau_fast changed but tau_slow is still seed
-        assert gain_update.tau_fast != 120.0  # Moved toward observed
-        assert gain_update.tau_slow == 120.0  # Seed unchanged
+        # tau_slow seed in GainUpdate stays at the configured default seed
+        assert gain_update.tau_slow == DEFAULT_TAU_SLOW_SEED
+        # Plant tracks the τ_fast observation but kp doesn't change
+        assert pi._plant_id.plant.tau_fast.observations >= 1
         pi._apply_gain_update(gain_update)
-        # Kp derived from tau_slow → unchanged
         assert pi._pi_kp == pytest.approx(kp_from_seed, abs=0.01)
 
 
@@ -3146,12 +3158,14 @@ class TestIMCPersistence:
 
     def test_tau_fast_restored_kp_stable(self):
         """τ_fast restored from persistence, Kp stays at seed (tau_slow unchanged)."""
+        from custom_components.tasmota_irhvac.const import DEFAULT_TAU_SLOW_SEED
         config = make_pi_config({"pi_tau_estimate": 120.0, "pi_response_lag": 15.0})
         entity = FakePIEntity(config)
         pi = entity._pi
         kp_seed = pi._pi_kp
 
-        # Simulate restore with learned τ_fast=60 (old single-tau format)
+        # Simulate restore with learned τ_fast=60 (old single-tau format
+        # restores into tau_fast specifically).
         data = PIExtraStoredData(
             pi_integral=0.0,
             desired_temp=22.0,
@@ -3160,11 +3174,13 @@ class TestIMCPersistence:
         )
         pi.restore_extra_stored_data(data)
         assert pi._plant_id.tau == 60.0  # tau_fast restored
-        assert pi._plant_id.plant.tau_slow.value == 120.0  # seed unchanged
+        # tau_slow stays at its seed (config value no longer used as a τ).
+        assert pi._plant_id.plant.tau_slow.value == DEFAULT_TAU_SLOW_SEED
         assert pi._pi_kp == pytest.approx(kp_seed, abs=0.01)  # Kp from tau_slow
 
     def test_tau_zero_not_restored(self):
-        """τ=0 in stored data doesn't overwrite seed."""
+        """τ=0 in stored data doesn't overwrite the seed."""
+        from custom_components.tasmota_irhvac.const import DEFAULT_TAU_FAST_SEED
         config = make_pi_config({"pi_tau_estimate": 120.0, "pi_response_lag": 15.0})
         entity = FakePIEntity(config)
         pi = entity._pi
@@ -3177,7 +3193,7 @@ class TestIMCPersistence:
             tau_estimate=0.0,
         )
         pi.restore_extra_stored_data(data)
-        assert pi._plant_id.tau == 120.0  # Kept seed
+        assert pi._plant_id.tau == DEFAULT_TAU_FAST_SEED  # Kept seed
         assert pi._pi_kp == kp_seed
 
     def test_integral_unchanged_when_ki_invariant(self):
@@ -3267,12 +3283,15 @@ class TestIMCStateAttributes:
 
     def test_attributes_include_tau_when_imc_enabled(self):
         """State attributes include τ and effective gains when IMC is on."""
+        from custom_components.tasmota_irhvac.const import DEFAULT_TAU_FAST_SEED
         config = make_pi_config({"pi_tau_estimate": 120.0})
         entity = FakePIEntity(config)
         pi = entity._pi
         attrs = pi.get_extra_state_attributes()
         assert "tau_estimate" in attrs
-        assert attrs["tau_estimate"] == 120.0
+        # The exposed `tau_estimate` mirrors τ_fast (Smith predictor input);
+        # config value no longer drives τ, so it stays at the seed.
+        assert attrs["tau_estimate"] == DEFAULT_TAU_FAST_SEED
         assert "effective_kp" in attrs
         assert "effective_ki" in attrs
         assert attrs["tau_observations"] == 0
@@ -3290,12 +3309,14 @@ class TestIMCStateAttributes:
 
     def test_health_status_includes_tau(self):
         """Health status includes τ when IMC is enabled."""
+        from custom_components.tasmota_irhvac.const import DEFAULT_TAU_FAST_SEED
         config = make_pi_config({"pi_tau_estimate": 120.0})
         entity = FakePIEntity(config)
         pi = entity._pi
         status = pi.get_health_status()
         assert "tau_estimate" in status
-        assert status["tau_estimate"] == 120.0
+        # τ_fast seed (config value no longer drives τ).
+        assert status["tau_estimate"] == DEFAULT_TAU_FAST_SEED
 
 
 # ── Grey-box Attribute Tests ─────────────────────────────────────────

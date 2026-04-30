@@ -241,7 +241,23 @@ DEFAULT_PI_OUTDOOR_SEED_COOL = 0.25
 DEFAULT_PI_OUTDOOR_SEED_CLAMP_MIN = 0.0
 DEFAULT_PI_OUTDOOR_SEED_CLAMP_MAX = 2.0
 DEFAULT_PI_SETPOINT_WEIGHT = 0.15 # 2-DOF: p_term = kp * b * error. Lower b since FF handles setpoint steps.
-DEFAULT_PI_TAU_ESTIMATE = 0.0      # Room thermal τ (minutes). 0 = disabled (use manual Kp/Ki).
+DEFAULT_PI_TAU_ESTIMATE = 60.0     # DEPRECATED: now an IMC enable flag only (>0 = IMC on, 0 = manual Kp/Ki).
+                                   # The numeric value is no longer used as a τ seed — see DEFAULT_TAU_FAST_SEED
+                                   # and DEFAULT_TAU_SLOW_SEED below.  Field is hidden from config flow; existing
+                                   # installs with explicit 0 keep manual gains.
+
+# Plant-ID seeds (internal — not config-exposed).  τ_fast and τ_slow are
+# physically distinct (air-mass coupling vs wall-mass coupling) and need
+# separate defaults.  Values are conservative low-end residential figures
+# (Madsen & Holst, ASHRAE Ch 18): under-estimating τ → lower kp → sluggish
+# but stable, biased away from the dangerous over-aggressive direction.
+DEFAULT_TAU_FAST_SEED = 20.0       # Air-mass response (minutes). Typical mini-split air loop.
+DEFAULT_TAU_SLOW_SEED = 60.0       # Wall-mass response (minutes). Low-end residential thermal mass.
+
+# Maturity gate: minimum non-seed observations before τ from plant ID
+# may drive IMC gains.  Below this threshold, compute_gains() falls back
+# to the conservative seed.  Skogestad SIMC + cautious adaptation pattern.
+MIN_TAU_OBSERVATIONS_FOR_GATE = 3
 DEFAULT_PI_RESPONSE_LAG = 15.0     # HP response lag L (minutes). Compressor→room first-order lag.
 DEFAULT_PI_IMC_LAMBDA = 0.0        # IMC closed-loop speed λ (minutes). 0 = auto (τ/2).
 DEFAULT_PI_SENSOR_FILTER_TAU = 120  # Measurement low-pass filter τ (seconds). 0 = disabled.

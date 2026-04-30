@@ -119,7 +119,6 @@ from .const import (
     CONF_PI_INTERCEPT_SEED_HEAT,
     CONF_PI_PLANT_ID_ENABLED,
     CONF_PI_RLS_ONLINE_ENABLED,
-    CONF_PI_TAU_ESTIMATE,
     CONF_PI_MODEL_INPUTS,
     CONF_SUPPLEMENTAL_AUTO_MODEL_INPUT,
     CONF_SUPPLEMENTAL_ENTITY,
@@ -171,7 +170,6 @@ from .const import (
     DEFAULT_PI_SETPOINT_HOLD,
     DEFAULT_PI_SETPOINT_WEIGHT,
     DEFAULT_PI_SMITH_ENABLED,
-    DEFAULT_PI_TAU_ESTIMATE,
     DEFAULT_MIN_TEMP,
     DEFAULT_MQTT_DELAY,
     DEFAULT_NAME,
@@ -463,9 +461,9 @@ OPTIONS_PI_TIMING_SCHEMA = vol.Schema(
         vol.Optional(CONF_PI_TICK_FALLBACK, default=DEFAULT_PI_TICK_FALLBACK): NumberSelector(
             NumberSelectorConfig(min=60, max=3600, step=60, mode=NumberSelectorMode.BOX)
         ),
-        vol.Optional(CONF_PI_TAU_ESTIMATE, default=DEFAULT_PI_TAU_ESTIMATE): NumberSelector(
-            NumberSelectorConfig(min=0, max=600, step=5, unit_of_measurement="min", mode=NumberSelectorMode.BOX)
-        ),
+        # CONF_PI_TAU_ESTIMATE is deprecated and no longer surfaced in the UI.
+        # Existing entries preserve their value; new installs use internal
+        # τ seeds (DEFAULT_TAU_FAST_SEED / DEFAULT_TAU_SLOW_SEED).
         vol.Optional(CONF_PI_RESPONSE_LAG, default=DEFAULT_PI_RESPONSE_LAG): NumberSelector(
             NumberSelectorConfig(min=0, max=60, step=1, unit_of_measurement="min", mode=NumberSelectorMode.BOX)
         ),

@@ -244,7 +244,6 @@
         "description": "Configure timing intervals, IMC tuning, and signal filtering.",
         "data": {
           "pi_tick_fallback": "Tick Fallback Interval (seconds)",
-          "pi_tau_estimate": "Room τ Estimate (minutes)",
           "pi_response_lag": "HP Response Lag (minutes)",
           "pi_imc_lambda": "IMC Lambda (minutes)",
           "pi_sensor_filter_tau": "Sensor Filter (seconds)",
@@ -252,7 +251,6 @@
         },
         "data_description": {
           "pi_tick_fallback": "Maximum seconds between PI ticks. Sensor updates trigger ticks sooner (60s cooldown). This is the fallback if no sensor update arrives.",
-          "pi_tau_estimate": "Room thermal time constant (minutes). Enables IMC gain scheduling — Kp and Ki are derived automatically from τ and response lag. The controller learns τ online from step responses. 0 = disabled (use manual Kp/Ki).",
           "pi_response_lag": "Heat pump response lag (minutes). Time for a setpoint change to begin affecting room temperature. Used by IMC gain formula and Smith predictor. Default 15 min.",
           "pi_imc_lambda": "IMC closed-loop speed parameter (minutes). Controls aggressiveness of IMC-derived gains. Lower = faster but less robust. 0 = auto (response_lag / 3).",
           "pi_sensor_filter_tau": "Low-pass filter time constant on room temperature sensor (seconds). Smooths noise without adding significant lag. 0 = disabled. Default 120s (2 min).",
@@ -579,7 +577,6 @@
         "title": "Timing & Filtering",
         "data": {
           "pi_tick_fallback": "Tick Fallback Interval (seconds)",
-          "pi_tau_estimate": "Room τ Estimate (minutes)",
           "pi_response_lag": "HP Response Lag (minutes)",
           "pi_imc_lambda": "IMC Lambda (minutes)",
           "pi_sensor_filter_tau": "Sensor Filter (seconds)",
@@ -587,7 +584,6 @@
         },
         "data_description": {
           "pi_tick_fallback": "Maximum seconds between PI ticks. Sensor updates trigger ticks sooner (60s cooldown). This is the fallback if no sensor update arrives.",
-          "pi_tau_estimate": "Room thermal time constant (minutes). Enables IMC gain scheduling — Kp and Ki are derived automatically from τ and response lag. The controller learns τ online from step responses. 0 = disabled (use manual Kp/Ki).",
           "pi_response_lag": "Heat pump response lag (minutes). Time for a setpoint change to begin affecting room temperature. Used by IMC gain formula and Smith predictor. Default 15 min.",
           "pi_imc_lambda": "IMC closed-loop speed parameter (minutes). Controls aggressiveness of IMC-derived gains. Lower = faster but less robust. 0 = auto (response_lag / 3).",
           "pi_sensor_filter_tau": "Low-pass filter time constant on room temperature sensor (seconds). Smooths noise without adding significant lag. 0 = disabled. Default 120s (2 min).",

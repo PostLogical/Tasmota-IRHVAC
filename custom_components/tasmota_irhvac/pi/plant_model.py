@@ -74,14 +74,23 @@ class PlantEstimate:
 
     @classmethod
     def from_seeds(
-        cls, tau_seed: float, response_lag: float, k_eff: float = 1.0
+        cls,
+        tau_fast_seed: float,
+        tau_slow_seed: float,
+        response_lag: float,
+        k_eff: float = 1.0,
     ) -> PlantEstimate:
-        """Create a seed-only PlantEstimate from config values."""
+        """Create a seed-only PlantEstimate.
+
+        τ_fast and τ_slow are physically distinct time constants and take
+        separate seeds: τ_fast tracks air-mass coupling (Smith predictor),
+        τ_slow tracks wall-mass coupling (kp scheduling).
+        """
         return cls(
             k=ParameterEstimate(value=k_eff, source="seed"),
             theta=ParameterEstimate(value=response_lag, source="seed"),
-            tau_fast=ParameterEstimate(value=tau_seed, source="seed"),
-            tau_slow=ParameterEstimate(value=tau_seed, source="seed"),
+            tau_fast=ParameterEstimate(value=tau_fast_seed, source="seed"),
+            tau_slow=ParameterEstimate(value=tau_slow_seed, source="seed"),
         )
 
 

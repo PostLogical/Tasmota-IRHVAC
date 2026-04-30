@@ -264,7 +264,10 @@ class TestClosedLoopOrchestration:
         """Closed-loop cross-checks primary and provides interim τ_slow."""
         from custom_components.tasmota_irhvac.pi.plant_identifier import PlantIdentifier
 
-        pi = PlantIdentifier(tau_seed=60.0, response_lag=0.0, imc_lambda=0.0)
+        pi = PlantIdentifier(
+            tau_fast_seed=60.0, tau_slow_seed=60.0,
+            response_lag=0.0, imc_lambda=0.0, enabled=True,
+        )
         assert pi.plant.tau_fast.source == "seed"
 
         # Start observation
@@ -297,7 +300,10 @@ class TestClosedLoopOrchestration:
         from custom_components.tasmota_irhvac.pi.plant_identifier import PlantIdentifier
 
         # Seed τ_slow=60. If closed-loop finds 200 (ratio=3.3 > 2.0), reject.
-        pi = PlantIdentifier(tau_seed=60.0, response_lag=0.0, imc_lambda=0.0)
+        pi = PlantIdentifier(
+            tau_fast_seed=60.0, tau_slow_seed=60.0,
+            response_lag=0.0, imc_lambda=0.0, enabled=True,
+        )
         pi.start_observation(0.0, 20.0, 22.0, 2.0)
 
         # Feed response with very slow dynamics (τ_slow=200)

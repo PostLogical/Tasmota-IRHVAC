@@ -109,6 +109,8 @@ from ..const import (
     DEFAULT_PI_SETPOINT_WEIGHT,
     DEFAULT_PI_SMITH_ENABLED,
     DEFAULT_PI_TAU_ESTIMATE,
+    DEFAULT_TAU_FAST_SEED,
+    DEFAULT_TAU_SLOW_SEED,
     SIGNAL_FF_SUPPRESS_UPDATE,
     SIGNAL_PI_BATCH_COMPLETE,
     SIGNAL_PI_UPDATE,
@@ -222,11 +224,19 @@ class PIController:
         )
         self._pi_tick_fallback: float = config.get(CONF_PI_TICK_FALLBACK, DEFAULT_PI_TICK_FALLBACK)
 
-        # Plant identification + IMC gain scheduling
+        # Plant identification + IMC gain scheduling.
+        # CONF_PI_TAU_ESTIMATE is deprecated — kept only as an enable flag
+        # (>0 = IMC on, 0 = manual Kp/Ki).  The numeric value is no longer
+        # used as a τ seed; conservative internal defaults are used instead.
+        imc_enabled = config.get(
+            CONF_PI_TAU_ESTIMATE, DEFAULT_PI_TAU_ESTIMATE
+        ) > 0
         self._plant_id = PlantIdentifier(
-            tau_seed=config.get(CONF_PI_TAU_ESTIMATE, DEFAULT_PI_TAU_ESTIMATE),
+            tau_fast_seed=DEFAULT_TAU_FAST_SEED,
+            tau_slow_seed=DEFAULT_TAU_SLOW_SEED,
             response_lag=config.get(CONF_PI_RESPONSE_LAG, DEFAULT_PI_RESPONSE_LAG),
             imc_lambda=config.get(CONF_PI_IMC_LAMBDA, DEFAULT_PI_IMC_LAMBDA),
+            enabled=imc_enabled,
         )
 
         # Smith predictor for dead-time compensation.
@@ -3600,11 +3610,22 @@ class PIController:
         self.flush_observation_buffer(mode=mode)
 
     def _reset_plant_id(self) -> None:
-        """Abort active plant test, cancel observations, reset estimate to seeds."""
+        """Abort active plant test, cancel observations, reset estimate to seeds.
+
+        Recomputes IMC gains from the seed-restored plant estimate so that
+        `_pi_kp`/`_pi_ki` track the reset rather than retaining values
+        derived from the pre-reset τ.  Rescales the integral when ki
+        changes to preserve the integral term's output contribution
+        (mirrors the persistence-restore path).
+        """
         was_testing = self._plant_id.plant_test_active
         self._plant_id.reset()
         if was_testing:
             self._pi_paused = False
+        old_ki = self._pi_ki
+        self._recompute_imc_gains()
+        if old_ki > 0 and self._pi_ki > 0 and old_ki != self._pi_ki:
+            self._pi_integral *= old_ki / self._pi_ki
 
     async def async_learning_reset(
         self, targets: list[str], mode: str | None = None

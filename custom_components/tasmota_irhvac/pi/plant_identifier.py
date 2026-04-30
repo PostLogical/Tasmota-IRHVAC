@@ -37,20 +37,31 @@ class PlantIdentifier:
     by the PI controller.
     """
 
+    # Minimum non-seed observations before τ from plant ID may influence
+    # IMC gains.  Below this threshold, compute_gains() falls back to the
+    # conservative seed.  Skogestad SIMC + cautious adaptation pattern —
+    # don't apply gain updates derived from a single observation.
+    MIN_TAU_OBSERVATIONS_FOR_GATE = 3
+
     def __init__(
         self,
-        tau_seed: float,
+        tau_fast_seed: float,
+        tau_slow_seed: float,
         response_lag: float,
         imc_lambda: float,
+        enabled: bool = True,
     ) -> None:
-        self._tau_seed: float = tau_seed
+        self._tau_fast_seed: float = tau_fast_seed
+        self._tau_slow_seed: float = tau_slow_seed
         self._response_lag: float = response_lag
         self._imc_lambda_config: float = imc_lambda
-        self._enabled: bool = tau_seed > 0
+        self._enabled: bool = enabled
 
         # Current best plant estimate — starts from seeds
         self._plant: PlantEstimate = PlantEstimate.from_seeds(
-            tau_seed=tau_seed, response_lag=response_lag
+            tau_fast_seed=tau_fast_seed,
+            tau_slow_seed=tau_slow_seed,
+            response_lag=response_lag,
         )
 
         # Providers
@@ -69,7 +80,7 @@ class PlantIdentifier:
 
     @property
     def enabled(self) -> bool:
-        """Whether plant identification is enabled (tau_seed > 0)."""
+        """Whether plant identification (IMC formula) is enabled."""
         return self._enabled
 
     @property
@@ -222,7 +233,9 @@ class PlantIdentifier:
         self.abort_plant_test()
         self.cancel_observation()
         self._plant = PlantEstimate.from_seeds(
-            tau_seed=self._tau_seed, response_lag=self._response_lag
+            tau_fast_seed=self._tau_fast_seed,
+            tau_slow_seed=self._tau_slow_seed,
+            response_lag=self._response_lag,
         )
         self._last_cross_check = None
 
@@ -469,25 +482,37 @@ class PlantIdentifier:
         Ki = Kp / Ti = 3 * Kp / τ_slow
 
         λ defaults to L/3 (bench-validated: 17% ITAE reduction, 0 regressions).
+
+        Maturity gate (Skogestad SIMC + cautious adaptation): until a
+        plant-ID parameter has accumulated MIN_TAU_OBSERVATIONS_FOR_GATE
+        observations from a non-seed source, the conservative seed is
+        used in the IMC formula instead of the live estimate.  This
+        prevents single-observation outliers from driving large gain
+        swings before evidence is strong enough to act on.
         """
-        tau_fast = max(self._plant.tau_fast.value, 1.0)
-        tau_slow = max(self._plant.tau_slow.value, 1.0)
+        tau_fast = self._gated_tau(self._plant.tau_fast, self._tau_fast_seed)
+        tau_slow = self._gated_tau(self._plant.tau_slow, self._tau_slow_seed)
         lag = self._response_lag
         lam = self._imc_lambda_config if self._imc_lambda_config > 0 else max(lag / 3.0, 1.0)
         k_eff = max(self._plant.k.value, 0.1)
 
         # Kp uses tau_slow (dominant dynamics — wall/mass time constant).
-        # Until tau_slow is identified (Layer 2), it stays at the seed value,
-        # giving stable Kp independent of tau_fast fluctuations.
-        tau_for_gains = tau_slow
-        kp = tau_for_gains / (k_eff * (lam + lag))
-        ti = tau_for_gains / 3.0
+        kp = tau_slow / (k_eff * (lam + lag))
+        ti = tau_slow / 3.0
         ki = kp / ti
 
         return GainUpdate(
             kp=kp, ki=ki, tau_fast=tau_fast, tau_slow=tau_slow, lag=lag,
             imc_lambda=lam,
         )
+
+    def _gated_tau(self, estimate: ParameterEstimate, seed: float) -> float:
+        """Return the seed unless the estimate has graduated past the maturity gate."""
+        mature = (
+            estimate.source != "seed"
+            and estimate.observations >= self.MIN_TAU_OBSERVATIONS_FOR_GATE
+        )
+        return max(estimate.value if mature else seed, 1.0)
 
     # ── Persistence ──────────────────────────────────────────────────
 

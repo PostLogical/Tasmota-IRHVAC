@@ -9,40 +9,63 @@ from custom_components.tasmota_irhvac.pi.plant_model import GainUpdate, PlantEst
 class TestPlantIdentifier:
     """Tests for the plant identification orchestrator."""
 
-    def _make(self, tau=60.0, lag=15.0, imc_lambda=0.0):
-        return PlantIdentifier(tau_seed=tau, response_lag=lag, imc_lambda=imc_lambda)
+    def _make(
+        self,
+        tau=None,
+        tau_fast=20.0,
+        tau_slow=60.0,
+        lag=15.0,
+        imc_lambda=0.0,
+        enabled=None,
+    ):
+        # Legacy `tau=` arg seeds both fast and slow with the same value
+        # (matches pre-split semantics) and toggles enabled on `tau > 0`.
+        if tau is not None:
+            tau_fast = tau
+            tau_slow = tau
+            if enabled is None:
+                enabled = tau > 0
+        if enabled is None:
+            enabled = True
+        return PlantIdentifier(
+            tau_fast_seed=tau_fast,
+            tau_slow_seed=tau_slow,
+            response_lag=lag,
+            imc_lambda=imc_lambda,
+            enabled=enabled,
+        )
 
     def test_initial_plant_from_seeds(self):
-        """PlantEstimate starts from configured seeds."""
-        pi = self._make(tau=60.0, lag=15.0)
-        assert pi.plant.tau_fast.value == 60.0
+        """PlantEstimate starts from configured seeds (split per τ-type)."""
+        pi = self._make(tau_fast=25.0, tau_slow=80.0, lag=15.0)
+        assert pi.plant.tau_fast.value == 25.0
         assert pi.plant.tau_fast.source == "seed"
-        assert pi.plant.tau_slow.value == 60.0
+        assert pi.plant.tau_slow.value == 80.0
         assert pi.plant.tau_slow.source == "seed"
         assert pi.plant.k.value == 1.0
         assert pi.plant.theta.value == 15.0
 
-    def test_enabled_when_tau_seed_positive(self):
-        pi = self._make(tau=60.0)
+    def test_enabled_when_constructed_enabled(self):
+        pi = self._make(enabled=True)
         assert pi.enabled
 
-    def test_disabled_when_tau_seed_zero(self):
-        pi = self._make(tau=0.0)
+    def test_disabled_when_constructed_disabled(self):
+        pi = self._make(enabled=False)
         assert not pi.enabled
 
     def test_compute_gains_from_seeds(self):
-        """IMC gains derive from seed τ_slow."""
-        pi = self._make(tau=60.0, lag=15.0)
+        """IMC gains derive from τ_slow seed when no observations yet."""
+        pi = self._make(tau_fast=20.0, tau_slow=60.0, lag=15.0)
         gains = pi.compute_gains()
         # λ = L/3 = 5, Kp = 60/(1*(5+15)) = 3.0
         assert gains.kp == pytest.approx(3.0)
         assert gains.ki == pytest.approx(0.15)
-        assert gains.tau_fast == 60.0
+        assert gains.tau_fast == 20.0
         assert gains.tau_slow == 60.0
         assert gains.lag == 15.0
 
     def test_compute_gains_explicit_lambda(self):
-        pi = self._make(tau=60.0, lag=15.0, imc_lambda=10.0)
+        pi = self._make(tau_fast=20.0, tau_slow=60.0, lag=15.0, imc_lambda=10.0)
         gains = pi.compute_gains()
         # Kp = 60/(1*(10+15)) = 2.4
         assert gains.kp == pytest.approx(2.4)
@@ -108,13 +131,14 @@ class TestPlantIdentifier:
         assert pi.plant.tau_slow.value == 60.0
 
     def test_area_provider_estimate_updates_tau_slow(self):
-        """When area_provider returns a tau_slow estimate, plant updates."""
+        """When area_provider returns a mature tau_slow estimate, GainUpdate uses it."""
         from custom_components.tasmota_irhvac.pi.plant_model import ParameterEstimate
         pi = self._make(tau=60.0, lag=15.0)
         pi.start_observation(0.0, 20.0, 22.0, 2.0)
-        # Stub the area provider to fire a tau_slow estimate on next check.
+        # Stub a *mature* estimate (observations past the maturity gate)
+        # so the new value propagates through compute_gains.
         new_tau_slow = ParameterEstimate(
-            value=180.0, source="area_method", confidence=1.0
+            value=180.0, source="area_method", confidence=1.0, observations=5,
         )
         pi._area_provider.accumulate = lambda *a, **kw: new_tau_slow
         gain_update = pi.check_observation(3000.0, 21.0)
@@ -123,12 +147,43 @@ class TestPlantIdentifier:
         assert gain_update is not None
         assert gain_update.tau_slow == 180.0
 
+    def test_immature_tau_slow_blocked_by_maturity_gate(self):
+        """Single-obs tau_slow update propagates to plant but NOT to gains."""
+        from custom_components.tasmota_irhvac.pi.plant_model import ParameterEstimate
+        pi = self._make(tau=60.0, lag=15.0)
+        pi.start_observation(0.0, 20.0, 22.0, 2.0)
+        # Stub a 1-observation estimate (below maturity threshold).
+        new_tau_slow = ParameterEstimate(
+            value=480.0, source="area_method", confidence=0.2, observations=1,
+        )
+        pi._area_provider.accumulate = lambda *a, **kw: new_tau_slow
+        gain_update = pi.check_observation(3000.0, 21.0)
+        # Plant tracks the observation
+        assert pi.plant.tau_slow.value == 480.0
+        # …but compute_gains falls back to the seed (60) — no kp blowup.
+        assert gain_update is not None
+        assert gain_update.tau_slow == 60.0
+        assert gain_update.kp == pytest.approx(3.0)
+
+
+def _legacy_make(tau, lag=15.0, imc_lambda=0.0):
+    """Construct a PlantIdentifier matching the pre-split tau_seed semantics:
+    tau seeds both τ_fast and τ_slow; tau > 0 means IMC enabled.
+    """
+    return PlantIdentifier(
+        tau_fast_seed=tau,
+        tau_slow_seed=tau,
+        response_lag=lag,
+        imc_lambda=imc_lambda,
+        enabled=tau > 0,
+    )
+
 
 class TestPlantIdentifierPersistence:
     """Tests for save/restore round-trip."""
 
     def _make(self, tau=60.0, lag=15.0):
-        return PlantIdentifier(tau_seed=tau, response_lag=lag, imc_lambda=0.0)
+        return _legacy_make(tau=tau, lag=lag)
 
     def test_round_trip(self):
         """as_dict → restore preserves plant estimate."""
@@ -180,7 +235,7 @@ class TestGainUpdateFields:
     """Verify GainUpdate has the correct dual-tau fields."""
 
     def test_gain_update_has_tau_fast_and_tau_slow(self):
-        pi = PlantIdentifier(tau_seed=60.0, response_lag=15.0, imc_lambda=0.0)
+        pi = _legacy_make(tau=60.0)
         gains = pi.compute_gains()
         assert hasattr(gains, "tau_fast")
         assert hasattr(gains, "tau_slow")
@@ -191,7 +246,7 @@ class TestPlantIdentifierDiagnostics:
     """Tests for get_diagnostics() method."""
 
     def _make(self, tau=60.0, lag=15.0):
-        return PlantIdentifier(tau_seed=tau, response_lag=lag, imc_lambda=0.0)
+        return _legacy_make(tau=tau, lag=lag)
 
     def test_baseline_diagnostics(self):
         """Fresh identifier returns plant estimate and provider states."""
@@ -260,7 +315,7 @@ class TestGreyboxTauProvider:
     """Tests for grey-box τ_eff → tau_slow integration."""
 
     def _make(self, tau=60.0, lag=15.0, imc_lambda=5.0):
-        return PlantIdentifier(tau_seed=tau, response_lag=lag, imc_lambda=imc_lambda)
+        return _legacy_make(tau=tau, lag=lag, imc_lambda=imc_lambda)
 
     def test_updates_seed_tau_slow(self):
         """Grey-box τ_eff should update tau_slow when source is seed."""
@@ -332,8 +387,10 @@ class TestGreyboxTauProvider:
         assert gains.ki > 0
 
     def test_disabled_returns_none(self):
-        """Disabled plant ID (tau_seed=0) → no update."""
-        pi = PlantIdentifier(tau_seed=0.0, response_lag=15.0, imc_lambda=5.0)
+        """Disabled plant ID → no update."""
+        pi = _legacy_make(tau=60.0, imc_lambda=5.0)
+        # Force-disable (legacy path: tau_seed=0 used to imply disabled)
+        pi._enabled = False
         gains = pi.update_from_greybox(tau_eff=100.0, ua_c_cv=0.1)
         assert gains is None
 

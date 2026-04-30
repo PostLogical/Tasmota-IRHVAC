@@ -274,6 +274,68 @@ class TestPIControllerCoverageGaps:
         pi._reset_plant_id()
         assert pi._pi_paused is False
 
+    def test_reset_plant_id_recomputes_kp_from_seed(self):
+        """_reset_plant_id must apply seed-based gains, not retain pre-reset Kp.
+
+        Regression test: prior to the wiring fix, _reset_plant_id() rebuilt
+        the plant estimate from seeds but never recomputed _pi_kp/_pi_ki, so
+        the controller kept running on stale gains derived from a (possibly
+        contaminated) τ_slow.  Operator complaint that drove this: DR's kp
+        stayed at 35.5 after `learning_reset` until HA restart.
+        """
+        entity = _make_pi({"pi_tau_estimate": 60})
+        pi = entity._pi
+        # Seed-based kp at construction
+        kp_from_seed = pi._pi_kp
+        # Inject a contaminated τ_slow that drives kp far higher
+        from custom_components.tasmota_irhvac.pi.plant_model import ParameterEstimate
+        import dataclasses
+        bad = ParameterEstimate(
+            value=710.0, source="area_method", confidence=1.0, observations=5,
+        )
+        pi._plant_id._plant = dataclasses.replace(pi._plant_id._plant, tau_slow=bad)
+        pi._recompute_imc_gains()
+        kp_inflated = pi._pi_kp
+        assert kp_inflated > kp_from_seed * 5  # ~10× higher
+        # Reset → kp should snap back to seed-derived value
+        pi._reset_plant_id()
+        assert pi._pi_kp == pytest.approx(kp_from_seed, abs=0.01)
+        assert pi._plant_id.plant.tau_slow.source == "seed"
+
+    def test_reset_plant_id_rescales_integral_when_ki_changes(self):
+        """_reset_plant_id rescales _pi_integral so the integral term's
+        output contribution stays continuous when ki changes (mirrors
+        the persistence-restore path).
+        """
+        # Use a config where ki varies with τ_slow: explicit imc_lambda flips
+        # the formula from the τ-invariant default to τ-dependent ki.
+        entity = _make_pi({
+            "pi_tau_estimate": 60,
+            "pi_imc_lambda": 30.0,
+            "pi_response_lag": 15.0,
+        })
+        pi = entity._pi
+        from custom_components.tasmota_irhvac.pi.plant_model import ParameterEstimate
+        import dataclasses
+        # Inject a different τ_slow so ki post-reset will differ
+        bumped = ParameterEstimate(
+            value=180.0, source="area_method", confidence=1.0, observations=5,
+        )
+        pi._plant_id._plant = dataclasses.replace(pi._plant_id._plant, tau_slow=bumped)
+        pi._recompute_imc_gains()
+        ki_pre = pi._pi_ki
+        pi._pi_integral = 5.0
+        # Reset: ki returns to seed-derived value, integral should rescale
+        # to preserve ki * integral product.
+        pi._reset_plant_id()
+        ki_post = pi._pi_ki
+        if ki_pre != pytest.approx(ki_post, rel=1e-3):
+            # When ki changes, integral output contribution must be preserved
+            assert pi._pi_integral == pytest.approx(5.0 * ki_pre / ki_post, rel=1e-3)
+        else:
+            # ki unchanged → integral not rescaled
+            assert pi._pi_integral == pytest.approx(5.0, abs=1e-6)
+
     # Line 3327: supplemental source with input_enabled=False in resolve
     def test_resolve_supplemental_disabled(self):
         """Disabled supplemental sources are skipped (line 3327)."""
@@ -1470,7 +1532,10 @@ class TestPlantIdentifierCoverageGaps:
     def test_tick_plant_test_no_test(self):
         """tick_plant_test returns aborted when no test active (line 381)."""
         from custom_components.tasmota_irhvac.pi.plant_identifier import PlantIdentifier
-        pi_id = PlantIdentifier(tau_seed=60, response_lag=0, imc_lambda=20.0)
+        pi_id = PlantIdentifier(
+            tau_fast_seed=60, tau_slow_seed=60,
+            response_lag=0, imc_lambda=20.0, enabled=True,
+        )
         cmd = pi_id.tick_plant_test(time.monotonic(), 20.0)
         assert cmd.phase == "aborted"
 
@@ -1479,7 +1544,10 @@ class TestPlantIdentifierCoverageGaps:
         """Cross-validation confidence boost on agreement (lines 250, 277)."""
         from custom_components.tasmota_irhvac.pi.plant_identifier import PlantIdentifier
         from custom_components.tasmota_irhvac.pi.plant_model import PlantEstimate, ParameterEstimate
-        pi_id = PlantIdentifier(tau_seed=60, response_lag=0, imc_lambda=20.0)
+        pi_id = PlantIdentifier(
+            tau_fast_seed=60, tau_slow_seed=60,
+            response_lag=0, imc_lambda=20.0, enabled=True,
+        )
         # Set non-seed primary estimates
         pi_id._plant = PlantEstimate(
             k=ParameterEstimate(value=1.0, confidence=0.5, source="step_response"),
@@ -2810,7 +2878,10 @@ class TestRemainingSmallGaps:
     def test_plant_id_start_when_disabled(self):
         """start_plant_test returns early when disabled (line 381)."""
         from custom_components.tasmota_irhvac.pi.plant_identifier import PlantIdentifier
-        pi_id = PlantIdentifier(tau_seed=0, response_lag=0, imc_lambda=0)
+        pi_id = PlantIdentifier(
+            tau_fast_seed=20.0, tau_slow_seed=60.0,
+            response_lag=0, imc_lambda=0, enabled=False,
+        )
         assert not pi_id.enabled
         pi_id.start_plant_test(
             baseline_setpoint_c=22.0, amplitude_c=2.0,
@@ -2919,7 +2990,10 @@ class TestPlantTestFullLifecycle:
         Covers: plant_identifier 432-441 (complete phase results extraction).
         """
         from custom_components.tasmota_irhvac.pi.plant_identifier import PlantIdentifier
-        pi_id = PlantIdentifier(tau_seed=60, response_lag=0, imc_lambda=20.0)
+        pi_id = PlantIdentifier(
+            tau_fast_seed=60, tau_slow_seed=60,
+            response_lag=0, imc_lambda=20.0, enabled=True,
+        )
         pi_id.start_plant_test(
             baseline_setpoint_c=22.0, amplitude_c=2.0,
             current_c=20.0, comfort_min_c=16.0, comfort_max_c=26.0, n_cycles=2,
@@ -2943,7 +3017,10 @@ class TestPlantTestFullLifecycle:
     def test_plant_identifier_restore_area_state(self):
         """PlantIdentifier restore with area_provider state (line 544)."""
         from custom_components.tasmota_irhvac.pi.plant_identifier import PlantIdentifier
-        pi_id = PlantIdentifier(tau_seed=60, response_lag=0, imc_lambda=20.0)
+        pi_id = PlantIdentifier(
+            tau_fast_seed=60, tau_slow_seed=60,
+            response_lag=0, imc_lambda=20.0, enabled=True,
+        )
         data = {
             "plant_estimate": pi_id._plant.as_dict(),
             "area_provider": {"tau_slow": 80.0, "observations": 3},
@@ -2955,7 +3032,10 @@ class TestPlantTestFullLifecycle:
         """tick_plant_test processes step_hold tau estimates (lines 423, 428)."""
         from custom_components.tasmota_irhvac.pi.plant_identifier import PlantIdentifier
         from custom_components.tasmota_irhvac.pi.plant_model import ParameterEstimate
-        pi_id = PlantIdentifier(tau_seed=60, response_lag=0, imc_lambda=20.0)
+        pi_id = PlantIdentifier(
+            tau_fast_seed=60, tau_slow_seed=60,
+            response_lag=0, imc_lambda=20.0, enabled=True,
+        )
         pi_id.start_plant_test(
             baseline_setpoint_c=22.0, amplitude_c=2.0,
             current_c=20.0, comfort_min_c=16.0, comfort_max_c=26.0,
@@ -2975,7 +3055,10 @@ class TestPlantTestFullLifecycle:
         """PlantIdentifier restore with no explicit area_provider but tau_slow data (line 544)."""
         from custom_components.tasmota_irhvac.pi.plant_identifier import PlantIdentifier
         from custom_components.tasmota_irhvac.pi.plant_model import PlantEstimate, ParameterEstimate
-        pi_id = PlantIdentifier(tau_seed=60, response_lag=0, imc_lambda=20.0)
+        pi_id = PlantIdentifier(
+            tau_fast_seed=60, tau_slow_seed=60,
+            response_lag=0, imc_lambda=20.0, enabled=True,
+        )
         # Set plant with non-seed tau_slow
         pi_id._plant = PlantEstimate(
             k=ParameterEstimate(value=1.0, confidence=0.5, source="seed"),
@@ -2993,7 +3076,10 @@ class TestPlantTestFullLifecycle:
         """PlantIdentifier diagnostics include test results when test inactive (576-578)."""
         from custom_components.tasmota_irhvac.pi.plant_identifier import PlantIdentifier
         from custom_components.tasmota_irhvac.pi.providers.plant_test import PlantTestProvider
-        pi_id = PlantIdentifier(tau_seed=60, response_lag=0, imc_lambda=20.0)
+        pi_id = PlantIdentifier(
+            tau_fast_seed=60, tau_slow_seed=60,
+            response_lag=0, imc_lambda=20.0, enabled=True,
+        )
         # Create a test provider with results (inactive + complete)
         test = PlantTestProvider()
         test._active = False

@@ -41,6 +41,17 @@ _SETTLING_FRACTION = 0.95
 # Minimum consecutive ticks with fraction above settling to declare settled.
 _SETTLING_TICKS = 3
 
+# Reject early if response moves the wrong direction by this fraction of step
+# magnitude after dead-time has elapsed.  Symmetric with the existing reversal
+# threshold (peak > 0.3): catches responses that go negative from the start
+# rather than peaking and reversing.
+_NEGATIVE_FRACTION_REJECT = -0.3
+
+# Hard ceiling on a single observed τ_slow (minutes).  Even a residential
+# building with very high thermal mass settles in well under this; anything
+# larger is a contaminated observation, not a real time constant.
+_MAX_OBSERVED_TAU_SLOW_MIN = 1440.0  # 24 hours
+
 
 class AreaMethodProvider:
     """Estimates τ_slow from the area under the step-response tail."""
@@ -152,10 +163,29 @@ class AreaMethodProvider:
             self._active = False
             return None
 
+        # ── Negative-direction rejection ─────────────────────────
+        # Catches responses that go negative from t=0 and never recover.
+        # Only fires after dead-time so we don't kill observations during
+        # the response_lag transient.
+        if (elapsed_min > self._response_lag
+                and fraction < _NEGATIVE_FRACTION_REJECT):
+            _LOGGER.info(
+                "τ_slow area observation rejected: fraction=%.2f after "
+                "%.0f min — response moved opposite to step (disturbance, "
+                "not step response)",
+                fraction, elapsed_min,
+            )
+            self._active = False
+            return None
+
         # ── Trapezoidal integration ──────────────────────────────
-        # Area under (1 - y_normalized) curve
-        integrand_prev = max(0.0, 1.0 - self._last_fraction)
-        integrand_now = max(0.0, 1.0 - fraction)
+        # Area under (1 - y_normalized) curve.  Clamp integrand to [0, 1]:
+        # for a valid step response y_normalized ∈ [0, 1] (rises monotonically
+        # from 0 to 1).  Clamping above 1 protects against overshoot; clamping
+        # below 0 protects against negative-fraction contamination, which
+        # would otherwise inflate the integrand by 1 + |fraction|.
+        integrand_prev = max(0.0, min(1.0, 1.0 - self._last_fraction))
+        integrand_now = max(0.0, min(1.0, 1.0 - fraction))
         self._area_integral += 0.5 * (integrand_prev + integrand_now) * dt_min
 
         self._last_time = now_mono
@@ -225,6 +255,20 @@ class AreaMethodProvider:
             return None
 
         observed_tau_slow = max(observed_tau_slow, 15.0)  # Same floor as τ_fast
+
+        # ── Sanity ceiling ───────────────────────────────────────
+        # Hard upper bound: any observation that pushes τ_slow above
+        # _MAX_OBSERVED_TAU_SLOW_MIN is contaminated, not a real estimate.
+        if observed_tau_slow > _MAX_OBSERVED_TAU_SLOW_MIN:
+            _LOGGER.warning(
+                "τ_slow area observation rejected: %.1f min exceeds "
+                "physical ceiling %.0f min (area=%.1f, fraction=%.2f) — "
+                "treating as contaminated",
+                observed_tau_slow, _MAX_OBSERVED_TAU_SLOW_MIN,
+                self._area_integral, fraction,
+            )
+            self._active = False
+            return None
 
         # ── Outlier rejection ────────────────────────────────────
         if self._observations >= 2 and self._tau_slow > 0:

@@ -256,7 +256,10 @@ class TestPlantTestOrchestration:
     def test_start_and_tick(self):
         from custom_components.tasmota_irhvac.pi.plant_identifier import PlantIdentifier
 
-        pi = PlantIdentifier(tau_seed=60.0, response_lag=15.0, imc_lambda=0.0)
+        pi = PlantIdentifier(
+            tau_fast_seed=60.0, tau_slow_seed=60.0,
+            response_lag=15.0, imc_lambda=0.0, enabled=True,
+        )
         pi.start_plant_test(
             baseline_setpoint_c=22, amplitude_c=2, current_c=21.0,
             comfort_min_c=15.0, comfort_max_c=30.0, n_cycles=2,
@@ -271,7 +274,10 @@ class TestPlantTestOrchestration:
     def test_abort(self):
         from custom_components.tasmota_irhvac.pi.plant_identifier import PlantIdentifier
 
-        pi = PlantIdentifier(tau_seed=60.0, response_lag=15.0, imc_lambda=0.0)
+        pi = PlantIdentifier(
+            tau_fast_seed=60.0, tau_slow_seed=60.0,
+            response_lag=15.0, imc_lambda=0.0, enabled=True,
+        )
         pi.start_plant_test(
             baseline_setpoint_c=22, amplitude_c=2, current_c=21.0,
             comfort_min_c=15.0, comfort_max_c=30.0,

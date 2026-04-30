@@ -9,7 +9,12 @@ import math
 import pytest
 
 from custom_components.tasmota_irhvac.pi.plant_model import ObservationContext, ParameterEstimate
-from custom_components.tasmota_irhvac.pi.providers.area_method import AreaMethodProvider
+from custom_components.tasmota_irhvac.pi.providers.area_method import (
+    _MAX_AREA_DURATION_MIN,
+    AreaMethodProvider,
+)
+
+_MAX_AREA_DURATION_SEC = _MAX_AREA_DURATION_MIN * 60.0
 
 
 def _ctx(start=0.0, temp=20.0, target=22.0, step=2.0, ff=0.0):
@@ -213,6 +218,73 @@ class TestAreaMethodRejection:
         assert p.observations == 0
 
 
+class TestAreaMethodNegativeFractionGuards:
+    """Guards against responses that move the wrong direction.
+
+    The pre-fix area method would integrate `max(0, 1 - fraction)` without
+    capping the upper end, so a fraction of -2.71 produced an integrand of
+    3.71/min — a single 8-hour timeout could push observed_τ_slow past
+    1000 min from a contaminated observation.
+    """
+
+    def _make(self, lag=15.0):
+        return AreaMethodProvider(response_lag=lag)
+
+    def test_integrand_clamped_above_one(self):
+        """Negative-fraction ticks add at most 1 minute of area per minute."""
+        p = self._make(lag=0.0)
+        p.start_observation(_ctx(step=2.0))
+        # Tick 1: room moved opposite by 4°C → fraction = -2.0
+        # Pre-fix integrand would be max(0, 1 - (-2)) = 3.0 → 30 min over 10-min tick
+        # Post-fix: clamp(1 - (-2), 0, 1) = 1.0 → 10 min over 10-min tick
+        p.accumulate(600.0, 16.0, tau_fast=15.0)
+        # Without the early-reject (lag=0 means it would still fire — set lag>0 to test
+        # integrand alone), this validates the clamp.
+        assert p._area_integral <= 10.0 + 1e-6
+
+    def test_negative_fraction_rejected_after_dead_time(self):
+        """Response that moves opposite the step is rejected after dead-time."""
+        p = self._make(lag=15.0)
+        p.start_observation(_ctx(step=2.0))
+        # During dead-time (elapsed <= response_lag): no rejection.
+        result = p.accumulate(600.0, 19.0, tau_fast=15.0)  # fraction=-0.5 at 10 min
+        assert result is None
+        assert p.active  # still observing — within dead-time grace
+
+        # Past dead-time with negative fraction → reject.
+        result = p.accumulate(1500.0, 18.5, tau_fast=15.0)  # fraction=-0.75 at 25 min
+        assert result is None
+        assert not p.active  # rejected
+        assert p.observations == 0
+
+    def test_negative_fraction_within_threshold_not_rejected(self):
+        """Small negative excursions (above -0.3 threshold) keep observing."""
+        p = self._make(lag=15.0)
+        p.start_observation(_ctx(step=2.0))
+        # Past dead-time, fraction=-0.2 (above threshold) → keep going
+        result = p.accumulate(1500.0, 19.6, tau_fast=15.0)
+        assert result is None
+        assert p.active  # still observing
+
+    def test_pathological_observation_rejected_by_ceiling(self):
+        """Observed τ_slow above the physical ceiling is rejected."""
+        p = self._make(lag=0.0)
+        # Pre-load EMA so first-pass outlier check would pass (we're testing
+        # the absolute ceiling, not the relative outlier check).
+        p.start_observation(_ctx(step=2.0))
+        # Run the response staying below settling for the entire 480-min window
+        # so accumulate hits the timeout path.  fraction stays positive but
+        # tiny, integrand near 1.0/min, area ≈ duration → observed τ_slow
+        # ≈ duration which crosses the 1440-min ceiling.  We synthesize this
+        # by stuffing area_integral directly past the timeout path.
+        p._area_integral = 1500.0  # would yield observed τ_slow > 1440
+        # Force completion via timeout
+        result = p.accumulate(_MAX_AREA_DURATION_SEC, 20.05, tau_fast=15.0)
+        # Ceiling rejects the observation
+        assert result is None
+        assert p.observations == 0
+
+
 class TestAreaMethodOutlierRejection:
     """Outlier rejection after ≥2 observations."""
 
@@ -246,7 +318,13 @@ class TestAreaMethodIntegration:
         """Verify area method results flow through the orchestrator."""
         from custom_components.tasmota_irhvac.pi.plant_identifier import PlantIdentifier
 
-        pi = PlantIdentifier(tau_seed=60.0, response_lag=0.0, imc_lambda=0.0)
+        pi = PlantIdentifier(
+            tau_fast_seed=60.0,
+            tau_slow_seed=60.0,
+            response_lag=0.0,
+            imc_lambda=0.0,
+            enabled=True,
+        )
         assert pi.plant.tau_slow.source == "seed"
 
         # Start observation

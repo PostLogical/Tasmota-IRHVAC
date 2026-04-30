@@ -69,11 +69,19 @@ def make_config(overrides=None):
 
 
 def make_pi_config(overrides=None):
-    """Build a config dict with PI enabled and a temp sensor."""
+    """Build a config dict with PI enabled and a temp sensor.
+
+    Test default sets `pi_tau_estimate: 0.0` to preserve the manual-gains
+    path the existing test suite was tuned for.  Production code now
+    defaults to IMC-on (`DEFAULT_PI_TAU_ESTIMATE = 60.0`); tests that
+    want IMC behavior should pass `pi_tau_estimate: 60` (or any positive
+    value) in `overrides`.
+    """
     pi_defaults = {
         "pi_enabled": True,
         "temperature_sensor": "sensor.room_temp",
         "outdoor_temp_sensor": "sensor.outdoor_temp",
+        "pi_tau_estimate": 0.0,
     }
     if overrides:
         pi_defaults.update(overrides)
