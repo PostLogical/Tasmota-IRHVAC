@@ -45,7 +45,6 @@ To run the long-horizon design study::
 from __future__ import annotations
 
 import math
-from pathlib import Path
 
 import pytest
 
@@ -60,15 +59,18 @@ from tests.hvac_bench.full_stack_runner import (
     diurnal_solar,
     run_full_stack,
 )
-from tests.hvac_bench.csv_adapters import from_open_meteo_csv, csv_to_schedules
 from tests.hvac_bench.house_profiles import (
     FUJITSU_HYPERHEAT_CAPACITY,
     PROFILES_2R2C,
     QUICK_PROFILES,
 )
 from tests.hvac_bench.scenarios._weather_mode import (
+    SHOULDER_SPRING,
+    SUMMER,
     WINTER_MC_STARTS,
+    WINTER_TYPICAL,
     WeatherMode,
+    WeatherWindow,
     get_default_weather_mode,
     real_weather_schedules,
     season_for_outdoor_base,
@@ -986,9 +988,6 @@ class TestRecoveryFromBadStates:
             )
 
 
-_WEATHER_DIR = Path(__file__).parent.parent / "weather_data"
-
-
 class TestRealWeatherReplay:
     """Run learning against real open-meteo weather data.
 
@@ -996,36 +995,21 @@ class TestRealWeatherReplay:
     non-synthetic weather patterns (fronts, clouds, variable solar).
     """
 
-    @pytest.mark.parametrize("weather_file,mode,desired,outdoor_offset", [
-        ("new_england_winter_2w.csv", "heat", 20.5, 0.0),
-        ("new_england_spring_2w.csv", "heat", 20.5, 0.0),
-        ("new_england_summer_2w.csv", "cool", 24.0, 0.0),
+    @pytest.mark.parametrize("window,mode,desired", [
+        (WINTER_TYPICAL, "heat", 20.5),
+        (SHOULDER_SPRING, "heat", 20.5),
+        (SUMMER, "cool", 24.0),
     ], ids=["winter_heat", "spring_heat", "summer_cool"])
-    def test_no_divergence(self, weather_file, mode, desired, outdoor_offset):
+    def test_no_divergence(
+        self, window: WeatherWindow, mode: str, desired: float
+    ):
         """Learning should not diverge under real weather."""
-        csv_path = _WEATHER_DIR / weather_file
-        if not csv_path.exists():
-            pytest.skip(f"Weather file not found: {csv_path}")
-
-        csv_data = from_open_meteo_csv(csv_path)
-        schedules = csv_to_schedules(csv_data)
-
-        outdoor_fn = schedules.get("outdoor_c")
-        if outdoor_fn is None:
-            pytest.skip("No outdoor_c in weather data")
-
-        # Solar: normalize W/m² to 0-1 proxy
-        raw_solar_fn = schedules.get("solar_w_m2")
-        if raw_solar_fn is not None:
-            solar_fn = lambda tick, _f=raw_solar_fn: _f(tick) / 1000.0
-        else:
-            solar_fn = None
-
-        n_hours = len(csv_data.get("outdoor_c", [])) - 1
-        n_days = max(1, n_hours // 24)
+        outdoor_fn, solar_fn, _ = windowed_real_weather(
+            start_day=window.start_day, n_days=14,
+        )
 
         config = FullStackConfig(
-            n_days=n_days,
+            n_days=14,
             profile_name="living_room",
             desired_c=desired,
             mode=mode,
@@ -1052,13 +1036,15 @@ class TestRealWeatherReplay:
         # No integral runaway
         max_integral = max(abs(h["integral"]) for h in result.history)
         assert max_integral < 50, (
-            f"{weather_file}: integral runaway, max={max_integral:.1f}"
+            f"{window.season} (start_day={window.start_day}): "
+            f"integral runaway, max={max_integral:.1f}"
         )
 
         # Coefficient should be bounded
         od = result.final_coefs.get("outdoor_delta", 0)
         assert abs(od) < 5.0, (
-            f"{weather_file}: outdoor_delta diverged to {od:.3f}"
+            f"{window.season} (start_day={window.start_day}): "
+            f"outdoor_delta diverged to {od:.3f}"
         )
 
 

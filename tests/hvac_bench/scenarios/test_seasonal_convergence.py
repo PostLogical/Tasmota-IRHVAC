@@ -38,11 +38,9 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from pathlib import Path
 
 import pytest
 
-from tests.hvac_bench.csv_adapters import csv_to_schedules, from_open_meteo_csv
 from tests.hvac_bench.full_stack_runner import (
     FullStackConfig,
     FullStackResult,
@@ -53,9 +51,23 @@ from tests.hvac_bench.full_stack_runner import (
     run_full_stack,
 )
 from tests.hvac_bench.house_profiles import PROFILES_2R2C
+from tests.hvac_bench.scenarios._weather_mode import (
+    SHOULDER_FALL,
+    SHOULDER_SPRING,
+    WINTER_TYPICAL,
+    WeatherWindow,
+    windowed_real_weather,
+)
 
 
-_WEATHER_DIR = Path(__file__).parent.parent / "weather_data"
+# Cross-season convergence asks a typical-conditions question, so winter
+# resolves to WINTER_TYPICAL (2024-01-01) rather than the cold-year
+# WINTER_DEEP (2025-01-01).
+_SEASON_WINDOWS: dict[str, WeatherWindow] = {
+    "winter": WINTER_TYPICAL,
+    "fall": SHOULDER_FALL,
+    "spring": SHOULDER_SPRING,
+}
 
 
 # ── Seasonal weather profiles ────────────────────────────────────────────
@@ -194,25 +206,18 @@ def _make_synth_config(season_name: str, n_days: int = 90) -> FullStackConfig:
 
 
 def _make_real_config(season_name: str, n_days: int = 90) -> FullStackConfig:
-    """Open-Meteo CSV-driven config — the canonical default (#45).
+    """Open-Meteo-driven config — the canonical default (#45, #51).
 
-    Reads ``new_england_{season}_90d.csv`` from ``tests/hvac_bench/weather_data``
-    (44°N 71.5°W). Same building/seed/wrong-starting-seed as the synth path so
-    only the weather distribution differs. Produces verdicts that survive
-    real cloud clustering, weather fronts, and seasonal day-length shifts.
+    Pulls a ``WeatherWindow`` from the multi-year CSV (44°N 71.5°W) for the
+    requested season via ``_SEASON_WINDOWS``. Same building/seed/wrong-starting-
+    seed as the synth path so only the weather distribution differs. Produces
+    verdicts that survive real cloud clustering, weather fronts, and seasonal
+    day-length shifts.
     """
-    csv_path = _WEATHER_DIR / f"new_england_{season_name}_90d.csv"
-    csv_data = from_open_meteo_csv(csv_path)
-    schedules = csv_to_schedules(csv_data)
-    outdoor_fn = schedules["outdoor_c"]
-    raw_solar_fn = schedules["solar_w_m2"]
-    # Open-meteo direct_radiation is W/m² (peak ~700-1000); normalize to 0-1
-    # proxy to match the synth convention the thermal model expects.
-    solar_fn = lambda t, _f=raw_solar_fn: _f(t) / 1000.0
-
-    n_hours = len(csv_data.get("outdoor_c", [])) - 1
-    n_days_max = max(1, n_hours // 24)
-    n_days = min(n_days, n_days_max)
+    window = _SEASON_WINDOWS[season_name]
+    outdoor_fn, solar_fn, n_days = windowed_real_weather(
+        start_day=window.start_day, n_days=n_days,
+    )
 
     profile = PROFILES_2R2C["living_room"]
     return FullStackConfig(

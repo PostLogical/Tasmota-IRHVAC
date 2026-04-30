@@ -11,7 +11,7 @@ learning-algorithm tests must be validated on real weather. ``"synth"``
 remains available for reproducible parameter sweeps and seed scans.
 
 #51: real-weather data lives in a single multi-year CSV
-(``new_england_multiyear.csv``, 2023-01-01 → 2025-12-31, 44.0°N 71.5°W).
+(``new_england_multiyear.csv``, 2023-01-01 → 2026-04-25, 44.0°N 71.5°W).
 :func:`windowed_real_weather` is the canonical accessor; the named-season
 helper :func:`real_weather_schedules` is a thin wrapper that resolves a
 season name to a :class:`WeatherWindow` constant.
@@ -73,23 +73,36 @@ class WeatherWindow:
     season: Season
 
 
-# Tuned so each window's outdoor mean and solar excitation match the
-# prior named-season 90d CSVs (#45 era):
-#   winter_90d (2025-01-01 → 90d)  T_mean=-8.50, S_mean=59.5
-#   fall_90d   (2024-10-01 → 90d)  T_mean= 0.0,  S_mean=55.9
-#   spring_90d (2025-04-01 → 90d)  T_mean= 8.9,  S_mean=121.0
-# Days are counted from 2023-01-01 (multi-year CSV origin).
+# Per-year Jan-1 + 90d means at this location:
+#   2023 -5.59°C, 2024 -6.02°C, 2025 -8.50°C, 2026 -8.26°C
+# (4-yr mean -7.09°C; bimodal — 2025/2026 are notable cold years.)
 #
-# SHOULDER_SPRING is offset by 1 day from the literal spring_90d start
-# (2025-03-31 instead of 2025-04-01) because Open-Meteo's reanalysis has
-# been republished since the named CSV was pulled, and on the literal
-# calendar window the week-1-vs-week-3 MAE assertion in
-# TestPositiveOffsetBandShift lands narrowly on the wrong side of its
-# 1.10 ratio bound. The 1-day shift puts the same test back inside its
-# bound while leaving the 90d means within 1.7% (T) / 0.3% (S) of the
-# named CSV. Per #49 Phase 3, week-vs-week assertions are the next class
-# to convert to N-start-day median assertions (#51 Phase 2).
-WINTER_DEEP = WeatherWindow(start_day=731, season="winter")  # 2025-01-01
+# WINTER_DEEP pins the cold-year window. Used by ``_NAMED_WINDOWS`` so
+# legacy callers that resolve season="winter" via
+# :func:`season_for_outdoor_base` keep their existing weather distribution
+# and assertion calibrations.
+#
+# WINTER_TYPICAL points at 2024-01-01, the year closest to the 4-yr mean.
+# Prefer this for *new* tests asking "what does the controller do under
+# typical winter weather"; reserve WINTER_DEEP for stress-test contexts
+# (cold snaps, deep cold tail behavior) where the extreme is the point.
+#
+# SHOULDER_FALL (2024-10-01, T_mean=-0.03°C) is already median across
+# 2023/2024/2025 fall windows.
+#
+# SHOULDER_SPRING is offset by 1 day from the literal 2025-04-01 start
+# because Open-Meteo's reanalysis has been republished since the named
+# CSV was pulled, and on the literal calendar window the week-1-vs-week-3
+# MAE assertion in TestPositiveOffsetBandShift lands narrowly on the
+# wrong side of its 1.10 ratio bound. The 1-day shift puts the same test
+# back inside its bound while leaving the 90d means within 1.7% (T) /
+# 0.3% (S) of the named CSV. 2025-03-31 (T_mean=+8.74°C) is the T-median
+# year. Per #49 Phase 3, week-vs-week assertions are the next class to
+# convert to N-start-day median assertions (#51 Phase 2).
+#
+# Days are counted from 2023-01-01 (multi-year CSV origin).
+WINTER_DEEP = WeatherWindow(start_day=731, season="winter")  # 2025-01-01 (cold-year)
+WINTER_TYPICAL = WeatherWindow(start_day=365, season="winter")  # 2024-01-01 (typical)
 SHOULDER_FALL = WeatherWindow(start_day=639, season="fall")  # 2024-10-01
 SHOULDER_SPRING = WeatherWindow(start_day=820, season="spring")  # 2025-03-31
 SUMMER = WeatherWindow(start_day=912, season="summer")  # 2025-07-01
