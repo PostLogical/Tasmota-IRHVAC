@@ -17,16 +17,17 @@ import logging
 import pytest
 
 from tests.hvac_bench.adapters import TasmotaPIAdapter
-from tests.hvac_bench.full_stack_runner import FullStackResult, run_full_stack
+from tests.hvac_bench.full_stack_runner import (
+    FullStackResult,
+    print_full_stack_summary,
+    run_full_stack,
+)
 from tests.hvac_bench.scenarios.test_buffer_variants import (
-    VARIANTS,
+    _compute_variant_results,
+    _print_variant_summary,
     _replace_buffers,
-    _print_buffer_fill,
-    _print_drift_table,
-    _print_final_table,
 )
 from tests.hvac_bench.scenarios.test_seasonal_convergence import (
-    SEASONS,
     _make_synth_config,
 )
 
@@ -47,23 +48,25 @@ def _run_with_variant(season_name: str, *, max_size: int, fifo: bool,
         TasmotaPIAdapter.__init__ = orig_init
 
 
+def _compute_synth_variant_results() -> dict[str, dict[str, FullStackResult]]:
+    """Run all (variant × season) combos with synth AR(1) weather."""
+    return _compute_variant_results(runner=_run_with_variant)
+
+
+def run_buffer_variants_synth_summary() -> None:
+    """CLI entry: per-run generic summary for each (variant × season),
+    then the cross-variant comparison tables (synth weather)."""
+    results = _compute_synth_variant_results()
+    for vname, by_season in results.items():
+        for sname, result in by_season.items():
+            print_full_stack_summary(result, label=f"{vname} / {sname} (synth)")
+    _print_variant_summary(results)
+
+
 @pytest.fixture(scope="module")
 def synth_variant_results() -> dict[str, dict[str, FullStackResult]]:
     """Run all (variant × season) combos with synth weather. 12 sims, ~8 min."""
-    pi_logger = logging.getLogger("custom_components.tasmota_irhvac")
-    prev = pi_logger.level
-    pi_logger.setLevel(logging.ERROR)
-    try:
-        out: dict[str, dict[str, FullStackResult]] = {}
-        for vname, size, fifo in VARIANTS:
-            out[vname] = {}
-            for sname in SEASONS:
-                out[vname][sname] = _run_with_variant(
-                    sname, max_size=size, fifo=fifo, n_days=90,
-                )
-        return out
-    finally:
-        pi_logger.setLevel(prev)
+    return _compute_synth_variant_results()
 
 
 @pytest.mark.design
@@ -75,13 +78,6 @@ class TestBufferVariantsSynth:
     knobs matter. See ``feedback_synthetic_vs_real_bench.md`` — the
     FIFO/leverage verdict comes from the real-weather sibling, not this one.
     """
-
-    def test_print_summary(self, synth_variant_results):
-        """All-in-one: final coefs, trajectory, fill rate. Always passes."""
-        _print_buffer_fill(synth_variant_results)
-        _print_final_table(synth_variant_results, "outdoor_delta", truth=-0.25)
-        _print_final_table(synth_variant_results, "Solar Proxy", truth=-2.0)
-        _print_drift_table(synth_variant_results, "Solar Proxy")
 
     def test_no_variant_diverges(self, synth_variant_results):
         """Sanity: every (variant, season) finishes with bounded coefs."""

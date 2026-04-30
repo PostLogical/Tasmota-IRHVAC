@@ -49,6 +49,7 @@ from tests.hvac_bench.full_stack_runner import (
     ModelInputSpec,
     WeatherState,
     diurnal_outdoor,
+    print_full_stack_summary,
     run_full_stack,
 )
 from tests.hvac_bench.house_profiles import PROFILES_2R2C
@@ -332,16 +333,43 @@ def _print_summary(results: dict[str, FullStackResult]) -> None:
     print(f"{'Total batches run':<34}" + "".join(f"{v:>12d}" for v in row))
 
 
+def _print_solar_drift_diagnostic(results: dict[str, FullStackResult]) -> None:
+    """Per-batch trajectory of Solar Proxy + outdoor + intercept + buffer.
+
+    Diagnostic for the day-30 → day-60 Solar Proxy drift. Prints every
+    10th batch (~5 days) so we can see when the drift starts and whether
+    it correlates with buffer fill, outdoor micro-shifts, or intercept.
+    """
+    for name, r in results.items():
+        print(f"\n=== {name}: Solar Proxy trajectory ===")
+        print(f"{'batch':>6} {'day':>5} {'outdoor':>10} {'solar':>10} "
+              f"{'intercept':>10} {'sol_froz':>9} {'buf%':>7}")
+        n_days = len(r.daily_buffer_utilization)
+        for i in range(0, len(r.coef_trajectory), 10):
+            snap = r.coef_trajectory[i]
+            day = i / 2.0
+            day_idx = min(int(day), n_days - 1) if n_days else 0
+            buf = (r.daily_buffer_utilization[day_idx]
+                   if n_days else 0.0)
+            frozen = snap.get("Solar Proxy_frozen", "?")
+            print(
+                f"{i:>6d} {day:>5.1f} "
+                f"{snap.get('outdoor_delta', 0):>10.4f} "
+                f"{snap.get('Solar Proxy', 0):>10.4f} "
+                f"{snap.get('intercept', 0):>10.4f} "
+                f"{str(frozen):>9} "
+                f"{buf:>6.1%}"
+            )
+
+
 # ── Fixture: run all seasons once, share across tests ───────────────────
 
 
-@pytest.fixture(scope="module")
-def seasonal_results() -> dict[str, FullStackResult]:
-    """Run all heating seasons (90 days each) once for the whole test module.
+def _compute_seasonal_results() -> dict[str, FullStackResult]:
+    """Run all heating seasons (90 days each). Shared by fixture and CLI.
 
     Uses real Open-Meteo CSVs by default (#45). Silences PI/batch loggers
-    during the runs so the printed summary table is the only artifact when
-    invoked with ``-s``.
+    during the runs so the printed summary table is the only artifact.
     """
     pi_logger = logging.getLogger("custom_components.tasmota_irhvac")
     prev_level = pi_logger.level
@@ -355,50 +383,27 @@ def seasonal_results() -> dict[str, FullStackResult]:
         pi_logger.setLevel(prev_level)
 
 
+def run_seasonal_summary() -> None:
+    """CLI entry: per-run generic summary, then cross-season tables + diagnostic."""
+    results = _compute_seasonal_results()
+    for name, result in results.items():
+        print_full_stack_summary(result, label=f"seasonal / {name}")
+    _print_summary(results)
+    _print_solar_drift_diagnostic(results)
+
+
+@pytest.fixture(scope="module")
+def seasonal_results() -> dict[str, FullStackResult]:
+    """Run all heating seasons (90 days each) once for the whole test module."""
+    return _compute_seasonal_results()
+
+
 # ── Tests ────────────────────────────────────────────────────────────────
 
 
 @pytest.mark.slow
 class TestSeasonalConvergence:
     """Compare batch WLS convergence and final coefficients across heating seasons."""
-
-    @pytest.mark.design
-    def test_print_summary(self, seasonal_results):
-        """Print the comparison table — always passes, the artifact is the output.
-
-        Run with ``pytest -s -m design`` to see the table.
-        """
-        _print_summary(seasonal_results)
-
-    @pytest.mark.design
-    def test_print_solar_drift_diagnostic(self, seasonal_results):
-        """Per-batch trajectory of Solar Proxy + outdoor + intercept + buffer.
-
-        Diagnostic for the day-30 → day-60 Solar Proxy drift. Prints every
-        10th batch (~5 days) so we can see when the drift starts and whether
-        it correlates with buffer fill, outdoor micro-shifts, or intercept.
-        Always passes — the artifact is the output.
-        """
-        for name, r in seasonal_results.items():
-            print(f"\n=== {name}: Solar Proxy trajectory ===")
-            print(f"{'batch':>6} {'day':>5} {'outdoor':>10} {'solar':>10} "
-                  f"{'intercept':>10} {'sol_froz':>9} {'buf%':>7}")
-            n_days = len(r.daily_buffer_utilization)
-            for i in range(0, len(r.coef_trajectory), 10):
-                snap = r.coef_trajectory[i]
-                day = i / 2.0
-                day_idx = min(int(day), n_days - 1) if n_days else 0
-                buf = (r.daily_buffer_utilization[day_idx]
-                       if n_days else 0.0)
-                frozen = snap.get("Solar Proxy_frozen", "?")
-                print(
-                    f"{i:>6d} {day:>5.1f} "
-                    f"{snap.get('outdoor_delta', 0):>10.4f} "
-                    f"{snap.get('Solar Proxy', 0):>10.4f} "
-                    f"{snap.get('intercept', 0):>10.4f} "
-                    f"{str(frozen):>9} "
-                    f"{buf:>6.1%}"
-                )
 
     def test_no_season_diverges(self, seasonal_results):
         """Sanity: every season's final coefficients must be bounded."""

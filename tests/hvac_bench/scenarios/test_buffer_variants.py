@@ -26,7 +26,11 @@ from custom_components.tasmota_irhvac.pi.batch_learning import (
     Observation,
 )
 from tests.hvac_bench.adapters import TasmotaPIAdapter
-from tests.hvac_bench.full_stack_runner import FullStackResult, run_full_stack
+from tests.hvac_bench.full_stack_runner import (
+    FullStackResult,
+    print_full_stack_summary,
+    run_full_stack,
+)
 from tests.hvac_bench.scenarios.test_seasonal_convergence import (
     SEASONS,
     _make_config,  # default: real CSV
@@ -108,9 +112,14 @@ def _run_with_variant(season_name: str, *, max_size: int, fifo: bool,
 # ── Fixture ──────────────────────────────────────────────────────────────
 
 
-@pytest.fixture(scope="module")
-def variant_results() -> dict[str, dict[str, FullStackResult]]:
-    """Run all (variant × season) combos once. 12 sims, ~8 minutes total."""
+def _compute_variant_results(
+    *, runner=_run_with_variant, n_days: int = 90,
+) -> dict[str, dict[str, FullStackResult]]:
+    """Run all (variant × season) combos once. 12 sims, ~8 minutes total.
+
+    Shared by the pytest fixture and the CLI runner. ``runner`` is injected so
+    the synth sibling can reuse this loop with its own per-variant runner.
+    """
     pi_logger = logging.getLogger("custom_components.tasmota_irhvac")
     prev = pi_logger.level
     pi_logger.setLevel(logging.ERROR)
@@ -119,12 +128,38 @@ def variant_results() -> dict[str, dict[str, FullStackResult]]:
         for vname, size, fifo in VARIANTS:
             out[vname] = {}
             for sname in SEASONS:
-                out[vname][sname] = _run_with_variant(
-                    sname, max_size=size, fifo=fifo, n_days=90,
+                out[vname][sname] = runner(
+                    sname, max_size=size, fifo=fifo, n_days=n_days,
                 )
         return out
     finally:
         pi_logger.setLevel(prev)
+
+
+def _print_variant_summary(
+    results: dict[str, dict[str, FullStackResult]],
+) -> None:
+    """All-in-one report: buffer fill, final coefs (outdoor + solar), drift table."""
+    _print_buffer_fill(results)
+    _print_final_table(results, "outdoor_delta", truth=-0.25)
+    _print_final_table(results, "Solar Proxy", truth=-2.0)
+    _print_drift_table(results, "Solar Proxy")
+
+
+def run_buffer_variants_summary() -> None:
+    """CLI entry: per-run generic summary for each (variant × season),
+    then the cross-variant comparison tables."""
+    results = _compute_variant_results()
+    for vname, by_season in results.items():
+        for sname, result in by_season.items():
+            print_full_stack_summary(result, label=f"{vname} / {sname}")
+    _print_variant_summary(results)
+
+
+@pytest.fixture(scope="module")
+def variant_results() -> dict[str, dict[str, FullStackResult]]:
+    """Run all (variant × season) combos once. 12 sims, ~8 minutes total."""
+    return _compute_variant_results()
 
 
 # ── Pretty printing ──────────────────────────────────────────────────────
@@ -205,13 +240,6 @@ class TestBufferVariants:
     uses ``DiversityAwareBuffer-2000``, exercised by ``test_seasonal_convergence``.
     Re-run this study only when revisiting buffer policy.
     """
-
-    def test_print_summary(self, variant_results):
-        """All-in-one: final coefs, trajectory, fill rate. Always passes."""
-        _print_buffer_fill(variant_results)
-        _print_final_table(variant_results, "outdoor_delta", truth=-0.25)
-        _print_final_table(variant_results, "Solar Proxy", truth=-2.0)
-        _print_drift_table(variant_results, "Solar Proxy")
 
     def test_no_variant_diverges(self, variant_results):
         """Sanity: every (variant, season) finishes with bounded coefs."""

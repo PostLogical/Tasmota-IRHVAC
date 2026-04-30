@@ -31,6 +31,7 @@ from tests.hvac_bench.full_stack_runner import (
     WeatherState,
     diurnal_outdoor,
     diurnal_solar,
+    print_full_stack_summary,
     run_full_stack,
 )
 from tests.hvac_bench.house_profiles import PROFILES_2R2C
@@ -91,9 +92,8 @@ def _saturation_pct(result: FullStackResult) -> float:
     )
 
 
-@pytest.fixture(scope="module")
-def capacity_runs() -> dict[str, FullStackResult]:
-    """Run both variants once for the whole test module."""
+def _compute_capacity_runs() -> dict[str, FullStackResult]:
+    """Run both variants once. Shared by the pytest fixture and the CLI runner."""
     pi_logger = logging.getLogger("custom_components.tasmota_irhvac")
     prev = pi_logger.level
     pi_logger.setLevel(logging.ERROR)
@@ -106,32 +106,46 @@ def capacity_runs() -> dict[str, FullStackResult]:
         pi_logger.setLevel(prev)
 
 
+def _print_capacity_summary(capacity_runs: dict[str, FullStackResult]) -> None:
+    """Side-by-side fixed-vs-capacity saturation/comfort/cold-violations table."""
+    sat_fixed = _saturation_pct(capacity_runs["fixed"])
+    sat_cap = _saturation_pct(capacity_runs["capacity"])
+    ctrl_fixed = capacity_runs["fixed"].ctrl_comfort_pct
+    ctrl_cap = capacity_runs["capacity"].ctrl_comfort_pct
+    cold_fixed = capacity_runs["fixed"].cold_violations
+    cold_cap = capacity_runs["capacity"].cold_violations
+    print(f"\n{'=' * 60}")
+    print("  HP Capacity Curve: winter saturation, 14d, living_room")
+    print(f"{'=' * 60}")
+    print(f"{'Variant':<22}{'Saturation%':>14}{'CtrlComfort%':>14}"
+          f"{'ColdViols':>12}")
+    print("-" * 62)
+    print(f"{'fixed (no capacity)':<22}{sat_fixed:>13.2f}%"
+          f"{ctrl_fixed:>13.2f}%{cold_fixed:>12d}")
+    print(f"{'capacity curve':<22}{sat_cap:>13.2f}%"
+          f"{ctrl_cap:>13.2f}%{cold_cap:>12d}")
+    print(f"{'Δ':<22}{sat_cap - sat_fixed:>+13.2f}pp"
+          f"{ctrl_cap - ctrl_fixed:>+13.2f}pp"
+          f"{cold_cap - cold_fixed:>+12d}")
+
+
+def run_hp_capacity_summary() -> None:
+    """CLI entry: per-run generic summary for each variant + capacity comparison."""
+    runs = _compute_capacity_runs()
+    for name, result in runs.items():
+        print_full_stack_summary(result, label=f"hp_capacity / {name}")
+    _print_capacity_summary(runs)
+
+
+@pytest.fixture(scope="module")
+def capacity_runs() -> dict[str, FullStackResult]:
+    """Run both variants once for the whole test module."""
+    return _compute_capacity_runs()
+
+
 @pytest.mark.slow
 class TestHPCapacityCurveSaturation:
     """Capacity curve raises winter saturation rate (#43 validation)."""
-
-    @pytest.mark.design
-    def test_print_summary(self, capacity_runs):
-        """Print the comparison — always passes, the artifact is the output."""
-        sat_fixed = _saturation_pct(capacity_runs["fixed"])
-        sat_cap = _saturation_pct(capacity_runs["capacity"])
-        ctrl_fixed = capacity_runs["fixed"].ctrl_comfort_pct
-        ctrl_cap = capacity_runs["capacity"].ctrl_comfort_pct
-        cold_fixed = capacity_runs["fixed"].cold_violations
-        cold_cap = capacity_runs["capacity"].cold_violations
-        print(f"\n{'=' * 60}")
-        print("  HP Capacity Curve: winter saturation, 14d, living_room")
-        print(f"{'=' * 60}")
-        print(f"{'Variant':<22}{'Saturation%':>14}{'CtrlComfort%':>14}"
-              f"{'ColdViols':>12}")
-        print("-" * 62)
-        print(f"{'fixed (no capacity)':<22}{sat_fixed:>13.2f}%"
-              f"{ctrl_fixed:>13.2f}%{cold_fixed:>12d}")
-        print(f"{'capacity curve':<22}{sat_cap:>13.2f}%"
-              f"{ctrl_cap:>13.2f}%{cold_cap:>12d}")
-        print(f"{'Δ':<22}{sat_cap - sat_fixed:>+13.2f}pp"
-              f"{ctrl_cap - ctrl_fixed:>+13.2f}pp"
-              f"{cold_cap - cold_fixed:>+12d}")
 
     def test_capacity_increases_saturation(self, capacity_runs):
         """Enabling the curve must raise the rail-time fraction.

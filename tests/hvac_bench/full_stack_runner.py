@@ -1150,3 +1150,139 @@ def _rollup(daily: list, period: int) -> list:
         else:
             result.append(sum(chunk))
     return result
+
+
+# ── Generic single-run summary printer (#50) ─────────────────────────────
+
+
+def _mean(values) -> float:
+    vals = [v for v in values if v is not None]
+    return (sum(vals) / len(vals)) if vals else float("nan")
+
+
+def print_full_stack_summary(
+    result: FullStackResult,
+    *,
+    label: str = "",
+) -> None:
+    """Print a single-run summary covering coefficient evolution, comfort,
+    integral convergence, FF/I balance, setpoint behavior, and learning health.
+
+    Works on any ``FullStackResult`` and is the default report invoked by every
+    scenario's ``run_*_summary`` (the registry in
+    ``tests.hvac_bench.scenarios.run_summaries``). Per-scenario tables are
+    layered on top of this; this is the always-on baseline.
+    """
+    title = f"Run summary: {label}" if label else "Run summary"
+    print(f"\n{'=' * 72}")
+    print(f"  {title}")
+    print(f"{'=' * 72}")
+
+    # ── Coefficient evolution ───────────────────────────────────────
+    coef_keys = list(result.final_coefs.keys())
+    print(f"{'Coefficient':<22}{'final':>12}{'true':>12}{'error':>12}")
+    print("-" * 58)
+    for k in coef_keys:
+        final = result.final_coefs.get(k, 0.0)
+        true = result.true_coefs.get(k, float("nan"))
+        err = result.coef_errors.get(k, float("nan"))
+        true_s = f"{true:>12.4f}" if not math.isnan(true) else f"{'-':>12}"
+        err_s = f"{err:>12.4f}" if not math.isnan(err) else f"{'-':>12}"
+        print(f"{k:<22}{final:>12.4f}{true_s}{err_s}")
+
+    traj = result.coef_trajectory
+    if traj:
+        n = len(traj)
+        marks = [
+            ("start", 0),
+            ("25%", n // 4),
+            ("50%", n // 2),
+            ("75%", (3 * n) // 4),
+            ("end", n - 1),
+        ]
+        print("-" * 58)
+        header = f"{'Trajectory':<22}" + "".join(f"{lbl:>12}" for lbl, _ in marks)
+        print(header)
+        for k in coef_keys:
+            row = "".join(
+                f"{traj[i].get(k, 0.0):>12.4f}" for _, i in marks
+            )
+            print(f"{k:<22}{row}")
+
+    n_conv = result.batches_to_converge
+    conv_s = f"{n_conv}" if n_conv is not None else "—"
+    print("-" * 58)
+    print(f"{'Batches to converge':<22}{conv_s:>12}    "
+          f"of {result.n_batches} batches")
+
+    # ── Comfort ──────────────────────────────────────────────────────
+    print(f"\n{'Comfort':<22}")
+    print("-" * 58)
+    print(f"{'Comfort hours %':<22}{result.comfort_hours_pct:>11.2f}%")
+    print(f"{'Controllable %':<22}{result.ctrl_comfort_pct:>11.2f}%")
+    print(f"{'Cold violations':<22}{result.cold_violations:>12d}    "
+          f"(worst undershoot {result.worst_undershoot:+.2f}°C)")
+    print(f"{'Warm violations':<22}{result.warm_violations:>12d}    "
+          f"(worst overshoot {result.worst_overshoot:+.2f}°C)")
+    print(f"{'Ctrl/Unctrl viols':<22}"
+          f"{result.ctrl_violations:>5d} / {result.unctrl_violations:<5d}")
+    print(f"{'Longest streak':<22}{result.longest_violation_streak:>12d}    "
+          f"ticks outside deadband")
+
+    # ── Integral & FF/I balance (early vs late means) ───────────────
+    daily_rms = result.daily_integral_rms
+    daily_ff = result.daily_ff_fraction
+    n_days = len(daily_rms)
+    window = max(1, min(7, n_days // 4)) if n_days else 0
+    print(f"\n{'Convergence':<22}")
+    print("-" * 58)
+    print(f"{'Total ITAE':<22}{result.total_itae:>12.2f}")
+    print(f"{'Total reversals':<22}{result.total_reversals:>12d}")
+    print(f"{'Integral RMS':<22}{result.integral_rms:>12.4f}")
+    if n_days:
+        early_rms = _mean(daily_rms[:window])
+        late_rms = _mean(daily_rms[-window:])
+        early_ff = _mean(daily_ff[:window]) if daily_ff else float("nan")
+        late_ff = _mean(daily_ff[-window:]) if daily_ff else float("nan")
+        print(f"{f'  daily RMS first {window}d':<22}{early_rms:>12.4f}")
+        print(f"{f'  daily RMS last {window}d':<22}{late_rms:>12.4f}")
+        if not math.isnan(early_ff):
+            print(f"{f'FF fraction first {window}d':<22}{early_ff:>12.4f}")
+            print(f"{f'FF fraction last {window}d':<22}{late_ff:>12.4f}")
+
+    # ── Setpoint behavior ────────────────────────────────────────────
+    sp_lim = result.daily_setpoint_limited_pct
+    if sp_lim:
+        print(f"\n{'Setpoint behavior':<22}")
+        print("-" * 58)
+        print(f"{'Saturation % (mean)':<22}{_mean(sp_lim):>11.2f}%")
+        print(f"{'Saturation % (max)':<22}{max(sp_lim):>11.2f}%")
+        print(f"{'Rapid SP changes':<22}{result.total_rapid_sp_changes:>12d}")
+
+    # ── Boundary estimator ──────────────────────────────────────────
+    print(f"\n{'Boundary estimator':<22}")
+    print("-" * 58)
+    print(f"{'Final cal band (°C)':<22}"
+          f"{result.final_cal_min:>+6.2f} .. {result.final_cal_max:<+6.2f}")
+    print(f"{'Updates / stalls':<22}"
+          f"{result.boundary_updates:>5d} / {result.boundary_stall_count:<5d}    "
+          f"(last sweep n={result.boundary_last_n_obs})")
+    print(f"{'Observation yield %':<22}{result.observation_yield_pct:>11.2f}%    "
+          f"(on={result.ticks_hp_on}, unc={result.ticks_uncertain}, "
+          f"off={result.ticks_hp_off})")
+
+    # ── Learning health ─────────────────────────────────────────────
+    if result.batch_kappa or result.batch_covariance_trace:
+        print(f"\n{'Learning health':<22}")
+        print("-" * 58)
+        if result.batch_kappa:
+            print(f"{'κ first / last':<22}"
+                  f"{result.batch_kappa[0]:>11.2f} / "
+                  f"{result.batch_kappa[-1]:<11.2f}")
+        if result.batch_covariance_trace:
+            print(f"{'tr(P) first / last':<22}"
+                  f"{result.batch_covariance_trace[0]:>11.4g} / "
+                  f"{result.batch_covariance_trace[-1]:<11.4g}")
+        if result.daily_buffer_utilization:
+            print(f"{'Buffer fill (final)':<22}"
+                  f"{result.daily_buffer_utilization[-1]:>11.1%}")

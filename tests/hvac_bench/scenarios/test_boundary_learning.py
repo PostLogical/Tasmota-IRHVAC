@@ -30,6 +30,11 @@ from tests.hvac_bench.full_stack_runner import (
     FullStackConfig,
     run_full_stack,
 )
+from tests.hvac_bench.scenarios._weather_mode import (
+    WeatherMode,
+    get_default_weather_mode,
+    real_weather_schedules,
+)
 
 
 # ── Shared spring config ────────────────────────────────────────────────
@@ -42,13 +47,32 @@ def _spring_config(
     outdoor_base_c: float = 10.0,
     outdoor_diurnal_c: float = 8.0,
     pi_overrides: dict | None = None,
+    weather: WeatherMode | None = None,
 ) -> FullStackConfig:
-    """Spring shoulder-season config with configurable head sensor offset."""
+    """Spring shoulder-season config with configurable head sensor offset.
+
+    ``weather`` defaults to ``BENCH_WEATHER`` (``"real"`` unless
+    ``--weather=synth`` was passed). Real mode swaps the synthetic
+    diurnal outdoor schedule for the New England spring Open-Meteo CSV;
+    the diurnal-amplitude knob is ignored under real weather, so tests
+    that rely on a *narrow* diurnal swing (e.g. probe-escalation) may
+    behave differently and need re-tuning under real (#49 Phase 3).
+    """
+    if weather is None:
+        weather = get_default_weather_mode()
+    outdoor_schedule = None
+    if weather == "real":
+        outdoor_fn, _, max_days = real_weather_schedules(
+            "spring", min_days=n_days,
+        )
+        n_days = min(n_days, max_days)
+        outdoor_schedule = outdoor_fn
     return FullStackConfig(
         n_days=n_days,
         profile_name="living_room",
         outdoor_base_c=outdoor_base_c,
         outdoor_diurnal_c=outdoor_diurnal_c,
+        outdoor_schedule=outdoor_schedule,
         desired_c=20.5,
         noise_sigma=0.1,
         noise_seed=42,

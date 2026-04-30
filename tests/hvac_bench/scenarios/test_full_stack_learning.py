@@ -62,6 +62,12 @@ from tests.hvac_bench.full_stack_runner import (
 )
 from tests.hvac_bench.csv_adapters import from_open_meteo_csv, csv_to_schedules
 from tests.hvac_bench.house_profiles import PROFILES_2R2C, QUICK_PROFILES
+from tests.hvac_bench.scenarios._weather_mode import (
+    WeatherMode,
+    get_default_weather_mode,
+    real_weather_schedules,
+    season_for_outdoor_base,
+)
 
 
 # ── Shared weather schedules ─────────────────────────────────────────────
@@ -83,13 +89,29 @@ class TestWrongSeedsConvergence:
     """
 
     @staticmethod
-    def _make_config(n_days: int = 30) -> FullStackConfig:
+    def _make_config(
+        n_days: int = 30, *, weather: WeatherMode | None = None
+    ) -> FullStackConfig:
+        if weather is None:
+            weather = get_default_weather_mode()
         profile = PROFILES_2R2C["living_room"]
+        outdoor_base_c = -5.0
+        outdoor_schedule = None
+        solar_input_schedule = _solar_schedule
+        if weather == "real":
+            outdoor_fn, solar_fn, max_days = real_weather_schedules(
+                season_for_outdoor_base(outdoor_base_c), min_days=n_days,
+            )
+            n_days = min(n_days, max_days)
+            outdoor_schedule = outdoor_fn
+            if solar_fn is not None:
+                solar_input_schedule = solar_fn
         return FullStackConfig(
             n_days=n_days,
             profile_name="living_room",
-            outdoor_base_c=-5.0,
+            outdoor_base_c=outdoor_base_c,
             outdoor_diurnal_c=6.0,
+            outdoor_schedule=outdoor_schedule,
             desired_c=20.5,
             noise_sigma=0.1,
             noise_seed=42,
@@ -102,7 +124,7 @@ class TestWrongSeedsConvergence:
                     seed_heat=0.0,  # wrong: should be -3.0
                     lag_tau=120,
                     clamp_min=0,  # solar only warms, never cools
-                    schedule=_solar_schedule,
+                    schedule=solar_input_schedule,
                 ),
             ],
             pi_overrides={
@@ -230,13 +252,26 @@ class TestBunkroomSlowLearner:
     """
 
     @staticmethod
-    def _make_config(n_days: int = 30) -> FullStackConfig:
+    def _make_config(
+        n_days: int = 30, *, weather: WeatherMode | None = None
+    ) -> FullStackConfig:
+        if weather is None:
+            weather = get_default_weather_mode()
         profile = PROFILES_2R2C["bunkroom"]
+        outdoor_base_c = -3.0
+        outdoor_schedule = None
+        if weather == "real":
+            outdoor_fn, _, max_days = real_weather_schedules(
+                season_for_outdoor_base(outdoor_base_c), min_days=n_days,
+            )
+            n_days = min(n_days, max_days)
+            outdoor_schedule = outdoor_fn
         return FullStackConfig(
             n_days=n_days,
             profile_name="bunkroom",
-            outdoor_base_c=-3.0,
+            outdoor_base_c=outdoor_base_c,
             outdoor_diurnal_c=8.0,
+            outdoor_schedule=outdoor_schedule,
             desired_c=20.5,
             noise_sigma=0.1,
             noise_seed=42,
@@ -401,24 +436,49 @@ class TestConvergenceToTruth:
     # may differ.  We'll discover the true value from a long baseline run
     # and use it as the reference.
 
+    @staticmethod
+    def _make_config(
+        seed_factor: float | None,
+        n_days: int = 21,
+        *,
+        weather: WeatherMode | None = None,
+    ) -> FullStackConfig:
+        """Living-room config with optional wrong outdoor seed.
+
+        ``seed_factor=None`` runs with PI defaults (correct seed baseline).
+        """
+        if weather is None:
+            weather = get_default_weather_mode()
+        profile = PROFILES_2R2C["living_room"]
+        outdoor_base_c = -5.0
+        outdoor_schedule = None
+        if weather == "real":
+            outdoor_fn, _, max_days = real_weather_schedules(
+                season_for_outdoor_base(outdoor_base_c), min_days=n_days,
+            )
+            n_days = min(n_days, max_days)
+            outdoor_schedule = outdoor_fn
+        pi_overrides: dict = {}
+        if seed_factor is not None:
+            pi_overrides["pi_outdoor_seed_heat"] = profile.true_seed * seed_factor
+        return FullStackConfig(
+            n_days=n_days,
+            profile_name="living_room",
+            outdoor_base_c=outdoor_base_c,
+            outdoor_diurnal_c=6.0,
+            outdoor_schedule=outdoor_schedule,
+            desired_c=20.5,
+            noise_sigma=0.1,
+            noise_seed=42,
+            pi_overrides=pi_overrides,
+            relax_kappa_gate=True,
+        )
+
     @pytest.mark.parametrize("seed_factor", [0.5, 1.0, 1.5, 2.0, 3.0],
                              ids=["half", "correct", "1.5x", "2x", "3x"])
     def test_coefficient_converges(self, seed_factor):
         """FF coefficient should stabilize regardless of initial seed error."""
-        profile = PROFILES_2R2C["living_room"]
-        config = FullStackConfig(
-            n_days=21,
-            profile_name="living_room",
-            outdoor_base_c=-5.0,
-            outdoor_diurnal_c=6.0,
-            desired_c=20.5,
-            noise_sigma=0.1,
-            noise_seed=42,
-            pi_overrides={
-                "pi_outdoor_seed_heat": profile.true_seed * seed_factor,
-            },
-            relax_kappa_gate=True,
-        )
+        config = self._make_config(seed_factor)
         result = run_full_stack(config)
 
         # Coefficient should stabilize: low variance in last 10 batch snapshots
@@ -438,35 +498,8 @@ class TestConvergenceToTruth:
         """All seed factors should converge to approximately the same
         final coefficient, since the ground-truth physics is identical.
         """
-        # Run with this seed factor
-        profile = PROFILES_2R2C["living_room"]
-        config = FullStackConfig(
-            n_days=21,
-            profile_name="living_room",
-            outdoor_base_c=-5.0,
-            outdoor_diurnal_c=6.0,
-            desired_c=20.5,
-            noise_sigma=0.1,
-            noise_seed=42,
-            pi_overrides={
-                "pi_outdoor_seed_heat": profile.true_seed * seed_factor,
-            },
-            relax_kappa_gate=True,
-        )
-        result = run_full_stack(config)
-
-        # Run baseline (correct seeds) for comparison
-        baseline_config = FullStackConfig(
-            n_days=21,
-            profile_name="living_room",
-            outdoor_base_c=-5.0,
-            outdoor_diurnal_c=6.0,
-            desired_c=20.5,
-            noise_sigma=0.1,
-            noise_seed=42,
-            relax_kappa_gate=True,
-        )
-        baseline = run_full_stack(baseline_config)
+        result = run_full_stack(self._make_config(seed_factor))
+        baseline = run_full_stack(self._make_config(None))
 
         # Final outdoor_delta should be within 0.1 of baseline
         od = result.final_coefs.get("outdoor_delta", 0)
@@ -478,23 +511,9 @@ class TestConvergenceToTruth:
 
     def test_worse_seeds_take_longer(self):
         """More wrong seeds should take more batch cycles to converge."""
-        profile = PROFILES_2R2C["living_room"]
         results = {}
         for factor in [1.0, 2.0, 3.0]:
-            config = FullStackConfig(
-                n_days=21,
-                profile_name="living_room",
-                outdoor_base_c=-5.0,
-                outdoor_diurnal_c=6.0,
-                desired_c=20.5,
-                noise_sigma=0.1,
-                noise_seed=42,
-                pi_overrides={
-                    "pi_outdoor_seed_heat": profile.true_seed * factor,
-                },
-                relax_kappa_gate=True,
-            )
-            result = run_full_stack(config)
+            result = run_full_stack(self._make_config(factor))
             # Measure when coefficient first stabilizes within 0.05 of final
             final_od = result.final_coefs.get("outdoor_delta", 0)
             first_stable = None
@@ -631,12 +650,32 @@ class TestStagedModelInputRollout:
     """
 
     @staticmethod
-    def _make_config(n_days: int = 30) -> FullStackConfig:
+    def _make_config(
+        n_days: int = 30, *, weather: WeatherMode | None = None
+    ) -> FullStackConfig:
+        # Sunroom + stove schedules stay synthetic — neither is in the
+        # Open-Meteo CSVs, and they exercise the κ/VIF gating logic
+        # against the solar feature, so realism of those two is
+        # secondary to the staged-rollout dynamics under test.
+        if weather is None:
+            weather = get_default_weather_mode()
+        outdoor_base_c = -5.0
+        outdoor_schedule = None
+        solar_input_schedule = _solar_schedule
+        if weather == "real":
+            outdoor_fn, solar_fn, max_days = real_weather_schedules(
+                season_for_outdoor_base(outdoor_base_c), min_days=n_days,
+            )
+            n_days = min(n_days, max_days)
+            outdoor_schedule = outdoor_fn
+            if solar_fn is not None:
+                solar_input_schedule = solar_fn
         return FullStackConfig(
             n_days=n_days,
             profile_name="living_room",
-            outdoor_base_c=-5.0,
+            outdoor_base_c=outdoor_base_c,
             outdoor_diurnal_c=6.0,
+            outdoor_schedule=outdoor_schedule,
             desired_c=20.5,
             noise_sigma=0.1,
             noise_seed=42,
@@ -649,7 +688,7 @@ class TestStagedModelInputRollout:
                     seed_heat=0.0,
                     lag_tau=120,
                     clamp_min=0,
-                    schedule=_solar_schedule,
+                    schedule=solar_input_schedule,
                 ),
                 ModelInputSpec(
                     name="Sunroom Delta",
@@ -768,6 +807,39 @@ class TestRecoveryFromBadStates:
     warns about.
     """
 
+    @staticmethod
+    def _make_config(
+        profile_name: str = "living_room",
+        n_days: int = 30,
+        *,
+        pi_overrides: dict | None = None,
+        disturbances: list | None = None,
+        weather: WeatherMode | None = None,
+    ) -> FullStackConfig:
+        if weather is None:
+            weather = get_default_weather_mode()
+        outdoor_base_c = -5.0
+        outdoor_schedule = None
+        if weather == "real":
+            outdoor_fn, _, max_days = real_weather_schedules(
+                season_for_outdoor_base(outdoor_base_c), min_days=n_days,
+            )
+            n_days = min(n_days, max_days)
+            outdoor_schedule = outdoor_fn
+        return FullStackConfig(
+            n_days=n_days,
+            profile_name=profile_name,
+            outdoor_base_c=outdoor_base_c,
+            outdoor_diurnal_c=6.0,
+            outdoor_schedule=outdoor_schedule,
+            desired_c=20.5,
+            noise_sigma=0.1,
+            noise_seed=42,
+            pi_overrides=pi_overrides or {},
+            disturbances=disturbances or [],
+            relax_kappa_gate=True,
+        )
+
     def test_recovery_from_sign_flip(self):
         """If outdoor_delta flips sign, batch WLS should correct it.
 
@@ -775,19 +847,12 @@ class TestRecoveryFromBadStates:
         sign — means HP backs off when it's colder, backwards).
         """
         profile = PROFILES_2R2C["living_room"]
-        config = FullStackConfig(
+        config = self._make_config(
             n_days=30,
-            profile_name="living_room",
-            outdoor_base_c=-5.0,
-            outdoor_diurnal_c=6.0,
-            desired_c=20.5,
-            noise_sigma=0.1,
-            noise_seed=42,
             pi_overrides={
                 # Positive seed = wrong sign (should be negative in RLS)
                 "pi_outdoor_seed_heat": profile.true_seed * -1.0,
             },
-            relax_kappa_gate=True,
         )
         result = run_full_stack(config)
 
@@ -808,14 +873,8 @@ class TestRecoveryFromBadStates:
         Simulate by injecting a massive disturbance early that winds
         up the integral, then removing it.
         """
-        config = FullStackConfig(
+        config = self._make_config(
             n_days=14,
-            profile_name="living_room",
-            outdoor_base_c=-5.0,
-            outdoor_diurnal_c=6.0,
-            desired_c=20.5,
-            noise_sigma=0.1,
-            noise_seed=42,
             disturbances=[
                 # Massive cold draft for 2 hours on day 1
                 Disturbance(
@@ -825,7 +884,6 @@ class TestRecoveryFromBadStates:
                     value=-5.0,  # -5°C sensor error
                 ),
             ],
-            relax_kappa_gate=True,
         )
         result = run_full_stack(config)
 
@@ -855,19 +913,12 @@ class TestRecoveryFromBadStates:
         corrects coefficients even when online RLS has stalled.
         """
         profile = PROFILES_2R2C["living_room"]
-        config = FullStackConfig(
+        config = self._make_config(
             n_days=30,
-            profile_name="living_room",
-            outdoor_base_c=-5.0,
-            outdoor_diurnal_c=6.0,
-            desired_c=20.5,
-            noise_sigma=0.1,
-            noise_seed=42,
             pi_overrides={
                 "pi_outdoor_seed_heat": profile.true_seed * 2.0,
                 "pi_rls_forgetting": 0.99,  # fast decay → P collapse
             },
-            relax_kappa_gate=True,
         )
         result = run_full_stack(config)
 
@@ -890,18 +941,12 @@ class TestRecoveryFromBadStates:
         """All profiles should recover from a wrong-sign outdoor seed."""
         for profile_name in ["living_room", "bunkroom"]:
             profile = PROFILES_2R2C[profile_name]
-            config = FullStackConfig(
-                n_days=14,
+            config = self._make_config(
                 profile_name=profile_name,
-                outdoor_base_c=-5.0,
-                outdoor_diurnal_c=6.0,
-                desired_c=20.5,
-                noise_sigma=0.1,
-                noise_seed=42,
+                n_days=14,
                 pi_overrides={
                     "pi_outdoor_seed_heat": profile.true_seed * -1.0,
                 },
-                relax_kappa_gate=True,
             )
             result = run_full_stack(config)
 
