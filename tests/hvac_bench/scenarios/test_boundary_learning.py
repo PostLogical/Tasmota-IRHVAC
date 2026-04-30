@@ -31,9 +31,11 @@ from tests.hvac_bench.full_stack_runner import (
     run_full_stack,
 )
 from tests.hvac_bench.scenarios._weather_mode import (
+    SPRING_MC_STARTS,
     WeatherMode,
     get_default_weather_mode,
     real_weather_schedules,
+    windowed_real_weather,
 )
 
 
@@ -48,6 +50,8 @@ def _spring_config(
     outdoor_diurnal_c: float = 8.0,
     pi_overrides: dict | None = None,
     weather: WeatherMode | None = None,
+    start_day: int | None = None,
+    profile_name: str = "living_room",
 ) -> FullStackConfig:
     """Spring shoulder-season config with configurable head sensor offset.
 
@@ -62,14 +66,19 @@ def _spring_config(
         weather = get_default_weather_mode()
     outdoor_schedule = None
     if weather == "real":
-        outdoor_fn, _, max_days = real_weather_schedules(
-            "spring", min_days=n_days,
-        )
+        if start_day is not None:
+            outdoor_fn, _, max_days = windowed_real_weather(
+                start_day=start_day, n_days=n_days,
+            )
+        else:
+            outdoor_fn, _, max_days = real_weather_schedules(
+                "spring", min_days=n_days,
+            )
         n_days = min(n_days, max_days)
         outdoor_schedule = outdoor_fn
     return FullStackConfig(
         n_days=n_days,
-        profile_name="living_room",
+        profile_name=profile_name,
         outdoor_base_c=outdoor_base_c,
         outdoor_diurnal_c=outdoor_diurnal_c,
         outdoor_schedule=outdoor_schedule,
@@ -116,24 +125,42 @@ class TestZeroOffsetBandNarrowing:
             f"got {result.observation_yield_pct:.1f}%"
         )
 
-        # -- Learning quality: FF fraction should grow --
-        n_days_actual = len(result.daily_ff_fraction)
-        if n_days_actual >= 14:
-            first_week = result.daily_ff_fraction[:7]
-            last_week = result.daily_ff_fraction[-7:]
-            avg_first = sum(first_week) / len(first_week)
-            avg_last = sum(last_week) / len(last_week)
-            assert avg_last >= avg_first, (
-                f"FF fraction should grow: first week {avg_first:.3f} "
-                f"vs last week {avg_last:.3f}"
+        # -- Learning quality: FF fraction should grow.
+        # Trajectory checkpoint — fragile to a single non-stationary spring
+        # window (#49 Phase 3). Run across three independent spring starts
+        # and assert the median delta. Bound (≥0) unchanged.
+        deltas: list[float] = []
+        for sd in SPRING_MC_STARTS:
+            mc_result = run_full_stack(
+                _spring_config(offset=0.0, n_days=21, start_day=sd)
             )
+            if len(mc_result.daily_ff_fraction) >= 14:
+                first = sum(mc_result.daily_ff_fraction[:7]) / 7
+                last = sum(mc_result.daily_ff_fraction[-7:]) / 7
+                deltas.append(last - first)
+        deltas.sort()
+        assert deltas and deltas[len(deltas) // 2] >= 0, (
+            f"Median FF-fraction (last - first week) should be ≥0, "
+            f"got deltas {[f'{d:+.3f}' for d in deltas]}"
+        )
 
         # -- Comfort --
         assert result.ctrl_comfort_pct >= 70.0, (
             f"Comfort should be maintained, got {result.ctrl_comfort_pct:.1f}%"
         )
-        assert result.worst_undershoot < 2.0, (
-            f"No major undershoot during learning, got {result.worst_undershoot:.2f}"
+
+        # -- No major undershoot during learning.
+        # Controller-behavior assertion (boundary estimator's exploration
+        # shouldn't cause deep cold dives). Run a synth-mode config so the
+        # disturbance is stationary and the bound reflects what the
+        # estimator did, not weather variance. See
+        # ``feedback_synthetic_vs_real_bench.md``.
+        synth_result = run_full_stack(_spring_config(
+            offset=0.0, n_days=21, weather="synth",
+        ))
+        assert synth_result.worst_undershoot < 2.0, (
+            f"No major undershoot during learning, "
+            f"got {synth_result.worst_undershoot:.2f}"
         )
 
 
@@ -240,15 +267,28 @@ class TestLargeOffsetConvergence:
             f"got {result.observation_yield_pct:.1f}%"
         )
 
-        # -- Downstream: later quarter should beat earlier --
-        n_days_actual = len(result.daily_mae)
-        q1 = n_days_actual // 4
-        if q1 >= 7:
-            first_q_mae = sum(result.daily_mae[:q1]) / q1
-            last_q_mae = sum(result.daily_mae[-q1:]) / q1
-            assert last_q_mae <= first_q_mae * 1.2, (
-                f"offset={offset}: last-quarter MAE ({last_q_mae:.3f}) "
-                f"should not be much worse than first ({first_q_mae:.3f})"
+        # -- Downstream: later quarter should beat earlier.
+        # Trajectory checkpoint — fragile to a single non-stationary spring
+        # window (#49 Phase 3). Run across three independent spring starts
+        # and assert the median ratio. Bound (≤1.2×) unchanged.
+        ratios: list[float] = []
+        for sd in SPRING_MC_STARTS:
+            mc_result = run_full_stack(
+                _spring_config(offset=offset, n_days=45, start_day=sd)
+            )
+            n_days_actual = len(mc_result.daily_mae)
+            q1 = n_days_actual // 4
+            if q1 >= 7:
+                first_q = sum(mc_result.daily_mae[:q1]) / q1
+                last_q = sum(mc_result.daily_mae[-q1:]) / q1
+                if first_q > 0:
+                    ratios.append(last_q / first_q)
+        if ratios:
+            ratios.sort()
+            assert ratios[len(ratios) // 2] <= 1.2, (
+                f"offset={offset}: median (last-q / first-q) MAE ratio "
+                f"across {len(ratios)} spring starts should be ≤1.2, "
+                f"got {[round(r, 3) for r in ratios]}"
             )
 
         # -- Stability: integral should not diverge --

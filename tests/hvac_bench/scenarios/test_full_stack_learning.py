@@ -61,12 +61,18 @@ from tests.hvac_bench.full_stack_runner import (
     run_full_stack,
 )
 from tests.hvac_bench.csv_adapters import from_open_meteo_csv, csv_to_schedules
-from tests.hvac_bench.house_profiles import PROFILES_2R2C, QUICK_PROFILES
+from tests.hvac_bench.house_profiles import (
+    FUJITSU_HYPERHEAT_CAPACITY,
+    PROFILES_2R2C,
+    QUICK_PROFILES,
+)
 from tests.hvac_bench.scenarios._weather_mode import (
+    WINTER_MC_STARTS,
     WeatherMode,
     get_default_weather_mode,
     real_weather_schedules,
     season_for_outdoor_base,
+    windowed_real_weather,
 )
 
 
@@ -90,25 +96,34 @@ class TestWrongSeedsConvergence:
 
     @staticmethod
     def _make_config(
-        n_days: int = 30, *, weather: WeatherMode | None = None
+        n_days: int = 30,
+        *,
+        weather: WeatherMode | None = None,
+        start_day: int | None = None,
+        profile_name: str = "living_room",
     ) -> FullStackConfig:
         if weather is None:
             weather = get_default_weather_mode()
-        profile = PROFILES_2R2C["living_room"]
+        profile = PROFILES_2R2C[profile_name]
         outdoor_base_c = -5.0
         outdoor_schedule = None
         solar_input_schedule = _solar_schedule
         if weather == "real":
-            outdoor_fn, solar_fn, max_days = real_weather_schedules(
-                season_for_outdoor_base(outdoor_base_c), min_days=n_days,
-            )
+            if start_day is not None:
+                outdoor_fn, solar_fn, max_days = windowed_real_weather(
+                    start_day=start_day, n_days=n_days,
+                )
+            else:
+                outdoor_fn, solar_fn, max_days = real_weather_schedules(
+                    season_for_outdoor_base(outdoor_base_c), min_days=n_days,
+                )
             n_days = min(n_days, max_days)
             outdoor_schedule = outdoor_fn
             if solar_fn is not None:
                 solar_input_schedule = solar_fn
         return FullStackConfig(
             n_days=n_days,
-            profile_name="living_room",
+            profile_name=profile_name,
             outdoor_base_c=outdoor_base_c,
             outdoor_diurnal_c=6.0,
             outdoor_schedule=outdoor_schedule,
@@ -135,8 +150,15 @@ class TestWrongSeedsConvergence:
         )
 
     def test_integral_compensates_early(self):
-        """Day 1: integral must be working to compensate wrong FF."""
-        config = self._make_config(n_days=2)
+        """Day 1: integral must be working to compensate wrong FF.
+
+        Controller-behavior test (PI integrator absorbing the steady-state
+        error from wrong FF), not learning. Opted to synth so the
+        disturbance is stationary — real weather shifts the FF target as
+        outdoor varies, which doesn't test what this assertion claims.
+        See ``feedback_synthetic_vs_real_bench.md``.
+        """
+        config = self._make_config(n_days=2, weather="synth")
         result = run_full_stack(config)
 
         # With wrong seeds, integral should be nonzero
@@ -230,8 +252,15 @@ class TestWrongSeedsConvergence:
         With intentionally wrong seeds, the cold start produces a long
         streak while the integral compensates.  After the first day,
         streaks should be much shorter.
+
+        Controller-behavior test (no-stuck-state property under wrong-FF
+        disturbance), not learning. Opted to synth so the disturbance
+        and recovery dynamics are stationary; real weather adds
+        non-stationary cold fronts that drag the bench HP out of
+        envelope and turn this into a saturation test, not a controller
+        test. See ``feedback_synthetic_vs_real_bench.md``.
         """
-        config = self._make_config(n_days=30)
+        config = self._make_config(n_days=30, weather="synth")
         result = run_full_stack(config)
 
         # 20 ticks = 5 hours — generous for wrong-seed cold start

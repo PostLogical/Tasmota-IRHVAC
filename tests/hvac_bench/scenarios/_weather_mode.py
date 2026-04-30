@@ -102,6 +102,17 @@ _NAMED_WINDOWS: dict[Season, WeatherWindow] = {
 }
 
 
+# Multi-start windows for trajectory-checkpoint tests (#49 Phase 3).
+# Three independent realizations across the three years of the multi-year
+# CSV: same season label each, but different fronts / cold snaps / cloud
+# patterns. Used by tests whose assertion premise (e.g. "wrong-seed integral
+# compensates by day 2") is fragile to a single window opening unusually
+# mild/extreme — the test asserts a percentile across these runs instead.
+# T_mean ranges (21d): winter [-12.4, -6.0]°C; spring [0.4, 5.1]°C.
+WINTER_MC_STARTS: tuple[int, ...] = (10, 380, 740)    # Jan 11 of 2023/2024/2025
+SPRING_MC_STARTS: tuple[int, ...] = (100, 460, 820)   # early Apr 2023/2024 + Mar 31 2025
+
+
 @lru_cache(maxsize=4)
 def _load_multiyear(weather_dir: Path) -> dict[str, list[tuple[float, float]]]:
     """Cache the multi-year CSV parse: loaded once per (weather_dir, process)."""
