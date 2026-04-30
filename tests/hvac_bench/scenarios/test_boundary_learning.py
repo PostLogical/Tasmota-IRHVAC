@@ -197,14 +197,29 @@ class TestPositiveOffsetBandShift:
             f"Yield should improve, got {result.observation_yield_pct:.1f}%"
         )
 
-        # -- Learning: later MAE should be better than early --
-        n_days_actual = len(result.daily_mae)
-        if n_days_actual >= 14:
-            first_week_mae = sum(result.daily_mae[:7]) / 7
-            last_week_mae = sum(result.daily_mae[-7:]) / 7
-            assert last_week_mae <= first_week_mae * 1.1, (
-                f"Last-week MAE ({last_week_mae:.3f}) should not be worse "
-                f"than first week ({first_week_mae:.3f})"
+        # -- Learning: later MAE should be better than early.
+        # Trajectory checkpoint — the 1.10 ratio bound is fragile to a
+        # single non-stationary spring window (the canonical
+        # SHOULDER_SPRING window was offset by 1 day specifically to land
+        # on the right side of this bound). Run across three independent
+        # spring starts and assert the median ratio. Bound (≤1.10) unchanged.
+        ratios: list[float] = []
+        for sd in SPRING_MC_STARTS:
+            mc_result = run_full_stack(
+                _spring_config(offset=1.0, n_days=21, start_day=sd)
+            )
+            n_days_actual = len(mc_result.daily_mae)
+            if n_days_actual >= 14:
+                first_week_mae = sum(mc_result.daily_mae[:7]) / 7
+                last_week_mae = sum(mc_result.daily_mae[-7:]) / 7
+                if first_week_mae > 0:
+                    ratios.append(last_week_mae / first_week_mae)
+        if ratios:
+            ratios.sort()
+            assert ratios[len(ratios) // 2] <= 1.1, (
+                f"Median (last-week / first-week) MAE ratio across "
+                f"{len(ratios)} spring starts should be ≤1.10, "
+                f"got {[round(r, 3) for r in ratios]}"
             )
 
         # -- Comfort --

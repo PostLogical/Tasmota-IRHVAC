@@ -682,7 +682,10 @@ class TestStagedModelInputRollout:
 
     @staticmethod
     def _make_config(
-        n_days: int = 30, *, weather: WeatherMode | None = None
+        n_days: int = 30,
+        *,
+        weather: WeatherMode | None = None,
+        start_day: int | None = None,
     ) -> FullStackConfig:
         # Sunroom + stove schedules stay synthetic — neither is in the
         # Open-Meteo CSVs, and they exercise the κ/VIF gating logic
@@ -694,9 +697,14 @@ class TestStagedModelInputRollout:
         outdoor_schedule = None
         solar_input_schedule = _solar_schedule
         if weather == "real":
-            outdoor_fn, solar_fn, max_days = real_weather_schedules(
-                season_for_outdoor_base(outdoor_base_c), min_days=n_days,
-            )
+            if start_day is not None:
+                outdoor_fn, solar_fn, max_days = windowed_real_weather(
+                    start_day=start_day, n_days=n_days,
+                )
+            else:
+                outdoor_fn, solar_fn, max_days = real_weather_schedules(
+                    season_for_outdoor_base(outdoor_base_c), min_days=n_days,
+                )
             n_days = min(n_days, max_days)
             outdoor_schedule = outdoor_fn
             if solar_fn is not None:
@@ -791,6 +799,44 @@ class TestStagedModelInputRollout:
                         f"outdoor_delta jumped {od_prev:.4f} → {od_curr:.4f} "
                         f"when {name} unlocked at batch {i}"
                     )
+
+    @pytest.mark.slow
+    def test_unlock_jump_bound_holds_across_winters(self):
+        """MC sanity-check: 0.3 unlock-jump bound across 3 winter starts.
+
+        ``test_unlock_does_not_destabilize_outdoor`` currently runs against
+        the cold-year window (``WINTER_DEEP`` via ``real_weather_schedules``)
+        where outdoor signal dominance keeps unlock-jumps small. This MC
+        variant runs the same scenario across ``WINTER_MC_STARTS`` (Jan-11
+        of 2023/2024/2025) and asserts the median per-run worst unlock-jump
+        stays under the production bound. Use this when retuning the 0.3
+        bound to confirm it's not just calibrated to a single weather
+        realization.
+        """
+        per_run_max: list[float] = []
+        for sd in WINTER_MC_STARTS:
+            config = self._make_config(n_days=30, start_day=sd)
+            result = run_full_stack(config)
+            run_max = 0.0
+            for i in range(1, len(result.coef_trajectory)):
+                prev = result.coef_trajectory[i - 1]
+                curr = result.coef_trajectory[i]
+                for name in ["Solar Proxy", "Sunroom Delta", "Pellet Stove"]:
+                    if (
+                        prev.get(f"{name}_frozen", True)
+                        and not curr.get(f"{name}_frozen", True)
+                    ):
+                        od_prev = prev.get("outdoor_delta", 0)
+                        od_curr = curr.get("outdoor_delta", 0)
+                        run_max = max(run_max, abs(od_curr - od_prev))
+            per_run_max.append(run_max)
+        per_run_max.sort()
+        median = per_run_max[len(per_run_max) // 2]
+        assert median < 0.3, (
+            f"Median worst unlock-jump across {len(per_run_max)} winter "
+            f"starts: {median:.4f} (bound 0.3); per-run worst-jumps: "
+            f"{[f'{j:.3f}' for j in per_run_max]}"
+        )
 
     def test_no_integral_runaway_during_unlocks(self):
         """Integral should stay bounded through all feature unlocks."""
@@ -1051,37 +1097,40 @@ class TestRealWeatherReplay:
 # ── Scenario 5: Multi-Year Stability ────────────────────────────────────
 
 
-def _seasonal_outdoor(tick: int) -> float:
-    """Full-year outdoor temp with seasonal + diurnal variation.
-
-    Annual cycle: winter low ~-10°C (Jan), summer high ~25°C (Jul).
-    Diurnal: ±5°C daily swing.  Weather fronts: ±4°C 5-day cycle.
-    """
-    tick_min = TICK_MINUTES_DEFAULT
-    hour = (tick * tick_min / 60.0) % 24.0
-    day_of_year = (tick * tick_min / (60.0 * 24.0)) % 365.0
-
-    # Annual sinusoid: min at day 15 (Jan 15), max at day 196 (Jul 15)
-    annual = 7.5 + 17.5 * math.sin(2 * math.pi * (day_of_year - 105) / 365)
-    # Diurnal
-    diurnal = 5.0 * math.cos(2 * math.pi * (hour - 15) / 24)
-    # Weather fronts
-    day_abs = tick * tick_min / (60.0 * 24.0)
-    weather = 4.0 * math.sin(2 * math.pi * day_abs / 5.0)
-
-    return annual + diurnal + weather
-
-
 @pytest.fixture(scope="module")
 def _multi_year_result():
-    """Single 365-day run shared by all TestMultiYearStability tests."""
+    """Single 365-day run shared by all TestMultiYearStability tests.
+
+    #51 P2: pulls the calendar year 2023-01-01 → 2023-12-31 from the
+    multi-year Open-Meteo CSV (44°N 71.5°W). Real outdoor data exposes
+    long-horizon behavior to actual cold snaps, fronts, and shoulder-
+    season transitions that the prior synthetic sinusoid smoothed over.
+    Solar is wired in via a Solar Proxy ModelInputSpec — the seasonal
+    swing in incident radiation (winter → summer → fall) is exactly the
+    kind of slow drift signal a 1-year design test should exercise; the
+    synthetic version couldn't credibly simulate it.
+    """
+    outdoor_fn, solar_fn, _ = windowed_real_weather(start_day=0, n_days=365)
     config = FullStackConfig(
         n_days=365,
         profile_name="living_room",
         desired_c=20.5,
         noise_sigma=0.1,
         noise_seed=42,
-        outdoor_schedule=_seasonal_outdoor,
+        outdoor_schedule=outdoor_fn,
+        solar_schedule=solar_fn,
+        model_inputs=[
+            ModelInputSpec(
+                name="Solar Proxy",
+                entity_id="sensor.solar_proxy",
+                input_role="solar",
+                _true_ff_coef=-2.0,
+                seed_heat=0.0,
+                lag_tau=120,
+                clamp_min=0,
+                schedule=solar_fn,
+            ),
+        ] if solar_fn else [],
         relax_kappa_gate=True,
     )
     return run_full_stack(config)
@@ -1143,8 +1192,6 @@ class TestMultiYearStability:
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
-
-TICK_MINUTES_DEFAULT = 15.0
 
 
 def _std(values: list[float]) -> float:
