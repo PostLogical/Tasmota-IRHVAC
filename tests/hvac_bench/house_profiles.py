@@ -18,38 +18,61 @@ class HPCapacityCurve:
     underestimates how often the HP rails in cold and overestimates control
     authority during cold snaps — exactly the regime Tobit (#40) is meant
     to handle. NEEP cold-climate ASHP datasets show ~50–70% of rated
-    heating capacity below design temp; standard ASHPs lose more.
+    heating capacity at design temp; standard ASHPs lose more. Cold-climate
+    hyper-heat units continue operating below design at reduced capacity
+    until a separate cutout temp.
 
     Heating curve (mode="heat"):
-        outdoor ≤ heating_design_t        → 0 (HP cannot heat)
-        heating_design_t .. heating_rated_t → linear 0 → 1.0
-        heating_rated_t  .. heating_mild_t  → linear 1.0 → heating_mild_factor
-        outdoor ≥ heating_mild_t           → heating_mild_factor
+        outdoor ≤ heating_cutoff_t          → 0 (HP cannot heat at all)
+        heating_cutoff_t .. heating_design_t → linear 0 → heating_design_factor
+        heating_design_t .. heating_rated_t  → linear heating_design_factor → 1.0
+        heating_rated_t  .. heating_mild_t   → linear 1.0 → heating_mild_factor
+        outdoor ≥ heating_mild_t             → heating_mild_factor
 
     Cooling curve (mode="cool"): mirror with opposite slope.
 
     Defaults represent a typical residential ASHP rated at AHRI 7°C heating
-    / 35°C cooling, with capacity zeroed at -15°C heating / 46°C cooling.
+    / 35°C cooling, with capacity zeroed at -15°C heating / 46°C cooling
+    (heating_design_factor=0.0, heating_cutoff_t = heating_design_t — the
+    cliff used pre-#49). Cold-climate / hyper-heat curves set
+    heating_design_factor > 0 and a colder cutout.
     """
     heating_design_t: float = -15.0
     heating_rated_t: float = 7.0
     heating_mild_t: float = 20.0
     heating_mild_factor: float = 1.15
+    # Capacity at design temp (0.0 = legacy cliff; CCASHPs typically 0.5-0.75).
+    heating_design_factor: float = 0.0
+    # Below this, capacity = 0. None ⇒ uses heating_design_t (legacy cliff).
+    heating_cutoff_t: float | None = None
     cooling_mild_t: float = 18.0
     cooling_rated_t: float = 35.0
     cooling_design_t: float = 46.0
     cooling_mild_factor: float = 1.15
 
+    @property
+    def heating_cutoff(self) -> float:
+        """Effective heating cutoff temp (below this, capacity = 0)."""
+        return self.heating_design_t if self.heating_cutoff_t is None else self.heating_cutoff_t
+
     def factor(self, outdoor_c: float, mode: str = "heat") -> float:
         """Capacity factor (≥ 0) at the given outdoor temperature."""
         if mode == "heat":
-            if outdoor_c <= self.heating_design_t:
+            cutoff = self.heating_cutoff
+            if outdoor_c <= cutoff:
                 return 0.0
             if outdoor_c >= self.heating_mild_t:
                 return self.heating_mild_factor
+            if outdoor_c <= self.heating_design_t:
+                # Below design, partial capacity (CCASHP / hyper-heat regime).
+                span = self.heating_design_t - cutoff
+                if span <= 0:
+                    return 0.0
+                return self.heating_design_factor * (outdoor_c - cutoff) / span
             if outdoor_c <= self.heating_rated_t:
                 span = self.heating_rated_t - self.heating_design_t
-                return (outdoor_c - self.heating_design_t) / span
+                frac = (outdoor_c - self.heating_design_t) / span
+                return self.heating_design_factor + frac * (1.0 - self.heating_design_factor)
             span = self.heating_mild_t - self.heating_rated_t
             frac = (outdoor_c - self.heating_rated_t) / span
             return 1.0 + frac * (self.heating_mild_factor - 1.0)
@@ -75,6 +98,22 @@ STANDARD_HP_CAPACITY = HPCapacityCurve()
 COLD_CLIMATE_HP_CAPACITY = HPCapacityCurve(
     heating_design_t=-25.0,
     heating_rated_t=7.0,
+    heating_mild_t=20.0,
+    heating_mild_factor=1.10,
+)
+
+
+# Fujitsu Halcyon hyper-heat AOU-RLF/XLTH series (NEEP cold-climate listing
+# typical): rated 100% at +47°F (8.3°C), ~75% at +5°F (-15°C),
+# ~50% at -15°F (-26°C, design point), continues operating with declining
+# capacity to ~-25°F to -30°F (-32°C to -34°C) cutout.
+# Modeled with heating_design_t=-26°C, heating_design_factor=0.5,
+# heating_cutoff_t=-32°C — matches the user's deployed system class.
+FUJITSU_HYPERHEAT_CAPACITY = HPCapacityCurve(
+    heating_design_t=-26.0,
+    heating_design_factor=0.5,
+    heating_cutoff_t=-32.0,
+    heating_rated_t=8.3,
     heating_mild_t=20.0,
     heating_mild_factor=1.10,
 )
@@ -336,4 +375,32 @@ PROFILES_2R2C["bunkroom_capacity"] = HouseProfile2R2C(
                 "Already 'modestly undersized' at -15°C per calibration; "
                 "with capacity curve, deep cold makes HP effectively zero.",
     hp_capacity=STANDARD_HP_CAPACITY,
+)
+
+# Fujitsu hyper-heat variants — match the deployed system class. CCASHP
+# capacity holds 50% at -26°C design and runs down to -32°C cutout, instead
+# of the cliff-at-design behavior of STANDARD_HP_CAPACITY.
+PROFILES_2R2C["living_room_fujitsu"] = HouseProfile2R2C(
+    name="Living Room (calibrated, Fujitsu hyper-heat capacity)",
+    tau_env=100,
+    tau_couple=30,
+    mass_ratio=8,
+    hp_gain=0.04,
+    description="living_room with FUJITSU_HYPERHEAT_CAPACITY. Use for tests "
+                "that need realistic CCASHP saturation under sub-design "
+                "cold snaps without an abrupt cliff. Design temp -26°C "
+                "(-15°F), cutoff -32°C.",
+    hp_capacity=FUJITSU_HYPERHEAT_CAPACITY,
+)
+
+PROFILES_2R2C["bunkroom_fujitsu"] = HouseProfile2R2C(
+    name="Bunkroom (calibrated, Fujitsu hyper-heat capacity)",
+    tau_env=170,
+    tau_couple=20,
+    mass_ratio=8,
+    hp_gain=0.025,
+    description="bunkroom with FUJITSU_HYPERHEAT_CAPACITY. Already "
+                "'modestly undersized' per calibration; CCASHP curve "
+                "preserves partial capacity below -26°C instead of cliff.",
+    hp_capacity=FUJITSU_HYPERHEAT_CAPACITY,
 )
