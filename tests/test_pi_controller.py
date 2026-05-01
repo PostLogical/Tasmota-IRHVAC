@@ -4098,6 +4098,100 @@ class TestHPNoOutput:
         )
 
     @pytest.mark.asyncio
+    async def test_tobit_disabled_by_default(self):
+        """Tobit toggle defaults to off — admission behavior unchanged."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        assert pi._tobit_enabled is False
+
+    @pytest.mark.asyncio
+    async def test_tobit_enabled_admits_no_output_obs(self):
+        """With pi_tobit_enabled=True, ``no_output`` (HP-off) observations
+        ARE admitted to the heat/cool buffer for data preservation.
+
+        #40 Session 1 invariant: WLS still excludes them at fit time
+        (the eligible filter checks ``not o.clamped``); they're kept
+        only so the future #40 follow-up can reclassify them against
+        a matured boundary estimate.
+        """
+        config = make_pi_config({"pi_tobit_enabled": True})
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 17  # below room → HP has no output (no_output)
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 24.0
+        pi._pi_integral = -5.0
+        pi._inputs.outdoor_temp = 5.0  # required for data_complete
+        before = len(pi._observation_buffer_heat)
+
+        await pi._pi_tick()
+
+        assert len(pi._observation_buffer_heat) > before, (
+            "no_output obs should be admitted under pi_tobit_enabled"
+        )
+        last_obs = pi._observation_buffer_heat.get_all()[-1]
+        assert last_obs.clamped is True
+        assert last_obs.clamped_reason == "no_output"
+
+    @pytest.mark.asyncio
+    async def test_tobit_enabled_admits_saturated_high_obs(self):
+        """With pi_tobit_enabled=True, ``saturated_high`` obs (controller
+        wanted setpoint above max) ARE admitted to the heat/cool buffer.
+
+        Trigger via integral windup: raw_setpoint = desired + Kp·error +
+        Ki·integral + ff > _max_temp_c forces clamped_reason=saturated_high.
+        """
+        config = make_pi_config({"pi_tobit_enabled": True})
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 30  # at top of range so HP is "definitely on"
+        pi._last_raw_setpoint = 28.0  # previous tick within range
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 18.0  # cold; raw_sp will go high
+        pi._pi_integral = 100.0  # massive windup → i_term ≫ 0
+        pi._inputs.outdoor_temp = -10.0
+        before = len(pi._observation_buffer_heat)
+
+        await pi._pi_tick()
+
+        added = pi._observation_buffer_heat.get_all()[before:]
+        assert len(added) >= 1, "Saturated_high obs should be admitted"
+        # Verify the admitted obs has the right reason
+        sat_high_admitted = any(
+            o.clamped and o.clamped_reason == "saturated_high"
+            for o in added
+        )
+        assert sat_high_admitted, (
+            "Expected at least one saturated_high obs in buffer; "
+            f"got reasons {[o.clamped_reason for o in added]}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_tobit_disabled_rejects_no_output_obs(self):
+        """Sanity: with toggle off (default), no_output obs are NOT admitted.
+        Mirrors test_no_output_observation_not_buffered to lock in that
+        the Tobit code path is opt-in only."""
+        config = make_pi_config()  # default: pi_tobit_enabled = False
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 17
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 24.0
+        pi._pi_integral = -5.0
+        pi._inputs.outdoor_temp = 5.0
+        before = len(pi._observation_buffer_heat)
+
+        await pi._pi_tick()
+
+        assert len(pi._observation_buffer_heat) == before, (
+            "no_output obs should NOT be admitted when toggle is off"
+        )
+
+    @pytest.mark.asyncio
     async def test_observation_unclamped_when_hp_active(self):
         """Observation should have clamped=False when HP is active."""
         config = make_pi_config()

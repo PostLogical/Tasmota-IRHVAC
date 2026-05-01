@@ -208,6 +208,7 @@ CONF_PI_FF_ENABLED = "pi_ff_enabled"
 CONF_PI_RLS_ONLINE_ENABLED = "pi_rls_online_enabled"
 CONF_PI_BATCH_WLS_ENABLED = "pi_batch_wls_enabled"
 CONF_PI_PLANT_ID_ENABLED = "pi_plant_id_enabled"
+CONF_PI_TOBIT_ENABLED = "pi_tobit_enabled"
 CONF_PI_MODEL_INPUTS = "pi_model_inputs"
 
 # Subentry types
@@ -269,6 +270,13 @@ DEFAULT_PI_FF_ENABLED = True
 DEFAULT_PI_RLS_ONLINE_ENABLED = True
 DEFAULT_PI_BATCH_WLS_ENABLED = True
 DEFAULT_PI_PLANT_ID_ENABLED = True
+# Tobit / censored WLS at HP saturation (#40). Default off — opt-in until
+# bench validation in Session 5 of #40 confirms convergence-quality wins.
+# When enabled: relaxes the buffer admission gate to admit
+# saturated_high / saturated_low / no_output observations alongside
+# uncensored ones, and partitions them at WLS time. The actual Tobit MLE
+# solve is gated on Session 2's solver landing.
+DEFAULT_PI_TOBIT_ENABLED = False
 
 # RLS model defaults
 DEFAULT_RLS_LAMBDA_BASE = 0.999  # Base forgetting factor (~10 day effective memory)

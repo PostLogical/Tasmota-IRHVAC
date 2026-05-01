@@ -85,6 +85,7 @@ from ..const import (
     CONF_PI_PLANT_ID_ENABLED,
     CONF_PI_RLS_ONLINE_ENABLED,
     CONF_PI_TAU_ESTIMATE,
+    CONF_PI_TOBIT_ENABLED,
     DEFAULT_PI_BATCH_WLS_ENABLED,
     DEFAULT_PI_DEADBAND,
     DEFAULT_PI_ENABLED,
@@ -104,6 +105,7 @@ from ..const import (
     DEFAULT_PI_PLANT_ID_ENABLED,
     DEFAULT_PI_RLS_ONLINE_ENABLED,
     DEFAULT_PI_TICK_FALLBACK,
+    DEFAULT_PI_TOBIT_ENABLED,
     DEFAULT_PI_RESPONSE_LAG,
     DEFAULT_PI_SETPOINT_HOLD,
     DEFAULT_PI_SETPOINT_WEIGHT,
@@ -219,6 +221,13 @@ class PIController:
             CONF_PI_BATCH_WLS_ENABLED, DEFAULT_PI_BATCH_WLS_ENABLED)
         self._pi_plant_id_enabled: bool = config.get(
             CONF_PI_PLANT_ID_ENABLED, DEFAULT_PI_PLANT_ID_ENABLED)
+        # Tobit / censored WLS at HP saturation (#40 Session 1).
+        # When True, the buffer admission gate (line ~4845) accepts
+        # observations with clamped_reason in {saturated_high, saturated_low,
+        # no_output} alongside uncensored ones. Tobit-specific solver behavior
+        # lands in Session 2; Session 1 only relaxes admission.
+        self._tobit_enabled: bool = config.get(
+            CONF_PI_TOBIT_ENABLED, DEFAULT_PI_TOBIT_ENABLED)
         self._SETPOINT_HOLD_SECONDS: float = float(
             config.get(CONF_PI_SETPOINT_HOLD, DEFAULT_PI_SETPOINT_HOLD)
         )
@@ -4840,7 +4849,24 @@ class PIController:
             )
             # RLS observation buffer: only when we have a valid feature vector
             # (ff_enabled + outdoor temp available) and HP is clearly contributing.
-            if x is not None and hp_observation_usable:
+            #
+            # Tobit (#40): when ``self._tobit_enabled`` is True, also admit
+            # actuator-saturation rails (saturated_high / saturated_low) and
+            # boundary-classified no-output observations. The WLS partition
+            # at fit time decides which censoring semantics apply; no_output
+            # is admitted for data preservation only — it stays excluded
+            # from the regression itself in Session 1. ``observe_only`` (set
+            # in passive observe-only mode at line ~4205) stays gated;
+            # observe-only ticks aren't drivable by the controller and
+            # carry no learning signal.
+            tobit_admit = (
+                self._tobit_enabled
+                and obs_clamped
+                and obs_clamped_reason in (
+                    "saturated_high", "saturated_low", "no_output",
+                )
+            )
+            if x is not None and (hp_observation_usable or tobit_admit):
                 active_buffer = self._observation_buffer_heat if is_heating else self._observation_buffer_cool
                 active_buffer.add(obs)
             # Grey-box buffer gets ALL observations (including HP-off) when

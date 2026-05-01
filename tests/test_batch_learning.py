@@ -284,6 +284,169 @@ class TestWeightedLeastSquares:
         assert abs(result.beta_batch[2] - 10.0) < 1.0    # small feature
 
 
+# ── Tobit partition (#40 Session 1) ───────────────────────────────────
+
+
+class TestTobitPartitionCounts:
+    """Session 1: WLS counts saturation rails admitted to the buffer.
+
+    The Session 1 invariant is "no behavioral change" — the eligible set
+    that flows into the WLS solve is unchanged (still excludes
+    ``o.clamped``). Only the diagnostic counts surface in the BatchResult.
+    Session 2 plugs in the Tobit MLE solver that consumes the counts.
+    """
+
+    def _make_obs(self, sp, cur, *, clamped=False, clamped_reason="",
+                  rate=0.005, des=20.0):
+        return _make_test_obs(
+            features=[1.0, 0.0], sp=sp, cur=cur, des=des, rate=rate,
+            clamped=clamped, clamped_reason=clamped_reason,
+        )
+
+    def test_no_clamped_obs_yields_zero_counts(self):
+        """No clamped observations → both counts zero, tobit_used False."""
+        obs = [
+            self._make_obs(sp=22.0, cur=20.0)
+            for _ in range(30)
+        ]
+        result = weighted_least_squares(
+            obs, n_features=2, min_observations=20,
+            feature_order=_test_feature_order(0),
+            model_inputs=_test_model_inputs(0),
+        )
+        assert result is not None
+        assert result.n_censored_high == 0
+        assert result.n_censored_low == 0
+        assert result.tobit_used is False
+
+    def test_saturated_high_observations_counted(self):
+        """saturated_high obs counted in n_censored_high; not in eligible."""
+        obs = [
+            self._make_obs(sp=22.0, cur=20.0)
+            for _ in range(30)
+        ]
+        # Add 5 saturated_high (admitted under tobit_enabled toggle)
+        for _ in range(5):
+            obs.append(self._make_obs(
+                sp=22.0, cur=20.0,
+                clamped=True, clamped_reason="saturated_high",
+            ))
+        result = weighted_least_squares(
+            obs, n_features=2, min_observations=20,
+            feature_order=_test_feature_order(0),
+            model_inputs=_test_model_inputs(0),
+        )
+        assert result is not None
+        assert result.n_censored_high == 5
+        assert result.n_censored_low == 0
+        # Eligible set unchanged: 30 uncensored, n_eligible should reflect that
+        assert result.n_eligible == 30
+        assert result.tobit_used is False
+
+    def test_saturated_low_observations_counted(self):
+        """saturated_low obs counted in n_censored_low."""
+        obs = [
+            self._make_obs(sp=22.0, cur=20.0)
+            for _ in range(30)
+        ]
+        for _ in range(7):
+            obs.append(self._make_obs(
+                sp=22.0, cur=20.0,
+                clamped=True, clamped_reason="saturated_low",
+            ))
+        result = weighted_least_squares(
+            obs, n_features=2, min_observations=20,
+            feature_order=_test_feature_order(0),
+            model_inputs=_test_model_inputs(0),
+        )
+        assert result is not None
+        assert result.n_censored_high == 0
+        assert result.n_censored_low == 7
+
+    def test_no_output_not_counted_in_either(self):
+        """``no_output`` admitted obs are NOT Tobit-eligible (no censoring
+        semantics — HP simply isn't contributing). They stay out of both
+        counts; data preservation is the only reason they're admitted."""
+        obs = [
+            self._make_obs(sp=22.0, cur=20.0)
+            for _ in range(30)
+        ]
+        for _ in range(4):
+            obs.append(self._make_obs(
+                sp=22.0, cur=20.0,
+                clamped=True, clamped_reason="no_output",
+            ))
+        result = weighted_least_squares(
+            obs, n_features=2, min_observations=20,
+            feature_order=_test_feature_order(0),
+            model_inputs=_test_model_inputs(0),
+        )
+        assert result is not None
+        assert result.n_censored_high == 0
+        assert result.n_censored_low == 0
+
+    def test_unstable_clamped_obs_excluded_from_count(self):
+        """Saturated obs with high room_rate (transient) are excluded from
+        Tobit counts too — they fail the same stability filter the eligible
+        set uses, and their y_obs isn't trustworthy as a censoring threshold."""
+        obs = [
+            self._make_obs(sp=22.0, cur=20.0)
+            for _ in range(30)
+        ]
+        # 3 saturated_high but UNSTABLE (rate above threshold)
+        for _ in range(3):
+            obs.append(self._make_obs(
+                sp=22.0, cur=20.0, rate=0.05,  # well above 0.02 threshold
+                clamped=True, clamped_reason="saturated_high",
+            ))
+        result = weighted_least_squares(
+            obs, n_features=2, min_observations=20,
+            feature_order=_test_feature_order(0),
+            model_inputs=_test_model_inputs(0),
+        )
+        assert result is not None
+        assert result.n_censored_high == 0  # excluded by rate filter
+        assert result.n_censored_low == 0
+
+    def test_mixed_clamped_reasons_partition_correctly(self):
+        """Buffer with all reasons mixed → counts only saturated_*."""
+        obs = [
+            self._make_obs(sp=22.0, cur=20.0)
+            for _ in range(30)
+        ]
+        # 4 high, 3 low, 5 no_output, 2 observe_only
+        for _ in range(4):
+            obs.append(self._make_obs(
+                sp=22.0, cur=20.0,
+                clamped=True, clamped_reason="saturated_high",
+            ))
+        for _ in range(3):
+            obs.append(self._make_obs(
+                sp=22.0, cur=20.0,
+                clamped=True, clamped_reason="saturated_low",
+            ))
+        for _ in range(5):
+            obs.append(self._make_obs(
+                sp=22.0, cur=20.0,
+                clamped=True, clamped_reason="no_output",
+            ))
+        for _ in range(2):
+            obs.append(self._make_obs(
+                sp=22.0, cur=20.0,
+                clamped=True, clamped_reason="observe_only",
+            ))
+        result = weighted_least_squares(
+            obs, n_features=2, min_observations=20,
+            feature_order=_test_feature_order(0),
+            model_inputs=_test_model_inputs(0),
+        )
+        assert result is not None
+        assert result.n_censored_high == 4
+        assert result.n_censored_low == 3
+        # n_eligible still 30 (uncensored only)
+        assert result.n_eligible == 30
+
+
 # ── Compare and Report ────────────────────────────────────────────────
 
 

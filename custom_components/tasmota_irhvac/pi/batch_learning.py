@@ -1114,6 +1114,15 @@ class BatchResult:
     plant_snapshot: dict[str, Any] = field(default_factory=dict)  # plant ID state at batch time
     feature_vif: list[float] = field(default_factory=list)  # per-feature VIF from regression data
     detected_tau: dict[str, float] = field(default_factory=dict)  # input name → auto-detected EMA tau (seconds)
+    # Tobit / censored WLS diagnostics (#40 Session 1+).
+    # Counts of saturated observations admitted to the buffer when
+    # ``pi_tobit_enabled`` is True. These flow through the partition logic
+    # in ``weighted_least_squares`` even when the actual Tobit MLE solve
+    # is not yet wired in (Session 1 admits + counts; Session 2 solves).
+    n_censored_high: int = 0  # saturated_high observations in buffer at fit time
+    n_censored_low: int = 0   # saturated_low observations in buffer at fit time
+    tobit_used: bool = False  # True when the Tobit MLE solver actually fit β
+                              # (False in Session 1 — partition only)
 
 
 def _weighted_variance(values: list[float], weights: list[float]) -> float:
@@ -1469,6 +1478,26 @@ def weighted_least_squares(
         and not o.hp_contribution_uncertain
     ]
 
+    # Tobit (#40 Session 1) partition: count saturation rails admitted to
+    # the buffer when ``pi_tobit_enabled`` is True. Session 1 only counts
+    # them — the actual MLE solve over censored observations lands in
+    # Session 2. Without the toggle, admission rejects rails so these
+    # counts will be zero (and the partition is a no-op).
+    n_censored_high = sum(
+        1 for o in observations
+        if o.clamped
+        and o.clamped_reason == "saturated_high"
+        and o.hp_setpoint is not None
+        and abs(o.room_rate) < room_rate_threshold
+    )
+    n_censored_low = sum(
+        1 for o in observations
+        if o.clamped
+        and o.clamped_reason == "saturated_low"
+        and o.hp_setpoint is not None
+        and abs(o.room_rate) < room_rate_threshold
+    )
+
     if len(eligible) < min_observations:
         return None
 
@@ -1754,6 +1783,9 @@ def weighted_least_squares(
         beta_std_err=std_err,
         feature_vif=vif,
         detected_tau=detected_tau,
+        n_censored_high=n_censored_high,
+        n_censored_low=n_censored_low,
+        tobit_used=False,  # Session 1: partition only; solve lands in Session 2
     )
 
 
