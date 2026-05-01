@@ -267,7 +267,12 @@ DEFAULT_PI_SETPOINT_HOLD = 1200     # Min seconds between HP setpoint changes. 0
 DEFAULT_PI_INTERCEPT_SEED_HEAT = 0.0
 DEFAULT_PI_INTERCEPT_SEED_COOL = 0.0
 DEFAULT_PI_FF_ENABLED = True
-DEFAULT_PI_RLS_ONLINE_ENABLED = True
+# Online RLS is retired per project_online_rls_verdict.md — batch WLS
+# is the sole production estimator. Default off to match the verdict;
+# users who want online RLS for experimentation can opt in via config
+# flow. Existing user configs with the key explicitly set keep their
+# stored value; only new installs see this default.
+DEFAULT_PI_RLS_ONLINE_ENABLED = False
 DEFAULT_PI_BATCH_WLS_ENABLED = True
 DEFAULT_PI_PLANT_ID_ENABLED = True
 # Tobit / censored WLS at HP saturation (#40). Default off — opt-in until

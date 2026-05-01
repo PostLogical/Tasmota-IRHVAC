@@ -487,6 +487,36 @@ class TestPIControllerCoverageGaps:
             await pi._pi_tick()
         # Just verify no crash — the learning path is exercised
 
+    # Line 3859: RLS coefficient change >10% logging path
+    def test_rls_learn_observation_logs_coefficient_change(self):
+        """``_rls_learn_observation`` logs an INFO message when any β
+        changes by more than 10% relative. Online RLS defaults to off
+        (verdict), so this path needs explicit enable + a contrived β
+        jump to cover the logging branch (line 3859)."""
+        entity = _make_pi()
+        pi = entity._pi
+        pi._pi_rls_online_enabled = True
+        rls = pi._rls_heat
+        # Seed RLS with non-zero β so a relative-change comparison is
+        # well-defined.
+        rls.beta = [1.0] + [0.0] * (rls.n - 1)
+        rls.observation_count = 50  # past warmup
+        # Patch update() to inject a large (>10%) coefficient change.
+        original_update = rls.update
+
+        def stomp_beta(x, y):
+            residual = original_update(x, y)
+            rls.beta[0] = 2.0  # 100% change from 1.0 → triggers log
+            return residual
+
+        rls.update = stomp_beta  # type: ignore[method-assign]
+        try:
+            pi._rls_learn_observation(
+                rls, [1.0] + [0.0] * (rls.n - 1), 0.5, "rls_heat",
+            )
+        finally:
+            rls.update = original_update  # type: ignore[method-assign]
+
     # Lines 4336-4337: obs_clamped saturated_low
     @pytest.mark.asyncio
     async def test_obs_clamped_saturated_low(self):
