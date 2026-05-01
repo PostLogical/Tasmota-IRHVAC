@@ -537,8 +537,12 @@ class TestFeedforward:
 
     @pytest.mark.asyncio
     async def test_model_input_suppress_learning_allows_when_inactive(self, pi_entity):
-        """Model input with suppress_learning=True allows RLS when inactive."""
+        """Model input with suppress_learning=True allows RLS when inactive.
+        Online RLS defaults to off per the verdict; this test explicitly
+        enables it to exercise the obs-count increment path that proves
+        suppression isn't blocking learning."""
         pi = pi_entity._pi
+        pi._pi_rls_online_enabled = True
         pi._model_inputs = [{
             "name": "pellet_stove",
             "entity_id": "sensor.stove",
@@ -1756,17 +1760,24 @@ class TestSetSubsystem:
         assert pi._pi_ff_enabled is True
 
     def test_set_subsystem_toggles_all(self):
-        """All five subsystems should be toggleable."""
+        """All five subsystems should be toggleable. Tests round-trip
+        each toggle False→True→False without asserting specific defaults
+        (defaults differ by subsystem; online RLS is False per verdict
+        while others default True)."""
         config = make_pi_config()
         entity = FakePIEntity(config)
         pi = entity._pi
 
         for name, attr in pi._SUBSYSTEM_ATTRS.items():
-            assert getattr(pi, attr) is True, f"{name} should default to True"
-            pi.set_subsystem(name, False)
-            assert getattr(pi, attr) is False, f"{name} should be False after disable"
-            pi.set_subsystem(name, True)
-            assert getattr(pi, attr) is True, f"{name} should be True after re-enable"
+            initial = getattr(pi, attr)
+            pi.set_subsystem(name, not initial)
+            assert getattr(pi, attr) is (not initial), (
+                f"{name} should flip from {initial} to {not initial}"
+            )
+            pi.set_subsystem(name, initial)
+            assert getattr(pi, attr) is initial, (
+                f"{name} should round-trip back to {initial}"
+            )
 
     def test_set_subsystem_unknown_ignored(self):
         """Unknown subsystem name should be silently ignored."""
@@ -5736,12 +5747,14 @@ class TestDriftDetection:
 class TestSubsystemToggles:
     """Tests for runtime subsystem gating via config toggles."""
 
-    def test_toggles_default_true(self):
-        """All subsystem toggles default to True."""
+    def test_toggles_defaults(self):
+        """Subsystem toggles default values match the production-default
+        verdict: FF / batch WLS / plant ID all enabled; online RLS off
+        (retired per ``project_online_rls_verdict.md``)."""
         entity = FakePIEntity(make_pi_config())
         pi = entity._pi
         assert pi._pi_ff_enabled is True
-        assert pi._pi_rls_online_enabled is True
+        assert pi._pi_rls_online_enabled is False
         assert pi._pi_batch_wls_enabled is True
         assert pi._pi_plant_id_enabled is True
 
@@ -5761,8 +5774,14 @@ class TestSubsystemToggles:
         assert pi._pi_plant_id_enabled is False
 
     def test_diagnostics_expose_toggles(self):
-        """Full diagnostics include subsystem toggle states."""
-        config = make_pi_config({"pi_ff_enabled": False, "pi_batch_wls_enabled": False})
+        """Full diagnostics include subsystem toggle states. Online RLS
+        defaults to False per the verdict; we explicitly enable it here
+        to exercise the True diagnostic path."""
+        config = make_pi_config({
+            "pi_ff_enabled": False,
+            "pi_batch_wls_enabled": False,
+            "pi_rls_online_enabled": True,  # explicit enable; default is False
+        })
         entity = FakePIEntity(config)
         diag = entity._pi.get_full_diagnostics()
         assert diag["config"]["ff_enabled"] is False
@@ -6052,12 +6071,13 @@ class TestSubsystemToggles:
         assert pi._rls_shared_gate_open(False) is False
 
     def test_rls_shared_gate_open_when_enabled(self):
-        """_rls_shared_gate_open returns True when all conditions met."""
-        config = make_pi_config()
+        """_rls_shared_gate_open returns True when all conditions met.
+        Online RLS defaults to False (verdict); explicitly enable to
+        exercise the open-gate branch."""
+        config = make_pi_config({"pi_rls_online_enabled": True})
         entity = FakePIEntity(config)
         pi = entity._pi
         pi._inputs.outdoor_temp = 5.0
-        # Default: rls_online_enabled=True, no suppression, no tracking
         assert pi._rls_shared_gate_open(False) is True
 
     @pytest.mark.asyncio
