@@ -89,6 +89,29 @@ class TestBothArmsRun:
             ol_id.feature_names.index("outdoor_delta")
         ] < 0.1
 
+    def test_closed_loop_identifiability_attached(self, living_room_attribution):
+        # Phase 1e: closed-loop arm now carries a real identifiability
+        # report (built from a snapshot of the production WLS buffer at
+        # the last tick), not the empty placeholder Phase 1c had.
+        cl_id = living_room_attribution.closed_loop.identifiability
+        # The closed-loop buffer fills up to its DEFAULT_DIVERSITY_BUFFER_SIZE
+        # (~2000) over 30 days; the eligible-after-filter count is somewhat
+        # smaller but still substantial.
+        assert cl_id.n_observations > 100, (
+            f"closed-loop buffer snapshot too small: {cl_id.n_observations}"
+        )
+        assert cl_id.rank >= 2
+
+    def test_both_arms_have_residual_diagnostics(self, living_room_attribution):
+        # Phase 1e: both arms carry Phase 1d residual reports.
+        cl_res = living_room_attribution.closed_loop.residuals
+        ol_res = living_room_attribution.open_loop.residuals
+        assert cl_res.n_residuals > 0
+        assert ol_res.n_residuals > 0
+        # Both reports include autocorrelation and Ljung-Box numbers.
+        assert len(cl_res.autocorrelation) > 0
+        assert len(ol_res.autocorrelation) > 0
+
 
 # ── The substantive Phase 1c claims ─────────────────────────────────
 
