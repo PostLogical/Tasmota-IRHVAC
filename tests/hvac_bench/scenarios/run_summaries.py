@@ -38,6 +38,9 @@ from tests.hvac_bench.scenarios.test_seasonal_convergence import (
 from tests.hvac_bench.scenarios.test_tobit_convergence_quality import (
     run_tobit_convergence_quality_summary,
 )
+from tests.hvac_bench.scenarios.test_wls_tobit import (
+    run_wls_tobit_summary,
+)
 
 
 REGISTRY: dict[str, Callable[[], None]] = {
@@ -46,6 +49,7 @@ REGISTRY: dict[str, Callable[[], None]] = {
     "buffer_variants_synth": run_buffer_variants_synth_summary,
     "hp_capacity": run_hp_capacity_summary,
     "tobit_convergence_quality": run_tobit_convergence_quality_summary,
+    "wls_tobit": run_wls_tobit_summary,
 }
 
 
