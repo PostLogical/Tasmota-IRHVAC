@@ -13,12 +13,22 @@ from custom_components.tasmota_irhvac.pi.greybox_observer import (
     GATE_MAX_CV,
     GATE_MAX_RMS,
     GATE_MAX_TAU,
+    GATE_MAX_TAU_FAST,
+    GATE_MAX_TAU_SLOW,
     GATE_MIN_TAU,
+    GATE_MIN_TAU_FAST,
+    GATE_MIN_TAU_SLOW,
+    GATE_MIN_TAU_SEPARATION,
+    MIN_OBSERVATIONS_2R2C,
+    MIN_TIMESPAN_DAYS_2R2C,
     SCIPY_AVAILABLE,
+    SOLAR_AIR_FRACTION,
+    SOLAR_WALL_FRACTION,
     GreyboxBridgeResult,
     GreyboxResult,
     _check_quality_gates,
     _delta_method_ratio_std,
+    _natural_eigenvalues,
     find_solar_entity,
     fit_greybox,
     greybox_to_beta,
@@ -533,3 +543,472 @@ class TestGreyboxBridgeEndToEnd:
         # Std errors should be finite and reasonable
         assert bridge.beta_std_err[1] < 0.5
         assert bridge.beta_std_err[2] < 1.0
+
+
+# ── 2R2C upgrade ────────────────────────────────────────────────────
+
+
+class TestNaturalEigenvalues:
+    """Test the analytic 2R2C natural eigenvalue helper."""
+
+    def test_typical_residential(self):
+        """Standard residential (τ_env=100, τ_couple=80, mass_ratio=8) → tau_fast<tau_slow."""
+        ua_c = 1.0 / 100.0   # τ_env = 100 min
+        k_w = 1.0 / 80.0     # τ_couple = 80 min
+        mass_ratio = 8.0
+        tau_fast, tau_slow = _natural_eigenvalues(ua_c, k_w, mass_ratio)
+        assert tau_fast < tau_slow
+        # Fast pole dominated by air node (≈ 1/(ua_c + k_w) when wall coupling weak)
+        assert 5.0 < tau_fast < 100.0
+        # Slow pole reflects wall mass (τ_couple × mass_ratio bound)
+        assert tau_slow > tau_fast * 2.0
+        assert tau_slow < 2000.0
+
+    def test_decoupled_limit(self):
+        """k_w → 0: wall decouples; eigenvalues approach 1/ua_c and ∞."""
+        tau_fast, tau_slow = _natural_eigenvalues(0.01, 1e-3, 8.0)
+        # tau_fast ≈ 1/0.01 = 100 (the only meaningful pole)
+        # tau_slow much longer (large mass_ratio × small k_w)
+        assert tau_slow > tau_fast * 5.0
+
+    def test_separation_grows_with_mass_ratio(self):
+        """Higher mass_ratio → larger τ_slow / τ_fast separation."""
+        ua_c, k_w = 1.0 / 100.0, 1.0 / 50.0
+        _, tau_slow_lo = _natural_eigenvalues(ua_c, k_w, mass_ratio=2.0)
+        _, tau_slow_hi = _natural_eigenvalues(ua_c, k_w, mass_ratio=15.0)
+        assert tau_slow_hi > tau_slow_lo
+
+
+class TestFitGreybox2R2C:
+    """End-to-end 2R2C fit on synthetic data generated from a known 2R2C plant.
+
+    True parameters chosen to span a realistic residential profile:
+      ua_c       = 0.01    (τ_env = 100 min)
+      k_c        = 0.04    (HP gain)
+      α_total    = 0.05    (solar rate, °C/min per unit proxy)
+      k_w        = 1/40    (τ_couple = 40 min)
+      mass_ratio = 8.0
+    """
+
+    UA_C_TRUE = 0.01
+    K_C_TRUE = 0.04
+    ALPHA_TOTAL_TRUE = 0.05
+    K_W_TRUE = 1.0 / 40.0
+    MASS_RATIO_TRUE = 8.0
+
+    def _generate_2r2c_observations(
+        self,
+        n_days: float = 21.0,
+        tick_minutes: float = 10.0,
+        noise_std: float = 0.0008,
+    ) -> list[Observation]:
+        """Simulate a 2R2C plant forward and emit Observations.
+
+        Uses exact piecewise-exponential integration on the same wall ODE
+        as the fitter so the fit can recover parameters within tolerance.
+        """
+        import random
+        random.seed(42)
+        rng_t_air = random.Random(43)
+
+        m = int(n_days * 24 * 60 / tick_minutes)
+        dt = tick_minutes  # minutes
+
+        alpha_air = self.ALPHA_TOTAL_TRUE * SOLAR_AIR_FRACTION
+        alpha_wall = self.ALPHA_TOTAL_TRUE * SOLAR_WALL_FRACTION
+        a_wall = self.K_W_TRUE / self.MASS_RATIO_TRUE
+
+        obs = []
+        t_air = 20.0
+        t_wall = 20.0
+        for i in range(m):
+            hour = (i * tick_minutes / 60.0) % 24.0
+            t_out = 5.0 + 7.0 * math.sin(2 * math.pi * (hour - 6) / 24)
+            solar = max(0.0, 0.6 * math.sin(2 * math.pi * (hour - 6) / 24))
+
+            # PI-like behaviour: HP off when solar warms the room near setpoint.
+            hp_off = solar > 0.45 and t_out > 8.0
+            if hp_off:
+                hp_setpoint = t_air - 1.0
+                hp_offset = 0.0
+                clamped_reason = "no_output"
+            else:
+                hp_offset = 1.5 + 0.5 * math.sin(i * 0.05)  # vary HP demand
+                hp_setpoint = t_air + hp_offset
+                clamped_reason = ""
+
+            # True air rate from 2R2C ODE (excluding c0/intercept term).
+            air_rate = (
+                self.UA_C_TRUE * (t_out - t_air)
+                + self.K_C_TRUE * hp_offset
+                + alpha_air * solar
+                + self.K_W_TRUE * (t_wall - t_air)
+            )
+            # Add small measurement noise to room_rate.
+            room_rate = air_rate + rng_t_air.gauss(0, noise_std)
+
+            obs.append(Observation(
+                timestamp=float(i * tick_minutes * 60),
+                wall_time=1713650000.0 + i * tick_minutes * 60,
+                hp_setpoint=hp_setpoint,
+                current_c=t_air,
+                desired_c=20.0,
+                outdoor_temp_c=t_out,
+                room_rate=room_rate,
+                raw_readings={"sensor.solar_proxy": solar},
+                clamped=clamped_reason != "",
+                clamped_reason=clamped_reason,
+            ))
+
+            # Advance the plant forward by dt minutes (exact 2R2C step).
+            # T_w ODE: dT_w/dt = a_wall*(T_a - T_w) + (alpha_wall/mass_ratio)*solar
+            t_w_eq = t_air + alpha_wall * solar / self.K_W_TRUE
+            t_wall = t_w_eq + (t_wall - t_w_eq) * math.exp(-a_wall * dt)
+            # T_a evolves at the air_rate; accumulate the drift.
+            t_air += air_rate * dt
+            # Don't let t_air drift too far (PI would correct in real life).
+            t_air = max(15.0, min(25.0, t_air))
+
+        return obs
+
+    def test_dispatch_uses_2r2c_when_eligible(self):
+        """With ≥1500 obs and ≥14-day span, fit_greybox returns a 2R2C result."""
+        obs = self._generate_2r2c_observations(n_days=21.0, tick_minutes=10.0)
+        assert len(obs) >= MIN_OBSERVATIONS_2R2C
+        timespan_days = (obs[-1].timestamp - obs[0].timestamp) / 86400.0
+        assert timespan_days >= MIN_TIMESPAN_DAYS_2R2C
+
+        model_inputs = [
+            {"name": "Solar Proxy", "entity_id": "sensor.solar_proxy", "input_role": "solar"},
+        ]
+        result = fit_greybox(obs, model_inputs)
+        assert result is not None
+        assert result.is_2r2c is True
+        assert result.k_w is not None
+        assert result.mass_ratio is not None
+        assert result.tau_fast is not None
+        assert result.tau_slow is not None
+
+    def test_dispatch_falls_back_to_1r1c_short_buffer(self):
+        """Below MIN_OBSERVATIONS_2R2C, dispatch returns 1R1C."""
+        obs = self._generate_2r2c_observations(n_days=2.0, tick_minutes=10.0)
+        assert len(obs) < MIN_OBSERVATIONS_2R2C
+        model_inputs = [
+            {"name": "Solar Proxy", "entity_id": "sensor.solar_proxy", "input_role": "solar"},
+        ]
+        result = fit_greybox(obs, model_inputs)
+        assert result is not None
+        assert result.is_2r2c is False
+        assert result.k_w is None
+        assert result.tau_fast is None
+
+    def test_dispatch_falls_back_short_timespan(self):
+        """≥1500 obs but <14 days → 1R1C fallback."""
+        # Many short ticks: 2 days × 24h × 60min / 1min = 2880 obs
+        obs = self._generate_2r2c_observations(n_days=2.0, tick_minutes=1.0)
+        assert len(obs) >= MIN_OBSERVATIONS_2R2C
+        timespan_days = (obs[-1].timestamp - obs[0].timestamp) / 86400.0
+        assert timespan_days < MIN_TIMESPAN_DAYS_2R2C
+        model_inputs = [
+            {"name": "Solar Proxy", "entity_id": "sensor.solar_proxy", "input_role": "solar"},
+        ]
+        result = fit_greybox(obs, model_inputs)
+        assert result is not None
+        assert result.is_2r2c is False
+
+    def test_recovers_known_2r2c_parameters(self):
+        """Fit recovers ua_c, k_c, α_total, k_w, mass_ratio within tolerance."""
+        obs = self._generate_2r2c_observations(n_days=21.0, tick_minutes=10.0)
+        model_inputs = [
+            {"name": "Solar Proxy", "entity_id": "sensor.solar_proxy", "input_role": "solar"},
+        ]
+        result = fit_greybox(obs, model_inputs)
+        assert result is not None and result.is_2r2c
+
+        # ua_c, k_c are directly identifiable from the rate equation; tight
+        # tolerance.  α_total ties to k_c via the steady-state ratio so it
+        # tracks closely too.
+        assert abs(result.ua_c - self.UA_C_TRUE) / self.UA_C_TRUE < 0.30
+        assert abs(result.k_c - self.K_C_TRUE) / self.K_C_TRUE < 0.30
+        assert abs(result.alpha_c - self.ALPHA_TOTAL_TRUE) / self.ALPHA_TOTAL_TRUE < 0.40
+        # k_w and mass_ratio are harder (latent state) — looser tolerance.
+        assert result.k_w is not None
+        assert result.k_w > 0
+        assert result.mass_ratio is not None
+        assert 1.5 <= result.mass_ratio <= 25.0
+
+    def test_2r2c_bridge_recovers_steady_state_betas(self):
+        """β_outdoor and β_solar from 2R2C bridge match the analytic SS gains.
+
+        β_outdoor_true = -ua_c / k_c = -0.01 / 0.04 = -0.25
+        β_solar_true   = -α_total / k_c = -0.05 / 0.04 = -1.25
+        """
+        obs = self._generate_2r2c_observations(n_days=21.0, tick_minutes=10.0)
+        model_inputs = [
+            {"name": "Solar Proxy", "entity_id": "sensor.solar_proxy", "input_role": "solar"},
+        ]
+        result = fit_greybox(obs, model_inputs)
+        assert result is not None and result.is_2r2c
+
+        bridge = greybox_to_beta(result, model_inputs)
+        beta_outdoor_true = -self.UA_C_TRUE / self.K_C_TRUE
+        beta_solar_true = -self.ALPHA_TOTAL_TRUE / self.K_C_TRUE
+        assert bridge.beta[1] is not None
+        assert abs(bridge.beta[1] - beta_outdoor_true) < 0.10
+        assert bridge.beta[2] is not None
+        assert abs(bridge.beta[2] - beta_solar_true) < 0.50
+
+
+class TestGates2R2C:
+    """Quality gates specific to 2R2C results."""
+
+    def _make_2r2c_result(self, **overrides) -> GreyboxResult:
+        defaults = dict(
+            n_observations=2000, n_hp_on=1200, n_hp_off=800,
+            c0=0.0005, ua_c=0.01, k_c=0.04, alpha_c=0.05,
+            tau_eff=120.0, residual_rms=0.005,
+            cost=1.0, n_function_evals=20,
+            param_std_err={
+                "ua_c": 0.0008, "k_c": 0.002,
+                "alpha_c": 0.005, "k_w": 0.002, "mass_ratio": 1.0,
+            },
+            is_2r2c=True,
+            k_w=0.025, mass_ratio=8.0,
+            tau_fast=20.0, tau_slow=180.0,
+        )
+        defaults.update(overrides)
+        return GreyboxResult(**defaults)
+
+    def test_2r2c_all_gates_pass_with_good_data(self):
+        result = self._make_2r2c_result()
+        gates = _check_quality_gates(result)
+        failed = [k for k, v in gates.items() if not v]
+        assert not failed, f"Unexpected gate failures: {failed}"
+        # 1R1C-only gate not present
+        assert "tau_plausible" not in gates
+        # 2R2C-specific gates present
+        assert "tau_fast_plausible" in gates
+        assert "tau_slow_plausible" in gates
+        assert "tau_separation" in gates
+        assert "mass_ratio_plausible" in gates
+        assert "k_w_positive" in gates
+
+    def test_tau_fast_too_long_fails(self):
+        result = self._make_2r2c_result(tau_fast=GATE_MAX_TAU_FAST + 5.0)
+        gates = _check_quality_gates(result)
+        assert not gates["tau_fast_plausible"]
+
+    def test_tau_fast_too_short_fails(self):
+        result = self._make_2r2c_result(tau_fast=GATE_MIN_TAU_FAST - 1.0)
+        gates = _check_quality_gates(result)
+        assert not gates["tau_fast_plausible"]
+
+    def test_tau_slow_too_long_fails(self):
+        result = self._make_2r2c_result(tau_slow=GATE_MAX_TAU_SLOW + 100.0)
+        gates = _check_quality_gates(result)
+        assert not gates["tau_slow_plausible"]
+
+    def test_tau_separation_too_close_fails(self):
+        """τ_slow ≈ τ_fast → degenerate to 1R1C; gate fails."""
+        result = self._make_2r2c_result(tau_fast=50.0, tau_slow=70.0)
+        gates = _check_quality_gates(result)
+        assert (70.0 / 50.0) < GATE_MIN_TAU_SEPARATION
+        assert not gates["tau_separation"]
+
+    def test_mass_ratio_too_low_fails(self):
+        result = self._make_2r2c_result(mass_ratio=0.5)
+        gates = _check_quality_gates(result)
+        assert not gates["mass_ratio_plausible"]
+
+    def test_mass_ratio_too_high_fails(self):
+        result = self._make_2r2c_result(mass_ratio=25.0)
+        gates = _check_quality_gates(result)
+        assert not gates["mass_ratio_plausible"]
+
+    def test_k_w_zero_fails(self):
+        result = self._make_2r2c_result(k_w=0.0)
+        gates = _check_quality_gates(result)
+        assert not gates["k_w_positive"]
+
+    def test_k_w_high_cv_fails_precision(self):
+        result = self._make_2r2c_result(
+            param_std_err={
+                "ua_c": 0.001, "k_c": 0.002,
+                "alpha_c": 0.005, "k_w": 0.020, "mass_ratio": 1.0,
+            },
+            k_w=0.025,
+        )
+        gates = _check_quality_gates(result)
+        assert "param_precision_k_w" in gates
+        assert not gates["param_precision_k_w"]
+
+
+class TestBridge2R2CExposesTaus:
+    """Bridge result must surface τ_fast and τ_slow for 2R2C results."""
+
+    def test_2r2c_bridge_populates_tau_fast_and_slow(self):
+        result = GreyboxResult(
+            n_observations=2000, n_hp_on=1200, n_hp_off=800,
+            c0=0.0, ua_c=0.01, k_c=0.04, alpha_c=0.05,
+            tau_eff=180.0, residual_rms=0.005,
+            cost=1.0, n_function_evals=20,
+            param_std_err={
+                "ua_c": 0.0008, "k_c": 0.002,
+                "alpha_c": 0.005, "k_w": 0.002, "mass_ratio": 1.0,
+            },
+            is_2r2c=True,
+            k_w=0.025, mass_ratio=8.0,
+            tau_fast=20.0, tau_slow=180.0,
+        )
+        bridge = greybox_to_beta(result, model_inputs=[])
+        assert bridge.tau_fast == 20.0
+        assert bridge.tau_slow == 180.0
+        d = bridge.as_dict()
+        assert d["tau_fast"] == 20.0
+        assert d["tau_slow"] == 180.0
+
+    def test_1r1c_bridge_leaves_tau_fast_slow_none(self):
+        result = GreyboxResult(
+            n_observations=200, n_hp_on=120, n_hp_off=80,
+            c0=0.001, ua_c=0.006, k_c=0.02, alpha_c=0.04,
+            tau_eff=166.7, residual_rms=0.005,
+            cost=0.5, n_function_evals=10,
+            param_std_err={"ua_c": 0.001, "k_c": 0.003, "alpha_c": 0.005},
+        )
+        bridge = greybox_to_beta(result, model_inputs=[])
+        assert bridge.tau_fast is None
+        assert bridge.tau_slow is None
+        d = bridge.as_dict()
+        assert d["tau_fast"] is None
+        assert d["tau_slow"] is None
+
+
+class TestLog2R2C:
+    """log_greybox_result handles both 1R1C and 2R2C results."""
+
+    def test_2r2c_log_includes_wall_params(self, caplog):
+        import logging
+        result = GreyboxResult(
+            n_observations=2000, n_hp_on=1200, n_hp_off=800,
+            c0=0.0, ua_c=0.01, k_c=0.04, alpha_c=0.05,
+            tau_eff=180.0, residual_rms=0.005,
+            cost=1.0, n_function_evals=20,
+            param_std_err={"ua_c": 0.0008},
+            is_2r2c=True,
+            k_w=0.025, mass_ratio=8.0,
+            tau_fast=20.0, tau_slow=180.0,
+        )
+        with caplog.at_level(logging.INFO):
+            log_greybox_result(result, log_prefix="[t] ")
+        assert "Grey-box 2R2C" in caplog.text
+        assert "k_w" in caplog.text
+        assert "mass_ratio" in caplog.text
+
+
+class TestFitGreybox2R2CEdgeCases:
+    """Edge cases for the 2R2C fit and dispatch logic."""
+
+    def _generate(self, **kwargs):
+        # Reuse the simulator from the main 2R2C class
+        return TestFitGreybox2R2C()._generate_2r2c_observations(**kwargs)
+
+    def test_2r2c_no_solar_input(self):
+        """2R2C fit without a solar proxy: still recovers ua_c, k_c, k_w, mass_ratio."""
+        obs = self._generate(n_days=21.0, tick_minutes=10.0)
+        # Strip solar from raw_readings so model_inputs=[] is consistent.
+        for o in obs:
+            o.raw_readings.pop("sensor.solar_proxy", None)
+        result = fit_greybox(obs, model_inputs=[])
+        assert result is not None
+        assert result.is_2r2c is True
+        # alpha_c is 0.0 (no solar fitted)
+        assert result.alpha_c == 0.0
+        # k_w and mass_ratio still identified
+        assert result.k_w is not None and result.k_w > 0
+        assert result.mass_ratio is not None
+
+    def test_2r2c_hp_all_off_returns_none_then_fallback(self):
+        """All HP-off → 2R2C returns None → fit_greybox falls back to 1R1C."""
+        obs = self._generate(n_days=21.0, tick_minutes=10.0)
+        for o in obs:
+            o.hp_setpoint = o.current_c - 1.0
+            o.clamped = True
+            o.clamped_reason = "no_output"
+        result = fit_greybox(obs, model_inputs=[])
+        assert result is not None
+        # 2R2C declined (hp_var below threshold) → fell back to 1R1C
+        assert result.is_2r2c is False
+
+    def test_2r2c_with_plant_tau_slow_warm_start(self):
+        """plant_tau_slow seeds the 2R2C ua_c init AND populates tau_agreement_pct."""
+        obs = self._generate(n_days=21.0, tick_minutes=10.0)
+        model_inputs = [
+            {"name": "Solar Proxy", "entity_id": "sensor.solar_proxy", "input_role": "solar"},
+        ]
+        result = fit_greybox(
+            obs, model_inputs,
+            plant_tau_slow=120.0, plant_tau_slow_confidence=0.6,
+        )
+        assert result is not None
+        assert result.is_2r2c is True
+        assert result.plant_tau_slow == 120.0
+        assert result.tau_agreement_pct is not None
+
+    def test_2r2c_least_squares_failure_falls_back_to_1r1c(self, monkeypatch):
+        """If scipy raises, _fit_greybox_2r2c returns None → fit_greybox falls back."""
+        from custom_components.tasmota_irhvac.pi import greybox_observer as gb
+
+        original = gb._least_squares
+        call_count = {"n": 0}
+
+        def flaky_lsq(*args, **kwargs):
+            call_count["n"] += 1
+            # First call (1R1C) succeeds; second call (2R2C) raises.
+            if call_count["n"] == 1:
+                return original(*args, **kwargs)
+            raise RuntimeError("synthetic scipy failure")
+
+        monkeypatch.setattr(gb, "_least_squares", flaky_lsq)
+
+        obs = self._generate(n_days=21.0, tick_minutes=10.0)
+        model_inputs = [
+            {"name": "Solar Proxy", "entity_id": "sensor.solar_proxy", "input_role": "solar"},
+        ]
+        result = fit_greybox(obs, model_inputs)
+        # 1R1C fallback after 2R2C raises.
+        assert result is not None
+        assert result.is_2r2c is False
+
+    def test_2r2c_tau_separation_gate_handles_zero_tau_fast(self):
+        """tau_separation gate fails when tau_fast is 0 or tau_slow is inf."""
+        result = GreyboxResult(
+            n_observations=2000, n_hp_on=1200, n_hp_off=800,
+            c0=0.0, ua_c=0.01, k_c=0.04, alpha_c=0.05,
+            tau_eff=180.0, residual_rms=0.005,
+            cost=1.0, n_function_evals=20,
+            param_std_err={"ua_c": 0.0008, "k_c": 0.002, "alpha_c": 0.005},
+            is_2r2c=True,
+            k_w=0.025, mass_ratio=8.0,
+            tau_fast=0.0,  # degenerate
+            tau_slow=float("inf"),
+        )
+        gates = _check_quality_gates(result)
+        assert gates["tau_separation"] is False
+
+    def test_2r2c_jacobian_failure_is_swallowed(self, monkeypatch):
+        """If pinv raises, std_err stays empty but the fit still returns."""
+        import numpy as np
+
+        def broken_pinv(*args, **kwargs):
+            raise np.linalg.LinAlgError("synthetic pinv failure")
+
+        monkeypatch.setattr(np.linalg, "pinv", broken_pinv)
+        obs = self._generate(n_days=21.0, tick_minutes=10.0)
+        model_inputs = [
+            {"name": "Solar Proxy", "entity_id": "sensor.solar_proxy", "input_role": "solar"},
+        ]
+        result = fit_greybox(obs, model_inputs)
+        assert result is not None
+        # 2R2C still returns a result; std_err is just empty for the failed branch.
+        assert result.is_2r2c is True
+        assert "ua_c" not in result.param_std_err

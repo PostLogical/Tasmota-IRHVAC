@@ -404,3 +404,113 @@ class TestGreyboxTauProvider:
         # Second update with slightly different value
         pi.update_from_greybox(tau_eff=90.0, ua_c_cv=0.1)
         assert pi.plant.tau_slow.value == 90.0
+
+
+class TestPlantIdentifierGreybox2R2C:
+    """update_from_greybox with optional tau_fast (2R2C path)."""
+
+    def _make(self, tau_fast=20.0, tau_slow=60.0, lag=15.0, imc_lambda=5.0):
+        return PlantIdentifier(
+            tau_fast_seed=tau_fast,
+            tau_slow_seed=tau_slow,
+            response_lag=lag,
+            imc_lambda=imc_lambda,
+            enabled=True,
+        )
+
+    def test_2r2c_updates_both_tau_fast_and_tau_slow(self):
+        """2R2C grey-box should update tau_fast (over seed) and tau_slow."""
+        pi = self._make(tau_fast=20.0, tau_slow=60.0)
+        gains = pi.update_from_greybox(
+            tau_eff=100.0, ua_c_cv=0.1,
+            tau_fast=18.0, tau_fast_cv=0.15,
+        )
+        assert gains is not None
+        assert pi.plant.tau_slow.source == "greybox"
+        assert pi.plant.tau_slow.value == 100.0
+        assert pi.plant.tau_fast.source == "greybox"
+        assert pi.plant.tau_fast.value == 18.0
+
+    def test_tau_fast_does_not_override_step_response(self):
+        """Existing step_response τ_fast must not be replaced by grey-box."""
+        from custom_components.tasmota_irhvac.pi.plant_model import ParameterEstimate
+        import dataclasses
+        pi = self._make(tau_fast=20.0, tau_slow=60.0)
+        sr_est = ParameterEstimate(
+            value=18.0, confidence=0.9, source="step_response", observations=5,
+        )
+        pi._plant = dataclasses.replace(pi._plant, tau_fast=sr_est)
+
+        gains = pi.update_from_greybox(
+            tau_eff=100.0, ua_c_cv=0.1,
+            tau_fast=22.0, tau_fast_cv=0.1,
+        )
+        # tau_slow still updates, tau_fast does not.
+        assert gains is not None
+        assert pi.plant.tau_fast.source == "step_response"
+        assert pi.plant.tau_slow.source == "greybox"
+
+    def test_tau_fast_only_low_confidence_blocks_fast(self):
+        """High tau_fast_cv → fast not updated; slow may still update."""
+        pi = self._make()
+        gains = pi.update_from_greybox(
+            tau_eff=100.0, ua_c_cv=0.1,
+            tau_fast=25.0, tau_fast_cv=0.45,  # conf < 0.3 → reject
+        )
+        # tau_slow still updates
+        assert gains is not None
+        assert pi.plant.tau_slow.source == "greybox"
+        # tau_fast unchanged from seed
+        assert pi.plant.tau_fast.source == "seed"
+        assert pi.plant.tau_fast.value == 20.0
+
+    def test_tau_fast_large_ratio_rejected(self):
+        """tau_fast 5× current is rejected; tau_slow still updates."""
+        pi = self._make(tau_fast=20.0)
+        gains = pi.update_from_greybox(
+            tau_eff=100.0, ua_c_cv=0.1,
+            tau_fast=80.0, tau_fast_cv=0.1,  # 4× → outside [0.5, 2]
+        )
+        assert gains is not None
+        assert pi.plant.tau_fast.source == "seed"
+        assert pi.plant.tau_slow.source == "greybox"
+
+    def test_no_tau_fast_keeps_legacy_behavior(self):
+        """Calling without tau_fast should match the 1R1C-only behavior."""
+        pi = self._make(tau_fast=20.0)
+        gains = pi.update_from_greybox(tau_eff=100.0, ua_c_cv=0.1)
+        assert gains is not None
+        assert pi.plant.tau_slow.source == "greybox"
+        assert pi.plant.tau_fast.source == "seed"
+
+    def test_tau_fast_cv_defaults_to_ua_c_cv(self):
+        """When tau_fast_cv is omitted, ua_c_cv is used as the proxy."""
+        pi = self._make(tau_fast=20.0)
+        gains = pi.update_from_greybox(
+            tau_eff=100.0, ua_c_cv=0.1,
+            tau_fast=18.0,  # tau_fast_cv defaults to ua_c_cv = 0.1
+        )
+        assert gains is not None
+        assert pi.plant.tau_fast.source == "greybox"
+        # confidence = (1 - 2*0.1) * 0.8 = 0.64
+        assert abs(pi.plant.tau_fast.confidence - 0.64) < 0.01
+
+    def test_only_tau_fast_updated_if_slow_blocked(self):
+        """If tau_slow rejected (e.g., area_method primary), tau_fast can still update."""
+        from custom_components.tasmota_irhvac.pi.plant_model import ParameterEstimate
+        import dataclasses
+        pi = self._make(tau_fast=20.0, tau_slow=60.0)
+        # Lock tau_slow to area_method (not overridable)
+        area = ParameterEstimate(
+            value=120.0, confidence=0.9, source="area_method", observations=5,
+        )
+        pi._plant = dataclasses.replace(pi._plant, tau_slow=area)
+
+        gains = pi.update_from_greybox(
+            tau_eff=100.0, ua_c_cv=0.1,
+            tau_fast=22.0, tau_fast_cv=0.1,
+        )
+        assert gains is not None  # tau_fast was updated → returns gains
+        assert pi.plant.tau_slow.source == "area_method"
+        assert pi.plant.tau_fast.source == "greybox"
+        assert pi.plant.tau_fast.value == 22.0

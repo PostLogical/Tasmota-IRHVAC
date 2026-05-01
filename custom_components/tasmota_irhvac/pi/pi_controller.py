@@ -918,13 +918,24 @@ class PIController:
             if result.beta_batch:
                 self._log_greybox_wls_comparison(bridge, result)
 
-            # Feed τ_eff to plant ID as a grey-box τ_slow estimate
+            # Feed τ_eff to plant ID as a grey-box τ_slow estimate.
+            # 2R2C bridges also provide τ_fast (step-response cousin).
             if bridge.gates_passed and self._plant_id.enabled:
                 gb_se = greybox.param_std_err
                 ua_c_cv = gb_se.get("ua_c", float("inf")) / max(abs(greybox.ua_c), 1e-12)
+                tau_fast_arg: float | None = None
+                tau_fast_cv: float | None = None
+                if greybox.is_2r2c and greybox.tau_fast is not None and greybox.k_w:
+                    tau_fast_arg = greybox.tau_fast
+                    # τ_fast depends on both ua_c and k_w; use the larger CV
+                    # as a conservative confidence bound.
+                    k_w_cv = gb_se.get("k_w", float("inf")) / max(abs(greybox.k_w), 1e-12)
+                    tau_fast_cv = max(ua_c_cv, k_w_cv)
                 gain_update = self._plant_id.update_from_greybox(
                     tau_eff=bridge.tau_eff,
                     ua_c_cv=ua_c_cv,
+                    tau_fast=tau_fast_arg,
+                    tau_fast_cv=tau_fast_cv,
                 )
                 if gain_update is not None:
                     self._pi_kp = gain_update.kp

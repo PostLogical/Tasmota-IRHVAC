@@ -307,76 +307,109 @@ class PlantIdentifier:
         self,
         tau_eff: float,
         ua_c_cv: float,
+        tau_fast: float | None = None,
+        tau_fast_cv: float | None = None,
     ) -> GainUpdate | None:
-        """Accept a grey-box τ_eff estimate and update tau_slow if appropriate.
+        """Accept grey-box τ estimates and update plant state if appropriate.
 
-        The grey-box energy balance produces τ_eff = 1/ua_c, which is the
-        building's effective time constant from a fundamentally different
-        method (energy balance regression vs transient step/area analysis).
+        ``tau_eff`` always updates tau_slow (1R1C: the only τ; 2R2C: τ_slow).
+        When ``tau_fast`` is provided (2R2C only), tau_fast is also updated.
 
-        Confidence derived from ua_c coefficient of variation (CV):
-            confidence = max(0, 1 - 2×CV)
-        So CV=0 → conf=1, CV=0.25 → conf=0.5, CV≥0.5 → conf=0.
+        Confidence derived from coefficient of variation:
+            confidence = max(0, 1 - 2×CV).  CV=0→conf=1, CV≥0.5→conf=0.
 
-        Only updates tau_slow when:
-        - Confidence > 0.3
-        - Current tau_slow source is "seed" or "closed_loop" (grey-box
-          doesn't override area_method or step_response primaries)
-        - Ratio to current is modest (<2× change)
+        tau_slow accepts grey-box updates over seed / closed_loop / prior
+        greybox; it never overrides area_method or step_response primaries.
+        tau_fast accepts grey-box updates over seed / prior greybox only —
+        the step_response primary keeps precedence.
 
-        Args:
-            tau_eff: 1/ua_c in minutes from grey-box fit.
-            ua_c_cv: Coefficient of variation of ua_c (std_err / ua_c).
-
-        Returns:
-            GainUpdate if plant was updated, None otherwise.
+        Both fields enforce a modest-change ratio (0.5×–2× of current).
         """
         if not self._enabled or tau_eff <= 0:
             return None
 
-        confidence = max(0.0, 1.0 - 2.0 * ua_c_cv)
+        slow_updated = self._apply_greybox_update(
+            field_name="tau_slow",
+            new_value=tau_eff,
+            cv=ua_c_cv,
+            overridable={"seed", "closed_loop", "greybox"},
+            label="τ_slow",
+        )
+
+        fast_updated = False
+        if tau_fast is not None and tau_fast > 0:
+            cv_fast = tau_fast_cv if tau_fast_cv is not None else ua_c_cv
+            fast_updated = self._apply_greybox_update(
+                field_name="tau_fast",
+                new_value=tau_fast,
+                cv=cv_fast,
+                # Don't override the step_response primary; allow over seed
+                # and prior greybox only.
+                overridable={"seed", "greybox"},
+                label="τ_fast",
+            )
+
+        if not (slow_updated or fast_updated):
+            return None
+
+        gains = self.compute_gains()
+        _LOGGER.info(
+            "Grey-box plant update applied (slow=%s, fast=%s) → Kp=%.3f Ki=%.4f",
+            slow_updated, fast_updated, gains.kp, gains.ki,
+        )
+        return gains
+
+    def _apply_greybox_update(
+        self,
+        field_name: str,
+        new_value: float,
+        cv: float,
+        overridable: set[str],
+        label: str,
+    ) -> bool:
+        """Helper: apply a grey-box τ update to one PlantEstimate field.
+
+        Returns True if the field was updated, False otherwise.  Gates:
+        confidence ≥ 0.3, current source in ``overridable``, and ratio
+        between 0.5× and 2× of current value.
+        """
+        confidence = max(0.0, 1.0 - 2.0 * cv)
         if confidence < 0.3:
             _LOGGER.debug(
-                "Grey-box τ_eff=%.0f rejected: low confidence (CV=%.2f → conf=%.2f)",
-                tau_eff, ua_c_cv, confidence,
+                "Grey-box %s=%.1f rejected: low confidence (CV=%.2f → conf=%.2f)",
+                label, new_value, cv, confidence,
             )
-            return None
+            return False
 
-        current = self._plant.tau_slow
-        # Only override seed or closed_loop estimates — don't replace
-        # area method or step response primaries.
-        overridable = {"seed", "closed_loop", "greybox"}
+        current: ParameterEstimate = getattr(self._plant, field_name)
         if current.source not in overridable:
             _LOGGER.debug(
-                "Grey-box τ_eff=%.0f: not overriding %s estimate (τ_slow=%.0f)",
-                tau_eff, current.source, current.value,
+                "Grey-box %s=%.1f: not overriding %s estimate (current=%.1f)",
+                label, new_value, current.source, current.value,
             )
-            return None
+            return False
 
-        # Modest change gate: don't jump >2× from current
         if current.value > 0:
-            ratio = tau_eff / current.value
+            ratio = new_value / current.value
             if not (0.5 <= ratio <= 2.0):
                 _LOGGER.info(
-                    "Grey-box τ_eff=%.0f rejected: ratio=%.2f from current=%.0f too large",
-                    tau_eff, ratio, current.value,
+                    "Grey-box %s=%.1f rejected: ratio=%.2f from current=%.1f too large",
+                    label, new_value, ratio, current.value,
                 )
-                return None
+                return False
 
-        # Discount confidence slightly vs primary providers
         est = ParameterEstimate(
-            value=tau_eff,
+            value=new_value,
             confidence=confidence * 0.8,
             source="greybox",
             observations=1,
         )
-        self._plant = dataclasses.replace(self._plant, tau_slow=est)
-        gains = self.compute_gains()
+        self._plant = dataclasses.replace(self._plant, **{field_name: est})
         _LOGGER.info(
-            "Grey-box τ_eff=%.0f (CV=%.2f, conf=%.2f) → τ_slow updated. Kp=%.3f Ki=%.4f",
-            tau_eff, ua_c_cv, est.confidence, gains.kp, gains.ki,
+            "Grey-box %s=%.1f (CV=%.2f, conf=%.2f) accepted",
+            label, new_value, cv, est.confidence,
         )
-        return gains
+        return True
 
     # ── Plant test (Layer 3: active identification) ──────────────────
 

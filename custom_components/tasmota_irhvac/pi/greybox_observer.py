@@ -82,8 +82,27 @@ K_C_BOUNDS = (0.001, 0.2)  # min⁻¹
 # Magnitude depends on solar proxy scaling and C.
 ALPHA_C_BOUNDS = (0.0, 1.0)  # °C/min per unit solar proxy
 
-# Minimum observations required for a meaningful fit.
+# 2R2C-only bounds.
+# k_w = 1/τ_couple, air–wall coupling rate (min⁻¹).
+# τ_couple ∈ ~10–600 min (bench profiles use 20–150).
+K_W_BOUNDS = (0.001, 0.2)
+# mass_ratio = C_wall/C_air. Bacher & Madsen (2011) report 5–10 typical
+# residential; allow margins for fit, gate to a tighter range.
+MASS_RATIO_BOUNDS = (1.0, 30.0)
+
+# ASHRAE Ch. 18 / bench convention: solar through a window splits ~30% to
+# the air node (convective) and ~70% to the wall node (radiative). Fixed
+# in v1; expose as config later if real-CSV validation flags it.
+SOLAR_AIR_FRACTION = 0.3
+SOLAR_WALL_FRACTION = 0.7
+
+# Minimum observations required for a meaningful 1R1C fit.
 MIN_OBSERVATIONS = 30
+
+# 2R2C dispatch thresholds: need both enough data and enough time span
+# to identify the wall mode + solar split. Below either, fall back to 1R1C.
+MIN_OBSERVATIONS_2R2C = 1500
+MIN_TIMESPAN_DAYS_2R2C = 14.0
 
 # Minimum variance in hp_offset column to identify k_c.
 MIN_HP_VARIANCE = 0.01
@@ -91,7 +110,14 @@ MIN_HP_VARIANCE = 0.01
 
 @dataclass
 class GreyboxResult:
-    """Result of a grey-box 1R1C energy balance fit."""
+    """Result of a grey-box energy balance fit (1R1C or 2R2C).
+
+    1R1C is the default. When ``is_2r2c`` is True, ``k_w``, ``mass_ratio``,
+    ``tau_fast`` and ``tau_slow`` carry the wall-node identification;
+    ``alpha_c`` holds the steady-state-effective total (α_air + α_wall),
+    so the existing bridge formulas (β_outdoor = -ua_c/k_c, β_solar =
+    -alpha_c/k_c) work unchanged.
+    """
 
     n_observations: int  # observations used in fit
     n_hp_on: int  # observations where HP was active
@@ -104,7 +130,7 @@ class GreyboxResult:
     alpha_c: float  # α_solar/C solar rate (0.0 if no solar input)
 
     # Derived
-    tau_eff: float  # 1/ua_c (minutes) -- effective time constant
+    tau_eff: float  # 1/ua_c (minutes) -- effective time constant (1R1C)
     residual_rms: float  # RMS of energy balance residual (°C/min)
 
     # Fit quality
@@ -117,6 +143,13 @@ class GreyboxResult:
 
     # Per-parameter confidence (from Jacobian if available)
     param_std_err: dict[str, float] = field(default_factory=dict)
+
+    # 2R2C extension (None for 1R1C results)
+    is_2r2c: bool = False
+    k_w: float | None = None         # 1/τ_couple, air–wall coupling rate (min⁻¹)
+    mass_ratio: float | None = None  # C_wall/C_air
+    tau_fast: float | None = None    # natural fast eigenvalue (min)
+    tau_slow: float | None = None    # natural slow eigenvalue (min)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -134,6 +167,11 @@ class GreyboxResult:
             "plant_tau_slow": self.plant_tau_slow,
             "tau_agreement_pct": self.tau_agreement_pct,
             "param_std_err": self.param_std_err,
+            "is_2r2c": self.is_2r2c,
+            "k_w": self.k_w,
+            "mass_ratio": self.mass_ratio,
+            "tau_fast": self.tau_fast,
+            "tau_slow": self.tau_slow,
         }
 
 
@@ -151,17 +189,18 @@ def fit_greybox(
     plant_tau_slow: float | None = None,
     plant_tau_slow_confidence: float = 0.0,
 ) -> GreyboxResult | None:
-    """Fit a 1R1C energy balance to observation buffer data.
+    """Fit a grey-box energy balance to observation buffer data.
 
-    Uses all observations (including HP-off) that have valid outdoor_temp_c.
-    The energy balance in rate-coefficient form:
+    Dispatches between 1R1C and 2R2C based on observation count and
+    time span.  When the buffer is rich enough (≥ MIN_OBSERVATIONS_2R2C
+    samples spanning ≥ MIN_TIMESPAN_DAYS_2R2C days), attempts 2R2C with
+    the 1R1C result as a warm start.  Falls back to 1R1C if 2R2C fails
+    to converge.
 
-        room_rate = c₀ + ua_c × (T_out - T_air) + k_c × hp_offset + α_c × solar
-
-    The intercept c₀ absorbs unmodeled internal gains and bias, preventing
-    them from distorting ua_c.  Rate coefficients are directly identifiable
-    from derivative data (Bacher & Madsen 2011).  Bounded to physically
-    plausible ranges.
+    The bridge formulas (β_outdoor = -ua_c/k_c, β_solar = -α_c/k_c) are
+    identical at steady state for 1R1C and 2R2C, so downstream consumers
+    are unchanged.  The 2R2C win is correct identification of ua_c and
+    α_total (which 1R1C confounds with wall thermal mass).
 
     Args:
         observations: full buffer contents (all ticks, not pre-filtered).
@@ -170,7 +209,8 @@ def fit_greybox(
         plant_tau_slow_confidence: confidence in τ_slow (0-1).
 
     Returns:
-        GreyboxResult or None if insufficient data or scipy unavailable.
+        GreyboxResult (1R1C or 2R2C) or None if insufficient data or
+        scipy unavailable.
     """
     if not SCIPY_AVAILABLE:
         _LOGGER.info(
@@ -179,13 +219,8 @@ def fit_greybox(
         )
         return None
 
-    solar_entity = find_solar_entity(model_inputs)
-
     # Filter to observations with valid outdoor temperature.
-    eligible = [
-        o for o in observations
-        if o.outdoor_temp_c is not None
-    ]
+    eligible = [o for o in observations if o.outdoor_temp_c is not None]
 
     if len(eligible) < MIN_OBSERVATIONS:
         _LOGGER.debug(
@@ -194,11 +229,50 @@ def fit_greybox(
         )
         return None
 
+    # Always try 1R1C first — it's cheap and gives a warm start for 2R2C.
+    r_1r1c = _fit_greybox_1r1c(eligible, model_inputs, plant_tau_slow)
+    if r_1r1c is None:
+        return None
+
+    # 2R2C dispatch: needs both enough data and enough time span.
+    timespan_days = (eligible[-1].timestamp - eligible[0].timestamp) / 86400.0
+    if (len(eligible) < MIN_OBSERVATIONS_2R2C
+            or timespan_days < MIN_TIMESPAN_DAYS_2R2C):
+        _LOGGER.debug(
+            "Grey-box: 2R2C dispatch skipped (n=%d, span=%.1f d) — using 1R1C",
+            len(eligible), timespan_days,
+        )
+        return r_1r1c
+
+    # Attempt 2R2C with 1R1C warm start.
+    r_2r2c = _fit_greybox_2r2c(eligible, model_inputs, r_1r1c, plant_tau_slow)
+    if r_2r2c is None:
+        _LOGGER.info("Grey-box: 2R2C fit failed — falling back to 1R1C")
+        return r_1r1c
+
+    return r_2r2c
+
+
+def _fit_greybox_1r1c(
+    eligible: list[Observation],
+    model_inputs: list[dict[str, Any]],
+    plant_tau_slow: float | None = None,
+) -> GreyboxResult | None:
+    """Fit a 1R1C energy balance.
+
+        room_rate = c₀ + ua_c × (T_out - T_air) + k_c × hp_offset + α_c × solar
+
+    Bacher & Madsen (2011) parameterization.  Rate coefficients are directly
+    identifiable from derivative data; bounded to physically plausible
+    ranges.  Caller has already filtered observations.
+    """
+    solar_entity = find_solar_entity(model_inputs)
+
     # Extract arrays for the fit.
     m = len(eligible)
     room_rate = [o.room_rate for o in eligible]
     t_air = [o.current_c for o in eligible]
-    t_out: list[float] = [o.outdoor_temp_c for o in eligible]  # type: ignore[misc]  # filtered not-None above
+    t_out: list[float] = [o.outdoor_temp_c for o in eligible]  # type: ignore[misc]
 
     # HP offset: setpoint - room temp when HP is on, 0 when off.
     hp_offset: list[float] = []
@@ -367,20 +441,282 @@ def fit_greybox(
     )
 
 
+def _natural_eigenvalues(
+    ua_c: float,
+    k_w: float,
+    mass_ratio: float,
+) -> tuple[float, float]:
+    """Return (τ_fast, τ_slow) of the HP-off natural 2R2C system.
+
+    A_natural = [[-(ua_c + k_w),  k_w           ],
+                 [ k_w/mass_ratio, -k_w/mass_ratio]]
+
+    Eigenvalues λ = -1/τ; we return positive τ_fast < τ_slow (minutes).
+    """
+    a11 = -(ua_c + k_w)
+    a22 = -k_w / mass_ratio
+    a12 = k_w
+    a21 = k_w / mass_ratio
+    tr = a11 + a22
+    det = a11 * a22 - a12 * a21
+    disc = max(0.0, tr * tr - 4.0 * det)
+    sq = math.sqrt(disc)
+    # Both eigenvalues are negative (decay). |λ_fast| > |λ_slow|.
+    lam_fast = (tr - sq) / 2.0  # most negative
+    lam_slow = (tr + sq) / 2.0
+    tau_fast = -1.0 / lam_fast if lam_fast < -1e-12 else float("inf")
+    tau_slow = -1.0 / lam_slow if lam_slow < -1e-12 else float("inf")
+    return tau_fast, tau_slow
+
+
+def _fit_greybox_2r2c(
+    eligible: list[Observation],
+    model_inputs: list[dict[str, Any]],
+    r_1r1c: GreyboxResult,
+    plant_tau_slow: float | None = None,
+) -> GreyboxResult | None:
+    """Fit a 2R2C grey-box energy balance with forward-simulated wall state.
+
+    Air ODE:  dT_a/dt = c₀ + ua_c·(T_out - T_a) + k_c·hp_offset
+                       + α_air·solar + k_w·(T_w - T_a)
+    Wall ODE: dT_w/dt = (k_w/mass_ratio)·(T_a - T_w) + (α_wall/mass_ratio)·solar
+
+    Solar split fixed at SOLAR_AIR_FRACTION / SOLAR_WALL_FRACTION (ASHRAE).
+    α_total is the fitted parameter; α_air = 0.3·α_total, α_wall = 0.7·α_total.
+
+    Residual: predicted - observed room_rate at each tick, with t_wall
+    propagated forward via exact piecewise-exponential integration.
+
+    Bridge formulas at steady state are unchanged from 1R1C:
+      β_outdoor = -ua_c / k_c
+      β_solar   = -α_total / k_c   (the 30/70 split cancels at SS)
+    """
+    solar_entity = find_solar_entity(model_inputs)
+
+    m = len(eligible)
+    timestamps = [o.timestamp for o in eligible]
+    room_rate = [o.room_rate for o in eligible]
+    t_air = [o.current_c for o in eligible]
+    t_out: list[float] = [o.outdoor_temp_c for o in eligible]  # type: ignore[misc]
+
+    hp_offset: list[float] = []
+    n_hp_on = 0
+    n_hp_off = 0
+    for o in eligible:
+        if (o.clamped_reason == "no_output" or o.hp_setpoint is None
+                or o.hp_contribution_uncertain):
+            hp_offset.append(0.0)
+            n_hp_off += 1
+        else:
+            hp_offset.append(o.hp_setpoint - o.current_c)
+            n_hp_on += 1
+
+    if solar_entity is not None:
+        solar = [o.raw_readings.get(solar_entity, 0.0) for o in eligible]
+    else:
+        solar = [0.0] * m
+    has_solar = solar_entity is not None and any(abs(s) > 1e-6 for s in solar)
+
+    hp_mean = sum(hp_offset) / m
+    hp_var = sum((h - hp_mean) ** 2 for h in hp_offset) / m
+    if hp_var < MIN_HP_VARIANCE:
+        # Without HP-on data we can't separate k_c from ua_c — same constraint
+        # as 1R1C. Fall back rather than fit a degenerate model.
+        return None
+
+    # Pre-compute dt[i] = (t[i] - t[i-1]) / 60 (minutes); first entry unused.
+    dt_min: list[float] = [0.0] * m
+    for i in range(1, m):
+        d = (timestamps[i] - timestamps[i - 1]) / 60.0
+        dt_min[i] = d if d > 0 else 0.0
+
+    # Parameter packing.
+    # Without solar: [c0, ua_c, k_c, k_w, mass_ratio]
+    # With solar:    [c0, ua_c, k_c, alpha_total, k_w, mass_ratio]
+    if has_solar:
+        param_names = ["c0", "ua_c", "k_c", "alpha_c", "k_w", "mass_ratio"]
+        lower = [
+            C0_BOUNDS[0], UA_C_BOUNDS[0], K_C_BOUNDS[0],
+            ALPHA_C_BOUNDS[0], K_W_BOUNDS[0], MASS_RATIO_BOUNDS[0],
+        ]
+        upper = [
+            C0_BOUNDS[1], UA_C_BOUNDS[1], K_C_BOUNDS[1],
+            ALPHA_C_BOUNDS[1], K_W_BOUNDS[1], MASS_RATIO_BOUNDS[1],
+        ]
+    else:
+        param_names = ["c0", "ua_c", "k_c", "k_w", "mass_ratio"]
+        lower = [
+            C0_BOUNDS[0], UA_C_BOUNDS[0], K_C_BOUNDS[0],
+            K_W_BOUNDS[0], MASS_RATIO_BOUNDS[0],
+        ]
+        upper = [
+            C0_BOUNDS[1], UA_C_BOUNDS[1], K_C_BOUNDS[1],
+            K_W_BOUNDS[1], MASS_RATIO_BOUNDS[1],
+        ]
+
+    # Warm start from 1R1C result, with plant ID hint on ua_c if available.
+    ua_c_init = r_1r1c.ua_c
+    if plant_tau_slow is not None and plant_tau_slow > 0:
+        ua_c_init = max(UA_C_BOUNDS[0], min(UA_C_BOUNDS[1], 1.0 / plant_tau_slow))
+    # Bacher-Madsen typical residential: τ_couple ≈ 30–80 min, mass_ratio 5–10.
+    k_w_init = 1.0 / 50.0
+    mass_ratio_init = 8.0
+
+    if has_solar:
+        x0 = [
+            r_1r1c.c0, ua_c_init, r_1r1c.k_c,
+            max(ALPHA_C_BOUNDS[0], r_1r1c.alpha_c),
+            k_w_init, mass_ratio_init,
+        ]
+    else:
+        x0 = [
+            r_1r1c.c0, ua_c_init, r_1r1c.k_c,
+            k_w_init, mass_ratio_init,
+        ]
+    # Clamp warm-start values into bounds.
+    for i, (lo, hi) in enumerate(zip(lower, upper)):
+        x0[i] = max(lo, min(hi, x0[i]))
+
+    def residual_fn(params: list[float]) -> list[float]:
+        if has_solar:
+            c0, ua_c, k_c, alpha_total, k_w, mass_ratio = params
+        else:
+            c0, ua_c, k_c, k_w, mass_ratio = params
+            alpha_total = 0.0
+        alpha_air = alpha_total * SOLAR_AIR_FRACTION
+        alpha_wall = alpha_total * SOLAR_WALL_FRACTION
+        a_wall = k_w / mass_ratio  # wall-side rate (min⁻¹)
+
+        # Initial wall state: assume equilibrium with air at t=0.
+        t_wall = t_air[0]
+        residuals = [0.0] * m
+
+        # First tick: t_wall = t_air → coupling term contributes 0.
+        residuals[0] = (
+            room_rate[0] - c0
+            - ua_c * (t_out[0] - t_air[0])
+            - k_c * hp_offset[0]
+            - alpha_air * solar[0]
+        )
+
+        for i in range(1, m):
+            dt = dt_min[i]
+            # Step t_wall using piecewise-exponential integration.
+            # dT_w/dt = a_wall*(T_a - T_w) + (α_wall/mass_ratio)*solar
+            # Equilibrium with previous T_a, solar held constant over dt:
+            #   T_w_eq = T_a + α_wall*solar / k_w
+            # (a_wall * mass_ratio = k_w cancels the mass_ratio in the
+            #  forcing scaled by C_wall.)
+            if dt > 0:
+                t_w_eq = t_air[i - 1] + alpha_wall * solar[i - 1] / k_w
+                decay = math.exp(-a_wall * dt)
+                t_wall = t_w_eq + (t_wall - t_w_eq) * decay
+
+            residuals[i] = (
+                room_rate[i] - c0
+                - ua_c * (t_out[i] - t_air[i])
+                - k_c * hp_offset[i]
+                - alpha_air * solar[i]
+                - k_w * (t_wall - t_air[i])
+            )
+        return residuals
+
+    try:
+        result = _least_squares(
+            residual_fn, x0,
+            bounds=(lower, upper),
+            method="trf",
+            loss="huber",
+            f_scale=0.005,
+            max_nfev=400,  # cap; 6-param fit usually converges in <100
+        )
+    except Exception:
+        _LOGGER.exception("Grey-box 2R2C: least_squares failed")
+        return None
+
+    params_fit = dict(zip(param_names, result.x))
+    c0 = float(params_fit["c0"])
+    ua_c = float(params_fit["ua_c"])
+    k_c = float(params_fit["k_c"])
+    alpha_total = float(params_fit.get("alpha_c", 0.0))
+    k_w = float(params_fit["k_w"])
+    mass_ratio = float(params_fit["mass_ratio"])
+
+    tau_fast, tau_slow = _natural_eigenvalues(ua_c, k_w, mass_ratio)
+    tau_eff = tau_slow  # dominant for legacy consumers
+    residual_rms = math.sqrt(2.0 * result.cost / m) if m > 0 else 0.0
+
+    # Standard errors via Jacobian.
+    std_err: dict[str, float] = {}
+    if result.jac is not None:
+        try:
+            import numpy as np
+            J = result.jac
+            n_params = len(param_names)
+            sigma2 = 2.0 * result.cost / max(1, m - n_params)
+            JtJ_inv = np.linalg.pinv(J.T @ J) * sigma2
+            for i, name in enumerate(param_names):
+                var = JtJ_inv[i, i]
+                std_err[name] = math.sqrt(max(0.0, float(var)))
+        except Exception:
+            pass
+
+    tau_agreement = None
+    if plant_tau_slow is not None and plant_tau_slow > 0 and not math.isinf(tau_slow):
+        tau_agreement = abs(tau_slow - plant_tau_slow) / plant_tau_slow * 100.0
+
+    return GreyboxResult(
+        n_observations=m,
+        n_hp_on=n_hp_on,
+        n_hp_off=n_hp_off,
+        c0=c0,
+        ua_c=ua_c,
+        k_c=k_c,
+        alpha_c=alpha_total,  # SS-effective total; bridge uses α_c/k_c
+        tau_eff=tau_eff,
+        residual_rms=residual_rms,
+        cost=float(result.cost),
+        n_function_evals=int(result.nfev),
+        plant_tau_slow=plant_tau_slow,
+        tau_agreement_pct=float(tau_agreement) if tau_agreement is not None else None,
+        param_std_err=std_err,
+        is_2r2c=True,
+        k_w=k_w,
+        mass_ratio=mass_ratio,
+        tau_fast=tau_fast,
+        tau_slow=tau_slow,
+    )
+
+
 def log_greybox_result(
     result: GreyboxResult,
     log_prefix: str = "",
 ) -> None:
     """Log grey-box fit results for diagnostics."""
+    label = "2R2C" if result.is_2r2c else "1R1C"
     _LOGGER.info(
-        "%sGrey-box 1R1C: %d obs (%d HP-on, %d HP-off), RMS=%.4f °C/min",
-        log_prefix, result.n_observations, result.n_hp_on,
+        "%sGrey-box %s: %d obs (%d HP-on, %d HP-off), RMS=%.4f °C/min",
+        log_prefix, label, result.n_observations, result.n_hp_on,
         result.n_hp_off, result.residual_rms,
     )
-    _LOGGER.info(
-        "%s  c0=%.5f, ua_c=%.5f (τ=%.0f min), k_c=%.5f, α_c=%.5f",
-        log_prefix, result.c0, result.ua_c, result.tau_eff, result.k_c, result.alpha_c,
-    )
+    if result.is_2r2c:
+        _LOGGER.info(
+            "%s  c0=%.5f, ua_c=%.5f, k_c=%.5f, α_total=%.5f, k_w=%.5f, mass_ratio=%.2f",
+            log_prefix, result.c0, result.ua_c, result.k_c,
+            result.alpha_c, result.k_w or 0.0, result.mass_ratio or 0.0,
+        )
+        _LOGGER.info(
+            "%s  τ_fast=%.0f min, τ_slow=%.0f min",
+            log_prefix,
+            result.tau_fast if result.tau_fast is not None else float("inf"),
+            result.tau_slow if result.tau_slow is not None else float("inf"),
+        )
+    else:
+        _LOGGER.info(
+            "%s  c0=%.5f, ua_c=%.5f (τ=%.0f min), k_c=%.5f, α_c=%.5f",
+            log_prefix, result.c0, result.ua_c, result.tau_eff,
+            result.k_c, result.alpha_c,
+        )
     _LOGGER.info(
         "%s  cost=%.6f, nfev=%d",
         log_prefix, result.cost, result.n_function_evals,
@@ -415,8 +751,15 @@ def log_greybox_result(
 #   σ_{a/b}² ≈ (a/b)² × (σ_a²/a² + σ_b²/b²)
 
 # Quality gate thresholds
-GATE_MIN_TAU = 30.0    # minutes — faster implies unrealistic building
+GATE_MIN_TAU = 30.0    # minutes — faster implies unrealistic building (1R1C)
 GATE_MAX_TAU = 1500.0  # minutes (25h) — 2R2C slow mode can reach 20-100h
+GATE_MIN_TAU_FAST = 5.0     # minutes — air-node response (2R2C)
+GATE_MAX_TAU_FAST = 60.0    # minutes
+GATE_MIN_TAU_SLOW = 60.0    # minutes — wall mode (2R2C)
+GATE_MAX_TAU_SLOW = 1500.0  # minutes
+GATE_MIN_TAU_SEPARATION = 2.0  # τ_slow / τ_fast — separation needed for 2R2C
+GATE_MIN_MASS_RATIO = 1.0   # Bacher-Madsen typical 5–10; allow 1–20
+GATE_MAX_MASS_RATIO = 20.0
 GATE_MAX_CV = 0.5      # coefficient of variation (std_err / |estimate|)
 GATE_MAX_RMS = 0.02    # °C/min — residual quality threshold
 
@@ -431,7 +774,7 @@ class GreyboxBridgeResult:
     beta_std_err: list[float]
 
     # Bonus outputs WLS cannot provide
-    tau_eff: float       # 1/ua_c (minutes) — independent τ estimate
+    tau_eff: float       # 1/ua_c (1R1C) or τ_slow (2R2C); dominant time const
     k_eff: float         # k_c/ua_c — process gain (currently assumed 1.0 in IMC)
 
     # Quality gate results
@@ -441,6 +784,11 @@ class GreyboxBridgeResult:
     # Source grey-box result for reference
     greybox: GreyboxResult
 
+    # 2R2C-only (None for 1R1C bridges) — exposed so plant_identifier
+    # can update τ_fast and τ_slow providers separately.
+    tau_fast: float | None = None
+    tau_slow: float | None = None
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "beta": self.beta,
@@ -449,6 +797,8 @@ class GreyboxBridgeResult:
             "k_eff": round(self.k_eff, 4),
             "gates_passed": self.gates_passed,
             "gate_details": self.gate_details,
+            "tau_fast": round(self.tau_fast, 1) if self.tau_fast is not None else None,
+            "tau_slow": round(self.tau_slow, 1) if self.tau_slow is not None else None,
         }
 
 
@@ -500,7 +850,28 @@ def _check_quality_gates(
         gates["param_precision_alpha_c"] = alpha_cv < GATE_MAX_CV
 
     # Gate 3: physical plausibility
-    gates["tau_plausible"] = GATE_MIN_TAU <= result.tau_eff <= GATE_MAX_TAU
+    if result.is_2r2c:
+        # 2R2C: separate τ_fast / τ_slow plausibility plus mode separation.
+        tf = result.tau_fast if result.tau_fast is not None else float("inf")
+        ts = result.tau_slow if result.tau_slow is not None else float("inf")
+        mr = result.mass_ratio if result.mass_ratio is not None else 0.0
+        kw = result.k_w if result.k_w is not None else 0.0
+        gates["tau_fast_plausible"] = GATE_MIN_TAU_FAST <= tf <= GATE_MAX_TAU_FAST
+        gates["tau_slow_plausible"] = GATE_MIN_TAU_SLOW <= ts <= GATE_MAX_TAU_SLOW
+        # Separation: need τ_slow noticeably bigger than τ_fast or the model
+        # has collapsed to 1R1C (degenerate fit).
+        if tf > 0 and not math.isinf(ts):
+            gates["tau_separation"] = (ts / tf) >= GATE_MIN_TAU_SEPARATION
+        else:
+            gates["tau_separation"] = False
+        gates["mass_ratio_plausible"] = GATE_MIN_MASS_RATIO <= mr <= GATE_MAX_MASS_RATIO
+        gates["k_w_positive"] = kw > 0
+        # k_w precision (only when std_err available)
+        if "k_w" in se:
+            k_w_cv = se["k_w"] / max(abs(kw), 1e-12)
+            gates["param_precision_k_w"] = k_w_cv < GATE_MAX_CV
+    else:
+        gates["tau_plausible"] = GATE_MIN_TAU <= result.tau_eff <= GATE_MAX_TAU
     gates["k_c_positive"] = result.k_c > 0
     gates["alpha_c_nonnegative"] = result.alpha_c >= 0.0 or "alpha_c" not in se
 
@@ -583,6 +954,8 @@ def greybox_to_beta(
         gates_passed=gates_passed,
         gate_details=gate_details,
         greybox=result,
+        tau_fast=result.tau_fast if result.is_2r2c else None,
+        tau_slow=result.tau_slow if result.is_2r2c else None,
     )
 
     # Log
