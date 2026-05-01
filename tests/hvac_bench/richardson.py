@@ -85,6 +85,36 @@ DEFAULT_RICHARDSON_KPIS: tuple[str, ...] = (
 # ── Result type ───────────────────────────────────────────────────────────
 
 
+# ── Roache GCI safety factors (Roache 1998, §5.5; ASME V&V 20-2009) ───────
+#
+# Roache's Grid Convergence Index introduces a safety factor on the
+# Richardson estimate to bound the actual discretization error with
+# ~95% confidence:
+#
+#     GCI = Fs · |KPI_finest - KPI_extrap| / (r^p - 1)
+#
+# Roache recommends:
+#   * Fs = 1.25 when the convergence sequence is in the asymptotic regime
+#     (≥ 3 grids, monotone, observed_order finite and physically sensible)
+#   * Fs = 3.0  when only 2 grids are available OR the convergence is
+#     not in the asymptotic regime (non-monotone, fallback fit, oscillatory
+#     order outside [REGIME_ORDER_MIN, REGIME_ORDER_MAX])
+#
+# Note: "in asymptotic regime" describes whether the *Richardson power-law
+# fit* is mathematically sound, NOT whether the finest grid is close to
+# the asymptote. The latter is what the GCI itself bounds. So a clean
+# fit on data far from the asymptote (large GCI but small relative-fit-
+# residual) still qualifies as in-regime; the GCI just reports a large
+# bound, which is the correct answer.
+ROACHE_FS_ASYMPTOTIC: float = 1.25
+ROACHE_FS_NON_ASYMPTOTIC: float = 3.0
+REGIME_ORDER_MIN: float = 0.5    # observed p below this → not in regime
+REGIME_ORDER_MAX: float = 4.0    # observed p above this → not in regime
+
+
+# ── Result type ───────────────────────────────────────────────────────────
+
+
 @dataclass
 class RichardsonReport:
     """Solution-verification report for a single KPI across a tick sweep.
@@ -99,17 +129,19 @@ class RichardsonReport:
         Observed KPI value at each tick rate (paired with
         ``tick_rates_minutes``).
     extrapolated_value
-        Best estimate of ``KPI(h → 0)``.
+        Best estimate of ``KPI(h → 0)``. Meaningful only when
+        ``in_asymptotic_regime`` is True; reported regardless for
+        diagnostic purposes.
     observed_order
         Fitted convergence order ``p`` in ``KPI(h) = KPI∞ + C·h^p``.
         ``NaN`` if the convergence sequence is not in the asymptotic
         regime (non-monotone deltas, identical values, or fewer points
         than required to fit ``p``).
     error_band
-        ``|KPI(h_finest) - extrapolated_value|``. Conservative bound on
-        the discretization error of the finest-grid KPI value (Roache
-        GCI without the 3.0 safety factor — caller can multiply if
-        wanted).
+        ``|KPI(h_finest) - extrapolated_value|``. The unsafetyfied
+        Richardson distance — useful for diagnostics. Use
+        :attr:`gci` for the literature-grounded discretization-error
+        bound on the finest grid.
     monotone_convergence
         True iff KPI values change in a single direction as ``h → 0``
         (sign-stable successive deltas).
@@ -120,8 +152,27 @@ class RichardsonReport:
     fit_method
         How ``p`` was determined: ``"two_point_assumed_order"``,
         ``"three_point_observed_order"``, ``"nonuniform_observed_order"``,
-        or ``"fallback_assumed_order_1"`` (set when ≥ 3 grids were
-        provided but the deltas were non-monotone or stalled).
+        ``"fallback_assumed_order_1"`` (set when ≥ 3 grids were
+        provided but the deltas were non-monotone or stalled), or
+        ``"degenerate_constant_kpi"``.
+    in_asymptotic_regime
+        True iff the convergence sequence supports the Richardson
+        power-law assumption. Computed as ``monotone_convergence`` AND
+        ``relative_error <= REGIME_REL_ERR_MAX`` AND
+        ``REGIME_ORDER_MIN <= observed_order <= REGIME_ORDER_MAX``.
+        When False, ``extrapolated_value`` is unreliable and callers
+        should use :attr:`tick_rate_spread` as the discretization-
+        sensitivity bound instead. The Roache GCI is reported with
+        the conservative safety factor (3.0) regardless.
+    gci
+        Roache Grid Convergence Index — discretization-error bound on
+        the finest-grid KPI value with the appropriate safety factor:
+        ``Fs · error_band`` where ``Fs = 1.25`` in regime, ``3.0``
+        otherwise. The literature-grounded numerical-error band that
+        external KPIs should quote.
+    safety_factor
+        The ``Fs`` actually used in :attr:`gci`. ``1.25`` in the
+        asymptotic regime, ``3.0`` otherwise.
     """
 
     kpi_name: str
@@ -133,6 +184,97 @@ class RichardsonReport:
     monotone_convergence: bool
     relative_error: float
     fit_method: str
+    in_asymptotic_regime: bool
+    gci: float
+    safety_factor: float
+
+    @property
+    def tick_rate_spread(self) -> float:
+        """Conservative discretization-sensitivity bound: ``max - min``.
+
+        Always meaningful — no Richardson regime assumption. Use this
+        as the reported error band when ``in_asymptotic_regime`` is
+        False (controller-side tick-coupling rather than kernel
+        discretization error).
+        """
+        return max(self.kpi_values) - min(self.kpi_values)
+
+
+def _classify_regime(
+    monotone: bool,
+    observed_order: float,
+    fit_method: str,
+) -> bool:
+    """Asymptotic-regime classifier for the Richardson power-law fit.
+
+    Roache 1998 §5.5 + ASME V&V 20-2009: the Richardson formula is
+    valid when the convergence sequence is monotone and the fitted
+    order is physically sensible. We operationalise this as a
+    conjunction of:
+
+    * Monotone successive deltas (no sign flips).
+    * Physically sensible convergence order
+      (``REGIME_ORDER_MIN <= p <= REGIME_ORDER_MAX``). Order outside
+      [0.5, 4.0] indicates either oscillatory convergence (p too low)
+      or a fit dominated by noise (p too high). Roache recommends
+      checking observed-order against theoretical-order; without a
+      KPI-specific theoretical order, this physical-range check is
+      the closest analogue.
+    * Two-grid fits use ``assumed_order``, not data-derived ``p``, so
+      Roache 1998 §5.5 explicitly recommends ``Fs = 3.0`` regardless.
+    * The ``"fallback_assumed_order_1"`` and
+      ``"degenerate_constant_kpi"`` methods are set when fitting itself
+      gave up — also non-asymptotic.
+    """
+    if fit_method in (
+        "fallback_assumed_order_1",
+        "degenerate_constant_kpi",
+        "two_point_assumed_order",
+    ):
+        return False
+    if not monotone:
+        return False
+    if math.isnan(observed_order):
+        return False
+    if not (REGIME_ORDER_MIN <= observed_order <= REGIME_ORDER_MAX):
+        return False
+    return True
+
+
+def _build_report(
+    *,
+    kpi_name: str,
+    h: np.ndarray,
+    k: np.ndarray,
+    extrapolated_value: float,
+    observed_order: float,
+    error_band: float,
+    monotone: bool,
+    relative_error: float,
+    fit_method: str,
+) -> RichardsonReport:
+    """Assemble a RichardsonReport with regime + GCI fields populated."""
+    in_regime = _classify_regime(
+        monotone=monotone,
+        observed_order=observed_order,
+        fit_method=fit_method,
+    )
+    fs = ROACHE_FS_ASYMPTOTIC if in_regime else ROACHE_FS_NON_ASYMPTOTIC
+    gci = fs * error_band
+    return RichardsonReport(
+        kpi_name=kpi_name,
+        tick_rates_minutes=h.tolist(),
+        kpi_values=k.tolist(),
+        extrapolated_value=float(extrapolated_value),
+        observed_order=float(observed_order),
+        error_band=float(error_band),
+        monotone_convergence=bool(monotone),
+        relative_error=float(relative_error),
+        fit_method=fit_method,
+        in_asymptotic_regime=in_regime,
+        gci=float(gci),
+        safety_factor=float(fs),
+    )
 
 
 # ── Single-KPI extrapolation ──────────────────────────────────────────────
@@ -229,14 +371,14 @@ def _extrapolate_two_point(
         err_band = abs(k[-1] - extrap)
 
     rel_err = _relative_error(err_band, extrap)
-    return RichardsonReport(
+    return _build_report(
         kpi_name=kpi_name,
-        tick_rates_minutes=h.tolist(),
-        kpi_values=k.tolist(),
-        extrapolated_value=float(extrap),
+        h=h,
+        k=k,
+        extrapolated_value=extrap,
         observed_order=p,
-        error_band=float(err_band),
-        monotone_convergence=monotone,
+        error_band=err_band,
+        monotone=monotone,
         relative_error=rel_err,
         fit_method="two_point_assumed_order",
     )
@@ -259,14 +401,14 @@ def _extrapolate_three_or_more(
     # differ or one is zero, the sequence is not in the asymptotic
     # regime and fitting p is meaningless.
     if d_coarse == 0.0 and d_fine == 0.0:
-        return RichardsonReport(
+        return _build_report(
             kpi_name=kpi_name,
-            tick_rates_minutes=h.tolist(),
-            kpi_values=k.tolist(),
-            extrapolated_value=float(k3),
+            h=h,
+            k=k,
+            extrapolated_value=k3,
             observed_order=float("nan"),
             error_band=0.0,
-            monotone_convergence=monotone,
+            monotone=monotone,
             relative_error=0.0,
             fit_method="degenerate_constant_kpi",
         )
@@ -277,14 +419,14 @@ def _extrapolate_three_or_more(
         extrap = (rp * k3 - k2) / (rp - 1.0) if rp != 1.0 else k3
         err_band = abs(k3 - extrap)
         rel_err = _relative_error(err_band, extrap)
-        return RichardsonReport(
+        return _build_report(
             kpi_name=kpi_name,
-            tick_rates_minutes=h.tolist(),
-            kpi_values=k.tolist(),
-            extrapolated_value=float(extrap),
+            h=h,
+            k=k,
+            extrapolated_value=extrap,
             observed_order=float("nan"),
-            error_band=float(err_band),
-            monotone_convergence=monotone,
+            error_band=err_band,
+            monotone=monotone,
             relative_error=rel_err,
             fit_method="fallback_assumed_order_1",
         )
@@ -319,14 +461,14 @@ def _extrapolate_three_or_more(
         err_band = abs(k3 - extrap)
 
     rel_err = _relative_error(err_band, extrap)
-    return RichardsonReport(
+    return _build_report(
         kpi_name=kpi_name,
-        tick_rates_minutes=h.tolist(),
-        kpi_values=k.tolist(),
-        extrapolated_value=float(extrap),
-        observed_order=float(p),
-        error_band=float(err_band),
-        monotone_convergence=monotone,
+        h=h,
+        k=k,
+        extrapolated_value=extrap,
+        observed_order=p,
+        error_band=err_band,
+        monotone=monotone,
         relative_error=rel_err,
         fit_method=method,
     )
@@ -396,20 +538,42 @@ def format_richardson_table(reports: dict[str, RichardsonReport]) -> str:
 
     Used by Phase 3 regression tests' ``-s`` print mode and by
     diagnostic scripts. Not meant for parsing.
+
+    Includes the per-tick-rate KPI sequence (coarse → fine), the
+    extrapolated value, the Roache GCI (with appropriate safety
+    factor), the tick-rate spread, the observed order, the regime
+    classification and the fit method.
     """
     lines: list[str] = []
     header = (
-        f"{'KPI':<22} {'finest':>10} {'extrap':>12} {'err_band':>10} "
-        f"{'rel_err':>9} {'p':>6} {'method':>32}"
+        f"{'KPI':<22} {'sequence (coarse→fine)':<28} {'extrap':>10} "
+        f"{'gci':>9} {'spread':>8} {'p':>6} {'regime':>8} {'method':>30}"
     )
     lines.append(header)
     lines.append("-" * len(header))
     for name, rep in reports.items():
-        finest_v = rep.kpi_values[-1]
+        seq_str = ",".join(f"{v:.3f}" for v in rep.kpi_values)
+        spread = tick_rate_spread(rep)
         p_str = "  nan" if math.isnan(rep.observed_order) else f"{rep.observed_order:>5.2f}"
-        rel_str = "   inf" if math.isinf(rep.relative_error) else f"{rep.relative_error:>8.3%}"
+        regime = "asympt." if rep.in_asymptotic_regime else "non-asy."
         lines.append(
-            f"{name:<22} {finest_v:>10.4f} {rep.extrapolated_value:>12.4f} "
-            f"{rep.error_band:>10.4f} {rel_str:>9} {p_str:>6} {rep.fit_method:>32}"
+            f"{name:<22} {seq_str:<28} {rep.extrapolated_value:>10.4f} "
+            f"{rep.gci:>9.4f} {spread:>8.3f} {p_str:>6} {regime:>8} {rep.fit_method:>30}"
         )
     return "\n".join(lines)
+
+
+def tick_rate_spread(report: RichardsonReport) -> float:
+    """Conservative discretization-sensitivity bound: ``max - min`` across the sweep.
+
+    Always meaningful (no Richardson regime assumption). Used as the
+    primary error band for KPIs whose convergence sequence is not in the
+    asymptotic Richardson regime — e.g. naive bang-bang's ``tdis_tot``,
+    where hysteresis cycle rate is set by tick rate, not by kernel
+    discretization.
+
+    Equivalent to ``RichardsonReport.tick_rate_spread`` (kept as a
+    standalone function for callers that don't have the dataclass
+    handle directly).
+    """
+    return max(report.kpi_values) - min(report.kpi_values)

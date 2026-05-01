@@ -26,10 +26,15 @@ import pytest
 from tests.hvac_bench.kpis import KpiBundle
 from tests.hvac_bench.richardson import (
     DEFAULT_RICHARDSON_KPIS,
+    REGIME_ORDER_MAX,
+    REGIME_ORDER_MIN,
+    ROACHE_FS_ASYMPTOTIC,
+    ROACHE_FS_NON_ASYMPTOTIC,
     RichardsonReport,
     format_richardson_table,
     kpi_richardson_sweep,
     richardson_extrapolate,
+    tick_rate_spread,
 )
 
 
@@ -296,6 +301,101 @@ class TestBundleSweep:
 
 
 # ── Reporting helper ──────────────────────────────────────────────────────
+
+
+class TestRegimeClassifier:
+    """Asymptotic-regime classification for Roache GCI safety-factor selection."""
+
+    def test_clean_asymptotic_data_in_regime(self):
+        # KPI(h) = 5 + 0.5·h^1.5 — clean asymptotic
+        h = [40.0, 20.0, 10.0]
+        truth = 5.0
+        c = 0.5
+        p_true = 1.5
+        k = [truth + c * x ** p_true for x in h]
+        rep = richardson_extrapolate(h, k, kpi_name="test")
+        assert rep.in_asymptotic_regime is True
+        assert rep.safety_factor == ROACHE_FS_ASYMPTOTIC
+        # GCI bounds the actual error generously
+        assert rep.gci >= rep.error_band
+
+    def test_non_monotone_not_in_regime(self):
+        h = [30.0, 15.0, 5.0]
+        k = [10.0, 8.0, 9.0]  # sign-flip in deltas
+        rep = richardson_extrapolate(h, k, kpi_name="test")
+        assert rep.in_asymptotic_regime is False
+        assert rep.safety_factor == ROACHE_FS_NON_ASYMPTOTIC
+
+    def test_order_outside_physical_range_not_in_regime(self):
+        # Construct a sequence with observed_order > REGIME_ORDER_MAX
+        # (very steep convergence dominated by the coarsest grid).
+        h = [30.0, 15.0, 5.0]
+        k = [50.0, 10.0, 9.5]  # d_coarse=-40, d_fine=-0.5, ratio=80
+        rep = richardson_extrapolate(h, k, kpi_name="test")
+        # Observed order is well above REGIME_ORDER_MAX (4.0) — order
+        # this large indicates a fit dominated by the coarsest grid,
+        # not a true power-law regime.
+        assert rep.observed_order > REGIME_ORDER_MAX
+        assert rep.in_asymptotic_regime is False
+        assert rep.safety_factor == ROACHE_FS_NON_ASYMPTOTIC
+
+    def test_two_grid_assumed_order_not_in_regime(self):
+        # Only 2 grids → fit_method is "two_point_assumed_order"; the
+        # fitted p is not data-derived so we can't claim asymptotic regime.
+        # Roache 1998 §5.5 explicitly recommends Fs=3.0 for 2-grid studies.
+        h = [30.0, 15.0]
+        k = [11.0, 8.0]
+        rep = richardson_extrapolate(h, k, assumed_order=1.0, kpi_name="test")
+        assert rep.in_asymptotic_regime is False
+        assert rep.safety_factor == ROACHE_FS_NON_ASYMPTOTIC
+
+    def test_constant_kpi_not_in_regime(self):
+        h = [30.0, 15.0, 5.0]
+        k = [3.14, 3.14, 3.14]
+        rep = richardson_extrapolate(h, k, kpi_name="test")
+        # Degenerate; not asymptotic in the Roache sense (no convergence
+        # to extract from). Fs=3.0 conservatively.
+        assert rep.in_asymptotic_regime is False
+        assert rep.safety_factor == ROACHE_FS_NON_ASYMPTOTIC
+        assert rep.gci == 0.0  # but error band is genuinely zero
+
+    def test_gci_uses_correct_safety_factor(self):
+        # Asymptotic case → Fs = 1.25
+        h = [40.0, 20.0, 10.0]
+        c = 0.5
+        k = [5.0 + c * x ** 1.5 for x in h]
+        rep = richardson_extrapolate(h, k, kpi_name="test")
+        assert rep.gci == pytest.approx(rep.error_band * ROACHE_FS_ASYMPTOTIC, abs=1e-9)
+
+    def test_regime_constants_sensible(self):
+        # Sanity: regime thresholds bracket the typical first/second-order
+        # range expected for reasonable convergence schemes.
+        assert 0 < REGIME_ORDER_MIN < 1.0 < 2.0 < REGIME_ORDER_MAX
+        # Roache recommends 1.25 for asymptotic, 3.0 for non-asymptotic
+        assert ROACHE_FS_ASYMPTOTIC == 1.25
+        assert ROACHE_FS_NON_ASYMPTOTIC == 3.0
+
+
+class TestTickRateSpread:
+    """``tick_rate_spread`` returns max - min across the sweep."""
+
+    def test_spread_returns_max_minus_min(self):
+        rep = richardson_extrapolate(
+            [30.0, 15.0, 5.0], [10.0, 7.0, 5.5], kpi_name="test"
+        )
+        assert tick_rate_spread(rep) == pytest.approx(4.5, abs=1e-9)
+
+    def test_spread_zero_for_constant(self):
+        rep = richardson_extrapolate(
+            [30.0, 15.0, 5.0], [3.0, 3.0, 3.0], kpi_name="test"
+        )
+        assert tick_rate_spread(rep) == 0.0
+
+    def test_spread_works_for_non_monotone(self):
+        rep = richardson_extrapolate(
+            [30.0, 15.0, 5.0], [5.0, 8.0, 6.0], kpi_name="test"
+        )
+        assert tick_rate_spread(rep) == 3.0
 
 
 class TestFormatTable:
