@@ -1969,6 +1969,271 @@ def _diagonal_of_inverse(A: list[list[float]], n: int) -> list[float] | None:
     return diag
 
 
+# ── Tobit / censored WLS (#40 Session 2) ──────────────────────────────
+
+
+def _log_phi(z: float) -> float:
+    """log of standard normal pdf at z."""
+    return -0.5 * math.log(2.0 * math.pi) - 0.5 * z * z
+
+
+def _log_Phi(z: float) -> float:
+    """log of standard normal CDF at z, log-stable via math.erfc.
+
+    Φ(z) = 0.5 · erfc(-z/√2). For z very negative, erfc gives a tiny
+    positive number; log of that is a large negative number.
+    """
+    return math.log(0.5 * math.erfc(-z / math.sqrt(2.0)))
+
+
+def _mills_ratio(z: float) -> float:
+    """Inverse Mills ratio λ(z) = φ(z) / Φ(z), numerically stable.
+
+    For z < -6 we use the asymptotic expansion λ(z) ≈ -z (1 + 1/z² + ...)
+    since both φ(z) and Φ(z) underflow near 0 in the direct ratio. The
+    bound -6 is the point where the leading-order asymptotic agrees with
+    the direct computation to ≪1% (Abramowitz & Stegun §26.2.12).
+    """
+    if z < -6.0:
+        # Asymptotic expansion: λ(z) = -z * (1 + 1/z² - 3/z^4 + 15/z^6 - ...)
+        # Two terms is sufficient for z ≤ -6.
+        z2 = z * z
+        return -z * (1.0 + 1.0 / z2)
+    return math.exp(_log_phi(z) - _log_Phi(z))
+
+
+# Numerical guards on the σ Newton step.
+_TOBIT_SIGMA_FLOOR_FACTOR = 1e-6  # σ ≥ floor_factor * range(y)
+_TOBIT_SIGMA_CAP_FACTOR = 100.0    # σ ≤ cap_factor * σ_init
+
+
+def _solve_joint_tobit(
+    X_uncens: list[list[float]],
+    y_uncens: list[float],
+    w_uncens: list[float],
+    X_cens_high: list[list[float]],
+    y_cens_high: list[float],
+    w_cens_high: list[float],
+    X_cens_low: list[list[float]],
+    y_cens_low: list[float],
+    w_cens_low: list[float],
+    n_features: int,
+    beta_init: list[float],
+    sigma_init: float,
+    *,
+    max_iter: int = 50,
+    tol: float = 1e-5,
+) -> tuple[list[float], list[float], float] | None:
+    """Tobit MLE on (β, σ) via Newton-Raphson with backtracking line search.
+
+    Maximizes the log-likelihood
+
+        L(β, σ) = Σ_uncens [log φ((y - x'β)/σ) - log σ]
+                + Σ_cens_high log Φ((x'β - y_obs)/σ)
+                + Σ_cens_low  log Φ((y_obs - x'β)/σ)
+
+    The optimization variable is θ = (β, η = log σ); η is unconstrained
+    so σ stays positive without inequality constraints.
+
+    Warm-started from the WLS solution (``beta_init``, ``sigma_init``).
+    Returns ``(beta, std_err, sigma)`` on convergence, or ``None`` on
+    numerical failure (caller should fall back to the WLS β).
+
+    Numerical guards:
+    - σ floor / cap (constants ``_TOBIT_SIGMA_FLOOR_FACTOR`` /
+      ``_TOBIT_SIGMA_CAP_FACTOR``).
+    - Mill's ratio asymptotic for z < -6 (avoids 0/0 underflow).
+    - Hessian-not-PD or singular → return None.
+    - Backtracking line search rejects steps that don't improve loglik;
+      after 20 halvings, return None.
+
+    No FWL twin in Session 2 — the FWL ragged-data path keeps the
+    standard WLS solution; Tobit only fires on the joint complete-data
+    path (caller's responsibility to gate on this).
+    """
+    # ── Setup ────────────────────────────────────────────────────────
+    n = n_features
+    m_uncens = len(X_uncens)
+    m_high = len(X_cens_high)
+    m_low = len(X_cens_low)
+    if m_uncens + m_high + m_low < n + 1:
+        return None  # under-determined
+
+    # σ floor: based on range of y values across all observations.
+    # all_y is non-empty here — the m_uncens + m_high + m_low ≥ n + 1
+    # guard above ensures that.
+    all_y = list(y_uncens) + list(y_cens_high) + list(y_cens_low)
+    y_range = max(all_y) - min(all_y)
+    sigma_floor = max(_TOBIT_SIGMA_FLOOR_FACTOR * y_range, 1e-6)
+    sigma_cap = max(_TOBIT_SIGMA_CAP_FACTOR * sigma_init, sigma_floor * 100.0)
+    sigma_init_clamped = min(max(sigma_init, sigma_floor), sigma_cap)
+
+    beta = list(beta_init)
+    eta = math.log(sigma_init_clamped)  # log σ
+
+    def _loglik(beta: list[float], eta: float) -> float:
+        sigma = math.exp(eta)
+        ll = 0.0
+        # Uncensored
+        for k in range(m_uncens):
+            xb = sum(beta[j] * X_uncens[k][j] for j in range(n))
+            z = (y_uncens[k] - xb) / sigma
+            ll += w_uncens[k] * (_log_phi(z) - eta)
+        # Right-censored: z = (x'β - y_obs) / σ
+        for k in range(m_high):
+            xb = sum(beta[j] * X_cens_high[k][j] for j in range(n))
+            z = (xb - y_cens_high[k]) / sigma
+            ll += w_cens_high[k] * _log_Phi(z)
+        # Left-censored: z = (y_obs - x'β) / σ
+        for k in range(m_low):
+            xb = sum(beta[j] * X_cens_low[k][j] for j in range(n))
+            z = (y_cens_low[k] - xb) / sigma
+            ll += w_cens_low[k] * _log_Phi(z)
+        return ll
+
+    def _score_and_neg_hessian(
+        beta: list[float], eta: float,
+    ) -> tuple[list[float], list[list[float]]]:
+        """Return (g, neg_H) where g is gradient of loglik and neg_H = -∇²loglik
+        (positive-definite at maximum).
+
+        θ = [β_0, …, β_{n-1}, η = log σ] so neg_H is (n+1) × (n+1).
+        """
+        sigma = math.exp(eta)
+        g = [0.0] * (n + 1)
+        neg_H = [[0.0] * (n + 1) for _ in range(n + 1)]
+        inv_sigma = 1.0 / sigma
+        inv_sigma_sq = inv_sigma * inv_sigma
+
+        # Uncensored contributions
+        for k in range(m_uncens):
+            xk = X_uncens[k]
+            wk = w_uncens[k]
+            xb = sum(beta[j] * xk[j] for j in range(n))
+            z = (y_uncens[k] - xb) * inv_sigma
+            # Gradient
+            for j in range(n):
+                g[j] += wk * z * xk[j] * inv_sigma
+            g[n] += wk * (z * z - 1.0)
+            # neg_H_ββ contrib: w · x x^T / σ²
+            for j in range(n):
+                wxj = wk * xk[j] * inv_sigma_sq
+                for k2 in range(n):
+                    neg_H[j][k2] += wxj * xk[k2]
+            # neg_H_βη contrib: 2 w z x / σ
+            two_wz_inv_sigma = 2.0 * wk * z * inv_sigma
+            for j in range(n):
+                neg_H[j][n] += two_wz_inv_sigma * xk[j]
+                neg_H[n][j] += two_wz_inv_sigma * xk[j]
+            # neg_H_ηη contrib: 2 w z²
+            neg_H[n][n] += 2.0 * wk * z * z
+
+        # Censored contributions (s = +1 for right, -1 for left)
+        for sign, X_c, y_c, w_c, m_c in (
+            (+1.0, X_cens_high, y_cens_high, w_cens_high, m_high),
+            (-1.0, X_cens_low, y_cens_low, w_cens_low, m_low),
+        ):
+            for k in range(m_c):
+                xk = X_c[k]
+                wk = w_c[k]
+                xb = sum(beta[j] * xk[j] for j in range(n))
+                # z_c = s · (xβ - y_obs) / σ; for right s=+1, for left s=-1
+                # which gives z_c = (y_obs - xβ)/σ for left.
+                z = sign * (xb - y_c[k]) * inv_sigma
+                lam = _mills_ratio(z)
+                # Gradient
+                # ∂loglik/∂β_j = w · λ · s · x_j / σ
+                w_lam_s_inv_sigma = wk * lam * sign * inv_sigma
+                for j in range(n):
+                    g[j] += w_lam_s_inv_sigma * xk[j]
+                # ∂loglik/∂η = -w · λ · z (sign-independent: z² in z·∂z/∂η)
+                g[n] += -wk * lam * z
+                # neg_H_ββ contrib: w · λ · (z + λ) · x x^T / σ²
+                lam_zlam = lam * (z + lam)
+                w_lam_zlam_inv_sigma_sq = wk * lam_zlam * inv_sigma_sq
+                for j in range(n):
+                    wxj = w_lam_zlam_inv_sigma_sq * xk[j]
+                    for k2 in range(n):
+                        neg_H[j][k2] += wxj * xk[k2]
+                # neg_H_βη contrib: -w · s · x_j / σ · λ · (1 - z² - z·λ)
+                #                 = w · s · x_j / σ · (λ·(z+λ)·z - λ)
+                # We use the unified form -(λ' z + λ) · x_j / σ · w · s
+                # where λ' = -λ(z+λ). Working through:
+                #   λ' z + λ = -λ(z+λ)z + λ = λ(1 - z² - zλ)
+                # so ∂²/∂β_j∂η loglik = -w s x_j / σ · λ (1 - z² - zλ)
+                # neg_H = +w s x_j / σ · λ (1 - z² - zλ)
+                bracket = lam * (1.0 - z * z - z * lam)
+                w_s_bracket_inv_sigma = wk * sign * bracket * inv_sigma
+                for j in range(n):
+                    neg_H[j][n] += w_s_bracket_inv_sigma * xk[j]
+                    neg_H[n][j] += w_s_bracket_inv_sigma * xk[j]
+                # neg_H_ηη contrib: -w · z · λ · (1 - z² - z·λ)
+                neg_H[n][n] += -wk * z * bracket
+
+        return g, neg_H
+
+    # ── Newton-Raphson loop ─────────────────────────────────────────
+    ll_prev = _loglik(beta, eta)
+    for _ in range(max_iter):
+        g, neg_H = _score_and_neg_hessian(beta, eta)
+        # neg_H · Δθ = g  (so θ_new = θ + Δθ moves uphill on loglik)
+        delta = _solve_symmetric(neg_H, g, n + 1)
+        if delta is None:
+            return None  # Hessian not PD or singular
+        # Backtracking line search
+        step = 1.0
+        accepted = False
+        for _ls in range(20):
+            new_beta = [beta[j] + step * delta[j] for j in range(n)]
+            new_eta = eta + step * delta[n]
+            new_sigma = math.exp(new_eta)
+            if new_sigma < sigma_floor or new_sigma > sigma_cap:
+                step *= 0.5
+                continue
+            ll_new = _loglik(new_beta, new_eta)
+            if math.isfinite(ll_new) and ll_new > ll_prev - 1e-9:
+                accepted = True
+                break
+            step *= 0.5
+        if not accepted:  # pragma: no cover
+            # Defensive: 20 halvings of the Newton step failed to improve
+            # log-likelihood. Practically unreachable on well-conditioned
+            # data after the warm-start from WLS β; would only fire on
+            # severely degenerate input where the first Newton step
+            # already overshoots beyond any improvable region.
+            return None
+        # Convergence check on relative changes in (β, η)
+        rel_change = max(
+            *[abs(step * delta[j]) / max(abs(beta[j]), 1e-6)
+              for j in range(n)],
+            abs(step * delta[n]) / max(abs(eta), 1e-6),
+        )
+        beta = new_beta
+        eta = new_eta
+        ll_prev = ll_new
+        if rel_change < tol:
+            break
+
+    sigma = math.exp(eta)
+
+    # Standard errors from observed Fisher information at the optimum:
+    # Cov(β̂) ≈ (neg_H)⁻¹, so std_err = sqrt(diag).
+    _, neg_H_final = _score_and_neg_hessian(beta, eta)
+    cov_diag = _diagonal_of_inverse(neg_H_final, n + 1)
+    if cov_diag is None:  # pragma: no cover
+        # Defensive: the converged Hessian must be positive-definite at a
+        # local maximum (so the inverse exists). Degenerate cases where
+        # convergence lands on a flat region are caught earlier by the
+        # singular-Newton-step return at the top of the loop.
+        return None
+    std_err = []
+    for j in range(n):
+        v = cov_diag[j]
+        std_err.append(math.sqrt(v) if v > 0 else float("inf"))
+
+    return beta, std_err, sigma
+
+
 def _solve_symmetric(A: list[list[float]], b: list[float], n: int) -> list[float] | None:
     """Solve Ax = b for symmetric positive-definite A via Gaussian elimination.
 

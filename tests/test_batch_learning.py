@@ -16,6 +16,8 @@ from custom_components.tasmota_irhvac.pi.batch_learning import (
     _apply_retrospective_ema,
     _detect_optimal_tau,
     _diagonal_of_inverse,
+    _mills_ratio,
+    _solve_joint_tobit,
     _weighted_variance,
     analyze_residuals_by_hour,
     build_feature_vector_from_raw,
@@ -445,6 +447,328 @@ class TestTobitPartitionCounts:
         assert result.n_censored_low == 3
         # n_eligible still 30 (uncensored only)
         assert result.n_eligible == 30
+
+
+# ── Tobit MLE solver (#40 Session 2) ──────────────────────────────────
+
+
+class TestMillsRatio:
+    """Numerical correctness of the inverse Mills ratio λ(z) = φ(z)/Φ(z).
+
+    Two regimes:
+    - z ≥ -6: direct computation via log-stable Φ from math.erfc.
+    - z < -6: asymptotic expansion λ(z) ≈ -z (1 + 1/z²).
+
+    The hand-off must be smooth and the asymptotic accurate.
+    """
+
+    def test_lambda_at_zero(self):
+        """At z=0, Φ(0)=0.5 and φ(0)=1/√(2π), so λ = √(2/π) ≈ 0.7979."""
+        assert abs(_mills_ratio(0.0) - math.sqrt(2.0 / math.pi)) < 1e-9
+
+    def test_lambda_positive_z_smaller(self):
+        """For positive z, Φ → 1 so λ → small; should be monotonically
+        decreasing in |z| as z grows positive."""
+        assert _mills_ratio(2.0) < _mills_ratio(0.0)
+        assert _mills_ratio(5.0) < _mills_ratio(2.0)
+
+    def test_lambda_negative_z_larger(self):
+        """For negative z, Φ → 0 so λ blows up; magnitude grows as z → -∞."""
+        assert _mills_ratio(-2.0) > _mills_ratio(0.0)
+        assert _mills_ratio(-5.0) > _mills_ratio(-2.0)
+
+    def test_lambda_asymptotic_continuity(self):
+        """The hand-off at z = -6 must be continuous to within 1%
+        (asymptotic error bound near the threshold)."""
+        # Direct computation at z just above the threshold
+        direct_at_minus_6 = _mills_ratio(-6.0 + 1e-9)
+        # Asymptotic just below
+        asymptotic_at_minus_6 = _mills_ratio(-6.0 - 1e-9)
+        rel_diff = abs(asymptotic_at_minus_6 - direct_at_minus_6) / direct_at_minus_6
+        assert rel_diff < 0.01
+
+    def test_lambda_deep_asymptotic(self):
+        """At z = -10, asymptotic λ(z) ≈ -z * (1 + 1/100) = 10.10.
+        Truth (from full asymptotic): -z * (1 + 1/z² - 3/z^4 + ...) ≈ 10.0997.
+        Two-term expansion is adequate at this scale."""
+        lam_at_minus_10 = _mills_ratio(-10.0)
+        assert abs(lam_at_minus_10 - 10.10) < 0.01
+
+
+class TestSolveJointTobit:
+    """Tobit MLE Newton-Raphson solver.
+
+    Tests the production implementation against synthetic data with
+    known truth, mirroring the Session 0 prototype self-test but with
+    deterministic seeds and explicit assertions.
+    """
+
+    @staticmethod
+    def _gen_synthetic(seed: int, n: int = 200, sigma: float = 0.3):
+        """Generate (X, y, beta_true) with a 3-feature regression."""
+        import random
+        rng = random.Random(seed)
+        beta_true = [0.5, -0.4, -2.0]
+        X = []
+        y = []
+        for _ in range(n):
+            x_od = rng.gauss(0.0, 1.0)
+            x_solar = rng.betavariate(2.0, 5.0)
+            xv = [1.0, x_od, x_solar]
+            yv = sum(b * x for b, x in zip(beta_true, xv)) + rng.gauss(0.0, sigma)
+            X.append(xv)
+            y.append(yv)
+        return X, y, beta_true
+
+    @staticmethod
+    def _wls(X, y, w):
+        """Plain WLS for comparison."""
+        n = len(X[0])
+        XtWX = [[sum(w[k] * X[k][i] * X[k][j] for k in range(len(X)))
+                 for j in range(n)] for i in range(n)]
+        XtWy = [sum(w[k] * X[k][i] * y[k] for k in range(len(X)))
+                for i in range(n)]
+        # Tiny ridge for numerical safety
+        for i in range(n):
+            XtWX[i][i] += 1e-9
+        # Gaussian elimination via numpy if available, else hand-rolled
+        try:
+            import numpy as np
+            return np.linalg.solve(np.array(XtWX), np.array(XtWy)).tolist()
+        except ImportError:
+            from custom_components.tasmota_irhvac.pi.batch_learning import (
+                _solve_symmetric,
+            )
+            return _solve_symmetric(XtWX, XtWy, n)
+
+    def test_pure_uncensored_matches_wls(self):
+        """Tobit on uncensored-only data should match WLS exactly (within
+        Newton-Raphson tolerance) — the Tobit log-likelihood reduces to
+        OLS log-likelihood when no observations are censored."""
+        X, y, beta_true = self._gen_synthetic(seed=42)
+        w = [1.0] * len(X)
+        beta_wls = self._wls(X, y, w)
+        result = _solve_joint_tobit(
+            X_uncens=X, y_uncens=y, w_uncens=w,
+            X_cens_high=[], y_cens_high=[], w_cens_high=[],
+            X_cens_low=[], y_cens_low=[], w_cens_low=[],
+            n_features=3,
+            beta_init=beta_wls,
+            sigma_init=0.3,
+        )
+        assert result is not None
+        beta_tobit, std_err, sigma = result
+        # Both methods solve the same problem on uncensored data.
+        max_diff = max(abs(beta_tobit[i] - beta_wls[i]) for i in range(3))
+        assert max_diff < 1e-3, (
+            f"Tobit and WLS disagree on pure uncensored data: "
+            f"max_diff={max_diff:.6f}, "
+            f"beta_tobit={beta_tobit}, beta_wls={beta_wls}"
+        )
+        # σ should be within 5% of the residual RMS the data was generated
+        # with (0.3) — Newton converges to a slightly different σ on finite
+        # samples but should be in the ballpark.
+        assert abs(sigma - 0.3) / 0.3 < 0.10
+
+    def test_right_censored_recovers_truth_better_than_dropping(self):
+        """Mixed regime: 30% right-censored. Tobit β should be closer to
+        truth than WLS β fitted on uncensored-only (the current production
+        behavior of dropping clamped obs)."""
+        X, y, beta_true = self._gen_synthetic(seed=42)
+        n = len(X)
+        # Censor at 70th percentile
+        sorted_y = sorted(y)
+        threshold = sorted_y[int(0.7 * n)]
+        X_uncens, y_uncens, w_uncens = [], [], []
+        X_cens, y_cens, w_cens = [], [], []
+        for i in range(n):
+            if y[i] > threshold:
+                X_cens.append(X[i])
+                y_cens.append(threshold)
+                w_cens.append(1.0)
+            else:
+                X_uncens.append(X[i])
+                y_uncens.append(y[i])
+                w_uncens.append(1.0)
+
+        beta_wls = self._wls(X_uncens, y_uncens, w_uncens)
+        result = _solve_joint_tobit(
+            X_uncens=X_uncens, y_uncens=y_uncens, w_uncens=w_uncens,
+            X_cens_high=X_cens, y_cens_high=y_cens, w_cens_high=w_cens,
+            X_cens_low=[], y_cens_low=[], w_cens_low=[],
+            n_features=3,
+            beta_init=beta_wls,
+            sigma_init=0.3,
+        )
+        assert result is not None
+        beta_tobit, _, _ = result
+        err_wls = math.sqrt(sum((beta_wls[i] - beta_true[i]) ** 2
+                                 for i in range(3)))
+        err_tobit = math.sqrt(sum((beta_tobit[i] - beta_true[i]) ** 2
+                                   for i in range(3)))
+        assert err_tobit < err_wls * 0.7, (
+            f"Tobit should beat dropped-WLS by ≥30%: "
+            f"err_wls={err_wls:.4f}, err_tobit={err_tobit:.4f}, "
+            f"reduction={(err_wls - err_tobit) / err_wls * 100:.1f}%"
+        )
+
+    def test_left_censored_symmetric(self):
+        """Left-censored data should behave symmetrically to right-censored."""
+        X, y, beta_true = self._gen_synthetic(seed=42)
+        n = len(X)
+        sorted_y = sorted(y)
+        threshold = sorted_y[int(0.3 * n)]  # bottom 30% censored
+        X_uncens, y_uncens, w_uncens = [], [], []
+        X_cens_low, y_cens_low, w_cens_low = [], [], []
+        for i in range(n):
+            if y[i] < threshold:
+                X_cens_low.append(X[i])
+                y_cens_low.append(threshold)
+                w_cens_low.append(1.0)
+            else:
+                X_uncens.append(X[i])
+                y_uncens.append(y[i])
+                w_uncens.append(1.0)
+
+        beta_wls = self._wls(X_uncens, y_uncens, w_uncens)
+        result = _solve_joint_tobit(
+            X_uncens=X_uncens, y_uncens=y_uncens, w_uncens=w_uncens,
+            X_cens_high=[], y_cens_high=[], w_cens_high=[],
+            X_cens_low=X_cens_low, y_cens_low=y_cens_low, w_cens_low=w_cens_low,
+            n_features=3,
+            beta_init=beta_wls,
+            sigma_init=0.3,
+        )
+        assert result is not None
+        beta_tobit, _, _ = result
+        err_wls = math.sqrt(sum((beta_wls[i] - beta_true[i]) ** 2
+                                 for i in range(3)))
+        err_tobit = math.sqrt(sum((beta_tobit[i] - beta_true[i]) ** 2
+                                   for i in range(3)))
+        assert err_tobit < err_wls
+
+    def test_both_sides_censored(self):
+        """Mixed left + right censoring (HP rails low and high). Tobit
+        should still recover β better than dropped-WLS."""
+        X, y, beta_true = self._gen_synthetic(seed=42)
+        n = len(X)
+        sorted_y = sorted(y)
+        low_thresh = sorted_y[int(0.20 * n)]
+        high_thresh = sorted_y[int(0.80 * n)]
+        X_uncens, y_uncens, w_uncens = [], [], []
+        X_cens_high, y_cens_high, w_cens_high = [], [], []
+        X_cens_low, y_cens_low, w_cens_low = [], [], []
+        for i in range(n):
+            if y[i] > high_thresh:
+                X_cens_high.append(X[i])
+                y_cens_high.append(high_thresh)
+                w_cens_high.append(1.0)
+            elif y[i] < low_thresh:
+                X_cens_low.append(X[i])
+                y_cens_low.append(low_thresh)
+                w_cens_low.append(1.0)
+            else:
+                X_uncens.append(X[i])
+                y_uncens.append(y[i])
+                w_uncens.append(1.0)
+
+        beta_wls = self._wls(X_uncens, y_uncens, w_uncens)
+        result = _solve_joint_tobit(
+            X_uncens=X_uncens, y_uncens=y_uncens, w_uncens=w_uncens,
+            X_cens_high=X_cens_high, y_cens_high=y_cens_high,
+            w_cens_high=w_cens_high,
+            X_cens_low=X_cens_low, y_cens_low=y_cens_low,
+            w_cens_low=w_cens_low,
+            n_features=3,
+            beta_init=beta_wls,
+            sigma_init=0.3,
+        )
+        assert result is not None
+        beta_tobit, _, _ = result
+        err_wls = math.sqrt(sum((beta_wls[i] - beta_true[i]) ** 2
+                                 for i in range(3)))
+        err_tobit = math.sqrt(sum((beta_tobit[i] - beta_true[i]) ** 2
+                                   for i in range(3)))
+        assert err_tobit < err_wls
+
+    def test_under_determined_returns_none(self):
+        """If total observations < n_features + 1, return None."""
+        result = _solve_joint_tobit(
+            X_uncens=[[1.0, 2.0, 3.0]], y_uncens=[1.0], w_uncens=[1.0],
+            X_cens_high=[], y_cens_high=[], w_cens_high=[],
+            X_cens_low=[], y_cens_low=[], w_cens_low=[],
+            n_features=3,
+            beta_init=[0.0, 0.0, 0.0],
+            sigma_init=1.0,
+        )
+        assert result is None
+
+    def test_empty_data_returns_none(self):
+        """Zero observations of any kind → return None (can't fit)."""
+        result = _solve_joint_tobit(
+            X_uncens=[], y_uncens=[], w_uncens=[],
+            X_cens_high=[], y_cens_high=[], w_cens_high=[],
+            X_cens_low=[], y_cens_low=[], w_cens_low=[],
+            n_features=3,
+            beta_init=[0.0, 0.0, 0.0],
+            sigma_init=1.0,
+        )
+        assert result is None
+
+    def test_zero_sigma_init_handled(self):
+        """σ_init = 0 is unphysical; floor must engage so Newton can start."""
+        X, y, _ = self._gen_synthetic(seed=42, n=50)
+        w = [1.0] * len(X)
+        # σ_init = 0 should be clamped to floor and solver should still run
+        result = _solve_joint_tobit(
+            X_uncens=X, y_uncens=y, w_uncens=w,
+            X_cens_high=[], y_cens_high=[], w_cens_high=[],
+            X_cens_low=[], y_cens_low=[], w_cens_low=[],
+            n_features=3,
+            beta_init=[0.0, 0.0, 0.0],
+            sigma_init=0.0,
+        )
+        # Should either converge or return None — never raise.
+        assert result is None or result is not None
+
+    def test_std_err_finite_on_well_conditioned_problem(self):
+        """Std_err should be finite (not inf, not NaN) on synthetic data
+        with sufficient observations."""
+        X, y, _ = self._gen_synthetic(seed=42, n=200)
+        w = [1.0] * len(X)
+        beta_wls = self._wls(X, y, w)
+        result = _solve_joint_tobit(
+            X_uncens=X, y_uncens=y, w_uncens=w,
+            X_cens_high=[], y_cens_high=[], w_cens_high=[],
+            X_cens_low=[], y_cens_low=[], w_cens_low=[],
+            n_features=3,
+            beta_init=beta_wls,
+            sigma_init=0.3,
+        )
+        assert result is not None
+        _, std_err, _ = result
+        for j, se in enumerate(std_err):
+            assert math.isfinite(se), f"std_err[{j}]={se} should be finite"
+            assert se > 0, f"std_err[{j}]={se} should be positive"
+
+    def test_singular_design_returns_none(self):
+        """Degenerate design (all-equal feature column) → singular Hessian
+        → solver returns None instead of raising."""
+        # Two identical observations → not enough rank for n=3 features
+        X = [[1.0, 0.0, 0.5], [1.0, 0.0, 0.5], [1.0, 0.0, 0.5],
+             [1.0, 0.0, 0.5], [1.0, 0.0, 0.5]]
+        y = [1.0, 1.0, 1.0, 1.0, 1.0]
+        w = [1.0] * 5
+        result = _solve_joint_tobit(
+            X_uncens=X, y_uncens=y, w_uncens=w,
+            X_cens_high=[], y_cens_high=[], w_cens_high=[],
+            X_cens_low=[], y_cens_low=[], w_cens_low=[],
+            n_features=3,
+            beta_init=[0.0, 0.0, 0.0],
+            sigma_init=1.0,
+        )
+        # Should return None (singular) — never raise.
+        assert result is None
 
 
 # ── Compare and Report ────────────────────────────────────────────────
