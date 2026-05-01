@@ -161,9 +161,15 @@ class TestTickIntervalSensitivity:
     def test_tick_interval_sweep(self):
         """Comfort, coefficient, and integral should be similar across tick rates.
 
-        5-min ticks are excluded from tight comfort checks — they cause PI
-        overcorrection on incomplete transients (P fires 3× per hour before
-        HP responds).  The sweep demonstrates this as expected behavior.
+        5-min ticks are excluded from tight comfort checks — the
+        production PI's gains (Kp=1.5, Ki=0.15) are tuned for a
+        15-min nominal cadence (``pi_tick_fallback=900s``); at 5-min
+        the post-hold action rate is ~50% faster, producing mild
+        ringing that doubles mean absolute error. Mechanism is
+        empirically diagnosed and locked in
+        ``tests/hvac_bench/scenarios/test_pi_overcorrection_diagnosis.py``
+        (Phase 3c). The sweep demonstrates the property; the diagnosis
+        explains it.
         """
         results = {}
         for tick_min in [5.0, 10.0, 15.0, 30.0]:
