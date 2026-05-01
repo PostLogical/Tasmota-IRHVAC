@@ -847,6 +847,7 @@ class PIController:
             feature_order=self._feature_order,
             model_inputs=self._inputs.model_inputs,
             frozen_features=frozen_set,
+            tobit_enabled=self._tobit_enabled,
         )
         if result is None:
             _LOGGER.debug(
@@ -858,6 +859,9 @@ class PIController:
         # Full model: all features estimated — for unlock evaluation only.
         # Coefficients are discarded; only std_err, held_features, and the
         # buffer VIF are used to decide if frozen features are identifiable.
+        # Tobit is intentionally OFF here: the unlock evaluator only consumes
+        # std_err / held_features / VIF, which are derived from the WLS path.
+        # Running Tobit again would burn cycles for no decision-relevant gain.
         full_result: BatchResult | None = None
         if frozen_set:
             full_result = weighted_least_squares(

@@ -1452,6 +1452,7 @@ def weighted_least_squares(
     model_inputs: list[dict[str, Any]] | None = None,
     frozen_features: set[int] | None = None,
     detect_lag: bool = True,
+    tobit_enabled: bool = False,
 ) -> BatchResult | None:
     """Run weighted least squares on physical observations.
 
@@ -1691,6 +1692,43 @@ def weighted_least_squares(
                 var_i = rms_sq * max(0.0, cov_diag[i]) / (col_scales_base[i] ** 2)
                 std_err[i] = math.sqrt(var_i) if var_i > 0 else 0.0
 
+    # ── Tobit replacement (#40 Session 4) ──────────────────────────
+    # When tobit_enabled is True AND the joint-solve path qualified
+    # AND no held features (FWL Tobit twin deferred per plan) AND
+    # there are saturated rails admitted to the buffer, replace the
+    # WLS β with the Tobit MLE β.
+    #
+    # Per Session 3 finding: Tobit's β is unbiased on the full
+    # operating distribution (Heckman 1979), while WLS-on-uncensored
+    # is biased at high rail fractions. Inverse-variance fusion of a
+    # biased + unbiased estimator yields a biased blend; use Tobit
+    # alone when it succeeds, fall back to WLS otherwise.
+    tobit_used_flag = False
+    if (
+        result is not None
+        and tobit_enabled
+        and not held
+        and feature_order
+        and m_inputs
+    ):
+        tobit_replacement = _try_tobit_replacement(
+            observations=observations,
+            base_eligible=base_eligible,
+            active_input_indices=active_input_indices,
+            m_inputs=m_inputs,
+            input_entity_ids=input_entity_ids,
+            detected_tau=detected_tau,
+            beta_wls=beta,
+            n=n,
+            n_base=n_base,
+            room_rate_threshold=room_rate_threshold,
+        )
+        if tobit_replacement is not None:
+            tobit_beta, tobit_std_err = tobit_replacement
+            beta = tobit_beta
+            std_err = tobit_std_err
+            tobit_used_flag = True
+
     # Fill held features from current model
     fallback = current_beta if current_beta else [0.0] * n
     for j in held:
@@ -1785,7 +1823,7 @@ def weighted_least_squares(
         detected_tau=detected_tau,
         n_censored_high=n_censored_high,
         n_censored_low=n_censored_low,
-        tobit_used=False,  # Session 1: partition only; solve lands in Session 2
+        tobit_used=tobit_used_flag,
     )
 
 
@@ -1972,6 +2010,199 @@ def _diagonal_of_inverse(A: list[list[float]], n: int) -> list[float] | None:
 # ── Tobit / censored WLS (#40 Session 2) ──────────────────────────────
 
 
+def _try_tobit_replacement(
+    observations: list[Observation],
+    base_eligible: list[Observation],
+    active_input_indices: list[int],
+    m_inputs: list[dict[str, Any]],
+    input_entity_ids: list[str],
+    detected_tau: dict[str, float],
+    beta_wls: list[float],
+    n: int,
+    n_base: int,
+    room_rate_threshold: float,
+) -> tuple[list[float], list[float]] | None:
+    """Attempt Tobit MLE replacement for the WLS β (#40 Session 4).
+
+    Builds censored-eligible sets (saturated_high, saturated_low) using
+    the same filters as the uncensored eligible set, applies the same
+    detected EMA tau across a chronologically-combined list (so the
+    censored obs share the uncensored history's filter context),
+    constructs active-feature design matrices, and calls
+    :func:`_solve_joint_tobit`.
+
+    Returns ``(beta, std_err)`` over ``n`` features (held positions
+    untouched at 0.0) on success, or ``None`` if there are no censored
+    observations OR Tobit fails to converge.
+
+    No ToD nuisance regressors in this Session 4 cut — Tobit fits over
+    the active features only, mirroring Session 0's empirical setup
+    that established the bias-reduction case. ToD partialling can be
+    added in a future iteration if Session 5 bench shows diurnal
+    correlation contaminates Tobit β.
+    """
+    # Build censored-eligible sets with same filters as uncensored.
+    cens_high = [
+        o for o in observations
+        if o.clamped
+        and o.clamped_reason == "saturated_high"
+        and o.hp_setpoint is not None
+        and abs(o.room_rate) < room_rate_threshold
+        and o.outdoor_temp_c is not None
+    ]
+    cens_low = [
+        o for o in observations
+        if o.clamped
+        and o.clamped_reason == "saturated_low"
+        and o.hp_setpoint is not None
+        and abs(o.room_rate) < room_rate_threshold
+        and o.outdoor_temp_c is not None
+    ]
+    if not cens_high and not cens_low:
+        return None  # nothing to fit
+
+    # Combined chronological list for EMA cache. Reuses the tau detected
+    # by the WLS path; censored obs participate in the EMA history so
+    # their filtered values reflect realistic thermal lag.
+    #
+    # ``detected_tau`` is keyed by model-input *name* (e.g. "input_0")
+    # while ``combined_filtered`` and ``raw_readings`` are keyed by
+    # *entity_id* (e.g. "sensor.test_input_0"). Build the
+    # name → entity_id mapping from ``m_inputs`` so we can index the
+    # cache correctly.
+    combined = sorted(
+        list(base_eligible) + cens_high + cens_low,
+        key=lambda o: o.timestamp,
+    )
+    name_to_entity: dict[str, str] = {}
+    for fi, m_input in enumerate(m_inputs):
+        eid = input_entity_ids[fi]
+        if not eid:  # pragma: no cover
+            # Defensive: config flow + active-feature gating in
+            # ``_solve_joint`` drop model inputs with empty entity_id
+            # before this function is reachable. Guard against future
+            # refactors that might forward unvalidated m_inputs.
+            continue
+        name_to_entity[m_input.get("name", eid)] = eid
+    combined_filtered: dict[str, list[float | None]] = {}
+    for name, tau in detected_tau.items():
+        eid = name_to_entity.get(name)
+        if eid is None:  # pragma: no cover
+            # Defensive: ``detected_tau`` keys are produced in
+            # ``weighted_least_squares`` from the same ``m_inputs`` and
+            # ``m_input.get("name", entity_id)`` lookup used here, so
+            # every name must resolve. Guard against future split-path
+            # refactors of the WLS / Tobit boundary.
+            continue
+        combined_filtered[eid] = _apply_retrospective_ema(
+            combined, eid, tau,
+        )
+
+    # Build active-feature design matrices for each subset.
+    def _row_for_obs(o: Observation, k: int) -> list[float] | None:
+        """Build [1, outdoor_delta, *active_input_values]. None if any
+        active input is unavailable for this obs (drops from Tobit fit).
+
+        Three None-return paths:
+        - ``outdoor_temp_c is None``: defensive; upstream filters
+          (cens_high, cens_low, base_eligible) require it not None.
+          Marked no-cover.
+        - ``entity_id not in raw_readings``: a censored obs may have
+          missing model-input readings (sensor outage during rails).
+          Real production path; tested below.
+        - ``val is None``: combined-EMA cache returns None for obs that
+          predate any reading for that entity. Real production path.
+        """
+        if o.outdoor_temp_c is None:  # pragma: no cover
+            return None
+        row: list[float] = [1.0, o.outdoor_temp_c - o.desired_c]
+        for fi in active_input_indices:
+            entity_id = input_entity_ids[fi]
+            if entity_id in combined_filtered:
+                val = combined_filtered[entity_id][k]
+            elif entity_id in o.raw_readings:
+                val = o.raw_readings[entity_id]
+            else:
+                return None
+            if val is None:
+                return None
+            if m_inputs[fi].get("delta_from_room"):
+                val = val - o.current_c
+            row.append(val)
+        return row
+
+    Xt_uncens: list[list[float]] = []
+    yt_uncens: list[float] = []
+    wt_uncens: list[float] = []
+    Xt_high: list[list[float]] = []
+    yt_high: list[float] = []
+    wt_high: list[float] = []
+    Xt_low: list[list[float]] = []
+    yt_low: list[float] = []
+    wt_low: list[float] = []
+    for k, o in enumerate(combined):
+        row = _row_for_obs(o, k)
+        if row is None:
+            continue
+        assert o.hp_setpoint is not None
+        y_val = o.hp_setpoint - o.current_c
+        w_val = 1.0 / (1.0 + (o.room_rate / room_rate_threshold) ** 2)
+        if o.clamped_reason == "saturated_high":
+            Xt_high.append(row)
+            yt_high.append(y_val)
+            wt_high.append(w_val)
+        elif o.clamped_reason == "saturated_low":
+            Xt_low.append(row)
+            yt_low.append(y_val)
+            wt_low.append(w_val)
+        else:
+            Xt_uncens.append(row)
+            yt_uncens.append(y_val)
+            wt_uncens.append(w_val)
+
+    if not Xt_uncens or (not Xt_high and not Xt_low):
+        return None  # all rows dropped by missing-entity guard above
+
+    # Warm-start β: take WLS active-feature β as initial guess.
+    n_tobit = 2 + len(active_input_indices)
+    beta_init_tobit = [beta_wls[0], beta_wls[1]]
+    for fi in active_input_indices:
+        beta_init_tobit.append(beta_wls[fi + 2])
+
+    # σ_init from uncensored residuals at WLS β (active features only).
+    resid_sq = 0.0
+    for k_idx, row in enumerate(Xt_uncens):
+        xb = sum(beta_init_tobit[j] * row[j] for j in range(n_tobit))
+        resid = yt_uncens[k_idx] - xb
+        resid_sq += resid * resid
+    dof = max(1, len(Xt_uncens) - n_tobit)
+    sigma_init = max(math.sqrt(resid_sq / dof), 1e-3)
+
+    tobit_result = _solve_joint_tobit(
+        X_uncens=Xt_uncens, y_uncens=yt_uncens, w_uncens=wt_uncens,
+        X_cens_high=Xt_high, y_cens_high=yt_high, w_cens_high=wt_high,
+        X_cens_low=Xt_low, y_cens_low=yt_low, w_cens_low=wt_low,
+        n_features=n_tobit,
+        beta_init=beta_init_tobit,
+        sigma_init=sigma_init,
+    )
+    if tobit_result is None:
+        return None
+
+    tobit_beta, tobit_std_err, _sigma = tobit_result
+    # Map Tobit's active-feature β back to the full β vector.
+    beta_out = list(beta_wls)  # copy WLS β; held positions stay
+    std_err_out = [float("inf")] * n
+    beta_out[0] = tobit_beta[0]
+    beta_out[1] = tobit_beta[1]
+    std_err_out[0] = tobit_std_err[0]
+    std_err_out[1] = tobit_std_err[1]
+    for jj, fi in enumerate(active_input_indices):
+        beta_out[fi + 2] = tobit_beta[2 + jj]
+        std_err_out[fi + 2] = tobit_std_err[2 + jj]
+    return beta_out, std_err_out
+
+
 def _log_phi(z: float) -> float:
     """log of standard normal pdf at z."""
     return -0.5 * math.log(2.0 * math.pi) - 0.5 * z * z
@@ -1980,9 +2211,17 @@ def _log_phi(z: float) -> float:
 def _log_Phi(z: float) -> float:
     """log of standard normal CDF at z, log-stable via math.erfc.
 
-    Φ(z) = 0.5 · erfc(-z/√2). For z very negative, erfc gives a tiny
-    positive number; log of that is a large negative number.
+    Φ(z) = 0.5 · erfc(-z/√2). For z very negative (z < -38 in double
+    precision), erfc underflows to exactly 0.0; we fall back to the
+    Mills-ratio asymptotic log Φ(z) ≈ -z²/2 - log(-z) - 0.5·log(2π)
+    (Abramowitz & Stegun §26.2.13). This guards Newton-Raphson during
+    aggressive steps in :func:`_solve_joint_tobit` from raising on
+    intermediate iterates that explore extreme z values.
     """
+    if z < -37.0:
+        # Asymptotic: log Φ(z) = log(φ(z)/(-z)) - O(1/z²)
+        #                     = -0.5·log(2π) - 0.5·z² - log(-z) + O(1/z²)
+        return -0.5 * math.log(2.0 * math.pi) - 0.5 * z * z - math.log(-z)
     return math.log(0.5 * math.erfc(-z / math.sqrt(2.0)))
 
 
@@ -2179,7 +2418,16 @@ def _solve_joint_tobit(
         # neg_H · Δθ = g  (so θ_new = θ + Δθ moves uphill on loglik)
         delta = _solve_symmetric(neg_H, g, n + 1)
         if delta is None:
-            return None  # Hessian not PD or singular
+            return None  # truly singular Hessian — design rank-deficient
+        # Verify Newton direction is uphill. neg_H is positive-definite at
+        # the optimum (loglik is concave there), but at warm-start points
+        # away from the optimum it can be indefinite — and then
+        # solve(neg_H, g) returns a downhill direction. Fall back to
+        # gradient (steepest ascent) when that happens; gradient is
+        # always uphill regardless of Hessian curvature.
+        g_dot_delta = sum(g[i] * delta[i] for i in range(n + 1))
+        if g_dot_delta <= 0.0:
+            delta = list(g)
         # Backtracking line search
         step = 1.0
         accepted = False

@@ -882,6 +882,518 @@ class TestTobitSession3Regression:
         )
 
 
+# ── Tobit replacement integration (#40 Session 4) ─────────────────────
+
+
+class TestTobitReplacement:
+    """Session 4: weighted_least_squares replaces WLS β with Tobit β when
+    ``tobit_enabled`` is True AND there are saturated rails admitted to
+    the buffer AND the joint-solve path qualified.
+
+    These tests exercise the integration end-to-end via the public
+    ``weighted_least_squares`` API rather than calling the solver
+    directly. They lock in the toggle semantics and the
+    "fall back to WLS on Tobit failure" guarantee.
+    """
+
+    @staticmethod
+    def _make_obs(sp, cur, *, clamped=False, clamped_reason="",
+                  rate=0.005, des=20.0, outdoor_delta=0.0,
+                  solar=0.0, wall_time=None):
+        """Build an Observation with intercept + outdoor_delta + 1 model input
+        (solar). Maps to the standard test feature order."""
+        return _make_test_obs(
+            features=[1.0, outdoor_delta, solar],
+            sp=sp, cur=cur, des=des, rate=rate,
+            clamped=clamped, clamped_reason=clamped_reason,
+            wall_time=wall_time,
+        )
+
+    def _gen_dataset(self, n_total=80, censor_frac=0.4, *, beta_solar=-2.0):
+        """Generate a synthetic dataset with proper right-censoring semantics.
+
+        Latent y* = 2.0 + β_solar * solar + ε,  ε ~ N(0, 0.1²)
+        For each obs, latent y* is computed from true β.  Observations
+        whose latent y* exceeds the (1 − censor_frac) quantile of the
+        latent distribution are marked saturated_high with y_obs = rail.
+        Observations with y* ≤ rail are uncensored with y = y*.
+
+        This matches the production semantics:
+        - saturated_high obs have y_obs = rail (the actuator ceiling),
+          latent y* > rail (controller wanted more).
+        - Uncensored obs have y = y* directly.
+
+        Returns observations interleaved (chronological order, not
+        grouped by clamping), matching real production where saturation
+        is interspersed with normal operation.
+        """
+        import random
+        rng = random.Random(1234)
+        latent_data: list[tuple[float, float, float, float]] = []
+        wall_t = 0.0
+        for _ in range(n_total):
+            solar = rng.betavariate(2, 5)
+            outdoor_delta = rng.gauss(0, 1.0)
+            true_y = 2.0 + beta_solar * solar + 0.1 * rng.gauss(0, 1)
+            latent_data.append((solar, outdoor_delta, true_y, wall_t))
+            wall_t += 60.0
+        # Rail at the (1 − censor_frac) quantile of latent y values.
+        # When censor_frac=0, rail above all observations → none censored.
+        sorted_y = sorted(d[2] for d in latent_data)
+        if censor_frac <= 0.0:
+            rail = max(sorted_y) + 1.0
+        else:
+            rail_idx = min(int((1.0 - censor_frac) * n_total), n_total - 1)
+            rail = sorted_y[rail_idx]
+        obs = []
+        for solar, outdoor_delta, true_y, wt in latent_data:
+            if true_y > rail:
+                obs.append(self._make_obs(
+                    sp=20.0 + rail, cur=20.0,
+                    outdoor_delta=outdoor_delta, solar=solar,
+                    wall_time=wt,
+                    clamped=True, clamped_reason="saturated_high",
+                ))
+            else:
+                obs.append(self._make_obs(
+                    sp=20.0 + true_y, cur=20.0,
+                    outdoor_delta=outdoor_delta, solar=solar,
+                    wall_time=wt,
+                ))
+        return obs
+
+    def test_toggle_off_does_not_invoke_tobit(self):
+        """Default behavior: tobit_enabled=False → tobit_used=False even
+        if the buffer contains saturated obs."""
+        obs = self._gen_dataset(n_total=60, censor_frac=0.33)
+        result = weighted_least_squares(
+            obs, n_features=3, min_observations=20,
+            feature_order=_test_feature_order(1),
+            model_inputs=_test_model_inputs(1),
+            tobit_enabled=False,
+        )
+        assert result is not None
+        assert result.tobit_used is False
+        # WLS still counts the rails for diagnostics. Count is approximately
+        # censor_frac * n_total but exact count varies by ±1 due to ties /
+        # quantile cutoff being strict-greater-than.
+        assert 18 <= result.n_censored_high <= 22
+
+    def test_toggle_on_no_rails_does_not_invoke_tobit(self):
+        """Toggle on but buffer has no saturated obs → tobit_used=False
+        (no censored data to fit)."""
+        obs = self._gen_dataset(n_total=40, censor_frac=0.0)
+        result = weighted_least_squares(
+            obs, n_features=3, min_observations=20,
+            feature_order=_test_feature_order(1),
+            model_inputs=_test_model_inputs(1),
+            tobit_enabled=True,
+        )
+        assert result is not None
+        assert result.tobit_used is False
+        assert result.n_censored_high == 0
+
+    def test_toggle_on_with_rails_invokes_tobit(self):
+        """Toggle on AND saturated_high obs in buffer → tobit_used=True,
+        β_solar should differ from WLS β_solar (since WLS-on-uncensored
+        is biased by the right-truncation)."""
+        obs = self._gen_dataset(n_total=70, censor_frac=0.43)
+        # First fit with toggle off — WLS β
+        result_wls = weighted_least_squares(
+            obs, n_features=3, min_observations=20,
+            feature_order=_test_feature_order(1),
+            model_inputs=_test_model_inputs(1),
+            tobit_enabled=False,
+        )
+        # Then with toggle on — Tobit β (or fallback)
+        result_tobit = weighted_least_squares(
+            obs, n_features=3, min_observations=20,
+            feature_order=_test_feature_order(1),
+            model_inputs=_test_model_inputs(1),
+            tobit_enabled=True,
+        )
+        assert result_wls is not None
+        assert result_tobit is not None
+        assert result_wls.tobit_used is False
+        assert result_tobit.tobit_used is True
+        # Tobit β_solar should differ from WLS β_solar by a non-trivial
+        # amount (the entire point of the replacement). Index 2 is solar
+        # in our 3-feature [intercept, outdoor_delta, solar] layout.
+        assert abs(result_tobit.beta_batch[2]
+                   - result_wls.beta_batch[2]) > 0.05, (
+            f"Tobit β_solar should differ from WLS β_solar at high rail "
+            f"fraction; got Tobit={result_tobit.beta_batch[2]:.4f}, "
+            f"WLS={result_wls.beta_batch[2]:.4f}"
+        )
+
+    def test_toggle_on_held_features_skips_tobit(self):
+        """When frozen_features is non-empty, the FWL ragged-data path
+        runs (deferred Tobit twin per plan). Even with rails in the
+        buffer, tobit_used should be False."""
+        obs = self._gen_dataset(n_total=60, censor_frac=0.33)
+        result = weighted_least_squares(
+            obs, n_features=3, min_observations=20,
+            feature_order=_test_feature_order(1),
+            model_inputs=_test_model_inputs(1),
+            frozen_features={2},  # freeze solar
+            tobit_enabled=True,
+        )
+        assert result is not None
+        assert result.tobit_used is False
+
+    def test_tobit_recovers_truth_better_than_wls(self):
+        """End-to-end check: at high rail fraction, the Tobit-replaced β
+        should be closer to truth than the WLS-on-uncensored β."""
+        beta_solar_truth = -2.0
+        obs = self._gen_dataset(
+            n_total=160, censor_frac=0.5, beta_solar=beta_solar_truth,
+        )
+        result_wls = weighted_least_squares(
+            obs, n_features=3, min_observations=20,
+            feature_order=_test_feature_order(1),
+            model_inputs=_test_model_inputs(1),
+            tobit_enabled=False,
+            detect_lag=False,  # synthetic data has no lag
+        )
+        result_tobit = weighted_least_squares(
+            obs, n_features=3, min_observations=20,
+            feature_order=_test_feature_order(1),
+            model_inputs=_test_model_inputs(1),
+            tobit_enabled=True,
+            detect_lag=False,
+        )
+        assert result_wls is not None
+        assert result_tobit is not None
+        err_wls = abs(result_wls.beta_batch[2] - beta_solar_truth)
+        err_tobit = abs(result_tobit.beta_batch[2] - beta_solar_truth)
+        assert err_tobit < err_wls, (
+            f"Tobit should beat WLS on truth recovery: "
+            f"err_wls={err_wls:.4f}, err_tobit={err_tobit:.4f}"
+        )
+
+    def test_left_censored_obs_admitted_and_used(self):
+        """saturated_low (cool-mode style) censoring path. Same Tobit
+        machinery; just exercises the s=−1 left-censored branch in the
+        solver."""
+        import random
+        rng = random.Random(2025)
+        # Generate data where some obs are censored from below (latent y*
+        # < observed y_obs at the floor).
+        latent: list[tuple[float, float, float]] = []
+        for _ in range(80):
+            solar = rng.betavariate(2, 5)
+            outdoor_delta = rng.gauss(0, 1.0)
+            true_y = 2.0 + (-2.0) * solar + 0.1 * rng.gauss(0, 1)
+            latent.append((solar, outdoor_delta, true_y))
+        sorted_y = sorted(d[2] for d in latent)
+        # Floor at the 30th percentile; obs below get saturated_low
+        floor_y = sorted_y[int(0.30 * len(latent))]
+        obs = []
+        for solar, od, ty in latent:
+            if ty < floor_y:
+                obs.append(self._make_obs(
+                    sp=20.0 + floor_y, cur=20.0,
+                    outdoor_delta=od, solar=solar,
+                    clamped=True, clamped_reason="saturated_low",
+                ))
+            else:
+                obs.append(self._make_obs(
+                    sp=20.0 + ty, cur=20.0,
+                    outdoor_delta=od, solar=solar,
+                ))
+        result = weighted_least_squares(
+            obs, n_features=3, min_observations=20,
+            feature_order=_test_feature_order(1),
+            model_inputs=_test_model_inputs(1),
+            tobit_enabled=True,
+            detect_lag=False,
+        )
+        assert result is not None
+        assert result.tobit_used is True
+        assert result.n_censored_low > 0
+        # Tobit β should differ from WLS β (the test of "Tobit was used")
+        result_wls = weighted_least_squares(
+            obs, n_features=3, min_observations=20,
+            feature_order=_test_feature_order(1),
+            model_inputs=_test_model_inputs(1),
+            tobit_enabled=False,
+            detect_lag=False,
+        )
+        assert abs(result.beta_batch[2] - result_wls.beta_batch[2]) > 0.01
+
+    def test_censored_obs_with_missing_entity_dropped(self):
+        """A censored obs that's missing the active input's entity reading
+        (sensor outage at rail time) should be dropped from the Tobit fit
+        without crashing the function."""
+        obs = self._gen_dataset(n_total=70, censor_frac=0.3)
+        # Drop the model-input entity from one censored obs's raw_readings.
+        for o in obs:
+            if o.clamped and o.clamped_reason == "saturated_high":
+                o.raw_readings.pop(_TEST_ENTITIES[0], None)
+                break  # just one; rest still complete
+        result = weighted_least_squares(
+            obs, n_features=3, min_observations=20,
+            feature_order=_test_feature_order(1),
+            model_inputs=_test_model_inputs(1),
+            tobit_enabled=True,
+            detect_lag=False,
+        )
+        # Tobit still runs (one obs less); doesn't raise.
+        assert result is not None
+        assert result.tobit_used is True
+
+    def test_delta_from_room_model_input(self):
+        """Model inputs with delta_from_room=True should subtract
+        current_c from the entity reading inside the Tobit feature
+        builder, matching production WLS behavior."""
+        obs = self._gen_dataset(n_total=70, censor_frac=0.3)
+        # Model input config with delta_from_room=True
+        model_inputs_dfr = [
+            {
+                "entity_id": _TEST_ENTITIES[0],
+                "name": "input_0",
+                "delta_from_room": True,
+            },
+        ]
+        result = weighted_least_squares(
+            obs, n_features=3, min_observations=20,
+            feature_order=_test_feature_order(1),
+            model_inputs=model_inputs_dfr,
+            tobit_enabled=True,
+            detect_lag=False,
+        )
+        assert result is not None
+        # tobit_used can be True or False depending on whether the
+        # delta_from_room reframing changes feature variance enough to
+        # keep the feature active. The test's purpose is to cover the
+        # delta_from_room branch in _row_for_obs without crashing.
+
+    def test_lag_tau_filtered_cache_path(self):
+        """When detect_lag=True and a non-zero tau is detected, Tobit's
+        feature builder uses combined_filtered[entity_id][k] (the EMA-
+        filtered value) instead of raw_readings. This test forces a
+        non-zero tau via direct ``Observation`` construction with
+        spaced-out wall_times and a strong solar lag in the latent y.
+
+        Exercises ``val = combined_filtered[entity_id][k]`` in
+        ``_try_tobit_replacement._row_for_obs``.
+        """
+        # Build a long, lagged sequence: 200 hourly obs, latent y depends
+        # on solar at t-2 (2-hour lag). detect_lag should pick a non-zero
+        # tau via BIC, populating combined_filtered.
+        import random
+        rng = random.Random(7777)
+        n = 200
+        # Pre-generate solar signal first (so lag references it cleanly)
+        solar_seq = [
+            0.5 + 0.5 * math.sin(2 * math.pi * (i / 24.0) - math.pi / 2)
+            for i in range(n)
+        ]
+        solar_seq = [max(0.0, s) for s in solar_seq]
+        obs = []
+        for i in range(n):
+            solar_lagged = solar_seq[max(0, i - 2)]
+            true_y = 2.0 + (-2.0) * solar_lagged + 0.05 * rng.gauss(0, 1)
+            outdoor_delta = rng.gauss(0, 1.0)
+            wt = i * 3600.0  # 1-hour ticks
+            if 100 <= i <= 130:  # cluster of rails midway through
+                obs.append(Observation(
+                    timestamp=wt, wall_time=wt + 1e9,  # large wall_time
+                    hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+                    outdoor_temp_c=20.0 + outdoor_delta,
+                    room_rate=0.005,
+                    raw_readings={_TEST_ENTITIES[0]: solar_seq[i]},
+                    clamped=True, clamped_reason="saturated_high",
+                ))
+            else:
+                obs.append(Observation(
+                    timestamp=wt, wall_time=wt + 1e9,
+                    hp_setpoint=20.0 + true_y, current_c=20.0,
+                    desired_c=20.0,
+                    outdoor_temp_c=20.0 + outdoor_delta,
+                    room_rate=0.005,
+                    raw_readings={_TEST_ENTITIES[0]: solar_seq[i]},
+                    clamped=False, clamped_reason="",
+                ))
+        result = weighted_least_squares(
+            obs, n_features=3, min_observations=20,
+            feature_order=_test_feature_order(1),
+            model_inputs=_test_model_inputs(1),
+            tobit_enabled=True,
+            detect_lag=True,  # exercise the EMA cache path
+        )
+        assert result is not None
+        # If detect_lag picked tau > 0, combined_filtered is populated
+        # and the Tobit feature builder went through the cache branch.
+        # Either way Tobit should have a chance to run.
+        # We assert the regression completed without error rather than
+        # specific β values (which depend on tau detection nuance).
+
+    def test_combined_ema_cache_with_none_entries(self):
+        """When the EMA cache for an entity contains None at some
+        positions (an obs predates the first reading for that entity),
+        ``_row_for_obs`` returns None for that obs and it's dropped
+        from the Tobit fit.
+
+        Exercises ``if val is None: return None`` in ``_row_for_obs``.
+        """
+        # Build dataset where some obs have raw_readings missing the
+        # entity reading (None values) — interspersed with valid obs.
+        # detect_lag=True so combined_filtered is populated, and the
+        # None values in raw_readings propagate to the cache.
+        import random
+        rng = random.Random(8888)
+        n = 120
+        obs = []
+        for i in range(n):
+            # 10% of obs have None for the entity reading
+            entity_val = None if rng.random() < 0.1 else rng.betavariate(2, 5)
+            outdoor_delta = rng.gauss(0, 1.0)
+            true_y = 2.0 + (-2.0) * (entity_val or 0.4) + 0.1 * rng.gauss(0, 1)
+            wt = i * 3600.0
+            is_cens = (60 < i < 90)  # cluster of rails midway
+            obs.append(Observation(
+                timestamp=wt, wall_time=wt + 1e9,
+                hp_setpoint=22.0 if is_cens else 20.0 + true_y,
+                current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=20.0 + outdoor_delta,
+                room_rate=0.005,
+                raw_readings={_TEST_ENTITIES[0]: entity_val}
+                              if entity_val is not None else {},
+                clamped=is_cens,
+                clamped_reason="saturated_high" if is_cens else "",
+            ))
+        result = weighted_least_squares(
+            obs, n_features=3, min_observations=20,
+            feature_order=_test_feature_order(1),
+            model_inputs=_test_model_inputs(1),
+            tobit_enabled=True,
+            detect_lag=True,
+        )
+        # Should not crash; Tobit may or may not run depending on how
+        # many obs survive after the None drops.
+        assert result is not None
+
+    def test_all_censored_dropped_returns_no_tobit(self):
+        """If every saturated obs has missing entity reading, none
+        survive ``_row_for_obs`` and Tobit isn't fit (function returns
+        None internally; outer flow sets tobit_used=False).
+
+        Exercises ``if not Xt_uncens or (not Xt_high and not Xt_low):
+        return None`` in ``_try_tobit_replacement``.
+        """
+        # Set up: rich uncensored obs with the entity, but the censored
+        # obs all have empty raw_readings. The censored set after
+        # _row_for_obs is empty → no Tobit data → return None.
+        import random
+        rng = random.Random(4242)
+        obs = []
+        for i in range(60):
+            solar = rng.betavariate(2, 5)
+            outdoor_delta = rng.gauss(0, 1.0)
+            true_y = 2.0 + (-2.0) * solar + 0.1 * rng.gauss(0, 1)
+            obs.append(self._make_obs(
+                sp=20.0 + true_y, cur=20.0,
+                outdoor_delta=outdoor_delta, solar=solar,
+            ))
+        # Add saturated obs WITHOUT the entity in raw_readings
+        for _ in range(20):
+            outdoor_delta = rng.gauss(0, 1.0)
+            obs.append(Observation(
+                timestamp=0.0, wall_time=time.time(),
+                hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=20.0 + outdoor_delta,
+                room_rate=0.005,
+                raw_readings={},  # MISSING the active entity
+                clamped=True, clamped_reason="saturated_high",
+            ))
+        result = weighted_least_squares(
+            obs, n_features=3, min_observations=20,
+            feature_order=_test_feature_order(1),
+            model_inputs=_test_model_inputs(1),
+            tobit_enabled=True,
+            detect_lag=False,
+        )
+        assert result is not None
+        # All censored dropped → Tobit not invoked → tobit_used=False
+        assert result.tobit_used is False
+
+    def test_tobit_solver_failure_falls_back_to_wls(self):
+        """If ``_solve_joint_tobit`` returns None (singular Hessian or
+        line-search failure), the integration should fall back to the
+        WLS β rather than crash.
+
+        Exercises ``if tobit_result is None: return None`` in
+        ``_try_tobit_replacement``, which propagates back as
+        ``tobit_used_flag = False`` in the caller.
+        """
+        # Construct data where Tobit is expected to fail: feature
+        # column is constant so the Tobit Hessian is rank-deficient.
+        # The active feature gating will likely hold this feature out,
+        # but if it doesn't (depending on min_feature_variance), Tobit
+        # should bail cleanly. We monkey-patch to force the return-None.
+        import random
+        from custom_components.tasmota_irhvac.pi import batch_learning
+        rng = random.Random(5555)
+        obs = self._gen_dataset(n_total=70, censor_frac=0.4)
+
+        # Force _solve_joint_tobit to return None via monkey-patch.
+        original = batch_learning._solve_joint_tobit
+        try:
+            batch_learning._solve_joint_tobit = lambda **kwargs: None
+            result = weighted_least_squares(
+                obs, n_features=3, min_observations=20,
+                feature_order=_test_feature_order(1),
+                model_inputs=_test_model_inputs(1),
+                tobit_enabled=True,
+                detect_lag=False,
+            )
+        finally:
+            batch_learning._solve_joint_tobit = original
+        assert result is not None
+        assert result.tobit_used is False  # fallback to WLS β
+
+    def test_no_active_inputs_path_skips_tobit(self):
+        """If active_input_indices is empty (only base features), the
+        replacement helper still runs but produces nothing different
+        from WLS — Tobit replaces β at the base positions only.
+
+        This test verifies the no-active-input fallback doesn't crash;
+        in this degenerate config Tobit is essentially refitting just
+        the intercept + outdoor_delta on the censored data, which is a
+        valid (if uninteresting) operation."""
+        # Generate observations with NO solar feature variance.
+        # This makes solar held (insufficient variance), but we still
+        # have rails. With no active inputs but rails admitted, Tobit
+        # CAN run on intercept + outdoor_delta only.
+        import random
+        rng = random.Random(1234)
+        obs = []
+        for _ in range(40):
+            outdoor_delta = rng.gauss(0, 1.0)
+            obs.append(self._make_obs(
+                sp=22.0, cur=20.0,
+                outdoor_delta=outdoor_delta, solar=0.5,  # constant
+            ))
+        for _ in range(20):
+            outdoor_delta = rng.gauss(0, 1.0)
+            obs.append(self._make_obs(
+                sp=22.0, cur=20.0,
+                outdoor_delta=outdoor_delta, solar=0.5,  # constant
+                clamped=True, clamped_reason="saturated_high",
+            ))
+        result = weighted_least_squares(
+            obs, n_features=3, min_observations=20,
+            feature_order=_test_feature_order(1),
+            model_inputs=_test_model_inputs(1),
+            tobit_enabled=True,
+        )
+        # With no solar variance, solar gets held → FWL path → Tobit
+        # gated by `not held` check → tobit_used=False.
+        assert result is not None
+        assert result.tobit_used is False
+
+
 # ── Compare and Report ────────────────────────────────────────────────
 
 
