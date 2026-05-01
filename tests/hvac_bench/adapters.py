@@ -31,7 +31,13 @@ class TasmotaPIAdapter:
                 Default (0.0, 0.0) = no uncertain zone (perfect sensor).
                 Use None for production defaults (±2.0°C).
         """
-        config = make_pi_config(config_overrides or {})
+        overrides = dict(config_overrides or {})
+        # Pull out test-only seed overrides before make_pi_config (they are
+        # not real config keys — production uses fixed DEFAULT_TAU_*_SEED).
+        tau_fast_seed = overrides.pop("tau_fast_seed", None)
+        tau_slow_seed = overrides.pop("tau_slow_seed", None)
+
+        config = make_pi_config(overrides)
         self._config = config
         self._entity = _FakeBenchEntity(config,
                                         head_calibration_bounds=head_calibration_bounds)
@@ -39,6 +45,39 @@ class TasmotaPIAdapter:
         self._loop = asyncio.new_event_loop()
         self._sim_clock = 0.0
         self._mode = "heat"
+
+        if tau_fast_seed is not None or tau_slow_seed is not None:
+            self._inject_plant_seeds(tau_fast_seed, tau_slow_seed)
+
+    def _inject_plant_seeds(self, tau_fast_seed: float | None,
+                            tau_slow_seed: float | None) -> None:
+        """Override the plant identifier's τ seeds for per-profile tuning.
+
+        Production uses fixed DEFAULT_TAU_FAST_SEED / DEFAULT_TAU_SLOW_SEED
+        (pre44 maturity gate). Tests that want to validate gain scheduling
+        across profiles need to inject profile-derived seeds; otherwise
+        every profile gets identical Kp/Ki and the test premise collapses.
+        """
+        from custom_components.tasmota_irhvac.pi.plant_model import PlantEstimate
+
+        plant_id = self._pi._plant_id
+        if tau_fast_seed is not None:
+            plant_id._tau_fast_seed = float(tau_fast_seed)
+        if tau_slow_seed is not None:
+            plant_id._tau_slow_seed = float(tau_slow_seed)
+
+        plant_id._plant = PlantEstimate.from_seeds(
+            tau_fast_seed=plant_id._tau_fast_seed,
+            tau_slow_seed=plant_id._tau_slow_seed,
+            response_lag=plant_id._response_lag,
+        )
+
+        if plant_id.enabled:
+            gains = plant_id.compute_gains()
+            self._pi._pi_kp = gains.kp
+            self._pi._pi_ki = gains.ki
+            if self._pi._smith is not None:
+                self._pi._smith.update_params(tau=gains.tau_fast, lag=gains.lag)
 
     def tick(self, room_temp_c, outdoor_temp_c, dt_seconds,
              model_inputs=None):

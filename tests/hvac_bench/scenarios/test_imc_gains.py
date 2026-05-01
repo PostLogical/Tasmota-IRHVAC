@@ -36,16 +36,25 @@ def _make_flat_controller(profile: HouseProfile):
 def _make_imc_controller(profile: HouseProfile):
     """Controller with IMC gains derived from profile τ.
 
+    Per-profile τ seeds are injected via the adapter (production uses
+    fixed DEFAULT_TAU_*_SEED with a maturity gate; tests need to bypass
+    that to validate gain scheduling across profiles).
+
     Smith predictor is disabled: these tests validate gain scheduling
     in isolation (hp_lag=0 in the thermal model, so there is no real
     delay for Smith to compensate).
     """
     seed = profile.true_seed
+    tau = float(profile.tau_minutes)  # 2R2C fast_tau — what step-response τ measures
     ctrl = TasmotaPIAdapter({
         "pi_outdoor_seed_heat": seed,
         "pi_outdoor_seed_cool": seed,
-        "pi_tau_estimate": float(profile.tau_minutes),
+        "pi_tau_estimate": tau,  # >0 enables IMC; numeric value unused since pre44
         "pi_response_lag": 15.0,
+        "tau_fast_seed": tau,
+        "tau_slow_seed": tau,  # bench profiles' analytic slow_tau is unrealistic;
+                               # use fast_tau as the IMC formula's τ (matches the
+                               # pre-2R2C test premise: Kp = τ/(λ+L))
     })
     ctrl._pi._smith = None  # IMC-only: no Smith for lag-free thermal model
     return ctrl

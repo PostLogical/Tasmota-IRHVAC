@@ -513,8 +513,14 @@ class TestAnomalyRobustness:
             f"Controllable comfort only {result.ctrl_comfort_pct:.1f}%"
         )
 
-    @pytest.mark.parametrize("tick_minutes", [1.0, 5.0, 15.0],
-                             ids=["1min", "5min", "15min"])
+    @pytest.mark.parametrize("tick_minutes", [
+        # 1-min ticks ⇒ 14 days × 1440 ticks = 20,160 PI iterations + full
+        # RLS/WLS/buffer per tick; the run takes minutes, so it's a design
+        # study (long-horizon coverage check), not regression.
+        pytest.param(1.0, marks=pytest.mark.design, id="1min"),
+        pytest.param(5.0, id="5min"),
+        pytest.param(15.0, id="15min"),
+    ])
     def test_anomaly_coverage_at_tick_rates(self, tick_minutes):
         """Tick-rate sweep: outdoor β stable across observation cadences.
 

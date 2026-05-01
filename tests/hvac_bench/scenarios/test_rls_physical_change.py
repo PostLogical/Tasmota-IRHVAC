@@ -17,6 +17,8 @@ import math
 import random
 from dataclasses import dataclass
 
+import pytest
+
 from tests.hvac_bench.full_stack_runner import (
     FullStackConfig, FullStackResult, ModelInputSpec,
     diurnal_outdoor, diurnal_solar, run_full_stack,
@@ -332,8 +334,14 @@ def _run_physical_change_comparison() -> PhysicalChangeResult:
     )
 
 
+@pytest.mark.design
 class TestPhysicalChange:
-    """Test online RLS value for detecting real physical changes."""
+    """Test online RLS value for detecting real physical changes.
+
+    Marked ``design``: 90-day "RLS on vs off" comparison is a verdict-in-memo
+    study (see project_online_rls_verdict.md), not routine regression.
+    Run on-demand when revisiting the online-RLS decision.
+    """
 
     def test_physical_change_adaptation(self):
         """After window replacement, does online RLS adapt faster?"""

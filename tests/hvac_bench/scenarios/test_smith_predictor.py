@@ -46,25 +46,42 @@ def _make_imc_controller(profile: HouseProfile):
 
 
 def _make_smith_controller(profile: HouseProfile):
-    """IMC + Smith predictor controller."""
+    """IMC + Smith predictor controller, profile-tuned.
+
+    Injects τ seeds matching the profile so the Smith internal FOPDT model
+    is calibrated to the plant.  Production uses fixed DEFAULT_TAU_*_SEED
+    seeds (pre44 maturity gate) — the test bypasses that gate to validate
+    Smith on a correctly-tuned model.
+    """
     seed = profile.true_seed
+    tau = float(profile.tau_minutes)
     return TasmotaPIAdapter({
         "pi_outdoor_seed_heat": seed,
         "pi_outdoor_seed_cool": seed,
-        "pi_tau_estimate": float(profile.tau_minutes),
+        "pi_tau_estimate": tau,
         "pi_response_lag": HP_LAG,
+        "tau_fast_seed": tau,
+        "tau_slow_seed": tau,
     })
 
 
 def _make_smith_mismatched(profile: HouseProfile, tau_factor: float = 1.0,
                            lag_factor: float = 1.0):
-    """Smith controller with intentionally mismatched model parameters."""
+    """Smith controller with intentionally mismatched model parameters.
+
+    The mismatch is applied to BOTH the τ seed (which calibrates Smith's
+    internal model) and pi_response_lag.  Without seeding, every profile
+    would use DEFAULT_TAU_FAST_SEED=20 regardless of tau_factor.
+    """
     seed = profile.true_seed
+    tau = float(profile.tau_minutes) * tau_factor
     return TasmotaPIAdapter({
         "pi_outdoor_seed_heat": seed,
         "pi_outdoor_seed_cool": seed,
-        "pi_tau_estimate": float(profile.tau_minutes) * tau_factor,
+        "pi_tau_estimate": tau,
         "pi_response_lag": HP_LAG * lag_factor,
+        "tau_fast_seed": tau,
+        "tau_slow_seed": tau,
     })
 
 
