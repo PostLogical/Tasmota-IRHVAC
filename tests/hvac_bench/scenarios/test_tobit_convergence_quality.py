@@ -1,26 +1,34 @@
-"""Tobit convergence-quality A/B — #40 Session 0b.
+"""Tobit convergence-quality A/B — #40 Sessions 0+3.
 
 Question this answers: would Tobit materially improve convergence
 quality (speed + asymptotic accuracy + std_err + recovery) versus the
-current rails-dropped WLS path? If yes, proceed to Sessions 1-5. If
-no, abandon prompt #40.
+current rails-dropped WLS path?
 
 Method: synthetic regression data with known β_truth and σ_truth, with
 right-censoring applied to a controlled fraction of the latent y values
 (MNAR truncation matching the operating-rails pattern). Process data
 incrementally in batches; per-batch, fit both rails-dropped WLS and
-prototype Tobit on the accumulated buffer. Compare β trajectories.
+Tobit on the accumulated buffer. Compare β trajectories.
 
 Why synthetic, not full-stack: a full-stack sim adds confounds
 (retrospective EMA / lag-tau detection in production WLS, controller
 dynamics, imperfect rail-fraction targeting) that obscure the pure
-solver A/B question we want to answer in Session 0. The full-stack
-real-weather validation happens in Session 5 of #40 with the production
-Tobit.
+solver A/B question. The full-stack real-weather validation happens in
+Session 5 of #40 against the same production solver.
+
+Solver versions:
+- **Session 0 (commit d98e2db)**: ran against the disposable BFGS
+  prototype in ``_tobit_prototype.py``. BFGS-approximated ``hess_inv``
+  was too noisy to measure the std_err improvement Tobit should give.
+- **Session 3 (this file)**: switched to the production
+  ``_solve_joint_tobit`` in ``batch_learning.py``. Newton-Raphson with
+  the analytical Tobit Hessian; ``std_err`` from observed Fisher
+  information at the optimum (Amemiya 1984 §10.4). This is what
+  finally makes the std_err A/B meaningful.
 
 Per ``feedback_no_design_docs_in_repo.md``: this is a diagnostic
-*report*, not a regression test. No assertions. Run once during Session
-0; persist findings in ``project_tobit_session0_finding.md``.
+*report*, not a regression test. No assertions. Re-runnable as needed.
+Findings persisted in ``project_tobit_session0_finding.md``.
 """
 
 from __future__ import annotations
@@ -31,7 +39,9 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from tests.hvac_bench.scenarios._tobit_prototype import solve_tobit_joint
+from custom_components.tasmota_irhvac.pi.batch_learning import (
+    _solve_joint_tobit,
+)
 
 
 # Synthetic ground truth.
@@ -145,29 +155,58 @@ def _solve_pair(
     np.ndarray, np.ndarray, float,  # WLS
     np.ndarray, np.ndarray, float,  # Tobit
 ]:
-    """Solve both WLS-on-uncensored and Tobit-on-all from the buffer."""
+    """Solve both WLS-on-uncensored and Tobit-on-all from the buffer.
+
+    Calls the production ``_solve_joint_tobit`` from batch_learning.py
+    (Session 3+) — Newton-Raphson on the analytical Tobit Hessian, with
+    std_err from observed Fisher information at the optimum.
+    """
     w_buf = np.ones(X_buf.shape[0])
     u = censor_buf == 0
-    if int(u.sum()) >= X_buf.shape[1] + 1:
+    n = X_buf.shape[1]
+    if int(u.sum()) >= n + 1:
         beta_wls, se_wls, sigma_wls = _solve_wls(X_buf[u], y_buf[u], w_buf[u])
     else:
-        beta_wls = np.full(X_buf.shape[1], np.nan)
-        se_wls = np.full(X_buf.shape[1], np.nan)
+        beta_wls = np.full(n, np.nan)
+        se_wls = np.full(n, np.nan)
         sigma_wls = float("nan")
-    if X_buf.shape[0] >= X_buf.shape[1] + 1:
-        try:
-            beta_tobit, se_tobit, sigma_tobit = solve_tobit_joint(
-                X_buf, y_buf, w_buf, censor_buf,
-                beta_init=(beta_wls if not np.any(np.isnan(beta_wls))
-                           else None),
-            )
-        except Exception:
-            beta_tobit = np.full(X_buf.shape[1], np.nan)
-            se_tobit = np.full(X_buf.shape[1], np.nan)
+    if X_buf.shape[0] >= n + 1:
+        # Partition into uncens / cens_high / cens_low for production API.
+        uc = censor_buf == 0
+        ch = censor_buf == 1
+        cl = censor_buf == -1
+        beta_init = (
+            beta_wls.tolist() if not np.any(np.isnan(beta_wls))
+            else [0.0] * n
+        )
+        sigma_init = (
+            sigma_wls if not math.isnan(sigma_wls) else 1.0
+        )
+        result = _solve_joint_tobit(
+            X_uncens=X_buf[uc].tolist(),
+            y_uncens=y_buf[uc].tolist(),
+            w_uncens=w_buf[uc].tolist(),
+            X_cens_high=X_buf[ch].tolist(),
+            y_cens_high=y_buf[ch].tolist(),
+            w_cens_high=w_buf[ch].tolist(),
+            X_cens_low=X_buf[cl].tolist(),
+            y_cens_low=y_buf[cl].tolist(),
+            w_cens_low=w_buf[cl].tolist(),
+            n_features=n,
+            beta_init=beta_init,
+            sigma_init=sigma_init,
+        )
+        if result is not None:
+            beta_tobit = np.asarray(result[0])
+            se_tobit = np.asarray(result[1])
+            sigma_tobit = result[2]
+        else:
+            beta_tobit = np.full(n, np.nan)
+            se_tobit = np.full(n, np.nan)
             sigma_tobit = float("nan")
     else:
-        beta_tobit = np.full(X_buf.shape[1], np.nan)
-        se_tobit = np.full(X_buf.shape[1], np.nan)
+        beta_tobit = np.full(n, np.nan)
+        se_tobit = np.full(n, np.nan)
         sigma_tobit = float("nan")
     return (
         beta_wls, se_wls, sigma_wls,

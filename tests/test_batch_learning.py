@@ -771,6 +771,117 @@ class TestSolveJointTobit:
         assert result is None
 
 
+class TestTobitSession3Regression:
+    """Lock in Session 3's empirical finding: at 60% censoring, Tobit
+    delivers ≥50% total-RMSE reduction vs dropped-WLS across multiple
+    seeds.
+
+    Total RMSE = √(bias² + empirical_SD²) computed across N seeds.
+    Replaces the originally-planned std_err-ratio criterion — Session 3
+    showed that WLS's claimed std_err is honest about its biased-estimate
+    variance, while Tobit's is conservative under high censor fractions
+    (Amemiya 1985 §10). The right A/B metric is total estimator error,
+    not the std_err ratio.
+
+    See ``project_tobit_session0_finding.md`` for the full empirical
+    decomposition that motivates this regression.
+    """
+
+    @staticmethod
+    def _gen(seed, n=200, sigma=0.3):
+        return TestSolveJointTobit._gen_synthetic(seed, n, sigma)
+
+    @staticmethod
+    def _wls(X, y, w):
+        return TestSolveJointTobit._wls(X, y, w)
+
+    def _fit_one_seed(self, seed):
+        """Run one (WLS-on-uncensored, Tobit-on-all) fit at 60% rails."""
+        X, y, beta_true = self._gen(seed, n=300)
+        n = len(X)
+        sorted_y = sorted(y)
+        threshold = sorted_y[int(0.4 * n)]  # bottom 40% = uncensored
+        X_uncens, y_uncens, w_uncens = [], [], []
+        X_cens, y_cens, w_cens = [], [], []
+        for i in range(n):
+            if y[i] > threshold:
+                X_cens.append(X[i])
+                y_cens.append(threshold)
+                w_cens.append(1.0)
+            else:
+                X_uncens.append(X[i])
+                y_uncens.append(y[i])
+                w_uncens.append(1.0)
+        beta_wls = self._wls(X_uncens, y_uncens, w_uncens)
+        result = _solve_joint_tobit(
+            X_uncens=X_uncens, y_uncens=y_uncens, w_uncens=w_uncens,
+            X_cens_high=X_cens, y_cens_high=y_cens, w_cens_high=w_cens,
+            X_cens_low=[], y_cens_low=[], w_cens_low=[],
+            n_features=3,
+            beta_init=beta_wls,
+            sigma_init=0.3,
+        )
+        assert result is not None, f"Tobit failed to converge at seed={seed}"
+        beta_tobit, _, _ = result
+        return beta_wls, beta_tobit, beta_true
+
+    def test_total_rmse_reduction_at_high_censoring(self):
+        """At 60% right-censored, Tobit total RMSE < 0.5 × WLS total RMSE.
+
+        Total RMSE for one β coefficient = √(bias² + var) where bias is
+        mean across seeds and var is empirical variance across seeds.
+        We focus on the solar β (index 2) — the regressor most affected
+        by censoring in the synthetic distribution.
+        """
+        N_SEEDS = 10
+        beta_solar_wls = []
+        beta_solar_tobit = []
+        beta_true = None
+        for seed in range(N_SEEDS):
+            bw, bt, btrue = self._fit_one_seed(seed)
+            beta_solar_wls.append(bw[2])
+            beta_solar_tobit.append(bt[2])
+            beta_true = btrue
+        truth = beta_true[2]
+        # Decompose error into bias + variance for both methods
+        bias_wls = abs(sum(beta_solar_wls) / N_SEEDS - truth)
+        bias_tobit = abs(sum(beta_solar_tobit) / N_SEEDS - truth)
+        # Population variance (Bessel correction not needed for this comparison)
+        mean_wls = sum(beta_solar_wls) / N_SEEDS
+        mean_tobit = sum(beta_solar_tobit) / N_SEEDS
+        var_wls = sum((b - mean_wls) ** 2 for b in beta_solar_wls) / N_SEEDS
+        var_tobit = sum((b - mean_tobit) ** 2 for b in beta_solar_tobit) / N_SEEDS
+        rmse_wls = math.sqrt(bias_wls ** 2 + var_wls)
+        rmse_tobit = math.sqrt(bias_tobit ** 2 + var_tobit)
+        assert rmse_tobit < 0.5 * rmse_wls, (
+            f"Total RMSE should drop ≥50%: "
+            f"rmse_wls={rmse_wls:.4f} (bias={bias_wls:.4f}, sd={math.sqrt(var_wls):.4f}); "
+            f"rmse_tobit={rmse_tobit:.4f} (bias={bias_tobit:.4f}, sd={math.sqrt(var_tobit):.4f})"
+        )
+
+    def test_bias_dominates_wls_error(self):
+        """Diagnostic: at high censoring, WLS error is dominated by bias,
+        not variance. Locks in the Session 3 finding so future changes
+        don't accidentally rebalance this in a way that masks the symptom.
+        """
+        N_SEEDS = 10
+        beta_solar_wls = []
+        beta_true = None
+        for seed in range(N_SEEDS):
+            bw, _, btrue = self._fit_one_seed(seed)
+            beta_solar_wls.append(bw[2])
+            beta_true = btrue
+        truth = beta_true[2]
+        mean_wls = sum(beta_solar_wls) / N_SEEDS
+        bias = abs(mean_wls - truth)
+        var = sum((b - mean_wls) ** 2 for b in beta_solar_wls) / N_SEEDS
+        sd = math.sqrt(var)
+        assert bias > 3.0 * sd, (
+            f"WLS bias should dominate variance: bias={bias:.4f}, sd={sd:.4f}, "
+            f"ratio={bias / max(sd, 1e-9):.1f} (expected >3)"
+        )
+
+
 # ── Compare and Report ────────────────────────────────────────────────
 
 
