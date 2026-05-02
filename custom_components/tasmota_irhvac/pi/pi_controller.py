@@ -1034,20 +1034,12 @@ class PIController:
             kappa = float("inf")
             self._cached_kappa = None
 
-        # Step cap: prevents batch WLS from making wild jumps that online
-        # RLS would have to recover from.  When online RLS is off, batch is
-        # the sole estimator so the cap just slows convergence — disable it.
-        if getattr(self, "_rls_online_learning", True):
-            per_feature_caps = self._build_per_feature_step_caps(
-                result, buffer, n_eligible, kappa,
-            )
-            step_cap = 1.0
-        else:
-            per_feature_caps = None
-            step_cap = float("inf")
+        # Batch is the sole coefficient estimator (online RLS removed),
+        # so the per-feature step cap is unnecessary — it only existed to
+        # keep batch jumps small enough for online tracking to recover from.
         compute_blended_update(
-            result, prior_std=1.0, max_step=step_cap,
-            max_step_per_feature=per_feature_caps,
+            result, prior_std=1.0, max_step=float("inf"),
+            max_step_per_feature=None,
         )
 
         # κ gate: reject batch recommendation when condition number indicates
@@ -3842,23 +3834,19 @@ class PIController:
         observed_offset: float,
         label: str,
     ) -> float:
-        """Update RLS model with observation and log. Returns residual."""
-        if not getattr(self, '_rls_online_learning', True):
-            return observed_offset - rls.predict(x)
-        beta_before = list(rls.beta)
-        residual = rls.update(x, observed_offset)
+        """Compute prediction residual and log. Returns residual.
+
+        Online RLS coefficient updates were removed per the bench-validated
+        verdict (project_online_rls_verdict.md): batch WLS is the sole
+        coefficient estimator.  This function now only computes the residual
+        for logging/CUSUM purposes.
+        """
+        residual = observed_offset - rls.predict(x)
         _LOGGER.debug(
             "%s: observed=%.2f predicted=%.2f residual=%.2f obs_count=%d dT_dt=%.4f",
             label, observed_offset, observed_offset - residual, residual,
             rls.observation_count, self._room_temp_rate,
         )
-        for idx in range(len(rls.beta)):
-            if beta_before[idx] != 0 and abs(rls.beta[idx] - beta_before[idx]) / abs(beta_before[idx]) > 0.1:
-                _LOGGER.info(
-                    "RLS coefficient[%d] changed %.3f -> %.3f (%.0f%%)",
-                    idx, beta_before[idx], rls.beta[idx],
-                    100 * (rls.beta[idx] - beta_before[idx]) / beta_before[idx],
-                )
         return residual
 
     def _log_learning_blocked(

@@ -6,7 +6,7 @@ the removal must establish.  They serve as TDD scaffolding for phases 1-4.
 T1 — Legacy stored data with ``rls_online_enabled`` loads gracefully
      (regression guard; passes today, must keep passing after Phase 4).
 T2 — ``RLSModel.update`` is not invoked by ``_rls_learn_observation``
-     (Phase 2 contract; FAILS today, passes after Phase 2 removes the call).
+     (Phase 2 contract; passes after Phase 2 removed the call).
 T3 — FF prediction works with online disabled
      (regression guard; passes today, must keep passing through removal).
 T4 — Bench ``production_pi`` reference scenarios pass with online OFF
@@ -57,23 +57,14 @@ class TestT1LegacyStoredDataLoads:
 class TestT2NoOnlineUpdateFromLearnObservation:
     """Phase 2 contract: ``_rls_learn_observation`` must not invoke ``RLSModel.update``.
 
-    Today this test FAILS because ``_rls_learn_observation`` calls
-    ``rls.update(x, observed_offset)`` at pi_controller.py:3849.  After Phase 2
-    removes that call site, the test passes.
-
     The test calls ``_rls_learn_observation`` directly so it does not depend
-    on the per-tick gating chain.
+    on the per-tick gating chain.  A regression that re-introduces an online
+    update path here will trip this immediately.
     """
 
-    @pytest.mark.xfail(
-        reason="Phase 2 removes the rls.update() call site; passes after Phase 2.",
-        strict=True,
-    )
     def test_learn_observation_does_not_call_rls_update(self):
         entity = FakePIEntity(make_pi_config())
         pi = entity._pi
-        # Ensure the test seam is True so the function would call update today.
-        pi._rls_online_learning = True
 
         update_calls: list[tuple[list[float], float]] = []
         original_update = RLSModel.update

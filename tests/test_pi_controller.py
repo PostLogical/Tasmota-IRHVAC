@@ -535,49 +535,6 @@ class TestFeedforward:
         assert pi._rls_heat.observation_count == old_obs_count
         assert pi._disturbance_suppress_active is True
 
-    @pytest.mark.asyncio
-    async def test_model_input_suppress_learning_allows_when_inactive(self, pi_entity):
-        """Model input with suppress_learning=True allows RLS when inactive.
-        Online RLS defaults to off per the verdict; this test explicitly
-        enables it to exercise the obs-count increment path that proves
-        suppression isn't blocking learning."""
-        pi = pi_entity._pi
-        pi._pi_rls_online_enabled = True
-        pi._model_inputs = [{
-            "name": "pellet_stove",
-            "entity_id": "sensor.stove",
-            "seed_heat": 3.0,
-            "seed_cool": 0.0,
-            "suppress_learning": True,
-        }]
-        pi._inputs.values = [0.0]  # Stove is OFF
-        pi._inputs.filtered = [0.0]
-        pi._inputs.outdoor_temp = 5.0
-        pi._desired_temp = 22.0
-        pi._hp_setpoint = 26  # Well above current → delta < cal_min → HP definitely on
-        pi._last_raw_setpoint = 26.0  # Previous tick wasn't saturated
-        pi._pi_integral = 0.5  # Small, stable
-        pi._prev_integral_for_rls = 0.5
-        pi._ff_settled_ticks = 10
-        pi._rls_warmup_done = True
-        pi._rls_heat_mature = True
-        pi._rls_heat_mature = True  # Batch-first gate satisfied
-        pi_entity._attr_current_temperature = 22.0  # In deadband
-        pi_entity._attr_hvac_mode = HVACMode.HEAT
-
-        # Mock stove entity as "off" so _read_model_input_values and
-        # _any_model_input_unavailable work correctly
-        mock_state = MagicMock()
-        mock_state.state = "off"
-        pi_entity.hass.states.get.return_value = mock_state
-
-        old_obs_count = pi._rls_heat.observation_count
-        await pi._pi_tick()
-
-        # RLS SHOULD have learned — stove is off, suppress doesn't apply
-        assert pi._rls_heat.observation_count > old_obs_count
-
-
 # ── Pause/Resume Tests ────────────────────────────────────────────────
 
 
@@ -4788,47 +4745,6 @@ class TestBatchWLSApply:
             beta_after = list(rls.beta)
             assert beta_after != beta_before, (
                 "RLS betas should change when batch recommends update"
-            )
-
-    @pytest.mark.asyncio
-    async def test_batch_apply_respects_step_cap(self):
-        """Batch apply should not move any coefficient more than max_step."""
-        config = make_pi_config()
-        entity = FakePIEntity(config)
-        pi = entity._pi
-        entity._attr_hvac_mode = HVACMode.HEAT
-        pi._desired_temp = 21.0
-        pi._hp_setpoint = 21.0
-        rls = pi._rls_heat
-
-        beta_phys_before = rls.get_coefficients()
-
-        # Seed with biased data that would suggest large coefficient changes
-        import time as time_mod
-        from custom_components.tasmota_irhvac.pi.batch_learning import Observation
-        now = time_mod.monotonic()
-        for i in range(40):
-            obs = Observation(
-                timestamp=now + i * 900,
-                wall_time=1713650000.0 + i * 900,
-                hp_setpoint=25.0,  # biased high
-                current_c=21.0,
-                desired_c=21.0,
-                outdoor_temp_c=21.0 + float(i % 8 - 4),
-                room_rate=0.005,
-                raw_readings={},
-                clamped=False,
-            )
-            pi._observation_buffer_heat.add(obs)
-
-        pi._run_batch_analysis()
-
-        beta_phys_after = rls.get_coefficients()
-        max_step = 1.0
-        for idx in range(rls.n):
-            delta = abs(beta_phys_after[idx] - beta_phys_before[idx])
-            assert delta <= max_step + 1e-6, (
-                f"Coefficient {idx} moved {delta:.4f}, exceeds step cap {max_step}"
             )
 
     @pytest.mark.asyncio
