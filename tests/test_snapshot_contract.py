@@ -22,25 +22,27 @@ import pytest
 # ── Stage 1: TickOutput dataclass exists ──────────────────────────────
 
 
-@pytest.mark.xfail(reason="Stage 1 not yet implemented", strict=False)
 def test_snapshot_module_importable():
-    """The snapshot module exists and exports TickOutput + SCHEMA_VERSION."""
+    """The snapshot module exists and exports TickOutput + SCHEMA_VERSION.
+
+    Stage 1: COMPLETE.
+    """
     from custom_components.tasmota_irhvac.pi.snapshot import TickOutput
 
     assert TickOutput.SCHEMA_VERSION == 1
 
 
-@pytest.mark.xfail(reason="Stage 1 not yet implemented", strict=False)
 def test_tick_output_roundtrip():
     """TickOutput.from_dict(tick.to_dict()) == tick.
 
     Sets the contract for future event-log readers: any record written
     to the log must round-trip cleanly.
+
+    Stage 1: COMPLETE.
     """
     from custom_components.tasmota_irhvac.pi.snapshot import TickOutput
 
-    # Construct a minimal TickOutput; details filled in during Stage 1
-    tick = TickOutput.minimal_for_test()  # type: ignore[attr-defined]
+    tick = TickOutput.empty(zone_label="contract_test")
     serialized = tick.to_dict()
     restored = TickOutput.from_dict(serialized)
     assert restored == tick
