@@ -1051,53 +1051,16 @@ class PIController:
                 if i < rls.n:
                     rls.beta[i] = val * rls.feature_scales[i]
 
-            # Apply coefficient clamps (same bounds as online RLS).
-            # Without this, batch WLS can bypass clamps and set
-            # coefficients to physically impossible values (e.g. solar
-            # coefficient positive = "HP pushes harder when warmer").
-            #
-            # Ideally the WLS solver itself would solve constrained LS
-            # so other coefficients are estimated correctly given the
-            # constraint.  Post-write clipping is approximate but the
-            # distortion is small when clamps only clip to a boundary.
+            # Apply coefficient clamps to keep batch within physical bounds
+            # (e.g. solar coefficient must be ≤ 0 = "HP eases off when warmer").
+            # Ideally the WLS solver itself would solve constrained LS;
+            # post-write clipping is approximate but the distortion is small
+            # when clamps only clip to a boundary.
             for i in range(rls.n):
                 clamp = rls.coeff_clamps[i] if i < len(rls.coeff_clamps) else None
                 if clamp is not None:
                     lo, hi = clamp
                     rls.beta[i] = max(lo, min(hi, rls.beta[i]))
-
-            # P-aware update: reduce covariance for updated coefficients
-            # so RLS treats the batch correction as real posterior
-            # information and doesn't immediately drift back.
-            # P[i,i] *= (1 - K_i): higher batch confidence → lower P.
-            # Floor = max(batch_var_normalized, delta) to preserve
-            # adaptability to real physical changes.
-            if result.blend_gains:
-                n = min(len(result.blend_gains), rls.n)
-                for i in range(n):
-                    k_i = result.blend_gains[i]
-                    if k_i <= 0:
-                        continue
-                    # Compute floor from batch std_err in normalized space
-                    se = (
-                        result.beta_std_err[i]
-                        if i < len(result.beta_std_err)
-                        else float("inf")
-                    )
-                    if math.isinf(se):
-                        continue
-                    se_norm = se * rls.feature_scales[i]
-                    p_floor = max(se_norm * se_norm, rls.delta)
-                    # Reduce diagonal by (1 - K_i)
-                    old_pii = rls.P[i * rls.n + i]
-                    rls.P[i * rls.n + i] = max(p_floor, old_pii * (1 - k_i))
-                    # Zero off-diagonal elements for updated coefficient
-                    # (same projection as clamp behavior) so cross-
-                    # correlations don't pull the corrected value back.
-                    for j in range(rls.n):
-                        if j != i:
-                            rls.P[i * rls.n + j] = 0.0
-                            rls.P[j * rls.n + i] = 0.0
 
             # observation_count = batch n_eligible.  Used by the FF
             # seed→learned blend to ramp up trust as data accumulates.
