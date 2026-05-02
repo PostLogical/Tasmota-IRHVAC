@@ -91,7 +91,7 @@ class TestManualSuppress:
         pi._rls_warmup_done = True
         pi._rls_heat_mature = True
         pi._pi_integral = 0.5
-        pi._prev_integral_for_rls = 0.5
+        pi._prev_integral_for_obs = 0.5
         entity._attr_current_temperature = 22.0
         entity._attr_hvac_mode = HVACMode.HEAT
 

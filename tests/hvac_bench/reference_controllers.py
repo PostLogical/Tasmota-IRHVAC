@@ -132,15 +132,14 @@ def _build_pi_overrides(
 ) -> dict:
     """Build the PI config-override dict shared by both PI factories.
 
-    ``learning_enabled=False`` disables batch WLS, online RLS, and plant-ID
-    so the controller's coefficients stay frozen. ``seed_with_truth=True``
-    uses the profile's true outdoor seed and the per-input ``_true_ff_coef``
+    ``learning_enabled=False`` disables batch WLS and plant-ID so the
+    controller's coefficients stay frozen. ``seed_with_truth=True`` uses
+    the profile's true outdoor seed and the per-input ``_true_ff_coef``
     as initial coefficients (well-tuned baseline). When False, default
     seeds are used (production behavior on a fresh deployment).
     """
     overrides: dict = {}
     overrides["pi_batch_wls_enabled"] = bool(learning_enabled)
-    overrides["pi_rls_online_enabled"] = False  # default-off; explicit
     overrides["pi_plant_id_enabled"] = bool(learning_enabled)
 
     if seed_with_truth:

@@ -425,7 +425,6 @@ class TestPIControllerCoverageGaps:
         entity._attr_hvac_mode = HVACMode.HEAT
         pi._inputs.outdoor_temp = 5.0
         pi._rls_heat_mature = True
-        pi._pi_rls_online_enabled = True
         # Simulate many stable ticks to accumulate OODB ticks
         for _ in range(20):
             pi._pi_last_tick_time = time.monotonic() - 900
@@ -1245,7 +1244,7 @@ class TestHealthChecksCoverageGaps:
         from custom_components.tasmota_irhvac.pi.health_checks import check_intercept_absorbing_repair
         result = check_intercept_absorbing_repair(
             intercept_value=0.01,
-            coefficients=[("outdoor_delta", 0.3, None, 0.1)],
+            coefficients=[("outdoor_delta", 0.3, None)],
         )
         assert result is not None
         assert result[2] is False  # should_create=False (not active)
@@ -2601,7 +2600,7 @@ class TestRemainingSmallGaps:
         from custom_components.tasmota_irhvac.pi.health_checks import check_intercept_absorbing_repair
         result = check_intercept_absorbing_repair(
             intercept_value=5.0,  # large
-            coefficients=[("outdoor_delta", 0.3, None, 0.1)],  # clamp=None
+            coefficients=[("outdoor_delta", 0.3, None)],  # clamp=None
         )
         # No clamped coefficients found → returns None (but line 526 continue was hit)
         assert result is None

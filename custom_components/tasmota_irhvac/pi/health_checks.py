@@ -471,25 +471,24 @@ def check_model_drift_repair(
 
 def check_intercept_absorbing_repair(
     intercept_value: float,
-    coefficients: list[tuple[str, float, tuple[float, float] | None, float]],
-    delta: float = 0.001,
+    coefficients: list[tuple[str, float, tuple[float, float] | None]],
     intercept_threshold: float = 1.0,
 ) -> tuple[str, dict[str, str], bool] | None:
     """Check if intercept has grown large by absorbing a clamped coefficient's effect.
 
-    coefficients: list of (name, value, clamp, p_diagonal) for non-intercept coefficients.
+    coefficients: list of (name, value, clamp) for non-intercept coefficients.
+    Batch WLS clips to clamps post-solve, so a coefficient sitting at its
+    boundary means the data wanted to push past the bound and the residual
+    is being absorbed by the intercept.
     """
     if abs(intercept_value) < intercept_threshold:
         return ("intercept_absorbing", {}, False)
 
-    # Find any coefficient with covariance collapse at its clamp
-    for name, value, clamp, p_diag in coefficients:
+    for name, value, clamp in coefficients:
         if clamp is None:
             continue
         lo, hi = clamp
-        at_clamp = abs(value - lo) < 1e-3 or abs(value - hi) < 1e-3
-        collapsed = p_diag < 3 * delta
-        if at_clamp and collapsed:
+        if abs(value - lo) < 1e-3 or abs(value - hi) < 1e-3:
             clamp_value = lo if abs(value - lo) < 1e-3 else hi
             return (
                 "intercept_absorbing",

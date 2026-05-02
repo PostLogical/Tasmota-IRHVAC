@@ -488,7 +488,7 @@ class PIController:
         self._metrics = PerformanceMetrics()
 
         # Integral baselines for batch observation metadata + auto-perturbation.
-        self._prev_integral_for_rls: float = 0.0
+        self._prev_integral_for_obs: float = 0.0
         self._prev_integral_for_oodb: float = 0.0
 
         # FF confidence (EMA-smoothed to prevent limit cycling from
@@ -2773,8 +2773,6 @@ class PIController:
                 is_fixable, fix_data,
             ))
 
-        from ..const import DEFAULT_RLS_DELTA
-
         # ── Model drift with maturity gate ──────────────────────────
         drift_results = check_model_drift_repair(
             drifting_coefficients=self.get_drifting_coefficients(),
@@ -2800,7 +2798,6 @@ class PIController:
             if rls_model.observation_count == 0:
                 continue
             coeffs = rls_model.get_coefficients()
-            p_diag = rls_model.get_covariance_diagonal()
             intercept = coeffs.get(0, 0.0)
             coeff_names = self._features.names
 
@@ -2812,13 +2809,11 @@ class PIController:
                     name,
                     coeffs.get(i, 0.0),
                     clamp,
-                    p_diag[i] if i < len(p_diag) else 1.0,
                 ))
 
             result = check_intercept_absorbing_repair(
                 intercept_value=intercept,
                 coefficients=coeff_tuples,
-                delta=DEFAULT_RLS_DELTA,
             )
             if result is not None:
                 key, placeholders, should_create = result
@@ -4288,7 +4283,7 @@ class PIController:
                 self._pi_integral += avg_error * dt_factor * rate
 
             # Track integral baseline for batch observation metadata.
-            self._prev_integral_for_rls = self._pi_integral
+            self._prev_integral_for_obs = self._pi_integral
 
             if learning_suppressed and self._ff_settled_ticks >= 2:
                 _LOGGER.debug(
@@ -4396,7 +4391,7 @@ class PIController:
 
         if data_complete:
             # Observation metadata for batch diagnostics.
-            obs_integral_change = abs(self._pi_integral - self._prev_integral_for_rls)
+            obs_integral_change = abs(self._pi_integral - self._prev_integral_for_obs)
             obs_output_change = obs_integral_change * self._pi_ki
             obs_integral_settled = (
                 obs_output_change < 0.045

@@ -99,7 +99,6 @@ class TestWellTunedPI:
         # Both batch WLS and plant ID off: well-tuned means frozen.
         assert c.adapter._config["pi_batch_wls_enabled"] is False
         assert c.adapter._config["pi_plant_id_enabled"] is False
-        assert c.adapter._config["pi_rls_online_enabled"] is False
 
     def test_outdoor_seed_matches_profile_truth_heat(self):
         from tests.hvac_bench.house_profiles import PROFILES_2R2C

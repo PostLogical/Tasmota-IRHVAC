@@ -471,14 +471,13 @@ class TestModelDriftRepair:
 class TestInterceptAbsorbingRepair:
     """Tests for intercept absorbing coefficient detection."""
 
-    def test_creates_when_intercept_large_and_coeff_collapsed(self):
-        """Issue created when intercept is large and a coefficient has collapsed."""
+    def test_creates_when_intercept_large_and_coeff_at_clamp(self):
+        """Issue created when intercept is large and a coefficient sits at its clamp."""
         result = check_intercept_absorbing_repair(
             intercept_value=-1.5,
             coefficients=[
-                ("outdoor_delta", 0.0, (0.0, 2.0), 0.001),
+                ("outdoor_delta", 0.0, (0.0, 2.0)),
             ],
-            delta=0.001,
         )
         assert result is not None
         key, placeholders, should_create = result
@@ -492,31 +491,33 @@ class TestInterceptAbsorbingRepair:
         result = check_intercept_absorbing_repair(
             intercept_value=0.3,
             coefficients=[
-                ("outdoor_delta", 0.0, (0.0, 2.0), 0.001),
+                ("outdoor_delta", 0.0, (0.0, 2.0)),
             ],
         )
         assert result is not None
         assert result[2] is False
 
-    def test_no_issue_when_no_collapsed_coeff(self):
-        """No issue when intercept is large but no coefficient has collapsed."""
+    def test_no_issue_when_no_coeff_at_clamp(self):
+        """No issue when intercept is large but no coefficient sits at its clamp."""
         result = check_intercept_absorbing_repair(
             intercept_value=-2.0,
             coefficients=[
-                ("outdoor_delta", 0.3, (0.0, 2.0), 0.5),
+                ("outdoor_delta", 0.3, (0.0, 2.0)),
             ],
         )
         assert result is None
 
-    def test_no_issue_when_coeff_at_clamp_but_p_healthy(self):
-        """No issue when coefficient at clamp but P hasn't collapsed."""
+    def test_creates_at_upper_clamp(self):
+        """Issue created when coefficient pinned at the upper clamp."""
         result = check_intercept_absorbing_repair(
             intercept_value=-1.5,
             coefficients=[
-                ("outdoor_delta", 0.0, (0.0, 2.0), 0.5),
+                ("outdoor_delta", 2.0, (0.0, 2.0)),
             ],
         )
-        assert result is None
+        assert result is not None
+        assert result[2] is True
+        assert result[1]["absorbed_clamp"] == "2.0000"
 
 
 # ── Integration: Phase 3 orchestration ──────────────────────────────
@@ -547,12 +548,10 @@ class TestPhase3Orchestration:
         entity = get_climate_entity(hass, entry)
         pi = entity._pi
 
-        n = pi._rls_heat.n
         # Large intercept
         pi._rls_heat.beta[0] = -1.5 * pi._rls_heat.feature_scales[0]
-        # outdoor_delta at lower clamp with collapsed P
+        # outdoor_delta clipped to lower clamp
         pi._rls_heat.beta[1] = 0.0
-        pi._rls_heat.P[1 * n + 1] = 0.001
         pi._rls_heat.observation_count = 100
 
         issues = pi._check_tuning_health()
