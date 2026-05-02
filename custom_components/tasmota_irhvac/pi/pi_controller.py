@@ -573,12 +573,6 @@ class PIController:
         self._detected_lag_tau_count: dict[str, int] = {}  # input name → consecutive consistent detections
         self._last_residual_patterns: list[HourlyResidualPattern] = []
         self._has_had_stable_batch: bool = False
-        # Batch-first gate: RLS online updates are frozen until the first
-        # batch WLS cycle has run and recommended an update.  Until then,
-        # observations are buffered for batch but rls.update() is not called.
-        # PI + seed-based FF handles comfort in the interim.
-        self._rls_heat_mature: bool = False
-        self._rls_cool_mature: bool = False
         self._tuning_alert_counters: dict[str, int] = {}
         self._tuning_alert_snapshots: dict[str, float] = {}
 
@@ -1105,29 +1099,10 @@ class PIController:
                             rls.P[i * rls.n + j] = 0.0
                             rls.P[j * rls.n + i] = 0.0
 
-            # observation_count = max(online RLS ticks, batch n_eligible).
-            # Online RLS increments it per tick; batch sets the floor here.
-            # The FF seed→learned blend uses this to ramp up trust.
+            # observation_count = batch n_eligible.  Used by the FF
+            # seed→learned blend to ramp up trust as data accumulates.
             if result.n_eligible > rls.observation_count:
                 rls.observation_count = result.n_eligible
-
-            # Mark RLS as mature — batch has validated the data geometry
-            # and provided a well-conditioned baseline.  Online RLS tracking
-            # is now safe to run.
-            if is_heating:
-                if not self._rls_heat_mature:
-                    _LOGGER.info(
-                        "%sBatch-first gate: heat RLS now mature",
-                        self._log_prefix,
-                    )
-                self._rls_heat_mature = True
-            else:
-                if not self._rls_cool_mature:
-                    _LOGGER.info(
-                        "%sBatch-first gate: cool RLS now mature",
-                        self._log_prefix,
-                    )
-                self._rls_cool_mature = True
 
             _LOGGER.info(
                 "%sBatch WLS: applied blended update to %s model",
@@ -1469,10 +1444,6 @@ class PIController:
                 coeff_clamps=self._rls_heat_clamps,
                 feature_scales=self._feature_scales,
             )
-            # If the restored model had observations, it was past the
-            # batch-first gate before restart — restore that state.
-            if self._rls_heat.observation_count > 0:
-                self._rls_heat_mature = True
         if data.rls_cool_model:
             self._rls_cool = RLSModel.from_dict(
                 data.rls_cool_model, self._n_model_inputs,
@@ -1480,8 +1451,6 @@ class PIController:
                 coeff_clamps=self._rls_cool_clamps,
                 feature_scales=self._feature_scales,
             )
-            if self._rls_cool.observation_count > 0:
-                self._rls_cool_mature = True
         # Restore per-mode observation buffers for batch learning.
         _n_buf_features = len(self._feature_order)
         _model_inputs_cfg = self._inputs.model_inputs
@@ -2023,7 +1992,6 @@ class PIController:
         # Compute κ once for adjacent_zone gate
         kappa = self._cached_kappa
 
-        unlocked_any = False
         for i in range(n):
             if not rls.frozen[i]:
                 continue  # Already unfrozen
@@ -2073,7 +2041,6 @@ class PIController:
 
             # All conditions met — unfreeze
             self.set_frozen(mode, i, frozen=False, manual=False)
-            unlocked_any = True
             # Track unlock cycle for adaptive batch step cap
             if i < len(self._unlock_batch_cycle):
                 self._unlock_batch_cycle[i] = self._batch_cycle_count
@@ -2081,13 +2048,6 @@ class PIController:
                 "%sFeature unlock: %s[%d] unfrozen (σ=%.4f, VIF=%.1f)",
                 self._log_prefix, name, i, se, feat_vif,
             )
-
-        # Mark RLS as mature when first feature unlocks
-        if unlocked_any:
-            if is_heating:
-                self._rls_heat_mature = True
-            else:
-                self._rls_cool_mature = True
 
     def get_learning_state(self) -> dict[str, Any]:
         """Return learning state for the learning sensor.
@@ -3538,7 +3498,6 @@ class PIController:
                 for j in range(n):
                     self._rls_heat.P[i * n + j] = DEFAULT_RLS_P_INIT if i == j else 0.0
             self._rls_heat.observation_count = 0
-            self._rls_heat_mature = False
             # Seed reset re-freezes features marked frozen_at_init
             for i, frozen in enumerate(self._features.frozen_mask()):
                 if frozen:
@@ -3556,7 +3515,6 @@ class PIController:
                 for j in range(n):
                     self._rls_cool.P[i * n + j] = DEFAULT_RLS_P_INIT if i == j else 0.0
             self._rls_cool.observation_count = 0
-            self._rls_cool_mature = False
             # Seed reset re-freezes features marked frozen_at_init
             for i, frozen in enumerate(self._features.frozen_mask()):
                 if frozen:
@@ -3642,7 +3600,6 @@ class PIController:
                 coeff_clamps=self._rls_heat_clamps,
                 feature_scales=self._feature_scales,
             )
-            self._rls_heat_mature = self._rls_heat.observation_count > 0
 
         cool_dict = data.get("rls_cool_model", {})
         if cool_dict:
@@ -3652,7 +3609,6 @@ class PIController:
                 coeff_clamps=self._rls_cool_clamps,
                 feature_scales=self._feature_scales,
             )
-            self._rls_cool_mature = self._rls_cool.observation_count > 0
 
         self._pi_integral = float(data.get("pi_integral", 0.0))
         self._manual_override_heat = data.get(
@@ -4618,8 +4574,7 @@ class PIController:
                 and abs(self._room_temp_rate) < 0.02
                 and hp_observation_usable
             )
-            rls_mature = self._rls_heat_mature if is_heating else self._rls_cool_mature
-            if branch_ready and rls_mature and x is not None and self._rls_shared_gate_open(learning_suppressed):
+            if branch_ready and x is not None and self._rls_shared_gate_open(learning_suppressed):
                 # Observe hp_setpoint - desired_c: what offset maintained target
                 self._rls_learn_observation(
                     rls, x, float(self._hp_setpoint) - desired_c, "RLS update",
@@ -4673,8 +4628,7 @@ class PIController:
                 self._stable_oodb_ticks = 0
 
             branch_ready = self._stable_oodb_ticks >= min_oodb_ticks
-            rls_mature = self._rls_heat_mature if is_heating else self._rls_cool_mature
-            if branch_ready and rls_mature and x is not None and self._rls_shared_gate_open(learning_suppressed):
+            if branch_ready and x is not None and self._rls_shared_gate_open(learning_suppressed):
                 # Observe hp_setpoint - current_c: what offset maintains equilibrium
                 self._rls_learn_observation(
                     rls, x, float(self._hp_setpoint) - current_c, "RLS oodb",

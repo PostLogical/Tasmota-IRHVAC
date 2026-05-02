@@ -82,7 +82,6 @@ class TestLearningReset:
         pi._pi_integral = 25.0
         pi._rls_heat.beta[0] = 99.0
         pi._rls_heat.observation_count = 100
-        pi._rls_heat_mature = True
         # Corrupt P off-diagonal
         pi._rls_heat.P[1] = 5.0
 
@@ -94,7 +93,6 @@ class TestLearningReset:
 
         assert pi._rls_heat.beta[0] == 0.0
         assert pi._rls_heat.observation_count == 0
-        assert pi._rls_heat_mature is False
         assert pi._pi_integral == 25.0  # Untouched
         # P should be reset to diagonal
         from custom_components.tasmota_irhvac.pi.pi_controller import DEFAULT_RLS_P_INIT
@@ -348,38 +346,6 @@ class TestLearningSnapshots:
         assert pi._pi_integral == 15.0
         assert pi._manual_override_heat[1] is True
         assert pi._rls_heat.P[0] == 999.0
-        # Maturity gate restored from observation count
-        assert pi._rls_heat_mature is True
-        assert pi._rls_cool_mature is True
-
-    @pytest.mark.asyncio
-    async def test_restore_immature_model(self, hass, setup_pi_integration):
-        """Restoring a snapshot with zero observations keeps model immature."""
-        entry = await setup_pi_integration()
-        entity = get_climate_entity(hass, entry)
-        pi = entity._pi
-
-        # Save with no observations (fresh model)
-        pi._rls_heat.observation_count = 0
-        await hass.services.async_call(
-            DOMAIN, "learning_save",
-            {"entity_id": entity.entity_id, "slot": "fresh"},
-            blocking=True,
-        )
-
-        # Make it mature
-        pi._rls_heat.observation_count = 100
-        pi._rls_heat_mature = True
-
-        # Restore the fresh snapshot
-        await hass.services.async_call(
-            DOMAIN, "learning_restore",
-            {"entity_id": entity.entity_id, "slot": "fresh"},
-            blocking=True,
-        )
-
-        assert pi._rls_heat.observation_count == 0
-        assert pi._rls_heat_mature is False
 
     @pytest.mark.asyncio
     async def test_max_three_slots(self, hass, setup_pi_integration):

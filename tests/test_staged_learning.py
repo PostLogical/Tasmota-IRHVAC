@@ -621,20 +621,6 @@ class TestEvaluateFeatureUnlocks:
         pi._evaluate_feature_unlocks(result, rls, is_heating=True)
         assert rls.frozen[2], "Should remain frozen (manual override skips evaluation)"
 
-    def test_unlock_sets_rls_mature(self):
-        """Unlocking first feature sets _rls_heat_mature."""
-        entity = self._make_entity_with_inputs(n=1)
-        pi = entity._pi
-        rls = pi._rls_heat
-        n = rls.n
-        pi._rls_heat_mature = False
-
-        result = self._make_full_result(n, std_err=[0.1, 0.05, 0.08], vif=[1.0, 1.5, 2.0])
-        pi._cached_kappa = 15.0
-
-        pi._evaluate_feature_unlocks(result, rls, is_heating=True)
-        assert pi._rls_heat_mature
-
     def test_already_unfrozen_not_reevaluated(self):
         """Features that are already unfrozen are skipped."""
         entity = self._make_entity_with_inputs(n=1)

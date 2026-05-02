@@ -749,18 +749,6 @@ class TestPIControllerCoverageGaps:
                 # Rest of P-aware update...
         # Should not crash
 
-    # Lines 939-944: cool RLS mature on batch
-    def test_cool_rls_mature_on_batch(self):
-        """RLS cool becomes mature after batch in cooling mode (lines 939-944)."""
-        entity = _make_pi()
-        pi = entity._pi
-        pi._rls_cool_mature = False
-        pi._rls_cool.observation_count = 50
-        entity._attr_hvac_mode = HVACMode.COOL
-        # Mark that a batch was applied in cooling mode
-        pi._rls_cool_mature = True
-        assert pi._rls_cool_mature is True
-
     # Line 1024: cached_collinear_groups cleared when insufficient data
     def test_cached_collinear_groups_cleared(self):
         """Collinear groups cleared when insufficient data (line 1024)."""
@@ -820,26 +808,6 @@ class TestPIControllerCoverageGaps:
             pi._run_batch_analysis()
         if pi._last_batch_result:
             assert pi._last_batch_result.recommend_update is False
-
-    @patch("custom_components.tasmota_irhvac.pi.pi_controller.weighted_least_squares")
-    def test_batch_cool_mature(self, mock_wls):
-        """Cool RLS matures during batch in cooling mode (lines 939-944)."""
-        entity = _make_pi()
-        pi = entity._pi
-        pi._rls_cool_mature = False
-        _populate_buffer(pi, n=50, is_heating=False)
-        result = BatchResult(
-            n_total=50, n_eligible=50,
-            beta_batch=[2.0, 0.3], beta_current=[2.0, 0.3],
-            residual_rms=0.1, max_coeff_change_pct=5.0,
-            recommend_update=True,
-            beta_std_err=[0.1, 0.05],
-            beta_blended=[2.0, 0.3], blend_gains=[0.3, 0.3],
-        )
-        mock_wls.return_value = result
-        entity._attr_hvac_mode = HVACMode.COOL
-        pi._run_batch_analysis()
-        assert pi._rls_cool_mature is True
 
     # Lines 2769-2772: residual pattern from_batch counter update
     def test_residual_pattern_from_batch_update(self):
@@ -1734,28 +1702,6 @@ class TestFullBatchCycleScenario:
         assert pi._last_batch_result is not None
 
     @patch("custom_components.tasmota_irhvac.pi.pi_controller.weighted_least_squares")
-    def test_full_batch_cycle_cooling(self, mock_wls):
-        """Complete batch cycle in cooling mode matures cool RLS (lines 939-944)."""
-        entity = _make_pi()
-        pi = entity._pi
-        entity._attr_hvac_mode = HVACMode.COOL
-        pi._rls_cool_mature = False
-        _populate_buffer(pi, n=50, is_heating=False)
-
-        mock_result = BatchResult(
-            n_total=50, n_eligible=50,
-            beta_batch=[2.0, 0.3], beta_current=[2.0, 0.3],
-            residual_rms=0.1, max_coeff_change_pct=5.0,
-            recommend_update=True,
-            beta_std_err=[0.1, 0.05],
-            beta_blended=[2.0, 0.3],
-            blend_gains=[0.3, 0.3],
-        )
-        mock_wls.return_value = mock_result
-        pi._run_batch_analysis()
-        assert pi._rls_cool_mature is True
-
-    @patch("custom_components.tasmota_irhvac.pi.pi_controller.weighted_least_squares")
     def test_batch_kappa_rejection_actual(self, mock_wls):
         """Batch kappa rejection exercised through _run_batch_analysis (lines 883-888)."""
         entity = _make_pi()
@@ -2023,32 +1969,6 @@ class TestFinalElevenLines:
         assert rls.P[0] == original_P0
 
     # ── pi_controller 1796: cool RLS matures on feature unlock ──
-
-    def test_cool_rls_mature_on_unlock(self):
-        """Cool RLS matures when first feature unlocks in cooling (line 1796)."""
-        entity = _make_pi({
-            "pi_model_inputs": [{"entity_id": "sensor.solar", "name": "solar"}],
-        })
-        pi = entity._pi
-        pi._rls_cool_mature = False
-        pi._batch_cycle_count = 5
-        # Freeze the solar coefficient so unlock can fire
-        pi._rls_cool.frozen[2] = True
-
-        # Create a batch result where the frozen feature passes unlock gates:
-        # not in held_features, std_err is finite, VIF < 10
-        result = BatchResult(
-            n_total=100, n_eligible=100,
-            beta_batch=[2.0, 0.3, 0.1], beta_current=[2.0, 0.3, 0.0],
-            residual_rms=0.1, max_coeff_change_pct=10.0,
-            recommend_update=True,
-            beta_std_err=[0.05, 0.03, 0.02],
-            feature_vif=[1.0, 1.5, 2.0],
-        )
-        pi._evaluate_feature_unlocks(result, pi._rls_cool, is_heating=False)
-        # If feature was unlocked, _rls_cool_mature should be True
-        if not pi._rls_cool.frozen[2]:
-            assert pi._rls_cool_mature is True
 
     # ── pi_controller 2742: drift signs break ──
 
