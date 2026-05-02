@@ -1,0 +1,181 @@
+{
+  "entity": {
+    "available": true,
+    "current_temperature": 21.0,
+    "entity_id": "climate.test_ac",
+    "fan_mode": "auto",
+    "hvac_mode": "off",
+    "preset_mode": null,
+    "swing_mode": "off",
+    "target_temperature": 22.0,
+    "unique_id": "**REDACTED**",
+    "vendor": "FUJITSU_AC"
+  },
+  "pi_controller": {
+    "batch_learning": null,
+    "boundary_estimator": {
+      "cal_band": {
+        "max": 2.0,
+        "min": -2.0,
+        "mode": "heat"
+      },
+      "last_result": null,
+      "posterior_mean": 0.0,
+      "posterior_std": 2.0,
+      "should_trigger_probe": false,
+      "stall_count": 0,
+      "updates_applied": 0
+    },
+    "config": {
+      "batch_wls_enabled": true,
+      "deadband": 0.5,
+      "ff_enabled": true,
+      "ki": 0.15,
+      "kp": 3.0,
+      "model_inputs": [],
+      "outdoor_temp_sensor": "sensor.outdoor_temp",
+      "plant_id_enabled": true,
+      "setpoint_weight": 0.15,
+      "tick_fallback": 900
+    },
+    "desired_temp": 22.0,
+    "enabled": true,
+    "ff_confidence": 1.0,
+    "ff_contributions": {
+      "_blended_offset": 4.25,
+      "_sum": 4.25,
+      "cos_hour": "<NORMALIZED_SUBTREE>",
+      "intercept": {
+        "coef": 0.0,
+        "contribution": 0.0,
+        "filtered": 1.0
+      },
+      "outdoor_delta": {
+        "coef": -0.25,
+        "contribution": 4.25,
+        "filtered": -17.0
+      },
+      "sin_hour": "<NORMALIZED_SUBTREE>"
+    },
+    "ff_offset": 4.25,
+    "greybox_bridge": null,
+    "greybox_buffer": {
+      "hp_off_pct": null,
+      "max_size": 6000,
+      "min_leverage": null,
+      "total": 0
+    },
+    "greybox_observer": null,
+    "hp_setpoint": 22.0,
+    "integral": 0.0,
+    "integral_convergence": 0.0,
+    "observation_buffer_cool": {
+      "condition_rating": "insufficient_data",
+      "correlated_pairs": [],
+      "eligible": 0,
+      "max_size": 2000,
+      "total": 0
+    },
+    "observation_buffer_heat": {
+      "condition_rating": "insufficient_data",
+      "correlated_pairs": [],
+      "eligible": 0,
+      "max_size": 2000,
+      "total": 0
+    },
+    "outdoor_temp": 5.0,
+    "paused": false,
+    "performance": {
+      "batch_model_rms": null,
+      "comfort_violation_hours": 0.0,
+      "controllable_cvh": 0.0,
+      "controllable_itae": 0.0,
+      "ff_load_fraction": 0.5,
+      "itae_accumulator": 0.0,
+      "setpoint_changes": 0,
+      "uncontrollable_cvh": 0.0,
+      "uncontrollable_itae": 0.0
+    },
+    "plant_identification": {
+      "plant_estimate": {
+        "k": {
+          "confidence": 0.0,
+          "observations": 0,
+          "source": "seed",
+          "value": 1.0
+        },
+        "tau_fast": {
+          "confidence": 0.0,
+          "observations": 0,
+          "source": "seed",
+          "value": 20.0
+        },
+        "tau_slow": {
+          "confidence": 0.0,
+          "observations": 0,
+          "source": "seed",
+          "value": 60.0
+        },
+        "theta": {
+          "confidence": 0.0,
+          "observations": 0,
+          "source": "seed",
+          "value": 15.0
+        }
+      },
+      "providers": {
+        "area_method": {
+          "active": false
+        },
+        "closed_loop": {
+          "active": false
+        },
+        "step_response": {
+          "active": false
+        }
+      }
+    },
+    "regime_probe": {
+      "confirmations_total": 0,
+      "enabled": false,
+      "evidence_above": [],
+      "evidence_below": [],
+      "forced_probe": false,
+      "last_probe_delta": null,
+      "last_probe_hp_contributing": null,
+      "no_contribution_count": 0,
+      "probes_completed": 0,
+      "state": "IDLE"
+    },
+    "rls_model": {
+      "cool_coefficients": {
+        "cos_hour": "<NORMALIZED_SUBTREE>",
+        "intercept": 0.0,
+        "outdoor_delta": -0.25,
+        "sin_hour": "<NORMALIZED_SUBTREE>"
+      },
+      "cool_observation_count": 0,
+      "heat_coefficients": {
+        "cos_hour": "<NORMALIZED_SUBTREE>",
+        "intercept": 0.0,
+        "outdoor_delta": -0.25,
+        "sin_hour": "<NORMALIZED_SUBTREE>"
+      },
+      "heat_observation_count": 0,
+      "heat_uncertainty": {
+        "cos_hour": "<NORMALIZED_SUBTREE>",
+        "intercept": 1.0,
+        "outdoor_delta": 1.0,
+        "sin_hour": "<NORMALIZED_SUBTREE>"
+      },
+      "learning_suppressed": false,
+      "manual_suppress_reason": ""
+    },
+    "room_temp_rate": 0.0,
+    "sensor_recovery_pending": false,
+    "sensor_unavailable": false,
+    "tau_estimate": 20.0,
+    "tau_fast": 20.0,
+    "tau_slow": 60.0
+  }
+}

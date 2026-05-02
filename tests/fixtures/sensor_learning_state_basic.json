@@ -1,0 +1,11 @@
+{
+  "active_features": [],
+  "condition_number": null,
+  "ff_confidence": 1.0,
+  "frozen_features": [
+    "sin_hour",
+    "cos_hour"
+  ],
+  "observation_count": 0,
+  "state": "Learning"
+}

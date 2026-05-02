@@ -1,0 +1,88 @@
+{
+  "buffer_size_cool": 0,
+  "buffer_size_heat": 0,
+  "correlated_pairs_cool": [],
+  "correlated_pairs_heat": [],
+  "greybox_bridge": null,
+  "greybox_buffer": {
+    "hp_off_pct": null,
+    "max_size": 6000,
+    "min_leverage": null,
+    "total": 0
+  },
+  "greybox_observer": null,
+  "model_input_configs": [],
+  "observation_buffer_cool": [],
+  "observation_buffer_heat": [],
+  "pi_state": {
+    "desired_temp": 22.0,
+    "ff_confidence": 1.0,
+    "ff_offset": 4.25,
+    "hp_setpoint": 22.0,
+    "integral": 0.0,
+    "integral_convergence": 0.0,
+    "outdoor_temp": 5.0,
+    "plant_identification": {
+      "plant_estimate": {
+        "k": {
+          "confidence": 0.0,
+          "observations": 0,
+          "source": "seed",
+          "value": 1.0
+        },
+        "tau_fast": {
+          "confidence": 0.0,
+          "observations": 0,
+          "source": "seed",
+          "value": 20.0
+        },
+        "tau_slow": {
+          "confidence": 0.0,
+          "observations": 0,
+          "source": "seed",
+          "value": 60.0
+        },
+        "theta": {
+          "confidence": 0.0,
+          "observations": 0,
+          "source": "seed",
+          "value": 15.0
+        }
+      },
+      "providers": {
+        "area_method": {
+          "active": false
+        },
+        "closed_loop": {
+          "active": false
+        },
+        "step_response": {
+          "active": false
+        }
+      }
+    },
+    "room_temp_rate": 0.0,
+    "tau_estimate": 20.0,
+    "tau_fast": 20.0,
+    "tau_slow": 60.0
+  },
+  "residual_patterns": [],
+  "rls_cool": {
+    "coefficients": {
+      "cos_hour": "<NORMALIZED_SUBTREE>",
+      "intercept": 0.0,
+      "outdoor_delta": -0.25,
+      "sin_hour": "<NORMALIZED_SUBTREE>"
+    },
+    "observation_count": 0
+  },
+  "rls_heat": {
+    "coefficients": {
+      "cos_hour": "<NORMALIZED_SUBTREE>",
+      "intercept": 0.0,
+      "outdoor_delta": -0.25,
+      "sin_hour": "<NORMALIZED_SUBTREE>"
+    },
+    "observation_count": 0
+  }
+}
