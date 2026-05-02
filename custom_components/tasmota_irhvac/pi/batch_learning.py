@@ -2082,11 +2082,6 @@ MAX_STEP_ABS = 1.0
 DEFAULT_PRIOR_STD = 1.0
 
 
-# Enlarged step cap for recently-unfrozen features.  Applied only when
-# batch quality gates pass (n_eligible ≥ 40, κ < 30, VIF < 5, σ < 1.0).
-UNLOCK_FIRST_STEP = 3.0
-
-
 def compute_blended_update(
     result: BatchResult,
     prior_std: float = DEFAULT_PRIOR_STD,

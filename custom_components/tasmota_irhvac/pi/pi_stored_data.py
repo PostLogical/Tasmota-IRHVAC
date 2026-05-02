@@ -66,7 +66,6 @@ class PIExtraStoredData(ExtraStoredData):
     manual_override_cool: list[bool | None] = dataclasses.field(default_factory=list)
     greybox_buffer: list[dict[str, Any]] = dataclasses.field(default_factory=list)  # Observation.as_dict()
     batch_cycle_count: int = 0
-    unlock_batch_cycle: list[int | None] = dataclasses.field(default_factory=list)
     # Runtime subsystem toggles (persisted so they survive restarts)
     control_active: bool = True
     ff_enabled: bool = True
@@ -121,7 +120,6 @@ class PIExtraStoredData(ExtraStoredData):
             "manual_override_cool": self.manual_override_cool,
             "greybox_buffer": self.greybox_buffer,
             "batch_cycle_count": self.batch_cycle_count,
-            "unlock_batch_cycle": self.unlock_batch_cycle,
             "control_active": self.control_active,
             "ff_enabled": self.ff_enabled,
             "rls_online_enabled": self.rls_online_enabled,
@@ -187,7 +185,6 @@ class PIExtraStoredData(ExtraStoredData):
                 manual_override_cool=restored.get("manual_override_cool", []),
                 greybox_buffer=restored.get("greybox_buffer", []),
                 batch_cycle_count=int(restored.get("batch_cycle_count", 0)),
-                unlock_batch_cycle=restored.get("unlock_batch_cycle", []),
                 control_active=bool(restored.get("control_active", True)),
                 ff_enabled=bool(restored.get("ff_enabled", True)),
                 rls_online_enabled=bool(restored.get("rls_online_enabled", True)),

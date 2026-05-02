@@ -38,7 +38,7 @@ from homeassistant.util.unit_conversion import TemperatureConverter
 
 import math
 
-from .batch_learning import BatchResult, CollinearGroup, DiversityAwareBuffer, HourlyResidualPattern, MAX_STEP_ABS, Observation, UNLOCK_FIRST_STEP, analyze_residuals_by_hour, build_feature_vector_from_raw, compute_belsley_diagnostics, fuse_batch_greybox, weighted_least_squares, compare_and_report, compute_blended_update
+from .batch_learning import BatchResult, CollinearGroup, DiversityAwareBuffer, HourlyResidualPattern, Observation, analyze_residuals_by_hour, build_feature_vector_from_raw, compute_belsley_diagnostics, fuse_batch_greybox, weighted_least_squares, compare_and_report, compute_blended_update
 from .greybox_buffer import GreyboxBuffer
 from .greybox_observer import (
     GreyboxBridgeResult,
@@ -589,11 +589,7 @@ class PIController:
         self._manual_override_cool: list[bool | None] = [None] * (self._n_model_inputs + 1)
         self._cached_kappa: float | None = None
         self._cached_collinear_groups: list[CollinearGroup] = []
-        # Adaptive batch step cap: track when each feature was unlocked
-        # so we can allow an enlarged first step.  None = never unlocked
-        # or unlocked long enough ago that normal cap applies.
         self._batch_cycle_count: int = 0
-        self._unlock_batch_cycle: list[int | None] = [None] * self._rls_heat.n
 
         # ── CUSUM anomaly detection state ───────────────────────────
         self._residual_history: deque[float] = deque(maxlen=60)
@@ -1361,7 +1357,6 @@ class PIController:
             manual_override_heat=list(self._manual_override_heat),
             manual_override_cool=list(self._manual_override_cool),
             batch_cycle_count=self._batch_cycle_count,
-            unlock_batch_cycle=list(self._unlock_batch_cycle),
             control_active=self._control_active,
             ff_enabled=self._pi_ff_enabled,
             rls_online_enabled=self._pi_rls_online_enabled,
@@ -1505,13 +1500,7 @@ class PIController:
             while len(self._manual_override_cool) < n:
                 self._manual_override_cool.append(None)
 
-        # Restore adaptive batch step cap state
         self._batch_cycle_count = data.batch_cycle_count
-        if data.unlock_batch_cycle:
-            self._unlock_batch_cycle = list(data.unlock_batch_cycle)
-            # Pad if model grew
-            while len(self._unlock_batch_cycle) < n:
-                self._unlock_batch_cycle.append(None)
 
         # Restore drift detection history
         if data.drift_correction_signs:
@@ -1849,77 +1838,6 @@ class PIController:
         """Return the set of frozen coefficient indices for batch WLS."""
         return {i for i in range(rls.n) if rls.frozen[i]}
 
-    def _build_per_feature_step_caps(
-        self,
-        result: BatchResult,
-        buffer: DiversityAwareBuffer,
-        n_eligible: int,
-        kappa: float,
-    ) -> list[float] | None:
-        """Build per-feature step caps for recently-unlocked features.
-
-        Returns None (all features use default cap) unless at least one
-        feature qualifies for the enlarged cap.  Quality gates per
-        Belsley (1980): diagnose collinearity per-variable, not globally.
-
-        Global gate:
-        - n_eligible ≥ 40 (2× minimum — more data for a larger step)
-
-        Per-feature gates:
-        - VIF < 5 (feature not confounded with others; stricter than
-          unlock threshold of 10)
-        - σ_batch < 1.0 (empirical confirmation estimate is precise)
-        - Feature was unlocked within the last 2 batch cycles
-        """
-        cycle = self._batch_cycle_count
-        n = len(self._unlock_batch_cycle)
-        if n == 0:
-            return None
-
-        # Global quality gate
-        if n_eligible < 40:
-            return None
-
-        # Per-feature VIF from the buffer
-        vif = buffer.compute_vif() if hasattr(buffer, 'compute_vif') else []
-
-        any_enlarged = False
-        caps: list[float] = [MAX_STEP_ABS] * n
-        for i in range(n):
-            unlock_cycle = self._unlock_batch_cycle[i]
-            if unlock_cycle is None:
-                continue
-            # Recently unlocked: within 2 batch cycles of unlock
-            if cycle - unlock_cycle > 2:
-                # No longer recently unlocked — clear tracker
-                self._unlock_batch_cycle[i] = None
-                continue
-
-            # Per-feature quality gates
-            feat_vif = vif[i] if i < len(vif) else float("inf")
-            if feat_vif >= 5.0:
-                continue
-            se = (
-                result.beta_std_err[i]
-                if i < len(result.beta_std_err)
-                else float("inf")
-            )
-            if math.isinf(se) or se >= 1.0:
-                continue
-
-            caps[i] = UNLOCK_FIRST_STEP
-            any_enlarged = True
-            coeff_names = self._coeff_names()
-            name = coeff_names[i] if i < len(coeff_names) else f"β{i}"
-            _LOGGER.info(
-                "%sAdaptive step cap: %s[%d] enlarged to ±%.1f°C "
-                "(unlocked cycle %d, now cycle %d, VIF=%.1f, σ=%.3f)",
-                self._log_prefix, name, i, UNLOCK_FIRST_STEP,
-                unlock_cycle, cycle, feat_vif, se,
-            )
-
-        return caps if any_enlarged else None
-
     def _evaluate_feature_unlocks(
         self,
         full_result: BatchResult,
@@ -2004,9 +1922,6 @@ class PIController:
 
             # All conditions met — unfreeze
             self.set_frozen(mode, i, frozen=False, manual=False)
-            # Track unlock cycle for adaptive batch step cap
-            if i < len(self._unlock_batch_cycle):
-                self._unlock_batch_cycle[i] = self._batch_cycle_count
             _LOGGER.info(
                 "%sFeature unlock: %s[%d] unfrozen (σ=%.4f, VIF=%.1f)",
                 self._log_prefix, name, i, se, feat_vif,

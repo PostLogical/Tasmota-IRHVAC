@@ -75,44 +75,6 @@ class TestPIControllerCoverageGaps:
             m.get("entity_id") == "climate.aux" for m in pi._model_inputs
         )
 
-    # Line 1651: _build_per_feature_step_caps with empty unlock_batch_cycle
-    def test_per_feature_step_caps_empty(self):
-        """Returns None when unlock_batch_cycle is empty (line 1651)."""
-        entity = _make_pi()
-        pi = entity._pi
-        pi._unlock_batch_cycle = []
-        result = BatchResult(
-            n_total=50, n_eligible=50,
-            beta_batch=[2.0, 0.3], beta_current=[2.0, 0.3],
-            residual_rms=0.1, max_coeff_change_pct=10.0,
-            recommend_update=True,
-            beta_std_err=[0.1, 0.1],
-        )
-        caps = pi._build_per_feature_step_caps(
-            result, pi._observation_buffer_heat, 50, 5.0,
-        )
-        assert caps is None
-
-    # Line 1682: skip recently-unlocked feature with se >= 1.0
-    def test_per_feature_step_caps_imprecise_se(self):
-        """Recently-unlocked feature with imprecise SE is skipped (line 1682)."""
-        entity = _make_pi()
-        pi = entity._pi
-        pi._batch_cycle_count = 5
-        pi._unlock_batch_cycle = [4, None]  # feature 0 unlocked at cycle 4
-        result = BatchResult(
-            n_total=50, n_eligible=50,
-            beta_batch=[2.0, 0.3], beta_current=[2.0, 0.3],
-            residual_rms=0.1, max_coeff_change_pct=10.0,
-            recommend_update=True,
-            beta_std_err=[2.0, 0.1],  # SE >= 1.0 for feature 0
-        )
-        caps = pi._build_per_feature_step_caps(
-            result, pi._observation_buffer_heat, 50, 5.0,
-        )
-        # Should return None since the only recently-unlocked feature is skipped
-        assert caps is None
-
     # Line 2355: set_coefficient out of range
     def test_set_coefficient_out_of_range(self):
         """set_coefficient is a no-op when index is out of range (line 2355)."""
@@ -656,9 +618,9 @@ class TestPIControllerCoverageGaps:
         pi.restore_extra_stored_data(stored)
         assert len(pi._greybox_buffer) >= 1
 
-    # Lines 1299, 1306, 1314: pad override/unlock lists when model grew
+    # Lines 1299, 1306: pad manual override lists when model grew
     def test_restore_pads_when_model_grew(self):
-        """Override and unlock lists are padded when model grows (lines 1299,1306,1314)."""
+        """Override lists are padded when model grows (lines 1299, 1306)."""
         entity = _make_pi({
             "pi_model_inputs": [
                 {"entity_id": "sensor.solar", "name": "solar"},
@@ -669,12 +631,10 @@ class TestPIControllerCoverageGaps:
         # Simulate old state with fewer features
         stored.manual_override_heat = [None]
         stored.manual_override_cool = [None]
-        stored.unlock_batch_cycle = [None]
         pi.restore_extra_stored_data(stored)
         # Should be padded to current model size
         assert len(pi._manual_override_heat) == pi._rls_heat.n
         assert len(pi._manual_override_cool) == pi._rls_heat.n
-        assert len(pi._unlock_batch_cycle) == pi._rls_heat.n
 
     # Line 1334: restore tuning_alert_snapshots
     def test_restore_tuning_alert_snapshots(self):
