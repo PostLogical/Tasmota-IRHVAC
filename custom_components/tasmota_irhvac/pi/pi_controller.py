@@ -123,6 +123,23 @@ from .model_input_manager import (
     ModelInputManager,
     TOD_FEATURE_NAMES,
 )
+from .snapshot import (
+    BatchCoeff,
+    BatchLearningSnapshot,
+    ControllerConfig,
+    DriftCoefficient,
+    DriftDetection,
+    FFContribution,
+    FFContributionsSnapshot,
+    LagFilterSnapshot,
+    LagFilterState,
+    ObservationBufferSnapshot,
+    ObservationContext,
+    PerformanceSnapshot,
+    ResidualPattern,
+    RLSModelSnapshot,
+    TickOutput,
+)
 from .health_checks import (
     check_comfort,
     check_feature_diversity,
@@ -595,6 +612,19 @@ class PIController:
         # Room temperature rate of change tracking (°C/min)
         self._room_temp_history: list[tuple[float, float]] = []  # [(monotonic_time, temp_c), ...]
         self._room_temp_rate: float = 0.0  # °C/min, updated each tick
+
+        # ── Tick-first contract state ───────────────────────────────
+        # Per-tick context populated during tick(); read by _build_tick_output().
+        # Sticky across ticks: holds the most-recent value, not strictly
+        # this-tick-only.
+        self._last_residual: float | None = None
+        self._last_observation_context: ObservationContext | None = None
+        # Cached typed tick output. Refreshed in fire_dispatcher() before
+        # the SIGNAL_PI_UPDATE signal fires so consumers reading via the
+        # signal handler always see fresh state.
+        self._last_tick: TickOutput = TickOutput.empty(
+            zone_label=getattr(self._entity, "entity_id", "") or ""
+        )
 
     # ── Shorthand entity access ──────────────────────────────────────
 
@@ -3141,12 +3171,308 @@ class PIController:
         return self._pi_enabled and hvac_mode in (HVACMode.AUTO, HVACMode.HEAT_COOL)
 
     def fire_dispatcher(self) -> None:
-        """Fire dispatcher signal for companion PI sensors."""
+        """Fire dispatcher signal for companion PI sensors.
+
+        Refreshes `self._last_tick` BEFORE sending the signal so handlers
+        reading from `controller.last_tick` always see current state.
+        """
+        # Build typed tick output before notifying consumers — sensors
+        # subscribing to SIGNAL_PI_UPDATE must see post-tick state.
+        self._last_tick = self._build_tick_output()
         if self._pi_enabled and hasattr(self._entity, "_config_entry_id"):
             async_dispatcher_send(
                 self._hass,
                 SIGNAL_PI_UPDATE.format(self._entity._config_entry_id),
             )
+
+    @property
+    def last_tick(self) -> TickOutput:
+        """Most-recent typed tick output. Always non-None.
+
+        Initialized to an empty TickOutput at controller construction;
+        refreshed in `fire_dispatcher()` after every state-write that
+        notifies sensors.
+        """
+        return self._last_tick
+
+    def _build_tick_output(self) -> TickOutput:
+        """Assemble the typed TickOutput from current controller state.
+
+        Called from `fire_dispatcher()` before SIGNAL_PI_UPDATE fires.
+        Heavy fields (multicollinearity κ, correlated_pairs, feature
+        active counts) are NOT computed here — they live in
+        `DiagnosticsBundle` and are computed only when the diagnostics
+        endpoint is queried.
+        """
+        import time as time_mod
+        coeff_names = self._coeff_names()
+        heat_phys = self._rls_heat.get_coefficients()
+        cool_phys = self._rls_cool.get_coefficients()
+
+        # Config snapshot
+        config = ControllerConfig(
+            kp=self._pi_kp,
+            ki=self._pi_ki,
+            deadband=self._pi_deadband,
+            setpoint_weight=self._pi_setpoint_weight,
+            tick_fallback=self._pi_tick_fallback,
+            outdoor_temp_sensor=self._inputs.outdoor_temp_sensor,
+            model_inputs=list(self._model_inputs),
+            ff_enabled=self._pi_ff_enabled,
+            batch_wls_enabled=self._pi_batch_wls_enabled,
+            plant_id_enabled=self._pi_plant_id_enabled,
+        )
+
+        # RLS model snapshot
+        rls_model = RLSModelSnapshot(
+            heat_coefficients={
+                coeff_names[i]: round(heat_phys[i], 4)
+                for i in range(min(len(coeff_names), len(heat_phys)))
+            },
+            cool_coefficients={
+                coeff_names[i]: round(cool_phys[i], 4)
+                for i in range(min(len(coeff_names), len(cool_phys)))
+            },
+            heat_uncertainty={
+                coeff_names[i]: round(self._rls_heat.get_covariance_diagonal()[i], 4)
+                for i in range(min(len(coeff_names), len(self._rls_heat.beta)))
+            },
+            heat_observation_count=self._rls_heat.observation_count,
+            cool_observation_count=self._rls_cool.observation_count,
+            learning_suppressed=self._manual_ff_suppress,
+            manual_suppress_reason=self._manual_ff_suppress_reason,
+            last_residual=self._last_residual,
+            last_gain_vector=None,  # Online RLS removed in pre45
+            frozen_mask_heat=tuple(self._rls_heat.frozen),
+            frozen_mask_cool=tuple(self._rls_cool.frozen),
+            cusum_pos=self._cusum_pos,
+            cusum_neg=self._cusum_neg,
+        )
+
+        # Performance snapshot
+        performance = PerformanceSnapshot(
+            itae_accumulator=round(self._metrics.itae_accumulator, 2),
+            comfort_violation_hours=round(self._metrics.comfort_violation_hours, 2),
+            setpoint_changes=self._metrics.setpoint_changes,
+            controllable_itae=round(self._metrics.controllable_itae, 2),
+            uncontrollable_itae=round(self._metrics.uncontrollable_itae, 2),
+            controllable_cvh=round(self._metrics.controllable_cvh, 2),
+            uncontrollable_cvh=round(self._metrics.uncontrollable_cvh, 2),
+            ff_load_fraction=round(self._metrics.ff_load_fraction, 4),
+            batch_model_rms=(
+                round(self._metrics.batch_model_rms, 3)
+                if self._metrics.batch_model_rms is not None else None
+            ),
+        )
+
+        # Batch learning snapshot — None if no batch has run yet
+        batch_learning: BatchLearningSnapshot | None = None
+        if self._last_batch_result is not None:
+            br = self._last_batch_result
+            batch_names = coeff_names[:len(br.beta_batch)]
+            drifting = self.get_drifting_coefficients()
+            batch_learning = BatchLearningSnapshot(
+                last_run_mono=self._last_batch_timestamp,
+                last_run_wallclock=self._last_batch_wallclock or None,
+                n_total=br.n_total,
+                n_eligible=br.n_eligible,
+                residual_rms=round(br.residual_rms, 4),
+                recommend_update=br.recommend_update,
+                max_coeff_change_pct=round(br.max_coeff_change_pct, 1),
+                coefficients={
+                    batch_names[i]: BatchCoeff(
+                        current=round(br.beta_current[i], 4),
+                        batch=round(br.beta_batch[i], 4),
+                    )
+                    for i in range(len(batch_names))
+                    if i < len(br.beta_current)
+                },
+                held_features=tuple(
+                    batch_names[i] for i in br.held_features
+                    if i < len(batch_names)
+                ),
+                n_outliers_excluded=br.n_outliers_excluded,
+                drift_detection=DriftDetection(
+                    drifting_coefficients=tuple(
+                        DriftCoefficient(index=idx, name=name, consecutive_cycles=count)
+                        for idx, name, count in drifting
+                    ),
+                    correction_history={
+                        (coeff_names[i] if i < len(coeff_names) else f"β{i}"): tuple(signs)
+                        for i, signs in enumerate(self._drift_correction_signs)
+                    },
+                ),
+                residual_patterns=tuple(
+                    ResidualPattern(
+                        start_hour=p.start_hour,
+                        end_hour=p.end_hour,
+                        mean_residual=round(p.mean_residual, 3),
+                        n_observations=p.n_observations,
+                    )
+                    for p in self._last_residual_patterns
+                ),
+            )
+
+        # Observation buffer snapshots (light fields only — multicollinearity
+        # heavies live in DiagnosticsBundle).
+        def _buf_snap(buf: DiversityAwareBuffer) -> ObservationBufferSnapshot:
+            obs = buf.get_all()
+            n_eligible = sum(
+                1 for o in obs if not o.clamped and abs(o.room_rate) < 0.02
+            )
+            scores = buf.get_leverage_scores()
+            lev_min = round(min(scores), 6) if scores else None
+            lev_med = round(sorted(scores)[len(scores) // 2], 6) if scores else None
+            lev_max = round(max(scores), 6) if scores else None
+            oldest_age: float | None = None
+            if obs:
+                now = time_mod.monotonic()
+                oldest = min(o.timestamp for o in obs)
+                oldest_age = round((now - oldest) / 3600, 1)
+            return ObservationBufferSnapshot(
+                total=len(obs),
+                eligible=n_eligible,
+                max_size=buf._max_size,
+                leverage_min=lev_min,
+                leverage_median=lev_med,
+                leverage_max=lev_max,
+                oldest_age_hours=oldest_age,
+            )
+
+        obs_buf_heat = _buf_snap(self._observation_buffer_heat)
+        obs_buf_cool = _buf_snap(self._observation_buffer_cool)
+
+        # Lag filter snapshot — surfaces what's currently only in PIExtraStoredData
+        lag_states = self._inputs.get_lag_states()
+        lag_filter = LagFilterSnapshot(
+            states=tuple(
+                LagFilterState(
+                    entity_id=str(m_input.get("entity_id", "")),
+                    filtered_value=lag_states.get(
+                        m_input.get("name", str(i)),
+                        self._inputs.filtered[i] if i < len(self._inputs.filtered) else 0.0,
+                    ),
+                    decay_constant_s=float(m_input.get("lag_tau", 0)),
+                )
+                for i, m_input in enumerate(self._model_inputs)
+            ),
+        )
+
+        # FF contributions: per-feature breakdown of current ff_offset.
+        from .model_input_manager import tod_features
+        sin_now, cos_now = tod_features(time.time())
+        ff_contribs: dict[str, FFContribution] = {}
+        mi_start = self._features.model_input_start
+        for i, name in enumerate(coeff_names):
+            coef = round(heat_phys[i], 4) if i < len(heat_phys) else 0.0
+            role = self._features.role(i)
+            if role == "intercept":
+                filtered_val = 1.0
+            elif role == "outdoor_delta":
+                desired_c = self.desired_temp_celsius
+                if self._inputs.outdoor_temp is not None and desired_c is not None:
+                    filtered_val = round(self._inputs.outdoor_temp - desired_c, 4)
+                else:
+                    filtered_val = 0.0
+            elif role == "model_input":
+                input_idx = i - mi_start
+                filtered_val = round(self._inputs.filtered[input_idx], 4) if input_idx < len(self._inputs.filtered) else 0.0
+            elif role == "time_of_day":
+                if name == "sin_hour":
+                    filtered_val = round(sin_now, 4)
+                elif name == "cos_hour":
+                    filtered_val = round(cos_now, 4)
+                else:
+                    filtered_val = 0.0
+            else:
+                filtered_val = 0.0
+            contribution = round(coef * filtered_val, 4)
+            ff_contribs[name] = FFContribution(
+                coef=coef, filtered=filtered_val, contribution=contribution,
+            )
+        ff_sum = round(sum(c.contribution for c in ff_contribs.values()), 4)
+        ff_blended = (
+            round(self._ff_offset / self._ff_confidence, 4)
+            if self._ff_confidence > 0.001 else None
+        )
+        ff_contributions = FFContributionsSnapshot(
+            contributions=ff_contribs, sum=ff_sum, blended_offset=ff_blended,
+        )
+
+        # Boundary estimator: as_dict() + live extras (matches legacy shape)
+        be = self._boundary_estimator
+        be_diag = be.as_dict()
+        be_diag["should_trigger_probe"] = be.should_trigger_probe
+        if be.last_result is not None:
+            be_diag["last_result"] = {
+                "confident": be.last_result.confident,
+                "estimated_breakpoint": be.last_result.estimated_breakpoint,
+                "breakpoint_rms": be.last_result.breakpoint_rms,
+                "n_observations": be.last_result.n_observations,
+            }
+        else:
+            be_diag["last_result"] = None
+        is_heating = self._entity._attr_hvac_mode != HVACMode.COOL
+        be_diag["cal_band"] = {
+            "min": (self._head_calibration_min_heat if is_heating
+                    else self._head_calibration_min_cool),
+            "max": (self._head_calibration_max_heat if is_heating
+                    else self._head_calibration_max_cool),
+            "mode": "heat" if is_heating else "cool",
+        }
+
+        # Regime probe: as_dict() + live extras
+        rp = self._regime_probe
+        rp_diag = rp.as_dict()
+        rp_diag["state"] = rp.state.name if hasattr(rp.state, "name") else str(rp.state)
+        rp_diag["enabled"] = rp.enabled
+        rp_diag["last_probe_delta"] = rp.last_probe_delta
+        rp_diag["last_probe_hp_contributing"] = rp.last_probe_hp_contributing
+
+        # Top-level live state + assembly
+        zone_label = getattr(self._entity, "entity_id", "") or ""
+        return TickOutput(
+            ts_mono=time_mod.monotonic(),
+            ts_wall=time.time(),
+            zone_label=zone_label,
+            enabled=True,
+            paused=self._pi_paused,
+            desired_temp=self._desired_temp,
+            hp_setpoint=self._hp_setpoint,
+            integral=round(self._pi_integral, 3),
+            integral_convergence=round(self._metrics.integral_convergence, 2),
+            ff_offset=round(self._ff_offset, 2),
+            ff_confidence=round(self._ff_confidence, 4),
+            outdoor_temp=self._inputs.outdoor_temp,
+            sensor_unavailable=self._sensor_unavailable,
+            sensor_recovery_pending=self._sensor_recovery_pending,
+            room_temp_rate=round(self._room_temp_rate, 4),
+            tau_estimate=round(self._plant_id.tau, 1) if self._plant_id.enabled else None,
+            tau_fast=round(self._plant_id.plant.tau_fast.value, 1) if self._plant_id.enabled else None,
+            tau_slow=round(self._plant_id.plant.tau_slow.value, 1) if self._plant_id.enabled else None,
+            config=config,
+            rls_model=rls_model,
+            performance=performance,
+            batch_learning=batch_learning,
+            observation_buffer_heat=obs_buf_heat,
+            observation_buffer_cool=obs_buf_cool,
+            ff_contributions=ff_contributions,
+            lag_filter=lag_filter,
+            plant_identification=self._plant_id.get_diagnostics() if self._plant_id.enabled else None,
+            greybox_observer=(
+                self._last_greybox_result.as_dict()
+                if self._last_greybox_result is not None else None
+            ),
+            greybox_bridge=(
+                self._last_greybox_bridge.as_dict()
+                if self._last_greybox_bridge is not None else None
+            ),
+            greybox_buffer=self._greybox_buffer.get_diagnostics(),
+            boundary_estimator=be_diag,
+            regime_probe=rp_diag,
+            observation=self._last_observation_context,
+            events=(),
+        )
 
     # ── Public API (for vendor subclasses via entity._pi) ────────────
 
@@ -3465,6 +3791,9 @@ class PIController:
         Uses MAD-based robust scale estimation (Huber, 1981) and the
         CUSUM algorithm (Page, 1954; Basseville & Nikiforov, 1993).
         """
+        # Capture for the typed tick output. Sticky across ticks: holds
+        # the most-recent prediction residual until next observation.
+        self._last_residual = residual
         self._residual_history.append(residual)
 
         now = _now or datetime.now()
@@ -4421,13 +4750,25 @@ class PIController:
             )
             # RLS observation buffer: only when we have a valid feature vector
             # (ff_enabled + outdoor temp available) and HP is clearly contributing.
+            obs_admitted = False
             if x is not None and hp_observation_usable:
                 active_buffer = self._observation_buffer_heat if is_heating else self._observation_buffer_cool
                 active_buffer.add(obs)
+                obs_admitted = True
             # Grey-box buffer gets ALL observations (including HP-off) when
             # data is complete — greybox learns from room_rate + outdoor temp
             # independently of FF.
             self._greybox_buffer.add(obs)
+            # Capture per-tick observation context for the typed tick output.
+            self._last_observation_context = ObservationContext(
+                admitted=obs_admitted,
+                clamped=obs_clamped,
+                clamped_reason=obs_clamped_reason or "",
+                leverage_score=None,  # leverage is computed lazily; skip for hot path
+                mode="heat" if is_heating else "cool",
+                raw_readings=dict(obs.raw_readings),
+                feature_vector=tuple(x) if x is not None else (),
+            )
 
         # CUSUM anomaly detection — requires valid feature vector (x).
         if x is not None and not obs_clamped:

@@ -6,8 +6,23 @@ from homeassistant.components.climate.const import HVACMode
 from homeassistant.core import HomeAssistant
 
 from custom_components.tasmota_irhvac.const import DOMAIN
+from custom_components.tasmota_irhvac.pi.batch_learning import Observation
 
 from .conftest import get_climate_entity
+
+
+def _dummy_obs() -> Observation:
+    """Real Observation for tests that just need a non-empty buffer.
+
+    State-write paths exercised during service calls now read buffer
+    contents (via the typed snapshot rebuild), so dict placeholders
+    break iteration. Use this helper to seed buffers safely.
+    """
+    return Observation(
+        timestamp=0.0, wall_time=0.0, hp_setpoint=22.0,
+        current_c=21.0, desired_c=22.0, outdoor_temp_c=5.0,
+        room_rate=0.0, raw_readings={}, clamped=False,
+    )
 
 
 class TestPIServices:
@@ -148,8 +163,8 @@ class TestLearningReset:
         pi = entity._pi
 
         # Seed buffer and batch state
-        pi._observation_buffer_heat._buffer.append({"dummy": True})
-        pi._greybox_buffer._buffer.append({"dummy": True})
+        pi._observation_buffer_heat._buffer.append(_dummy_obs())
+        pi._greybox_buffer._buffer.append(_dummy_obs())
         pi._last_batch_result = {"rms": 0.5}
         pi._drift_correction_signs = [[1, -1]]
         pi._tuning_alert_counters = {"test": 1}
@@ -174,8 +189,8 @@ class TestLearningReset:
         entity = get_climate_entity(hass, entry)
         pi = entity._pi
 
-        pi._observation_buffer_heat._buffer.append({"dummy": True})
-        pi._greybox_buffer._buffer.append({"dummy": True})
+        pi._observation_buffer_heat._buffer.append(_dummy_obs())
+        pi._greybox_buffer._buffer.append(_dummy_obs())
         pi._last_greybox_result = {"tau_eff": 60.0}
         pi._last_greybox_bridge = {"outdoor_delta": -0.3}
         pi._greybox_has_been_good = True
@@ -230,8 +245,8 @@ class TestLearningReset:
 
         pi._pi_integral = 25.0
         pi._rls_heat.beta[0] = 99.0
-        pi._observation_buffer_heat._buffer.append({"dummy": True})
-        pi._greybox_buffer._buffer.append({"dummy": True})
+        pi._observation_buffer_heat._buffer.append(_dummy_obs())
+        pi._greybox_buffer._buffer.append(_dummy_obs())
 
         await hass.services.async_call(
             DOMAIN, "learning_reset",
@@ -274,8 +289,8 @@ class TestLearningReset:
         entity = get_climate_entity(hass, entry)
         pi = entity._pi
 
-        pi._observation_buffer_heat._buffer.append({"dummy": True})
-        pi._observation_buffer_cool._buffer.append({"dummy": True})
+        pi._observation_buffer_heat._buffer.append(_dummy_obs())
+        pi._observation_buffer_cool._buffer.append(_dummy_obs())
 
         await hass.services.async_call(
             DOMAIN, "learning_reset",
@@ -452,8 +467,8 @@ class TestBackwardCompat:
         entity = get_climate_entity(hass, entry)
         pi = entity._pi
 
-        pi._observation_buffer_heat._buffer.append({"dummy": True})
-        pi._greybox_buffer._buffer.append({"dummy": True})
+        pi._observation_buffer_heat._buffer.append(_dummy_obs())
+        pi._greybox_buffer._buffer.append(_dummy_obs())
 
         await hass.services.async_call(
             DOMAIN, "flush_observation_buffer",

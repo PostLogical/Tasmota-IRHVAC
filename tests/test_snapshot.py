@@ -48,7 +48,7 @@ def test_tick_output_schema_version_is_one():
 def test_controller_config_roundtrip():
     c = ControllerConfig(
         kp=1.5, ki=0.15, deadband=0.5, setpoint_weight=0.3,
-        tick_fallback=True, outdoor_temp_sensor="sensor.outdoor",
+        tick_fallback=900.0, outdoor_temp_sensor="sensor.outdoor",
         model_inputs=[{"name": "solar", "entity_id": "sensor.solar"}],
         ff_enabled=True, batch_wls_enabled=True, plant_id_enabled=False,
     )
@@ -62,12 +62,23 @@ def test_rls_model_snapshot_roundtrip():
         heat_uncertainty={"intercept": 0.01, "outdoor_delta": 0.02},
         heat_observation_count=42, cool_observation_count=10,
         learning_suppressed=False, manual_suppress_reason="",
-        last_residual_heat=0.05, last_residual_cool=None,
-        last_gain_vector_heat=(0.1, 0.05), last_gain_vector_cool=None,
+        last_residual=0.05, last_gain_vector=(0.1, 0.05),
         frozen_mask_heat=(False, False, True),
         frozen_mask_cool=(False, False, True),
-        cusum_pos_heat=2.5, cusum_neg_heat=0.0,
-        cusum_pos_cool=0.0, cusum_neg_cool=1.2,
+        cusum_pos=2.5, cusum_neg=1.2,
+    )
+    assert RLSModelSnapshot.from_dict(r.to_dict()) == r
+
+
+def test_rls_model_snapshot_with_none_residual_and_gain():
+    """Online RLS removed in pre45; last_residual/gain may be None."""
+    r = RLSModelSnapshot(
+        heat_coefficients={}, cool_coefficients={}, heat_uncertainty={},
+        heat_observation_count=0, cool_observation_count=0,
+        learning_suppressed=False, manual_suppress_reason="",
+        last_residual=None, last_gain_vector=None,
+        frozen_mask_heat=(), frozen_mask_cool=(),
+        cusum_pos=0.0, cusum_neg=0.0,
     )
     assert RLSModelSnapshot.from_dict(r.to_dict()) == r
 
@@ -316,7 +327,7 @@ def test_sub_snapshots_are_frozen():
     """Spot-check: sub-snapshots also frozen."""
     c = ControllerConfig(
         kp=1.5, ki=0.15, deadband=0.5, setpoint_weight=0.3,
-        tick_fallback=True, outdoor_temp_sensor=None,
+        tick_fallback=900.0, outdoor_temp_sensor=None,
         model_inputs=[], ff_enabled=False, batch_wls_enabled=False,
         plant_id_enabled=False,
     )

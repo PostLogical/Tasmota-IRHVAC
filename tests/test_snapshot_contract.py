@@ -51,77 +51,88 @@ def test_tick_output_roundtrip():
 # ── Stage 2: last_tick populated after tick() ─────────────────────────
 
 
-@pytest.mark.xfail(reason="Stage 2 not yet implemented", strict=False)
 @pytest.mark.asyncio
-async def test_last_tick_populated_after_tick(hass, setup_pi_integration):
-    """controller.last_tick is non-None after first tick; schema version is 1."""
+async def test_last_tick_populated_after_fire_dispatcher(hass, setup_pi_integration):
+    """controller.last_tick is non-None after fire_dispatcher; schema version is 1.
+
+    Stage 2: COMPLETE.
+    """
     from .conftest import get_climate_entity
 
     entry = await setup_pi_integration({"pi_tau_estimate": 60})
     pi = get_climate_entity(hass, entry)._controller
 
-    # Trigger a tick — exact mechanism TBD in Stage 2
-    await pi.tick()  # type: ignore[attr-defined]
+    # fire_dispatcher() rebuilds last_tick before sending the signal
+    pi.fire_dispatcher()
 
     assert pi.last_tick is not None
     assert pi.last_tick.SCHEMA_VERSION == 1
 
 
-@pytest.mark.xfail(reason="Stage 2 not yet implemented", strict=False)
 @pytest.mark.asyncio
 async def test_last_tick_zone_label(hass, setup_pi_integration):
-    """last_tick carries zone_label from the climate entity."""
+    """last_tick carries zone_label from the climate entity.
+
+    Stage 2: COMPLETE.
+    """
     from .conftest import get_climate_entity
 
     entry = await setup_pi_integration({"pi_tau_estimate": 60})
     climate = get_climate_entity(hass, entry)
     pi = climate._controller
 
-    await pi.tick()  # type: ignore[attr-defined]
+    pi.fire_dispatcher()
 
-    # zone_label should be derivable from the entity's name or unique_id
-    assert pi.last_tick.zone_label  # non-empty
+    # zone_label is the entity_id (or empty if not yet registered)
+    assert pi.last_tick.zone_label  # non-empty after entity registration
 
 
-@pytest.mark.xfail(reason="Stage 2 not yet implemented", strict=False)
 @pytest.mark.asyncio
 async def test_signal_pi_update_ordering(hass, setup_pi_integration):
     """SIGNAL_PI_UPDATE fires AFTER last_tick is set, not before.
 
     Sensors subscribe to this signal and must see the new tick state when
     they re-read, not the previous tick's state.
-    """
-    from unittest.mock import MagicMock
 
+    Stage 2: COMPLETE.
+    """
     from custom_components.tasmota_irhvac.const import SIGNAL_PI_UPDATE
     from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
     from .conftest import get_climate_entity
 
     entry = await setup_pi_integration({"pi_tau_estimate": 60})
-    pi = get_climate_entity(hass, entry)._controller
+    climate = get_climate_entity(hass, entry)
+    pi = climate._controller
 
-    seen_ticks: list[object | None] = []
+    seen_ts: list[float] = []
 
     def callback() -> None:
-        seen_ticks.append(pi.last_tick)
+        # Signal handler reads last_tick — should reflect the just-built tick
+        seen_ts.append(pi.last_tick.ts_mono)
 
-    async_dispatcher_connect(hass, SIGNAL_PI_UPDATE, callback)
+    async_dispatcher_connect(
+        hass,
+        SIGNAL_PI_UPDATE.format(climate._config_entry_id),
+        callback,
+    )
 
-    await pi.tick()  # type: ignore[attr-defined]
+    pi.fire_dispatcher()
     await hass.async_block_till_done()
 
-    # Signal handler saw a non-None last_tick
-    assert seen_ticks
-    assert seen_ticks[-1] is not None
+    # Signal handler saw a non-zero ts_mono — meaning last_tick was rebuilt
+    # before the signal fired (initial empty tick has ts_mono=0.0).
+    assert seen_ts
+    assert seen_ts[-1] > 0.0
 
 
-@pytest.mark.xfail(reason="Stage 2 not yet implemented", strict=False)
 @pytest.mark.asyncio
 async def test_null_controller_last_tick_compat(hass, setup_integration):
     """NullController.last_tick is a default-empty TickOutput (not None).
 
     Sensors must not crash when reading from a non-PI integration.
+
+    Stage 2: COMPLETE.
     """
     from .conftest import get_climate_entity
 

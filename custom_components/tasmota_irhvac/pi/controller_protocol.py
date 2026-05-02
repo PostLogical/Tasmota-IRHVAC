@@ -15,6 +15,8 @@ if TYPE_CHECKING:
     from homeassistant.core import State
     from homeassistant.helpers.restore_state import ExtraStoredData
 
+    from .snapshot import TickOutput
+
 
 @runtime_checkable
 class ControllerHook(Protocol):
@@ -39,6 +41,11 @@ class ControllerHook(Protocol):
 
     @property
     def is_tick_running(self) -> bool: ...
+
+    @property
+    def last_tick(self) -> TickOutput:
+        """Most-recent typed tick output. Always non-None."""
+        ...
 
     # ── Lifecycle ────────────────────────────────────────────────────
 
@@ -119,6 +126,11 @@ class NullController:
     method unconditionally without checking if a controller exists.
     """
 
+    def __init__(self) -> None:
+        # Lazy import to avoid circular dependency.
+        from .snapshot import TickOutput
+        self._last_tick = TickOutput.empty(zone_label="null")
+
     # ── Properties ───────────────────────────────────────────────────
 
     @property
@@ -136,6 +148,10 @@ class NullController:
     @property
     def is_tick_running(self) -> bool:
         return False
+
+    @property
+    def last_tick(self) -> TickOutput:
+        return self._last_tick
 
     # ── Lifecycle ────────────────────────────────────────────────────
 

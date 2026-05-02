@@ -41,7 +41,7 @@ class ControllerConfig:
     ki: float
     deadband: float
     setpoint_weight: float
-    tick_fallback: bool
+    tick_fallback: float  # fallback tick interval in seconds
     outdoor_temp_sensor: str | None
     model_inputs: list[dict[str, Any]]
     ff_enabled: bool
@@ -97,20 +97,23 @@ class RLSModelSnapshot:
     learning_suppressed: bool
     manual_suppress_reason: str
 
-    # Per-tick learning signals — populated only on the tick that updated
-    # the RLS model. None on ticks where no observation was admitted.
-    last_residual_heat: float | None
-    last_residual_cool: float | None
-    last_gain_vector_heat: tuple[float, ...] | None
-    last_gain_vector_cool: tuple[float, ...] | None
+    # Per-tick learning signals. `last_residual` is the most recent
+    # prediction residual `(hp_setpoint - desired) - rls.predict(x)`
+    # from the currently-active RLS (heat OR cool, not both — only one
+    # is active per tick). None if no residual has been computed yet.
+    last_residual: float | None
+    # Reserved for future per-tick RLS update gain vectors. Online RLS
+    # was removed in pre45, so this is None today; field retained so the
+    # schema doesn't bump when a future update path lands.
+    last_gain_vector: tuple[float, ...] | None
+    # Per-mode static frozen masks (locked coefficients).
     frozen_mask_heat: tuple[bool, ...]
     frozen_mask_cool: tuple[bool, ...]
 
-    # CUSUM detector state (always present, even when no event is open)
-    cusum_pos_heat: float
-    cusum_neg_heat: float
-    cusum_pos_cool: float
-    cusum_neg_cool: float
+    # CUSUM detector state — shared across modes in production. Single
+    # pos/neg pair, regardless of which mode the residual came from.
+    cusum_pos: float
+    cusum_neg: float
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -121,22 +124,15 @@ class RLSModelSnapshot:
             "cool_observation_count": self.cool_observation_count,
             "learning_suppressed": self.learning_suppressed,
             "manual_suppress_reason": self.manual_suppress_reason,
-            "last_residual_heat": self.last_residual_heat,
-            "last_residual_cool": self.last_residual_cool,
-            "last_gain_vector_heat": (
-                list(self.last_gain_vector_heat)
-                if self.last_gain_vector_heat is not None else None
-            ),
-            "last_gain_vector_cool": (
-                list(self.last_gain_vector_cool)
-                if self.last_gain_vector_cool is not None else None
+            "last_residual": self.last_residual,
+            "last_gain_vector": (
+                list(self.last_gain_vector)
+                if self.last_gain_vector is not None else None
             ),
             "frozen_mask_heat": list(self.frozen_mask_heat),
             "frozen_mask_cool": list(self.frozen_mask_cool),
-            "cusum_pos_heat": self.cusum_pos_heat,
-            "cusum_neg_heat": self.cusum_neg_heat,
-            "cusum_pos_cool": self.cusum_pos_cool,
-            "cusum_neg_cool": self.cusum_neg_cool,
+            "cusum_pos": self.cusum_pos,
+            "cusum_neg": self.cusum_neg,
         }
 
     @classmethod
@@ -149,22 +145,15 @@ class RLSModelSnapshot:
             cool_observation_count=data["cool_observation_count"],
             learning_suppressed=data["learning_suppressed"],
             manual_suppress_reason=data["manual_suppress_reason"],
-            last_residual_heat=data["last_residual_heat"],
-            last_residual_cool=data["last_residual_cool"],
-            last_gain_vector_heat=(
-                tuple(data["last_gain_vector_heat"])
-                if data["last_gain_vector_heat"] is not None else None
-            ),
-            last_gain_vector_cool=(
-                tuple(data["last_gain_vector_cool"])
-                if data["last_gain_vector_cool"] is not None else None
+            last_residual=data["last_residual"],
+            last_gain_vector=(
+                tuple(data["last_gain_vector"])
+                if data["last_gain_vector"] is not None else None
             ),
             frozen_mask_heat=tuple(data["frozen_mask_heat"]),
             frozen_mask_cool=tuple(data["frozen_mask_cool"]),
-            cusum_pos_heat=data["cusum_pos_heat"],
-            cusum_neg_heat=data["cusum_neg_heat"],
-            cusum_pos_cool=data["cusum_pos_cool"],
-            cusum_neg_cool=data["cusum_neg_cool"],
+            cusum_pos=data["cusum_pos"],
+            cusum_neg=data["cusum_neg"],
         )
 
 
@@ -313,7 +302,7 @@ class ResidualPattern:
 class BatchLearningSnapshot:
     """Last batch WLS run results."""
 
-    last_run_mono: float
+    last_run_mono: float | None
     last_run_wallclock: str | None
     n_total: int
     n_eligible: int
@@ -848,7 +837,7 @@ class TickOutput:
             tau_slow=None,
             config=ControllerConfig(
                 kp=0.0, ki=0.0, deadband=0.0, setpoint_weight=0.0,
-                tick_fallback=False, outdoor_temp_sensor=None,
+                tick_fallback=0.0, outdoor_temp_sensor=None,
                 model_inputs=[], ff_enabled=False, batch_wls_enabled=False,
                 plant_id_enabled=False,
             ),
@@ -857,11 +846,9 @@ class TickOutput:
                 heat_uncertainty={}, heat_observation_count=0,
                 cool_observation_count=0, learning_suppressed=False,
                 manual_suppress_reason="",
-                last_residual_heat=None, last_residual_cool=None,
-                last_gain_vector_heat=None, last_gain_vector_cool=None,
+                last_residual=None, last_gain_vector=None,
                 frozen_mask_heat=(), frozen_mask_cool=(),
-                cusum_pos_heat=0.0, cusum_neg_heat=0.0,
-                cusum_pos_cool=0.0, cusum_neg_cool=0.0,
+                cusum_pos=0.0, cusum_neg=0.0,
             ),
             performance=PerformanceSnapshot(
                 itae_accumulator=0.0, comfort_violation_hours=0.0,
