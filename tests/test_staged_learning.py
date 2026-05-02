@@ -650,69 +650,7 @@ class TestEvaluateFeatureUnlocks:
         assert not rls.frozen[2], "Already unfrozen should stay unfrozen"
 
 
-# ── Part 3: κ-Gated Learning Rate ───────────────────────────────────────
-
-
-class TestKappaGatedLambda:
-    """Tests for κ-gated learning rate."""
-
-    def test_no_change_when_kappa_low(self):
-        """λ unchanged when κ <= 30."""
-        entity = FakePIEntity(make_pi_config())
-        pi = entity._pi
-        rls = pi._rls_heat
-        original = rls.lambda_base
-        pi._cached_kappa = 20.0
-        pi._apply_kappa_gated_lambda(rls, is_heating=True)
-        assert rls.lambda_base == original
-
-    def test_no_change_when_kappa_none(self):
-        """λ unchanged when κ not yet computed."""
-        entity = FakePIEntity(make_pi_config())
-        pi = entity._pi
-        rls = pi._rls_heat
-        original = rls.lambda_base
-        pi._cached_kappa = None
-        pi._apply_kappa_gated_lambda(rls, is_heating=True)
-        assert rls.lambda_base == original
-
-    def test_lambda_one_when_kappa_100(self):
-        """λ = 1.0 when κ >= 100."""
-        entity = FakePIEntity(make_pi_config())
-        pi = entity._pi
-        rls = pi._rls_heat
-        pi._cached_kappa = 100.0
-        pi._apply_kappa_gated_lambda(rls, is_heating=True)
-        assert rls.lambda_base == pytest.approx(1.0, abs=0.001)
-
-    def test_lambda_interpolated_at_kappa_65(self):
-        """λ interpolated halfway between original and 1.0 at κ=65."""
-        entity = FakePIEntity(make_pi_config())
-        pi = entity._pi
-        rls = pi._rls_heat
-        original = rls.lambda_base
-        pi._cached_kappa = 65.0  # blend = (65-30)/70 = 0.5
-        pi._apply_kappa_gated_lambda(rls, is_heating=True)
-        expected = original + 0.5 * (1.0 - original)
-        assert rls.lambda_base == pytest.approx(expected, abs=0.001)
-
-    def test_lambda_restored_when_kappa_drops(self):
-        """λ returns to original when κ drops below 30."""
-        entity = FakePIEntity(make_pi_config())
-        pi = entity._pi
-        rls = pi._rls_heat
-        original = rls.lambda_base
-        # Push κ high
-        pi._cached_kappa = 100.0
-        pi._apply_kappa_gated_lambda(rls, is_heating=True)
-        assert rls.lambda_base == pytest.approx(1.0, abs=0.001)
-        # Drop κ
-        pi._cached_kappa = 20.0
-        pi._apply_kappa_gated_lambda(rls, is_heating=True)
-        assert rls.lambda_base == pytest.approx(original, abs=0.001)
-
-
-# ── Part 4: Learning State Sensor ────────────────────────────────────────
+# ── Part 3: Learning State Sensor ────────────────────────────────────────
 
 
 class TestLearningState:

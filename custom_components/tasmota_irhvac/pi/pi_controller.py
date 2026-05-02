@@ -593,9 +593,6 @@ class PIController:
         # Auto-gating skips features where override is not None.
         self._manual_override_heat: list[bool | None] = [None] * (self._n_model_inputs + 1)
         self._manual_override_cool: list[bool | None] = [None] * (self._n_model_inputs + 1)
-        # κ-gated lambda: original lambda_base cached for restoration
-        self._original_lambda_base_heat: float = self._rls_heat.lambda_base
-        self._original_lambda_base_cool: float = self._rls_cool.lambda_base
         self._cached_kappa: float | None = None
         self._cached_collinear_groups: list[CollinearGroup] = []
         # Adaptive batch step cap: track when each feature was unlocked
@@ -1143,12 +1140,6 @@ class PIController:
         # us whether each frozen feature is identifiable from current data.
         if full_result is not None:
             self._evaluate_feature_unlocks(full_result, rls, is_heating)
-
-        # ── κ-gated learning rate ──
-        # When condition number is elevated, slow online RLS by pushing
-        # λ toward 1.0 (no forgetting).  Linear blend: κ≤30 → no change,
-        # κ≥100 → λ=1.0.  Cached per batch cycle.
-        self._apply_kappa_gated_lambda(rls, is_heating)
 
         self._last_batch_result = result
         self._last_batch_timestamp = time.monotonic()
@@ -2097,31 +2088,6 @@ class PIController:
                 self._rls_heat_mature = True
             else:
                 self._rls_cool_mature = True
-
-    def _apply_kappa_gated_lambda(self, rls: RLSModel, is_heating: bool) -> None:
-        """Adjust RLS forgetting factor based on cached condition number.
-
-        κ ≤ 30: no change (original λ_base).
-        30 < κ < 100: linear interpolation toward λ=1.0.
-        κ ≥ 100: λ=1.0 (no forgetting, maximum stability).
-        """
-        kappa = self._cached_kappa
-        original = (
-            self._original_lambda_base_heat if is_heating
-            else self._original_lambda_base_cool
-        )
-        if kappa is None or kappa <= 30:
-            rls.lambda_base = original
-            return
-
-        blend = min((kappa - 30) / 70.0, 1.0)
-        new_lambda = original + blend * (1.0 - original)
-        if abs(new_lambda - rls.lambda_base) > 0.001:
-            _LOGGER.info(
-                "%sκ-gated λ: κ=%.0f → λ=%.4f (original=%.4f, blend=%.0f%%)",
-                self._log_prefix, kappa, new_lambda, original, blend * 100,
-            )
-        rls.lambda_base = new_lambda
 
     def get_learning_state(self) -> dict[str, Any]:
         """Return learning state for the learning sensor.
