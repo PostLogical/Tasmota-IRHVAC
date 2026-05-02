@@ -12,6 +12,13 @@
     "vendor": "FUJITSU_AC"
   },
   "pi_controller": {
+    "_lag_filter": {
+      "states": []
+    },
+    "_schema_version": 1,
+    "_ts_mono": "<NORMALIZED>",
+    "_ts_wall": "<NORMALIZED>",
+    "_zone_label": "climate.test_ac",
     "batch_learning": null,
     "boundary_estimator": {
       "cal_band": {
@@ -155,6 +162,20 @@
         "sin_hour": "<NORMALIZED_SUBTREE>"
       },
       "cool_observation_count": 0,
+      "cusum_neg": 0.0,
+      "cusum_pos": 0.0,
+      "frozen_mask_cool": [
+        false,
+        false,
+        true,
+        true
+      ],
+      "frozen_mask_heat": [
+        false,
+        false,
+        true,
+        true
+      ],
       "heat_coefficients": {
         "cos_hour": "<NORMALIZED_SUBTREE>",
         "intercept": 0.0,
@@ -168,6 +189,8 @@
         "outdoor_delta": 1.0,
         "sin_hour": "<NORMALIZED_SUBTREE>"
       },
+      "last_gain_vector": null,
+      "last_residual": null,
       "learning_suppressed": false,
       "manual_suppress_reason": ""
     },

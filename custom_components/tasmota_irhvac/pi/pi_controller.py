@@ -127,12 +127,15 @@ from .snapshot import (
     BatchCoeff,
     BatchLearningSnapshot,
     ControllerConfig,
+    CorrelatedPair,
+    DiagnosticsBundle,
     DriftCoefficient,
     DriftDetection,
     FFContribution,
     FFContributionsSnapshot,
     LagFilterSnapshot,
     LagFilterState,
+    MulticollinearityStats,
     ObservationBufferSnapshot,
     ObservationContext,
     PerformanceSnapshot,
@@ -2168,290 +2171,12 @@ class PIController:
     def get_full_diagnostics(self) -> dict[str, Any]:
         """Return complete PI state for HA diagnostics platform.
 
-        This is the single entry point for diagnostics.py — it should not
-        need to reach into PI internals beyond this method.
+        Thin wrapper over `self.diagnostics().to_dict()` — the actual
+        assembly lives in `_build_tick_output()` (typed) and
+        `_compute_multicollinearity_stats()` (heavy buffer stats).
         """
-        import time as time_mod
+        return self.diagnostics().to_dict()
 
-        coeff_names = self._coeff_names()
-        heat_phys = self._rls_heat.get_coefficients()
-        cool_phys = self._rls_cool.get_coefficients()
-
-        result: dict[str, Any] = {
-            "enabled": True,
-            "paused": self._pi_paused,
-            "desired_temp": self._desired_temp,
-            "hp_setpoint": self._hp_setpoint,
-            "integral": round(self._pi_integral, 3),
-            "integral_convergence": round(self._metrics.integral_convergence, 2),
-            "ff_offset": round(self._ff_offset, 2),
-            "ff_confidence": round(self._ff_confidence, 4),
-            "outdoor_temp": self._inputs.outdoor_temp,
-            "sensor_unavailable": self._sensor_unavailable,
-            "sensor_recovery_pending": self._sensor_recovery_pending,
-            "room_temp_rate": round(self._room_temp_rate, 4),
-            "tau_estimate": round(self._plant_id.tau, 1) if self._plant_id.enabled else None,  # backward compat
-            "tau_fast": round(self._plant_id.plant.tau_fast.value, 1) if self._plant_id.enabled else None,
-            "tau_slow": round(self._plant_id.plant.tau_slow.value, 1) if self._plant_id.enabled else None,
-            "plant_identification": self._plant_id.get_diagnostics() if self._plant_id.enabled else None,
-            "config": {
-                "kp": self._pi_kp,
-                "ki": self._pi_ki,
-                "deadband": self._pi_deadband,
-                "setpoint_weight": self._pi_setpoint_weight,
-                "tick_fallback": self._pi_tick_fallback,
-                "outdoor_temp_sensor": self._inputs.outdoor_temp_sensor,
-                "model_inputs": self._model_inputs,
-                "ff_enabled": self._pi_ff_enabled,
-                "batch_wls_enabled": self._pi_batch_wls_enabled,
-                "plant_id_enabled": self._pi_plant_id_enabled,
-            },
-            "rls_model": {
-                "heat_coefficients": {
-                    coeff_names[i]: round(heat_phys[i], 4)
-                    for i in range(min(len(coeff_names), len(heat_phys)))
-                },
-                "cool_coefficients": {
-                    coeff_names[i]: round(cool_phys[i], 4)
-                    for i in range(min(len(coeff_names), len(cool_phys)))
-                },
-                "heat_uncertainty": {
-                    coeff_names[i]: round(self._rls_heat.get_covariance_diagonal()[i], 4)
-                    for i in range(min(len(coeff_names), len(self._rls_heat.beta)))
-                },
-                "heat_observation_count": self._rls_heat.observation_count,
-                "cool_observation_count": self._rls_cool.observation_count,
-                "learning_suppressed": self._manual_ff_suppress,
-                "manual_suppress_reason": self._manual_ff_suppress_reason,
-            },
-            "performance": {
-                "itae_accumulator": round(self._metrics.itae_accumulator, 2),
-                "comfort_violation_hours": round(self._metrics.comfort_violation_hours, 2),
-                "setpoint_changes": self._metrics.setpoint_changes,
-                "controllable_itae": round(self._metrics.controllable_itae, 2),
-                "uncontrollable_itae": round(self._metrics.uncontrollable_itae, 2),
-                "controllable_cvh": round(self._metrics.controllable_cvh, 2),
-                "uncontrollable_cvh": round(self._metrics.uncontrollable_cvh, 2),
-                "ff_load_fraction": round(self._metrics.ff_load_fraction, 4),
-                "batch_model_rms": (
-                    round(self._metrics.batch_model_rms, 3)
-                    if self._metrics.batch_model_rms is not None else None
-                ),
-            },
-        }
-
-        # Batch learning
-        if self._last_batch_result is not None:
-            br = self._last_batch_result
-            batch_names = coeff_names[:len(br.beta_batch)]
-            batch: dict[str, Any] = {
-                "last_run_mono": self._last_batch_timestamp,
-                "last_run_wallclock": self._last_batch_wallclock or None,
-                "n_total": br.n_total,
-                "n_eligible": br.n_eligible,
-                "residual_rms": round(br.residual_rms, 4),
-                "recommend_update": br.recommend_update,
-                "max_coeff_change_pct": round(br.max_coeff_change_pct, 1),
-                "coefficients": {
-                    batch_names[i]: {
-                        "current": round(br.beta_current[i], 4),
-                        "batch": round(br.beta_batch[i], 4),
-                    }
-                    for i in range(len(batch_names))
-                    if i < len(br.beta_current)
-                },
-                "held_features": [
-                    batch_names[i] for i in br.held_features
-                    if i < len(batch_names)
-                ],
-                "n_outliers_excluded": br.n_outliers_excluded,
-            }
-            drifting = self.get_drifting_coefficients()
-            batch["drift_detection"] = {
-                "drifting_coefficients": [
-                    {"index": idx, "name": name, "consecutive_cycles": count}
-                    for idx, name, count in drifting
-                ],
-                "correction_history": {
-                    (coeff_names[i] if i < len(coeff_names) else f"β{i}"): signs
-                    for i, signs in enumerate(self._drift_correction_signs)
-                },
-            }
-            result["batch_learning"] = batch
-        else:
-            result["batch_learning"] = None
-
-        # Grey-box observer + bridge
-        result["greybox_observer"] = (
-            self._last_greybox_result.as_dict()
-            if self._last_greybox_result is not None else None
-        )
-        result["greybox_bridge"] = (
-            self._last_greybox_bridge.as_dict()
-            if self._last_greybox_bridge is not None else None
-        )
-
-        # Observation buffer stats (per-mode)
-        def _buf_stats(buf: DiversityAwareBuffer) -> dict[str, Any]:
-            obs = buf.get_all()
-            n_eligible = sum(
-                1 for o in obs if not o.clamped and abs(o.room_rate) < 0.02
-            )
-            stats: dict[str, Any] = {"total": len(obs), "eligible": n_eligible}
-            scores = buf.get_leverage_scores()
-            if scores:
-                stats["leverage_min"] = round(min(scores), 6)
-                stats["leverage_median"] = round(sorted(scores)[len(scores) // 2], 6)
-                stats["leverage_max"] = round(max(scores), 6)
-            if obs:
-                now = time_mod.monotonic()
-                oldest = min(o.timestamp for o in obs)
-                stats["oldest_age_hours"] = round((now - oldest) / 3600, 1)
-            stats["max_size"] = buf._max_size
-            n_features = buf.n_features
-            feature_active: dict[str, int] = {}
-            mi_start = self._features.model_input_start
-            for j in range(mi_start, n_features):
-                input_idx = j - mi_start
-                name = coeff_names[j] if j < len(coeff_names) else f"feature_{j}"
-                entity_id = self._model_inputs[input_idx].get("entity_id", "") if input_idx < len(self._model_inputs) else ""
-                feature_active[name] = sum(
-                    1 for o in obs
-                    if abs(obs_raw_reading(o, entity_id)) > 1e-6
-                ) if entity_id else 0
-            if feature_active:
-                stats["feature_active_counts"] = feature_active
-            # Multicollinearity diagnostics — gate on sufficient data
-            # to avoid rank-deficient noise from the regularizer.
-            if n_eligible >= 2 * n_features:
-                cond = buf.compute_condition_number()
-                if not math.isinf(cond):
-                    stats["condition_number"] = round(cond, 1)
-                    if cond > 100:
-                        stats["condition_rating"] = "severe"
-                    elif cond > 30:
-                        stats["condition_rating"] = "moderate"
-                    else:
-                        stats["condition_rating"] = "weak"
-                corr = buf.get_pairwise_correlations(coeff_names)
-                stats["correlated_pairs"] = [
-                    {"feature_a": a, "feature_b": b, "r": round(r, 3)}
-                    for a, b, r in corr
-                ]
-            else:
-                stats["condition_rating"] = "insufficient_data"
-                stats["correlated_pairs"] = []
-            return stats
-
-        result["observation_buffer_heat"] = _buf_stats(self._observation_buffer_heat)
-        result["observation_buffer_cool"] = _buf_stats(self._observation_buffer_cool)
-        result["greybox_buffer"] = self._greybox_buffer.get_diagnostics()
-
-        # Residual time-of-day patterns — under batch_learning
-        if result.get("batch_learning") is not None:
-            result["batch_learning"]["residual_patterns"] = [
-                {
-                    "start_hour": p.start_hour,
-                    "end_hour": p.end_hour,
-                    "mean_residual": round(p.mean_residual, 3),
-                    "n_observations": p.n_observations,
-                }
-                for p in self._last_residual_patterns
-            ]
-
-        # Boundary estimator + regime probe state — needed for production
-        # debug bundles when the boundary band has shifted unexpectedly,
-        # probes are stuck/escalating, or observation yield drops.
-        # as_dict() carries persistence-relevant counters; we add live
-        # state (last result, current cal band, probe state) on top.
-        be = self._boundary_estimator
-        be_diag = be.as_dict()
-        be_diag["should_trigger_probe"] = be.should_trigger_probe
-        if be.last_result is not None:
-            be_diag["last_result"] = {
-                "confident": be.last_result.confident,
-                "estimated_breakpoint": be.last_result.estimated_breakpoint,
-                "breakpoint_rms": be.last_result.breakpoint_rms,
-                "n_observations": be.last_result.n_observations,
-            }
-        else:
-            be_diag["last_result"] = None
-        is_heating = self._entity._attr_hvac_mode != HVACMode.COOL
-        be_diag["cal_band"] = {
-            "min": (self._head_calibration_min_heat if is_heating
-                    else self._head_calibration_min_cool),
-            "max": (self._head_calibration_max_heat if is_heating
-                    else self._head_calibration_max_cool),
-            "mode": "heat" if is_heating else "cool",
-        }
-        result["boundary_estimator"] = be_diag
-
-        rp = self._regime_probe
-        rp_diag = rp.as_dict()
-        rp_diag["state"] = rp.state.name if hasattr(rp.state, "name") else str(rp.state)
-        rp_diag["enabled"] = rp.enabled
-        rp_diag["last_probe_delta"] = rp.last_probe_delta
-        rp_diag["last_probe_hp_contributing"] = rp.last_probe_hp_contributing
-        result["regime_probe"] = rp_diag
-
-        # FF decomposition: per-feature breakdown of current ff_offset.
-        # Compute the live ToD sin/cos once so time_of_day features show
-        # their actual contribution (not a 0.0 placeholder).
-        from .model_input_manager import tod_features
-        sin_now, cos_now = tod_features(time.time())
-        ff_contribs: dict[str, Any] = {}
-        mi_start = self._features.model_input_start
-        for i, name in enumerate(coeff_names):
-            coef = round(heat_phys[i], 4) if i < len(heat_phys) else 0.0
-            role = self._features.role(i)
-            if role == "intercept":
-                filtered_val = 1.0
-            elif role == "outdoor_delta":
-                desired_c = self.desired_temp_celsius
-                if self._inputs.outdoor_temp is not None and desired_c is not None:
-                    filtered_val = round(self._inputs.outdoor_temp - desired_c, 4)
-                else:
-                    filtered_val = 0.0
-            elif role == "model_input":
-                input_idx = i - mi_start
-                filtered_val = round(self._inputs.filtered[input_idx], 4) if input_idx < len(self._inputs.filtered) else 0.0
-            elif role == "time_of_day":
-                if name == "sin_hour":
-                    filtered_val = round(sin_now, 4)
-                elif name == "cos_hour":
-                    filtered_val = round(cos_now, 4)
-                else:
-                    filtered_val = 0.0
-            else:
-                filtered_val = 0.0  # placeholder for features without runtime state
-            contribution = round(coef * filtered_val, 4)
-            ff_contribs[name] = {
-                "coef": coef,
-                "filtered": filtered_val,
-                "contribution": contribution,
-            }
-        ff_sum = round(sum(v["contribution"] for v in ff_contribs.values()), 4)
-        ff_contribs["_sum"] = ff_sum
-        ff_contribs["_blended_offset"] = round(
-            self._ff_offset / self._ff_confidence, 4
-        ) if self._ff_confidence > 0.001 else None
-        result["ff_contributions"] = ff_contribs
-
-        # Power-user debug capture: full RLS P matrix off-diagonals.
-        # Toggled via the `set_debug_capture` service. Default off.
-        if self._debug_capture_full_p:
-            n_heat = self._rls_heat.n
-            n_cool = self._rls_cool.n
-            result["full_p_heat"] = [
-                [self._rls_heat.P[i * n_heat + j] for j in range(n_heat)]
-                for i in range(n_heat)
-            ]
-            result["full_p_cool"] = [
-                [self._rls_cool.P[i * n_cool + j] for j in range(n_cool)]
-                for i in range(n_cool)
-            ]
-
-        return result
 
     def get_learning_status(self) -> dict[str, Any]:
         """Return FF learning suppression state for binary_sensor platform."""
@@ -3512,6 +3237,96 @@ class PIController:
             regime_probe=rp_diag,
             observation=self._last_observation_context,
             events=(),
+        )
+
+    def _compute_multicollinearity_stats(
+        self, buf: DiversityAwareBuffer,
+    ) -> MulticollinearityStats:
+        """Compute heavy buffer stats — only called from `diagnostics()`.
+
+        Condition number and pairwise correlations are O(n_features²) over
+        the full buffer; gating in `_build_tick_output()` keeps the hot
+        path cheap by routing these here.
+        """
+        coeff_names = self._coeff_names()
+        obs = buf.get_all()
+        n_eligible = sum(
+            1 for o in obs if not o.clamped and abs(o.room_rate) < 0.02
+        )
+        n_features = buf.n_features
+        feature_active: dict[str, int] = {}
+        mi_start = self._features.model_input_start
+        for j in range(mi_start, n_features):
+            input_idx = j - mi_start
+            name = coeff_names[j] if j < len(coeff_names) else f"feature_{j}"
+            entity_id = (
+                self._model_inputs[input_idx].get("entity_id", "")
+                if input_idx < len(self._model_inputs) else ""
+            )
+            feature_active[name] = sum(
+                1 for o in obs
+                if abs(obs_raw_reading(o, entity_id)) > 1e-6
+            ) if entity_id else 0
+
+        # Multicollinearity gate: only compute when buffer has enough data
+        # to avoid rank-deficient noise from the regularizer.
+        condition_number: float | None = None
+        condition_rating = "insufficient_data"
+        correlated_pairs: tuple[CorrelatedPair, ...] = ()
+        if n_eligible >= 2 * n_features:
+            cond = buf.compute_condition_number()
+            if not math.isinf(cond):
+                condition_number = round(cond, 1)
+                if cond > 100:
+                    condition_rating = "severe"
+                elif cond > 30:
+                    condition_rating = "moderate"
+                else:
+                    condition_rating = "weak"
+            corr = buf.get_pairwise_correlations(coeff_names)
+            correlated_pairs = tuple(
+                CorrelatedPair(feature_a=a, feature_b=b, r=round(r, 3))
+                for a, b, r in corr
+            )
+
+        return MulticollinearityStats(
+            condition_number=condition_number,
+            condition_rating=condition_rating,
+            correlated_pairs=correlated_pairs,
+            feature_active_counts=feature_active,
+        )
+
+    def diagnostics(self) -> DiagnosticsBundle:
+        """Build a typed DiagnosticsBundle reflecting CURRENT controller state.
+
+        Always rebuilds the underlying TickOutput so the result is fresh
+        (not the cached `last_tick` which sensors read between dispatcher
+        signals). Includes multicollinearity heavies and — when
+        `set_debug_capture(full_p=True)` has been called — the full RLS
+        P matrices.
+        """
+        fresh_tick = self._build_tick_output()
+        heat_mc = self._compute_multicollinearity_stats(self._observation_buffer_heat)
+        cool_mc = self._compute_multicollinearity_stats(self._observation_buffer_cool)
+        full_p_heat: tuple[tuple[float, ...], ...] | None = None
+        full_p_cool: tuple[tuple[float, ...], ...] | None = None
+        if self._debug_capture_full_p:
+            n_heat = self._rls_heat.n
+            full_p_heat = tuple(
+                tuple(self._rls_heat.P[i * n_heat + j] for j in range(n_heat))
+                for i in range(n_heat)
+            )
+            n_cool = self._rls_cool.n
+            full_p_cool = tuple(
+                tuple(self._rls_cool.P[i * n_cool + j] for j in range(n_cool))
+                for i in range(n_cool)
+            )
+        return DiagnosticsBundle(
+            tick=fresh_tick,
+            heat_multicollinearity=heat_mc,
+            cool_multicollinearity=cool_mc,
+            full_p_heat=full_p_heat,
+            full_p_cool=full_p_cool,
         )
 
     # ── Public API (for vendor subclasses via entity._pi) ────────────

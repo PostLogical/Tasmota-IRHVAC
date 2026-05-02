@@ -200,9 +200,11 @@ async def test_debug_capture_service_toggles_full_p(hass, setup_pi_integration):
 # ── Stage 4: get_full_diagnostics() reduced to one-liner ─────────────
 
 
-@pytest.mark.xfail(reason="Stage 4 not yet implemented", strict=False)
 def test_get_full_diagnostics_is_one_liner():
-    """After Stage 4, get_full_diagnostics() body is a single return statement."""
+    """After Stage 4, get_full_diagnostics() body is a single return statement.
+
+    Stage 4: COMPLETE.
+    """
     import inspect
 
     from custom_components.tasmota_irhvac.pi.pi_controller import PIController
