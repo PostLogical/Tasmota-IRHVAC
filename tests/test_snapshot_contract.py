@@ -146,27 +146,33 @@ async def test_null_controller_last_tick_compat(hass, setup_integration):
 # ── Stage 3: set_debug_capture service ────────────────────────────────
 
 
-@pytest.mark.xfail(reason="Stage 3 not yet implemented", strict=False)
 @pytest.mark.asyncio
 async def test_debug_capture_service_toggles_full_p(hass, setup_pi_integration):
-    """set_debug_capture(full_p=True) makes full_p_heat/cool appear in diagnostics."""
+    """set_debug_capture(full_p=True) makes full_p_heat/cool appear in diagnostics.
+
+    Stage 3: COMPLETE.
+    """
     from custom_components.tasmota_irhvac.const import DOMAIN
     from custom_components.tasmota_irhvac.diagnostics import (
         async_get_config_entry_diagnostics,
     )
 
+    from .conftest import get_climate_entity
+
     entry = await setup_pi_integration({"pi_tau_estimate": 60})
+    climate = get_climate_entity(hass, entry)
 
     # Initially: no full_p
     diag = await async_get_config_entry_diagnostics(hass, entry)
     pi_diag = diag["pi_controller"]
-    assert "full_p_heat" not in pi_diag.get("observation_buffer_heat", {})
+    assert "full_p_heat" not in pi_diag
+    assert "full_p_cool" not in pi_diag
 
     # Call service: full_p=True
     await hass.services.async_call(
         DOMAIN,
         "set_debug_capture",
-        {"full_p": True, "entity_id": "climate.test_ac_pi"},
+        {"full_p": True, "entity_id": climate.entity_id},
         blocking=True,
     )
 
@@ -175,6 +181,20 @@ async def test_debug_capture_service_toggles_full_p(hass, setup_pi_integration):
     pi_diag = diag["pi_controller"]
     assert "full_p_heat" in pi_diag
     assert "full_p_cool" in pi_diag
+    # Should be square matrices
+    n = len(pi_diag["full_p_heat"])
+    assert all(len(row) == n for row in pi_diag["full_p_heat"])
+
+    # Toggle off again
+    await hass.services.async_call(
+        DOMAIN,
+        "set_debug_capture",
+        {"full_p": False, "entity_id": climate.entity_id},
+        blocking=True,
+    )
+    diag = await async_get_config_entry_diagnostics(hass, entry)
+    assert "full_p_heat" not in diag["pi_controller"]
+    assert "full_p_cool" not in diag["pi_controller"]
 
 
 # ── Stage 4: get_full_diagnostics() reduced to one-liner ─────────────

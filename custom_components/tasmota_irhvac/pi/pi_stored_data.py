@@ -73,6 +73,7 @@ class PIExtraStoredData(ExtraStoredData):
     plant_id_enabled: bool = True
     detected_lag_tau: dict[str, float] = dataclasses.field(default_factory=dict)  # input name → auto-detected EMA tau (seconds)
     detected_lag_tau_counts: dict[str, int] = dataclasses.field(default_factory=dict)  # input name → consistent detection count
+    debug_capture_full_p: bool = False  # power-user toggle for full RLS P matrix capture
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize to JSON-compatible dict."""
@@ -125,6 +126,7 @@ class PIExtraStoredData(ExtraStoredData):
             "plant_id_enabled": self.plant_id_enabled,
             "detected_lag_tau": self.detected_lag_tau,
             "detected_lag_tau_counts": self.detected_lag_tau_counts,
+            "debug_capture_full_p": self.debug_capture_full_p,
         }
 
     @classmethod
@@ -191,6 +193,7 @@ class PIExtraStoredData(ExtraStoredData):
                 detected_lag_tau_counts={
                     k: int(v) for k, v in restored.get("detected_lag_tau_counts", {}).items()
                 },
+                debug_capture_full_p=bool(restored.get("debug_capture_full_p", False)),
             )
         except (KeyError, ValueError, TypeError, AttributeError):
             return None

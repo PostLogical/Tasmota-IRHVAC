@@ -456,3 +456,16 @@ set_subsystem:
       required: true
       selector:
         boolean:
+
+set_debug_capture:
+  name: Set debug capture
+  description: "Power-user toggle for deep debugging. When full_p=true, diagnostics (Download Diagnostics from the integration UI) include the full RLS P matrix off-diagonals — useful for analyzing covariance structure during multicollinearity investigations. Adds ~200 floats per snapshot. Default off; persists across restarts. Not exposed in the config flow."
+  target:
+    entity:
+      integration: tasmota_irhvac
+  fields:
+    full_p:
+      description: When true, include full RLS P matrix (heat + cool, off-diagonals) in diagnostics output.
+      required: true
+      selector:
+        boolean:

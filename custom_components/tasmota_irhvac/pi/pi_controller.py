@@ -625,6 +625,11 @@ class PIController:
         self._last_tick: TickOutput = TickOutput.empty(
             zone_label=getattr(self._entity, "entity_id", "") or ""
         )
+        # Power-user debug toggle: when True, diagnostics include full RLS
+        # P matrix off-diagonals. Default off (saves log size). Toggled via
+        # the `tasmota_irhvac.set_debug_capture` service. Persisted so the
+        # setting survives restarts.
+        self._debug_capture_full_p: bool = False
 
     # ── Shorthand entity access ──────────────────────────────────────
 
@@ -1386,6 +1391,7 @@ class PIController:
             plant_id_enabled=self._pi_plant_id_enabled,
             detected_lag_tau=dict(self._detected_lag_tau),
             detected_lag_tau_counts=dict(self._detected_lag_tau_count),
+            debug_capture_full_p=self._debug_capture_full_p,
         )
 
     def restore_extra_stored_data(self, data: PIExtraStoredData) -> None:
@@ -1565,6 +1571,8 @@ class PIController:
         self._pi_ff_enabled = data.ff_enabled
         self._pi_batch_wls_enabled = data.batch_wls_enabled
         self._pi_plant_id_enabled = data.plant_id_enabled
+        # Restore power-user debug capture toggle
+        self._debug_capture_full_p = data.debug_capture_full_p
         # Restore lag filter states
         if data.lag_filter_states:
             self._inputs.restore_lag_states(data.lag_filter_states)
@@ -2429,6 +2437,20 @@ class PIController:
         ) if self._ff_confidence > 0.001 else None
         result["ff_contributions"] = ff_contribs
 
+        # Power-user debug capture: full RLS P matrix off-diagonals.
+        # Toggled via the `set_debug_capture` service. Default off.
+        if self._debug_capture_full_p:
+            n_heat = self._rls_heat.n
+            n_cool = self._rls_cool.n
+            result["full_p_heat"] = [
+                [self._rls_heat.P[i * n_heat + j] for j in range(n_heat)]
+                for i in range(n_heat)
+            ]
+            result["full_p_cool"] = [
+                [self._rls_cool.P[i * n_cool + j] for j in range(n_cool)]
+                for i in range(n_cool)
+            ]
+
         return result
 
     def get_learning_status(self) -> dict[str, Any]:
@@ -3194,6 +3216,24 @@ class PIController:
         notifies sensors.
         """
         return self._last_tick
+
+    def set_debug_capture(self, *, full_p: bool) -> None:
+        """Toggle debug captures (power-user surface for deep debugging).
+
+        Currently exposes only `full_p`: when enabled, diagnostics include
+        the full RLS P matrix (heat + cool, off-diagonals included). Adds
+        ~200 floats per snapshot — negligible for occasional debugging,
+        meaningful if event-logged every tick. Default off.
+
+        Persisted via `PIExtraStoredData.debug_capture_full_p` so the
+        setting survives restarts. Wired through the
+        `tasmota_irhvac.set_debug_capture` service.
+        """
+        self._debug_capture_full_p = bool(full_p)
+        _LOGGER.info(
+            "%sDebug capture: full_p=%s",
+            self._log_prefix, self._debug_capture_full_p,
+        )
 
     def _build_tick_output(self) -> TickOutput:
         """Assemble the typed TickOutput from current controller state.
