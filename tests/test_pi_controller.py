@@ -1803,14 +1803,12 @@ class TestSetSubsystem:
 
         pi.set_subsystem("control", False)
         pi.set_subsystem("ff", False)
-        pi.set_subsystem("rls_online", False)
 
         data = pi.get_extra_stored_data()
         assert data is not None
         d = data.as_dict()
         assert d["control_active"] is False
         assert d["ff_enabled"] is False
-        assert d["rls_online_enabled"] is False
         assert d["batch_wls_enabled"] is True
         assert d["plant_id_enabled"] is True
 
@@ -1822,7 +1820,6 @@ class TestSetSubsystem:
         pi2.restore_extra_stored_data(PIExtraStoredData.from_dict(d))
         assert pi2._control_active is False
         assert pi2._pi_ff_enabled is False
-        assert pi2._pi_rls_online_enabled is False
         assert pi2._pi_batch_wls_enabled is True
 
     def test_control_active_in_attributes(self):
@@ -4748,77 +4745,6 @@ class TestBatchWLSApply:
             )
 
 
-class TestGateLogging:
-    """Tests for RLS gate decision logging."""
-
-    @pytest.mark.asyncio
-    async def test_deadband_gate_logs_periodically(self, pi_entity, caplog):
-        """Gate block log should fire at tick 4, 8, 12 — not every tick."""
-        import logging
-        pi_entity._attr_hvac_mode = HVACMode.HEAT
-        pi_entity._attr_current_temperature = 22.1  # in deadband (error = -0.1)
-        pi_entity._pi._desired_temp = 22.0
-        pi_entity._pi._hp_setpoint = 22.0
-        # Force a condition that blocks learning
-        pi_entity._pi._inputs.outdoor_temp = None  # blocks "no outdoor temp"
-
-        with caplog.at_level(logging.DEBUG):
-            for i in range(16):
-                pi_entity._pi._pi_last_tick_time = float(i * 900)
-                with patch("time.monotonic", return_value=float((i + 1) * 900)):
-                    await pi_entity._pi._pi_tick()
-
-        blocked_msgs = [r for r in caplog.records if "RLS learning blocked" in r.message]
-        # Should fire at ticks 4, 8, 12 (every 4th tick)
-        assert len(blocked_msgs) >= 2, (
-            f"Expected periodic gate block logs, got {len(blocked_msgs)}"
-        )
-
-    @pytest.mark.asyncio
-    async def test_oodb_gate_reset_logged(self, pi_entity, caplog):
-        """OODB gate reset should log when counter was accumulating."""
-        import logging
-        pi_entity._attr_hvac_mode = HVACMode.HEAT
-        pi_entity._attr_current_temperature = 19.0  # outside deadband
-        pi_entity._pi._desired_temp = 22.0
-        pi_entity._pi._hp_setpoint = 22.0
-        pi_entity._pi._inputs.outdoor_temp = 5.0
-        # Simulate some stable ticks to build up counter
-        pi_entity._pi._stable_oodb_ticks = 3
-
-        with caplog.at_level(logging.DEBUG):
-            # Break stability by making room rate unstable
-            pi_entity._pi._room_temp_rate = 0.05  # > 0.015 threshold
-            pi_entity._pi._pi_last_tick_time = 0.0
-            with patch("time.monotonic", return_value=900.0):
-                await pi_entity._pi._pi_tick()
-
-        reset_msgs = [r for r in caplog.records if "OODB gate reset" in r.message]
-        assert len(reset_msgs) >= 1, (
-            f"Expected OODB gate reset log, got {len(reset_msgs)}"
-        )
-
-    @pytest.mark.asyncio
-    async def test_oodb_gate_no_log_when_counter_zero(self, pi_entity, caplog):
-        """No OODB reset log when counter was already at zero."""
-        import logging
-        pi_entity._attr_hvac_mode = HVACMode.HEAT
-        pi_entity._attr_current_temperature = 19.0
-        pi_entity._pi._desired_temp = 22.0
-        pi_entity._pi._hp_setpoint = 22.0
-        pi_entity._pi._inputs.outdoor_temp = 5.0
-        pi_entity._pi._stable_oodb_ticks = 0  # already zero
-        pi_entity._pi._room_temp_rate = 0.05  # unstable
-
-        with caplog.at_level(logging.DEBUG):
-            await pi_entity._pi._pi_tick()
-
-        reset_msgs = [r for r in caplog.records if "OODB gate reset" in r.message]
-        assert len(reset_msgs) == 0, (
-            f"Should not log OODB reset when counter was already 0"
-        )
-
-
 class TestControllableUncontrollableMetrics:
     """Tests for controllable/uncontrollable ITAE and CVH split."""
 
@@ -5452,13 +5378,10 @@ class TestSubsystemToggles:
     """Tests for runtime subsystem gating via config toggles."""
 
     def test_toggles_defaults(self):
-        """Subsystem toggles default values match the production-default
-        verdict: FF / batch WLS / plant ID all enabled; online RLS off
-        (retired per ``project_online_rls_verdict.md``)."""
+        """Subsystem toggles default values: FF / batch WLS / plant ID all enabled."""
         entity = FakePIEntity(make_pi_config())
         pi = entity._pi
         assert pi._pi_ff_enabled is True
-        assert pi._pi_rls_online_enabled is False
         assert pi._pi_batch_wls_enabled is True
         assert pi._pi_plant_id_enabled is True
 
@@ -5466,30 +5389,24 @@ class TestSubsystemToggles:
         """Toggles reflect explicit config overrides."""
         config = make_pi_config({
             "pi_ff_enabled": False,
-            "pi_rls_online_enabled": False,
             "pi_batch_wls_enabled": False,
             "pi_plant_id_enabled": False,
         })
         entity = FakePIEntity(config)
         pi = entity._pi
         assert pi._pi_ff_enabled is False
-        assert pi._pi_rls_online_enabled is False
         assert pi._pi_batch_wls_enabled is False
         assert pi._pi_plant_id_enabled is False
 
     def test_diagnostics_expose_toggles(self):
-        """Full diagnostics include subsystem toggle states. Online RLS
-        defaults to False per the verdict; we explicitly enable it here
-        to exercise the True diagnostic path."""
+        """Full diagnostics include subsystem toggle states."""
         config = make_pi_config({
             "pi_ff_enabled": False,
             "pi_batch_wls_enabled": False,
-            "pi_rls_online_enabled": True,  # explicit enable; default is False
         })
         entity = FakePIEntity(config)
         diag = entity._pi.get_full_diagnostics()
         assert diag["config"]["ff_enabled"] is False
-        assert diag["config"]["rls_online_enabled"] is True
         assert diag["config"]["batch_wls_enabled"] is False
         assert diag["config"]["plant_id_enabled"] is True
 
@@ -5765,24 +5682,6 @@ class TestSubsystemToggles:
 
         await pi._pi_tick()
         assert pi._ff_offset != 0.0, "FF should still predict from seeds"
-
-    def test_rls_shared_gate_respects_toggle(self):
-        """_rls_shared_gate_open returns False when toggle disabled."""
-        config = make_pi_config({"pi_rls_online_enabled": False})
-        entity = FakePIEntity(config)
-        pi = entity._pi
-        pi._inputs.outdoor_temp = 5.0
-        assert pi._rls_shared_gate_open(False) is False
-
-    def test_rls_shared_gate_open_when_enabled(self):
-        """_rls_shared_gate_open returns True when all conditions met.
-        Online RLS defaults to False (verdict); explicitly enable to
-        exercise the open-gate branch."""
-        config = make_pi_config({"pi_rls_online_enabled": True})
-        entity = FakePIEntity(config)
-        pi = entity._pi
-        pi._inputs.outdoor_temp = 5.0
-        assert pi._rls_shared_gate_open(False) is True
 
     @pytest.mark.asyncio
     async def test_rls_online_disabled_observations_still_buffered(self):
@@ -6219,45 +6118,6 @@ class TestPIControllerCoverageGaps:
             assert diag["ff_contributions"]["future_role_feature"]["filtered"] == 0.0
         finally:
             pi._features = original
-
-    def test_predict_only_when_rls_online_disabled(self):
-        """With _rls_online_learning=False, _rls_learn_observation is predict-only (line 3815)."""
-        entity = FakePIEntity(make_pi_config())
-        pi = entity._pi
-        pi._rls_online_learning = False
-        # Feature vector: intercept + outdoor_delta + 2 ToD = 4
-        x = [1.0, 0.0, 0.0, 0.0]
-        beta_before = list(pi._rls_heat.beta)
-        residual = pi._rls_learn_observation(pi._rls_heat, x, 0.5, "heat")
-        # Beta unchanged (no update applied), residual = 0.5 - predict(x)
-        assert list(pi._rls_heat.beta) == beta_before
-        assert residual == 0.5 - pi._rls_heat.predict(x)
-
-    def test_per_feature_caps_disabled_when_rls_offline(self):
-        """When _rls_online_learning=False, batch sets per_feature_caps=None (lines 1025-1026)."""
-        import time as time_mod
-        from custom_components.tasmota_irhvac.pi.batch_learning import Observation
-        entity = FakePIEntity(make_pi_config())
-        pi = entity._pi
-        pi._rls_online_learning = False  # explicit set — getattr returns this
-        entity._attr_hvac_mode = HVACMode.HEAT
-        pi._desired_temp = 21.0
-        pi._hp_setpoint = 21.0
-        # Seed enough observations for batch to run
-        now = time_mod.monotonic()
-        for i in range(30):
-            obs = Observation(
-                timestamp=now + i * 900,
-                wall_time=1713650000.0 + i * 900,
-                hp_setpoint=22.0, current_c=21.0 + (i % 3) * 0.1,
-                desired_c=21.0,
-                outdoor_temp_c=21.0 + float(i % 5 - 2),
-                room_rate=0.001, raw_readings={}, clamped=False,
-            )
-            pi._observation_buffer_heat.add(obs)
-        # No assertion needed — just exercise the code path. If the line
-        # ran, coverage records it.
-        pi._run_batch_analysis()
 
     def test_restore_detected_lag_tau(self):
         """Restoring data with detected_lag_tau applies the best confirmed value (lines 1630-1643)."""

@@ -533,7 +533,7 @@ SERVICE_TO_METHOD = {
         "method": "async_set_subsystem",
         "schema": IRHVAC_SERVICE_SCHEMA.extend({
             vol.Required("subsystem"): vol.In([
-                "control", "ff", "rls_online", "batch_wls", "plant_id",
+                "control", "ff", "batch_wls", "plant_id",
             ]),
             vol.Required("enabled"): cv.boolean,
         }),

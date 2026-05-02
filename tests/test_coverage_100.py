@@ -323,23 +323,6 @@ class TestPIControllerCoverageGaps:
         pi._update_cusum(0.1, time.monotonic(), True)
         # Just verify it doesn't crash
 
-    # Line 3488: RLS online disabled in learning blocked log
-    def test_learning_blocked_rls_disabled(self):
-        """Log includes 'online RLS disabled' reason (line 3488)."""
-        entity = _make_pi()
-        pi = entity._pi
-        pi._pi_rls_online_enabled = False
-        # Call the log method
-        pi._log_learning_blocked(
-            learning_suppressed=False,
-            integral_change=0.0,
-            room_rate=0.0,
-            is_heating=True,
-            is_cooling=False,
-            error=0.5,
-        )
-        # Just verify no crash
-
     # Line 3551: outdoor temp state change with None new_state
     def test_outdoor_temp_changed_none_state(self):
         """Handler returns early when new_state is None (line 3551)."""
@@ -448,36 +431,6 @@ class TestPIControllerCoverageGaps:
             pi._pi_last_tick_time = time.monotonic() - 900
             await pi._pi_tick()
         # Just verify no crash — the learning path is exercised
-
-    # Line 3859: RLS coefficient change >10% logging path
-    def test_rls_learn_observation_logs_coefficient_change(self):
-        """``_rls_learn_observation`` logs an INFO message when any β
-        changes by more than 10% relative. Online RLS defaults to off
-        (verdict), so this path needs explicit enable + a contrived β
-        jump to cover the logging branch (line 3859)."""
-        entity = _make_pi()
-        pi = entity._pi
-        pi._pi_rls_online_enabled = True
-        rls = pi._rls_heat
-        # Seed RLS with non-zero β so a relative-change comparison is
-        # well-defined.
-        rls.beta = [1.0] + [0.0] * (rls.n - 1)
-        rls.observation_count = 50  # past warmup
-        # Patch update() to inject a large (>10%) coefficient change.
-        original_update = rls.update
-
-        def stomp_beta(x, y):
-            residual = original_update(x, y)
-            rls.beta[0] = 2.0  # 100% change from 1.0 → triggers log
-            return residual
-
-        rls.update = stomp_beta  # type: ignore[method-assign]
-        try:
-            pi._rls_learn_observation(
-                rls, [1.0] + [0.0] * (rls.n - 1), 0.5, "rls_heat",
-            )
-        finally:
-            rls.update = original_update  # type: ignore[method-assign]
 
     # Lines 4336-4337: obs_clamped saturated_low
     @pytest.mark.asyncio

@@ -259,7 +259,7 @@
       },
       "pi_advanced": {
         "title": "Advanced PI",
-        "description": "Configure setpoint weighting and experimental features. Subsystem toggles (FF, RLS, batch WLS, plant ID) are now runtime services — use set_subsystem.",
+        "description": "Configure setpoint weighting and experimental features. Subsystem toggles (FF, batch WLS, plant ID) are now runtime services — use set_subsystem.",
         "data": {
           "pi_setpoint_weight": "Setpoint Weight (0-1)",
           "pi_smith_enabled": "Smith Predictor",

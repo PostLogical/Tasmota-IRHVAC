@@ -83,7 +83,6 @@ from ..const import (
     CONF_PI_BATCH_WLS_ENABLED,
     CONF_PI_FF_ENABLED,
     CONF_PI_PLANT_ID_ENABLED,
-    CONF_PI_RLS_ONLINE_ENABLED,
     CONF_PI_TAU_ESTIMATE,
     DEFAULT_PI_BATCH_WLS_ENABLED,
     DEFAULT_PI_DEADBAND,
@@ -102,7 +101,6 @@ from ..const import (
     DEFAULT_PI_KI,
     DEFAULT_PI_KP,
     DEFAULT_PI_PLANT_ID_ENABLED,
-    DEFAULT_PI_RLS_ONLINE_ENABLED,
     DEFAULT_PI_TICK_FALLBACK,
     DEFAULT_PI_RESPONSE_LAG,
     DEFAULT_PI_SETPOINT_HOLD,
@@ -213,8 +211,6 @@ class PIController:
         # set_subsystem service toggles at runtime.
         self._control_active: bool = True
         self._pi_ff_enabled: bool = config.get(CONF_PI_FF_ENABLED, DEFAULT_PI_FF_ENABLED)
-        self._pi_rls_online_enabled: bool = config.get(
-            CONF_PI_RLS_ONLINE_ENABLED, DEFAULT_PI_RLS_ONLINE_ENABLED)
         self._pi_batch_wls_enabled: bool = config.get(
             CONF_PI_BATCH_WLS_ENABLED, DEFAULT_PI_BATCH_WLS_ENABLED)
         self._pi_plant_id_enabled: bool = config.get(
@@ -491,12 +487,9 @@ class PIController:
         # Performance metrics (ITAE, CVH, FF load fraction, integral convergence)
         self._metrics = PerformanceMetrics()
 
-        # RLS learning gate: track integral stability
+        # Integral baselines for batch observation metadata + auto-perturbation.
         self._prev_integral_for_rls: float = 0.0
-        # Out-of-deadband steady-state learning: consecutive ticks with
-        # low room_temp_rate while outside deadband but within learning zone.
-        self._stable_oodb_ticks: int = 0
-        self._prev_integral_for_oodb: float = 0.0  # separate from deadband tracker
+        self._prev_integral_for_oodb: float = 0.0
 
         # FF confidence (EMA-smoothed to prevent limit cycling from
         # tick-to-tick confidence changes near integer setpoint boundaries)
@@ -1359,7 +1352,6 @@ class PIController:
             batch_cycle_count=self._batch_cycle_count,
             control_active=self._control_active,
             ff_enabled=self._pi_ff_enabled,
-            rls_online_enabled=self._pi_rls_online_enabled,
             batch_wls_enabled=self._pi_batch_wls_enabled,
             plant_id_enabled=self._pi_plant_id_enabled,
             detected_lag_tau=dict(self._detected_lag_tau),
@@ -1541,7 +1533,6 @@ class PIController:
         # Restore runtime subsystem toggle states
         self._control_active = data.control_active
         self._pi_ff_enabled = data.ff_enabled
-        self._pi_rls_online_enabled = data.rls_online_enabled
         self._pi_batch_wls_enabled = data.batch_wls_enabled
         self._pi_plant_id_enabled = data.plant_id_enabled
         # Restore lag filter states
@@ -1729,7 +1720,6 @@ class PIController:
             "rls_observation_count": self._rls_heat.observation_count,
             "control_active": self._control_active,
             "ff_enabled": self._pi_ff_enabled,
-            "rls_online_enabled": self._pi_rls_online_enabled,
             "batch_wls_enabled": self._pi_batch_wls_enabled,
             "plant_id_enabled": self._pi_plant_id_enabled,
             "ff_learning_suppressed": self._disturbance_suppress_active,
@@ -2175,7 +2165,6 @@ class PIController:
                 "outdoor_temp_sensor": self._inputs.outdoor_temp_sensor,
                 "model_inputs": self._model_inputs,
                 "ff_enabled": self._pi_ff_enabled,
-                "rls_online_enabled": self._pi_rls_online_enabled,
                 "batch_wls_enabled": self._pi_batch_wls_enabled,
                 "plant_id_enabled": self._pi_plant_id_enabled,
             },
@@ -3268,7 +3257,6 @@ class PIController:
     _SUBSYSTEM_ATTRS: dict[str, str] = {
         "control": "_control_active",
         "ff": "_pi_ff_enabled",
-        "rls_online": "_pi_rls_online_enabled",
         "batch_wls": "_pi_batch_wls_enabled",
         "plant_id": "_pi_plant_id_enabled",
     }
@@ -3469,19 +3457,6 @@ class PIController:
         """
         return 1.0
 
-    # ── RLS learning ─────────────────────────────────────────────────
-
-    def _rls_shared_gate_open(self, learning_suppressed: bool) -> bool:
-        """Check shared RLS learning preconditions (toggle, outdoor temp, suppression, tracking)."""
-        return (
-            self._pi_rls_online_enabled
-            and self._inputs.outdoor_temp is not None
-            and not learning_suppressed
-            and not self._any_model_input_unavailable()
-            and not self._supplemental.tracking_mode
-            and not self._supplemental.assist_active
-        )
-
     def _update_cusum(
         self,
         residual: float,
@@ -3551,58 +3526,6 @@ class PIController:
             self._cusum_pos = 0.0
             self._cusum_neg = 0.0
             self._cusum_cooldown_until = now + timedelta(seconds=CUSUM_COOLDOWN_SEC)
-
-    def _rls_learn_observation(
-        self,
-        rls: RLSModel,
-        x: list[float],
-        observed_offset: float,
-        label: str,
-    ) -> float:
-        """Compute prediction residual and log. Returns residual.
-
-        Online RLS coefficient updates were removed per the bench-validated
-        verdict (project_online_rls_verdict.md): batch WLS is the sole
-        coefficient estimator.  This function now only computes the residual
-        for logging/CUSUM purposes.
-        """
-        residual = observed_offset - rls.predict(x)
-        _LOGGER.debug(
-            "%s: observed=%.2f predicted=%.2f residual=%.2f obs_count=%d dT_dt=%.4f",
-            label, observed_offset, observed_offset - residual, residual,
-            rls.observation_count, self._room_temp_rate,
-        )
-        return residual
-
-    def _log_learning_blocked(
-        self,
-        learning_suppressed: bool,
-        integral_change: float,
-        room_rate: float,
-        is_heating: bool,
-        is_cooling: bool,
-        error: float,
-    ) -> None:
-        """Log reasons why RLS learning gate is blocked (deadband path)."""
-        reasons: list[str] = []
-        if not self._pi_rls_online_enabled:
-            reasons.append("online RLS disabled")
-        if self._inputs.outdoor_temp is None:
-            reasons.append("no outdoor temp")
-        if learning_suppressed:
-            reasons.append("manually suppressed")
-        if integral_change * self._pi_ki >= 0.045:
-            reasons.append(f"integral not settled (d_output={integral_change * self._pi_ki:.3f})")
-        if abs(room_rate) >= 0.02:
-            reasons.append(f"room not settled (dT/dt={room_rate:.4f} °C/min)")
-        if self._any_model_input_unavailable():
-            reasons.append("model input unavailable")
-        if (is_heating and error < 0) or (is_cooling and error > 0):
-            reasons.append(
-                f"actuator no authority ({'heating' if is_heating else 'cooling'}, error={error:.2f})"
-            )
-        if reasons:
-            _LOGGER.debug("RLS learning blocked: %s", ", ".join(reasons))
 
     # ── IMC Gain Scheduling (delegated to PlantIdentifier) ────────────
 
@@ -4364,29 +4287,7 @@ class PIController:
             if not skip_integration:
                 self._pi_integral += avg_error * dt_factor * rate
 
-            # IDB learning gate: require integral settled and room temp stable.
-            # Output-normalized: compare Ki × Δintegral against a fixed output
-            # threshold (0.045°C ≈ 0.3 × 0.15 at the default Ki).  This makes
-            # the gate Ki-invariant — higher Ki needs proportionally smaller
-            # integral swings to produce the same output change.
-            integral_change = abs(self._pi_integral - self._prev_integral_for_rls)
-            output_change = integral_change * self._pi_ki
-            branch_ready = (
-                self._ff_settled_ticks >= 4
-                and output_change < 0.045
-                and abs(self._room_temp_rate) < 0.02
-                and hp_observation_usable
-            )
-            if branch_ready and x is not None and self._rls_shared_gate_open(learning_suppressed):
-                # Observe hp_setpoint - desired_c: what offset maintained target
-                self._rls_learn_observation(
-                    rls, x, float(self._hp_setpoint) - desired_c, "RLS update",
-                )
-            elif self._ff_settled_ticks >= 4 and self._ff_settled_ticks % 4 == 0:
-                self._log_learning_blocked(
-                    learning_suppressed, integral_change, self._room_temp_rate,
-                    is_heating, is_cooling, error,
-                )
+            # Track integral baseline for batch observation metadata.
             self._prev_integral_for_rls = self._pi_integral
 
             if learning_suppressed and self._ff_settled_ticks >= 2:
@@ -4398,45 +4299,8 @@ class PIController:
         else:
             self._ff_settled_ticks = 0
 
-            # OODB learning: at thermal equilibrium outside deadband, feed a
-            # corrected observation (hp_setpoint - current_c) to the RLS.
-            # Breaks the cycle where a miscalibrated model keeps the room away
-            # from target, preventing the normal gate from opening.
-            # Bias grows with distance from target, so require proportionally
-            # more settling ticks at larger errors.
-            room_stable = abs(self._room_temp_rate) < 0.015  # stricter than IDB gate
-            integral_change = abs(self._pi_integral - self._prev_integral_for_oodb)
-            # Output-normalized: 0.075°C ≈ 0.5 × 0.15 at default Ki
-            integral_stable = integral_change * self._pi_ki < 0.075
+            # Track integral baseline for batch observation metadata.
             self._prev_integral_for_oodb = self._pi_integral
-            setpoint_clamped = not hp_observation_usable
-            min_oodb_ticks = 8 + int(abs_error * 4)  # +4 ticks per °C of error
-
-            if room_stable and integral_stable and not setpoint_clamped:
-                self._stable_oodb_ticks += 1
-            else:
-                if self._stable_oodb_ticks > 0:
-                    reasons = []
-                    if not room_stable:
-                        reasons.append(f"room not settled (dT/dt={self._room_temp_rate:.4f})")
-                    if not integral_stable:
-                        reasons.append(f"integral not settled (d_output={integral_change * self._pi_ki:.3f})")
-                    if setpoint_clamped:
-                        reasons.append("setpoint clamped")
-                    _LOGGER.debug(
-                        "OODB gate reset at %d/%d ticks: %s",
-                        self._stable_oodb_ticks, min_oodb_ticks,
-                        ", ".join(reasons) if reasons else "conditions changed",
-                    )
-                self._stable_oodb_ticks = 0
-
-            branch_ready = self._stable_oodb_ticks >= min_oodb_ticks
-            if branch_ready and x is not None and self._rls_shared_gate_open(learning_suppressed):
-                # Observe hp_setpoint - current_c: what offset maintains equilibrium
-                self._rls_learn_observation(
-                    rls, x, float(self._hp_setpoint) - current_c, "RLS oodb",
-                )
-                self._stable_oodb_ticks = 0  # one observation per settled window
 
             # P-term with setpoint weighting (2-DOF, Åström & Hägglund).
             # Smith correction only applied when it prevents overshoot

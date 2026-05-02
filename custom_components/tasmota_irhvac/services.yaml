@@ -442,14 +442,13 @@ set_subsystem:
       integration: tasmota_irhvac
   fields:
     subsystem:
-      description: "Subsystem to toggle: control (PI output), ff (feedforward), rls_online (per-tick RLS), batch_wls (batch analysis), plant_id (τ estimation)."
+      description: "Subsystem to toggle: control (PI output), ff (feedforward), batch_wls (batch analysis), plant_id (τ estimation)."
       required: true
       selector:
         select:
           options:
             - control
             - ff
-            - rls_online
             - batch_wls
             - plant_id
     enabled:

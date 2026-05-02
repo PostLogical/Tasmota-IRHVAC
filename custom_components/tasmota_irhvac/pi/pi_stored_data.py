@@ -69,7 +69,6 @@ class PIExtraStoredData(ExtraStoredData):
     # Runtime subsystem toggles (persisted so they survive restarts)
     control_active: bool = True
     ff_enabled: bool = True
-    rls_online_enabled: bool = True
     batch_wls_enabled: bool = True
     plant_id_enabled: bool = True
     detected_lag_tau: dict[str, float] = dataclasses.field(default_factory=dict)  # input name → auto-detected EMA tau (seconds)
@@ -122,7 +121,6 @@ class PIExtraStoredData(ExtraStoredData):
             "batch_cycle_count": self.batch_cycle_count,
             "control_active": self.control_active,
             "ff_enabled": self.ff_enabled,
-            "rls_online_enabled": self.rls_online_enabled,
             "batch_wls_enabled": self.batch_wls_enabled,
             "plant_id_enabled": self.plant_id_enabled,
             "detected_lag_tau": self.detected_lag_tau,
@@ -187,7 +185,6 @@ class PIExtraStoredData(ExtraStoredData):
                 batch_cycle_count=int(restored.get("batch_cycle_count", 0)),
                 control_active=bool(restored.get("control_active", True)),
                 ff_enabled=bool(restored.get("ff_enabled", True)),
-                rls_online_enabled=bool(restored.get("rls_online_enabled", True)),
                 batch_wls_enabled=bool(restored.get("batch_wls_enabled", True)),
                 plant_id_enabled=bool(restored.get("plant_id_enabled", True)),
                 detected_lag_tau=restored.get("detected_lag_tau", {}),
