@@ -6445,3 +6445,111 @@ class TestPIControllerCoverageGaps:
         # Likely "weak" with simple data; assert it's set to one of the rating
         # categories (whichever lands here exercises the code path).
         assert rating in ("weak", "moderate", "severe")
+
+    def test_drift_history_records_negative_delta(self):
+        """Drift sign-classification stores -1 when blended < current (line 1197)."""
+        import time as time_mod
+        from custom_components.tasmota_irhvac.pi.batch_learning import (
+            BatchResult, Observation, compute_blended_update as _real_blend,
+        )
+        entity = FakePIEntity(make_pi_config())
+        pi = entity._pi
+        entity._attr_hvac_mode = HVACMode.HEAT
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 21.0
+
+        now = time_mod.monotonic()
+        for i in range(30):
+            pi._observation_buffer_heat.add(Observation(
+                timestamp=now + i * 900,
+                wall_time=1713650000.0 + i * 900,
+                hp_setpoint=22.0,
+                current_c=21.0 + (i % 3) * 0.1,
+                desired_c=21.0,
+                outdoor_temp_c=21.0 + (i % 3) * 0.1 + float(i % 5 - 2),
+                room_rate=0.001,
+                raw_readings={},
+                clamped=False,
+            ))
+
+        # Force beta_blended < beta_current so the sign loop hits the
+        # else branch (signs.append(-1)) for every coefficient.
+        def _force_negative_blend(result: BatchResult, **kwargs):
+            _real_blend(result, **kwargs)
+            result.beta_blended = [
+                bc - 1.0 for bc in result.beta_current
+            ]
+
+        with patch(
+            "custom_components.tasmota_irhvac.pi.pi_controller."
+            "compute_blended_update",
+            side_effect=_force_negative_blend,
+        ):
+            pi._run_batch_analysis()
+
+        assert pi._drift_correction_signs, "drift history should be populated"
+        # Every coefficient saw a negative delta → sign = -1.
+        for signs in pi._drift_correction_signs:
+            assert signs == [-1]
+
+    def test_2r2c_tau_fast_feeds_plant_id(self):
+        """2R2C grey-box with k_w forwards τ_fast to plant_id (lines 909-913)."""
+        import time as time_mod
+        from custom_components.tasmota_irhvac.pi.batch_learning import Observation
+        from custom_components.tasmota_irhvac.pi.greybox_observer import (
+            GreyboxBridgeResult, GreyboxResult,
+        )
+        # pi_tau_estimate>0 turns on IMC, which is the gate for plant_id.enabled.
+        entity = FakePIEntity(make_pi_config({"pi_tau_estimate": 60.0}))
+        pi = entity._pi
+        entity._attr_hvac_mode = HVACMode.HEAT
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 21.0
+
+        now = time_mod.monotonic()
+        for i in range(30):
+            pi._observation_buffer_heat.add(Observation(
+                timestamp=now + i * 900,
+                wall_time=1713650000.0 + i * 900,
+                hp_setpoint=22.0,
+                current_c=21.0 + (i % 3) * 0.1,
+                desired_c=21.0,
+                outdoor_temp_c=21.0 + (i % 3) * 0.1 + float(i % 5 - 2),
+                room_rate=0.001,
+                raw_readings={},
+                clamped=False,
+            ))
+
+        fake_greybox = GreyboxResult(
+            n_observations=80, n_hp_on=50, n_hp_off=30,
+            c0=0.0, ua_c=0.012, k_c=0.015, alpha_c=0.0,
+            tau_eff=83.3, residual_rms=0.0005,
+            cost=0.5, n_function_evals=20,
+            param_std_err={"ua_c": 0.0006, "k_w": 0.001},
+            is_2r2c=True, k_w=0.025, mass_ratio=1.5,
+            tau_fast=12.0, tau_slow=83.3,
+        )
+        fake_bridge = GreyboxBridgeResult(
+            beta=[None, -0.8],
+            beta_std_err=[float("inf"), 0.05],
+            tau_eff=83.3, k_eff=1.0,
+            gates_passed=True, gate_details={},
+            greybox=fake_greybox,
+            tau_fast=12.0, tau_slow=83.3,
+        )
+        spy = MagicMock(return_value=None)
+        with patch(
+            "custom_components.tasmota_irhvac.pi.pi_controller.fit_greybox",
+            return_value=fake_greybox,
+        ), patch(
+            "custom_components.tasmota_irhvac.pi.pi_controller.greybox_to_beta",
+            return_value=fake_bridge,
+        ), patch.object(pi._plant_id, "update_from_greybox", spy):
+            pi._run_batch_analysis()
+
+        assert spy.called, "plant_id.update_from_greybox should be invoked"
+        kwargs = spy.call_args.kwargs
+        assert kwargs["tau_fast"] == 12.0
+        # CV = std_err / |value|; k_w_cv = 0.001/0.025 = 0.04 dominates
+        # ua_c_cv = 0.0006/0.012 = 0.05 → max picks ua_c_cv.
+        assert kwargs["tau_fast_cv"] == pytest.approx(0.05, abs=1e-9)
