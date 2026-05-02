@@ -2712,8 +2712,6 @@ class PIController:
                 HA restarts don't inflate them.
         """
         from .health_checks import (
-            check_batch_online_disagreement_repair,
-            check_covariance_collapse_repair,
             check_freeze_impact_repair,
             check_high_integral_repair,
             check_intercept_absorbing_repair,
@@ -2871,39 +2869,7 @@ class PIController:
                 is_fixable, fix_data,
             ))
 
-        # ── Covariance collapse at clamp ────────────────────────────
         from ..const import DEFAULT_RLS_DELTA
-        for mode_label, rls_model, clamps in [
-            ("heat", self._rls_heat, self._rls_heat_clamps),
-            ("cool", self._rls_cool, self._rls_cool_clamps),
-        ]:
-            if rls_model.observation_count == 0:
-                continue
-            coeffs = rls_model.get_coefficients()
-            p_diag = rls_model.get_covariance_diagonal()
-            coeff_names = self._features.names
-
-            for i in range(1, rls_model.n):  # skip intercept (no clamp)
-                clamp = clamps[i] if i < len(clamps) else None
-                name = coeff_names[i] if i < len(coeff_names) else f"coeff_{i}"
-                result = check_covariance_collapse_repair(
-                    coeff_index=i,
-                    coeff_name=name,
-                    coeff_value=coeffs.get(i, 0.0),
-                    clamp=clamp,
-                    p_diagonal=p_diag[i] if i < len(p_diag) else 1.0,
-                    delta=DEFAULT_RLS_DELTA,
-                )
-                if result is not None:
-                    key, placeholders, should_create = result
-                    issues.append((
-                        f"{key}_{entry_id}_{mode_label}_{name}",
-                        "warning",
-                        key,
-                        placeholders,
-                        should_create,
-                        False, None,
-                    ))
 
         # ── Model drift with maturity gate ──────────────────────────
         drift_results = check_model_drift_repair(
@@ -2960,47 +2926,6 @@ class PIController:
                     should_create,
                     False, None,
                 ))
-
-        # ── Batch-online disagreement ───────────────────────────────
-        if (
-            self._last_batch_result is not None
-            and self._last_batch_result.beta_blended
-            and self._drift_correction_signs
-        ):
-            is_heating_active = self._entity._attr_hvac_mode in (HVACMode.HEAT, HVACMode.HEAT_COOL, None)
-            active_rls = self._rls_heat if is_heating_active else self._rls_cool
-            active_coeffs = active_rls.get_coefficients()
-            coeff_names_list = self._features.names
-
-            n = min(
-                len(self._drift_correction_signs),
-                len(self._last_batch_result.beta_blended),
-                active_rls.n,
-            )
-            for i in range(n):
-                if i >= len(coeff_names_list):
-                    break
-                drift_signs = self._drift_correction_signs[i] if i < len(self._drift_correction_signs) else []
-                blended = self._last_batch_result.beta_blended[i] if i < len(self._last_batch_result.beta_blended) else None
-                current = active_coeffs.get(i, 0.0)
-
-                result = check_batch_online_disagreement_repair(
-                    coeff_index=i,
-                    coeff_name=coeff_names_list[i],
-                    drift_signs=drift_signs,
-                    current_beta=current,
-                    last_blended_beta=blended,
-                )
-                if result is not None:
-                    key, placeholders, should_create = result
-                    issues.append((
-                        f"{key}_{entry_id}_{coeff_names_list[i]}",
-                        "warning",
-                        key,
-                        placeholders,
-                        should_create,
-                        False, None,
-                    ))
 
         # ── Residual time-of-day patterns ──────────────────────────
         for idx, pattern in enumerate(self._last_residual_patterns):

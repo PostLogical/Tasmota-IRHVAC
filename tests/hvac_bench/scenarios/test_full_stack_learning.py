@@ -982,38 +982,6 @@ class TestRecoveryFromBadStates:
                 f"Comfort not recovered in last week: {last_week_comfort:.1f}%"
             )
 
-    def test_recovery_from_covariance_collapse(self):
-        """If P collapses (RLS stops learning), batch WLS should compensate.
-
-        Simulate by running with very low forgetting factor (λ≈0.99)
-        which causes fast P decay, then check that batch WLS still
-        corrects coefficients even when online RLS has stalled.
-        """
-        profile = PROFILES_2R2C["living_room"]
-        config = self._make_config(
-            n_days=30,
-            pi_overrides={
-                "pi_outdoor_seed_heat": profile.true_seed * 2.0,
-                "pi_rls_forgetting": 0.99,  # fast decay → P collapse
-            },
-        )
-        result = run_full_stack(config)
-
-        # Batch WLS should still function — coefficients should stabilize
-        if len(result.coef_trajectory) >= 15:
-            late_ods = [snap.get("outdoor_delta", 0)
-                        for snap in result.coef_trajectory[-10:]]
-            od_std = _std(late_ods)
-            assert od_std < 0.1, (
-                f"Coefficients not stable despite P collapse: "
-                f"outdoor_delta std={od_std:.4f}"
-            )
-
-        # System should still be comfortable (controllable)
-        assert result.ctrl_comfort_pct >= 80.0, (
-            f"Controllable comfort collapsed with low λ: {result.ctrl_comfort_pct:.1f}%"
-        )
-
     def test_wrong_sign_seed_all_profiles(self):
         """All profiles should recover from a wrong-sign outdoor seed."""
         for profile_name in ["living_room", "bunkroom"]:

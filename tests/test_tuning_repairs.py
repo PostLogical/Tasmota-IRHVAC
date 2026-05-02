@@ -4,8 +4,6 @@ import pytest
 from homeassistant.components.climate import HVACMode
 
 from custom_components.tasmota_irhvac.pi.health_checks import (
-    check_batch_online_disagreement_repair,
-    check_covariance_collapse_repair,
     check_freeze_impact_repair,
     check_high_integral_repair,
     check_intercept_absorbing_repair,
@@ -402,65 +400,6 @@ class TestCheckTuningHealthOrchestration:
         assert signal_received.called
 
 
-# ── check_covariance_collapse_repair ────────────────────────────────
-
-
-class TestCovarianceCollapseRepair:
-    """Tests for covariance collapse detection."""
-
-    def test_creates_when_at_clamp_with_collapsed_p(self):
-        """Issue created when coefficient at clamp with P ≈ delta."""
-        result = check_covariance_collapse_repair(
-            coeff_index=1, coeff_name="outdoor_delta",
-            coeff_value=0.0, clamp=(0.0, 2.0),
-            p_diagonal=0.002, delta=0.001,
-        )
-        assert result is not None
-        key, placeholders, should_create = result
-        assert should_create is True
-        assert key == "covariance_collapse"
-        assert placeholders["coeff_name"] == "outdoor_delta"
-
-    def test_no_issue_when_p_healthy(self):
-        """No issue when P is still large even though at clamp."""
-        result = check_covariance_collapse_repair(
-            coeff_index=1, coeff_name="outdoor_delta",
-            coeff_value=0.0, clamp=(0.0, 2.0),
-            p_diagonal=0.5, delta=0.001,
-        )
-        assert result is None
-
-    def test_clears_when_away_from_clamp(self):
-        """Issue cleared when coefficient moves away from clamp."""
-        result = check_covariance_collapse_repair(
-            coeff_index=1, coeff_name="outdoor_delta",
-            coeff_value=0.3, clamp=(0.0, 2.0),
-            p_diagonal=0.002, delta=0.001,
-        )
-        assert result is not None
-        assert result[2] is False
-
-    def test_no_clamp_returns_none(self):
-        """Returns None for unclamped coefficients."""
-        result = check_covariance_collapse_repair(
-            coeff_index=0, coeff_name="intercept",
-            coeff_value=-1.5, clamp=None,
-            p_diagonal=0.001, delta=0.001,
-        )
-        assert result is None
-
-    def test_at_upper_clamp(self):
-        """Detects collapse at upper clamp boundary."""
-        result = check_covariance_collapse_repair(
-            coeff_index=1, coeff_name="outdoor_delta",
-            coeff_value=2.0, clamp=(0.0, 2.0),
-            p_diagonal=0.001, delta=0.001,
-        )
-        assert result is not None
-        assert result[2] is True
-        assert result[1]["clamp_value"] == "2.0000"
-
-
 # ── check_model_drift_repair ───────────────────────────────────────
 
 
@@ -587,25 +526,6 @@ class TestPhase3Orchestration:
     """Test Phase 3 checks wired into _check_tuning_health()."""
 
     @pytest.mark.asyncio
-    async def test_covariance_collapse_detected(self, hass, setup_pi_integration):
-        """Covariance collapse is detected in orchestration."""
-        entry = await setup_pi_integration()
-        entity = get_climate_entity(hass, entry)
-        pi = entity._pi
-
-        # Simulate: outdoor_delta at lower clamp with collapsed P
-        n = pi._rls_heat.n
-        pi._rls_heat.beta[1] = 0.0  # at lower clamp
-        pi._rls_heat.observation_count = 100
-        # Collapse P[1,1]
-        pi._rls_heat.P[1 * n + 1] = 0.001
-
-        issues = pi._check_tuning_health()
-        collapse_issues = [i for i in issues if "covariance_collapse" in i[0]]
-        assert len(collapse_issues) >= 1
-        assert collapse_issues[0][4] is True
-
-    @pytest.mark.asyncio
     async def test_drift_suppressed_before_stable(self, hass, setup_pi_integration):
         """Model drift is suppressed before first stable batch."""
         entry = await setup_pi_integration()
@@ -639,117 +559,6 @@ class TestPhase3Orchestration:
         absorbing_issues = [i for i in issues if "intercept_absorbing" in i[0]]
         assert len(absorbing_issues) >= 1
         assert absorbing_issues[0][4] is True
-
-
-# ── check_batch_online_disagreement_repair ──────────────────────────
-
-
-class TestBatchOnlineDisagreementRepair:
-    """Tests for batch-online oscillation detection."""
-
-    def test_creates_when_corrections_same_direction_and_drift_back(self):
-        """Issue created when batch keeps correcting but RLS drifts back."""
-        result = check_batch_online_disagreement_repair(
-            coeff_index=1, coeff_name="outdoor_delta",
-            drift_signs=[1, 1, 1],
-            current_beta=0.25,
-            last_blended_beta=0.35,  # current drifted back down
-        )
-        assert result is not None
-        key, placeholders, should_create = result
-        assert should_create is True
-        assert key == "batch_online_disagreement"
-        assert placeholders["direction"] == "upward"
-
-    def test_no_issue_when_corrections_mixed(self):
-        """No issue when corrections aren't all in same direction."""
-        result = check_batch_online_disagreement_repair(
-            coeff_index=1, coeff_name="outdoor_delta",
-            drift_signs=[1, -1, 1],
-            current_beta=0.25,
-            last_blended_beta=0.35,
-        )
-        assert result is None
-
-    def test_clears_when_correction_sticking(self):
-        """Issue cleared when current beta stays near blended (correction stuck)."""
-        result = check_batch_online_disagreement_repair(
-            coeff_index=1, coeff_name="outdoor_delta",
-            drift_signs=[1, 1, 1],
-            current_beta=0.34,
-            last_blended_beta=0.35,  # essentially no drift-back
-        )
-        assert result is not None
-        assert result[2] is False
-
-    def test_no_blended_beta(self):
-        """Returns None when no blended beta available."""
-        result = check_batch_online_disagreement_repair(
-            coeff_index=1, coeff_name="outdoor_delta",
-            drift_signs=[1, 1, 1],
-            current_beta=0.25,
-            last_blended_beta=None,
-        )
-        assert result is None
-
-    def test_insufficient_history(self):
-        """Returns None when not enough drift history."""
-        result = check_batch_online_disagreement_repair(
-            coeff_index=1, coeff_name="outdoor_delta",
-            drift_signs=[1, 1],
-            current_beta=0.25,
-            last_blended_beta=0.35,
-        )
-        assert result is None
-
-    def test_downward_direction(self):
-        """Detects downward correction direction."""
-        result = check_batch_online_disagreement_repair(
-            coeff_index=1, coeff_name="outdoor_delta",
-            drift_signs=[-1, -1, -1],
-            current_beta=0.45,
-            last_blended_beta=0.35,  # drifted back up
-        )
-        assert result is not None
-        assert result[2] is True
-        assert result[1]["direction"] == "downward"
-
-
-class TestBatchOnlineDisagreementOrchestration:
-    """Test batch-online disagreement wired into _check_tuning_health()."""
-
-    @pytest.mark.asyncio
-    async def test_disagreement_detected(self, hass, setup_pi_integration):
-        """Batch-online disagreement detected in orchestration."""
-        from custom_components.tasmota_irhvac.pi.batch_learning import BatchResult
-
-        entry = await setup_pi_integration()
-        entity = get_climate_entity(hass, entry)
-        pi = entity._pi
-
-        # Simulate: 3 consecutive upward corrections
-        pi._drift_correction_signs = [
-            [0, 0, 0],   # intercept
-            [1, 1, 1],   # outdoor_delta — corrected upward 3x
-        ]
-        # Last batch blended outdoor_delta to 0.4
-        pi._last_batch_result = BatchResult(
-            n_total=50, n_eligible=40,
-            beta_batch=[0.0, 0.4],
-            beta_current=[0.0, 0.3],
-            residual_rms=0.1,
-            max_coeff_change_pct=10.0,
-            recommend_update=True,
-            beta_blended=[0.0, 0.4],
-        )
-        # But current beta drifted back down to 0.25
-        pi._rls_heat.beta[1] = 0.25 * pi._rls_heat.feature_scales[1]
-        pi._rls_heat.observation_count = 100
-
-        issues = pi._check_tuning_health()
-        disagreement_issues = [i for i in issues if "batch_online_disagreement" in i[0]]
-        assert len(disagreement_issues) >= 1
-        assert disagreement_issues[0][4] is True
 
 
 # ── check_multicollinearity_repair ─────────────────────────────────

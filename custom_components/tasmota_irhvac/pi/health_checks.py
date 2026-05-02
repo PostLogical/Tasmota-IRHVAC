@@ -430,47 +430,6 @@ def check_high_integral_repair(
     )
 
 
-def check_covariance_collapse_repair(
-    coeff_index: int,
-    coeff_name: str,
-    coeff_value: float,
-    clamp: tuple[float, float] | None,
-    p_diagonal: float,
-    delta: float = 0.001,
-) -> tuple[str, dict[str, str], bool] | None:
-    """Check if a coefficient is stuck at its clamp with collapsed uncertainty.
-
-    When P[i,i] ≈ delta and the coefficient is at a clamp boundary,
-    online RLS learning cannot recover — the covariance has collapsed.
-    """
-    if clamp is None:
-        return None
-
-    lo, hi = clamp
-    at_lower = abs(coeff_value - lo) < 1e-3
-    at_upper = abs(coeff_value - hi) < 1e-3
-
-    if not (at_lower or at_upper):
-        # Coefficient not at clamp — clear any existing issue
-        return ("covariance_collapse", {}, False)
-
-    if p_diagonal < 3 * delta:
-        clamp_value = lo if at_lower else hi
-        return (
-            "covariance_collapse",
-            {
-                "coeff_name": coeff_name,
-                "value": f"{coeff_value:.4f}",
-                "clamp_value": f"{clamp_value:.4f}",
-                "p_diagonal": f"{p_diagonal:.6f}",
-            },
-            True,
-        )
-
-    # At clamp but P hasn't collapsed yet — no issue
-    return None
-
-
 def check_model_drift_repair(
     drifting_coefficients: list[tuple[int, str, int]],
     has_had_stable_batch: bool,
@@ -543,46 +502,6 @@ def check_intercept_absorbing_repair(
             )
 
     return None
-
-
-def check_batch_online_disagreement_repair(
-    coeff_index: int,
-    coeff_name: str,
-    drift_signs: list[int],
-    current_beta: float,
-    last_blended_beta: float | None,
-    min_same_direction: int = 3,
-) -> tuple[str, dict[str, str], bool] | None:
-    """Check if batch and online learning are fighting over a coefficient.
-
-    Detected when the last N batch corrections are in the same direction
-    but the current beta has drifted back in the opposite direction.
-    """
-    if last_blended_beta is None or len(drift_signs) < min_same_direction:
-        return None
-
-    recent = drift_signs[-min_same_direction:]
-    # Check all recent corrections are in the same direction (all +1 or all -1)
-    if not (all(s == 1 for s in recent) or all(s == -1 for s in recent)):
-        return None
-
-    correction_direction = recent[0]  # +1 or -1
-    drift_back = current_beta - last_blended_beta
-
-    # Disagreement: current beta drifted in opposite direction from corrections
-    if correction_direction * drift_back < 0 and abs(drift_back) > 0.01:
-        direction = "upward" if correction_direction == 1 else "downward"
-        return (
-            "batch_online_disagreement",
-            {
-                "coeff_name": coeff_name,
-                "direction": direction,
-            },
-            True,
-        )
-
-    # Corrections in same direction but no drift-back — corrections are sticking
-    return ("batch_online_disagreement", {}, False)
 
 
 def check_residual_pattern_repair(

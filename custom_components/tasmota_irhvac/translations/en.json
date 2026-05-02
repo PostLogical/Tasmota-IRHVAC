@@ -646,10 +646,6 @@
         }
       }
     },
-    "covariance_collapse": {
-      "title": "Coefficient {coeff_name} stuck at clamp",
-      "description": "{coeff_name} is stuck at {clamp_value} with collapsed uncertainty (P={p_diagonal}). Online learning cannot recover. Wait for the next batch cycle to correct, or call the reset_ff_seeds service to re-learn from scratch. If this recurs, widen the {coeff_name} clamp range in PI Settings."
-    },
     "high_integral_immature": {
       "title": "High integral correction (model still learning)",
       "description": "The PI integral is compensating with {correction}°C of setpoint adjustment. No action needed — the model is still learning ({count} of ~100 observations). Performance will improve as the model accumulates more data."
@@ -681,10 +677,6 @@
     "intercept_absorbing": {
       "title": "Intercept absorbing {absorbed_name} effect",
       "description": "The intercept has grown to {intercept_value}°C, absorbing the effect of {absorbed_name} (stuck at {absorbed_clamp}). Call the reset_ff_seeds service to re-learn both coefficients. If {absorbed_name} returns to its clamp, consider widening its range in PI Settings."
-    },
-    "batch_online_disagreement": {
-      "title": "Batch and online learning disagree on {coeff_name}",
-      "description": "The batch model keeps correcting {coeff_name} {direction} but online learning pulls it back. This may indicate seasonal variation. The system will stabilize as the observation buffer accumulates more data from current conditions. No action needed."
     },
     "residual_pattern": {
       "title": "Unmodeled disturbance detected ({time_range})",
