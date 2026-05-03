@@ -12,8 +12,30 @@
     "vendor": "FUJITSU_AC"
   },
   "pi_controller": {
+    "_greybox": {
+      "reason": "buffer empty",
+      "state": "Failed"
+    },
+    "_health": {
+      "alerts": [],
+      "state": "OK"
+    },
     "_lag_filter": {
       "states": []
+    },
+    "_learning": {
+      "active_features": [],
+      "condition_number": null,
+      "frozen_features": [
+        "sin_hour",
+        "cos_hour"
+      ],
+      "observation_count": 0,
+      "state": "Learning"
+    },
+    "_learning_suppression": {
+      "active_suppressors": [],
+      "effective_suppressed": false
     },
     "_schema_version": 1,
     "_ts_mono": "<NORMALIZED>",

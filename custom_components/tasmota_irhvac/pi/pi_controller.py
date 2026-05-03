@@ -124,6 +124,7 @@ from .model_input_manager import (
     TOD_FEATURE_NAMES,
 )
 from .snapshot import (
+    Alert,
     BatchCoeff,
     BatchLearningSnapshot,
     ControllerConfig,
@@ -133,8 +134,12 @@ from .snapshot import (
     DriftDetection,
     FFContribution,
     FFContributionsSnapshot,
+    GreyboxSnapshot,
+    HealthSnapshot,
     LagFilterSnapshot,
     LagFilterState,
+    LearningSnapshot,
+    LearningSuppressionSnapshot,
     MulticollinearityStats,
     ObservationBufferSnapshot,
     ObservationContext,
@@ -1961,98 +1966,48 @@ class PIController:
     def get_learning_state(self) -> dict[str, Any]:
         """Return learning state for the learning sensor.
 
-        Returns dict with:
-        - state: "Learning" | "Optimizing" | "Optimized"
-        - frozen_features: list of frozen feature names
-        - active_features: list of unfrozen feature names
-        - observation_count: total observations (heat + cool)
-        - ff_confidence: current FF confidence value
-        - condition_number: cached κ
-        - batch_cycles: count of batch cycles since reset
+        Thin transformer producing the legacy wire format from the
+        typed `LearningSnapshot`. Computes fresh via
+        `_build_learning_snapshot()` so callers see current state
+        without needing to fire the dispatcher first.
         """
-        coeff_names = self._coeff_names()
-        # Use whichever RLS matches the current mode, default to heat
-        e = self._entity
-        is_heating = e._attr_hvac_mode != HVACMode.COOL
-        rls = self._rls_heat if is_heating else self._rls_cool
-        n = rls.n
-
-        frozen_names = []
-        active_names = []
-        # Track features that start frozen (model_inputs + time_of_day).
-        # Base features (intercept, outdoor_delta) are always identifiable
-        # and never auto-frozen — they don't represent "learning progress."
-        for i, frozen_at_init in enumerate(self._features.frozen_mask()):
-            if not frozen_at_init or i >= n:
-                continue
-            name = coeff_names[i] if i < len(coeff_names) else f"β{i}"
-            if rls.frozen[i]:
-                frozen_names.append(name)
-            else:
-                active_names.append(name)
-
-        n_model = len(frozen_names) + len(active_names)  # Learnable features
-        n_frozen = len(frozen_names)
-        if not self._control_active:
-            state = "Observing"
-        elif n_frozen == n_model:
-            state = "Learning"
-        elif n_frozen == 0:
-            state = "Optimized"
-        else:
-            state = "Optimizing"
-
-        obs_count = len(self._observation_buffer_heat) + len(self._observation_buffer_cool)
-
+        learning = self._build_learning_snapshot()
         return {
-            "state": state,
-            "frozen_features": frozen_names,
-            "active_features": active_names,
-            "observation_count": obs_count,
+            "state": learning.state,
+            "frozen_features": list(learning.frozen_features),
+            "active_features": list(learning.active_features),
+            "observation_count": learning.observation_count,
             "ff_confidence": round(self._ff_confidence, 3),
-            "condition_number": (
-                round(self._cached_kappa, 1) if self._cached_kappa is not None
-                else None
-            ),
+            "condition_number": learning.condition_number,
         }
 
     def get_greybox_state(self) -> dict[str, Any]:
         """Return grey-box model state for the greybox statistics sensor.
 
-        Returns dict with:
-        - state: "Failed" | "Learning" | "Adequate" | "Good" | "Degraded"
-        - Plus model outputs and buffer diagnostics as attributes.
+        Computes fresh via `_build_greybox_snapshot()` (state machine)
+        plus the fit/bridge/buffer details. Preserves the legacy wire
+        format.
         """
-        # Unconditional failures.
-        if not SCIPY_AVAILABLE:
-            return {"state": "Failed", "reason": "scipy unavailable"}
-        if len(self._greybox_buffer) == 0:
-            return {"state": "Failed", "reason": "buffer empty"}
-
-        # No fit yet.
-        if self._last_greybox_result is None:
+        gb = self._build_greybox_snapshot()
+        # Failure cases — minimal payload
+        if gb.state == "Failed":
+            return {"state": "Failed", "reason": gb.reason}
+        if gb.state == "Learning":
             return {
                 "state": "Learning",
                 "buffer_total": len(self._greybox_buffer),
                 "buffer_max": self._greybox_buffer._max_size,
             }
 
+        # Normal case — assemble attributes from the typed greybox state
+        # plus the fit/bridge dicts already in last_tick
         result = self._last_greybox_result
         bridge = self._last_greybox_bridge
-
-        # Determine state from gates + history.
-        gates_passed = bridge is not None and bridge.gates_passed
-        if gates_passed:
-            state = "Good"
-        elif self._greybox_has_been_good:
-            state = "Degraded"
-        else:
-            state = "Adequate"
-
-        # Build attributes.
         gb_diag = self._greybox_buffer.get_diagnostics()
+        # By now we know result is non-None (state is Adequate/Good/Degraded)
+        assert result is not None
         attrs: dict[str, Any] = {
-            "state": state,
+            "state": gb.state,
             "tau_eff": round(result.tau_eff, 1),
             "c0": round(result.c0, 6),
             "ua_c": round(result.ua_c, 6),
@@ -2179,12 +2134,18 @@ class PIController:
 
 
     def get_learning_status(self) -> dict[str, Any]:
-        """Return FF learning suppression state for binary_sensor platform."""
+        """Return FF learning suppression state for binary_sensor platform.
+
+        Computes fresh via `_build_learning_suppression_snapshot()`.
+        Preserves the legacy wire format including the manual-suppress
+        fields read directly from controller state.
+        """
+        ls = self._build_learning_suppression_snapshot()
         return {
-            "suppressed": self._disturbance_suppress_active,
+            "suppressed": ls.effective_suppressed,
             "manual_suppress": self._manual_ff_suppress,
             "manual_suppress_reason": self._manual_ff_suppress_reason,
-            "active_suppressors": list(self._disturbance_active_suppressors),
+            "active_suppressors": list(ls.active_suppressors),
         }
 
     def has_rls_observations(self) -> bool:
@@ -2787,15 +2748,25 @@ class PIController:
         return issues
 
     def get_health_status(self) -> dict[str, Any]:
-        """Evaluate PI controller health and return status with alerts."""
-        if not self._pi_enabled:
+        """Evaluate PI controller health and return status with alerts.
+
+        Computes fresh via `_build_health_snapshot()` (which is pure;
+        the grace-period side effects fire in `_build_tick_output()` so
+        they don't double-fire when this getter is called separately).
+        Preserves the legacy wire format: `alerts` and `reasons` are
+        parallel `list[str]` rather than a typed Alert sequence.
+        """
+        h = self._build_health_snapshot()
+
+        # Special-case: short payload for Disabled / OFF / OK-no-alerts states
+        # that historically returned a minimal dict (no diagnostic attrs).
+        if h.state == "Disabled":
             return {
                 "state": "Disabled",
-                "alerts": ["PI controller not enabled"],
-                "reasons": ["pi_disabled"],
+                "alerts": [a.message for a in h.alerts],
+                "reasons": [a.code for a in h.alerts],
                 "alert_count": 0,
             }
-
         if self._entity._attr_hvac_mode == HVACMode.OFF:
             return {
                 "state": "OK",
@@ -2804,41 +2775,8 @@ class PIController:
                 "alert_count": 0,
             }
 
+        # Active model coefficients for the diagnostic attributes
         e = self._entity
-        checks: list[tuple[str, str, str] | None] = []
-
-        # Grace period: suppress comfort check for one tick after setpoint change
-        if self._desired_temp != self._health_prev_desired:
-            self._health_comfort_skip = 1
-            self._health_prev_desired = self._desired_temp
-
-        if self._health_comfort_skip > 0:
-            self._health_comfort_skip -= 1
-        elif (
-            e._attr_current_temperature is not None
-            and self._desired_temp is not None
-        ):
-            cur_c = TemperatureConverter.convert(
-                e._attr_current_temperature,
-                e._attr_temperature_unit,
-                UnitOfTemperature.CELSIUS,
-            )
-            desired_c = TemperatureConverter.convert(
-                self._desired_temp,
-                e._attr_temperature_unit,
-                UnitOfTemperature.CELSIUS,
-            )
-            checks.append(check_comfort(
-                abs(cur_c - desired_c),
-                self.HEALTH_COMFORT_WARN, self.HEALTH_COMFORT_CRIT,
-            ))
-
-        checks.append(check_integral(
-            abs(self._pi_ki * self._pi_integral), self.HEALTH_INTEGRAL_WARN,
-        ))
-        checks.append(check_ff_confidence(self._ff_confidence))
-
-        # Active RLS model for coefficient checks
         is_heating = e._attr_hvac_mode in (HVACMode.HEAT, HVACMode.HEAT_COOL, None)
         rls = self._rls_heat if is_heating else self._rls_cool
         expected_slope = -self._outdoor_seed_heat if is_heating else -self._outdoor_seed_cool
@@ -2847,48 +2785,11 @@ class PIController:
         intercept = coeffs.get(0, 0.0)
         outdoor_slope = coeffs.get(1, expected_slope)
 
-        checks.append(check_intercept_drift(
-            intercept, self.HEALTH_INTERCEPT_WARN, has_obs,
-        ))
-        checks.append(check_slope_drift(
-            outdoor_slope, expected_slope,
-            self.HEALTH_SLOPE_DRIFT_PCT, self.HEALTH_SLOPE_DRIFT_FLOOR, has_obs,
-        ))
-
-        checks.extend(check_model_drift(self.get_drifting_coefficients()))
-
-        feature_names = self._features.names
-        active_buf = self._active_buffer
-        checks.append(check_feature_diversity(
-            active_buf.get_all(),
-            active_buf.n_features,
-            feature_names,
-            self.HEALTH_FEATURE_DIVERSITY_MIN,
-            self.HEALTH_FEATURE_DIVERSITY_MIN_OBS,
-            model_inputs=self._model_inputs,
-            model_input_start=self._features.model_input_start,
-        ))
-
-        # Assemble results — highest severity wins
-        alerts: list[str] = []
-        reasons: list[str] = []
-        severity = "OK"
-        for result in checks:
-            if result is None:
-                continue
-            msg, reason, sev = result
-            alerts.append(msg)
-            reasons.append(reason)
-            if sev == "Critical":
-                severity = "Critical"
-            elif sev == "Warning" and severity != "Critical":
-                severity = "Warning"
-
         return {
-            "state": severity,
-            "alerts": alerts,
-            "reasons": reasons,
-            "alert_count": len(alerts),
+            "state": h.state,
+            "alerts": [a.message for a in h.alerts],
+            "reasons": [a.code for a in h.alerts],
+            "alert_count": len(h.alerts),
             "pi_integral": round(self._pi_integral, 3),
             "hp_setpoint": self._hp_setpoint,
             "ff_offset": round(self._ff_offset, 2),
@@ -2898,7 +2799,7 @@ class PIController:
             "rls_obs_count": rls.observation_count,
             "ff_confidence": round(self._ff_confidence, 3),
             "integral_convergence": round(self._metrics.integral_convergence, 2),
-            "tau_estimate": round(self._plant_id.tau, 1) if self._plant_id.enabled else None,  # backward compat
+            "tau_estimate": round(self._plant_id.tau, 1) if self._plant_id.enabled else None,
             "tau_fast": round(self._plant_id.plant.tau_fast.value, 1) if self._plant_id.enabled else None,
             "tau_slow": round(self._plant_id.plant.tau_slow.value, 1) if self._plant_id.enabled else None,
             "smith_correction": (
@@ -2958,6 +2859,218 @@ class PIController:
         _LOGGER.info(
             "%sDebug capture: full_p=%s",
             self._log_prefix, self._debug_capture_full_p,
+        )
+
+    def _advance_health_grace_period(self) -> None:
+        """Track the per-tick grace-period state machine for the comfort check.
+
+        Called once per `_build_tick_output()` (i.e., once per
+        `fire_dispatcher`). Sets `_health_comfort_skip = 1` when the
+        setpoint has changed since the last call; otherwise decrements
+        the skip counter. Side effect — separated from
+        `_build_health_snapshot()` so that helper can be called
+        idempotently from the legacy getters.
+        """
+        if self._desired_temp != self._health_prev_desired:
+            self._health_comfort_skip = 1
+            self._health_prev_desired = self._desired_temp
+        elif self._health_comfort_skip > 0:
+            self._health_comfort_skip -= 1
+
+    def _build_health_snapshot(self) -> HealthSnapshot:
+        """Compute the health state-machine result (PURE — no side effects).
+
+        Mirrors the legacy `get_health_status` logic but produces a
+        typed `HealthSnapshot` (state + alerts only). The grace-period
+        side effects (`_health_comfort_skip` decrement,
+        `_health_prev_desired` tracking) live in
+        `_advance_health_grace_period()` which fires once per
+        `_build_tick_output()`.
+
+        Diagnostic attributes (pi_integral, hp_setpoint, ...) are
+        assembled by the legacy `get_health_status` transformer reading
+        from the broader TickOutput.
+        """
+        if not self._pi_enabled:
+            return HealthSnapshot(
+                state="Disabled",
+                alerts=(Alert(
+                    message="PI controller not enabled",
+                    code="pi_disabled",
+                    severity="Warning",
+                ),),
+            )
+
+        e = self._entity
+        if e._attr_hvac_mode == HVACMode.OFF:
+            return HealthSnapshot(state="OK", alerts=())
+
+        checks: list[tuple[str, str, str] | None] = []
+
+        # Comfort check gated by the grace-period counter. `_health_comfort_skip`
+        # is updated once per fire_dispatcher in `_advance_health_grace_period`;
+        # this helper just reads it.
+        if self._health_comfort_skip == 0 and (
+            e._attr_current_temperature is not None
+            and self._desired_temp is not None
+        ):
+            cur_c = TemperatureConverter.convert(
+                e._attr_current_temperature,
+                e._attr_temperature_unit,
+                UnitOfTemperature.CELSIUS,
+            )
+            desired_c = TemperatureConverter.convert(
+                self._desired_temp,
+                e._attr_temperature_unit,
+                UnitOfTemperature.CELSIUS,
+            )
+            checks.append(check_comfort(
+                abs(cur_c - desired_c),
+                self.HEALTH_COMFORT_WARN, self.HEALTH_COMFORT_CRIT,
+            ))
+
+        checks.append(check_integral(
+            abs(self._pi_ki * self._pi_integral), self.HEALTH_INTEGRAL_WARN,
+        ))
+        checks.append(check_ff_confidence(self._ff_confidence))
+
+        is_heating = e._attr_hvac_mode in (HVACMode.HEAT, HVACMode.HEAT_COOL, None)
+        rls = self._rls_heat if is_heating else self._rls_cool
+        expected_slope = -self._outdoor_seed_heat if is_heating else -self._outdoor_seed_cool
+        has_obs = rls.observation_count > 0
+        coeffs = rls.get_coefficients() if has_obs else {}
+        intercept = coeffs.get(0, 0.0)
+        outdoor_slope = coeffs.get(1, expected_slope)
+
+        checks.append(check_intercept_drift(
+            intercept, self.HEALTH_INTERCEPT_WARN, has_obs,
+        ))
+        checks.append(check_slope_drift(
+            outdoor_slope, expected_slope,
+            self.HEALTH_SLOPE_DRIFT_PCT, self.HEALTH_SLOPE_DRIFT_FLOOR, has_obs,
+        ))
+
+        checks.extend(check_model_drift(self.get_drifting_coefficients()))
+
+        feature_names = self._features.names
+        active_buf = self._active_buffer
+        checks.append(check_feature_diversity(
+            active_buf.get_all(),
+            active_buf.n_features,
+            feature_names,
+            self.HEALTH_FEATURE_DIVERSITY_MIN,
+            self.HEALTH_FEATURE_DIVERSITY_MIN_OBS,
+            model_inputs=self._model_inputs,
+            model_input_start=self._features.model_input_start,
+        ))
+
+        # Aggregate — highest severity wins
+        alerts: list[Alert] = []
+        severity = "OK"
+        for result in checks:
+            if result is None:
+                continue
+            msg, code, sev = result
+            alerts.append(Alert(message=msg, code=code, severity=sev))
+            if sev == "Critical":
+                severity = "Critical"
+            elif sev == "Warning" and severity != "Critical":
+                severity = "Warning"
+
+        return HealthSnapshot(state=severity, alerts=tuple(alerts))
+
+    def _build_learning_snapshot(self) -> LearningSnapshot:
+        """Compute the learning state-machine result.
+
+        Mirrors the legacy `get_learning_state` logic. State transitions
+        post-pre45 happen at batch boundaries (every ~12h) instead of
+        gradually per-tick; the labels still mean what they did.
+
+        `observation_count` is the SUM of buffer lengths (real-time,
+        grows per tick) — not `rls.observation_count` which post-pre45
+        reflects the most recent batch's `n_eligible`.
+        """
+        coeff_names = self._coeff_names()
+        e = self._entity
+        is_heating = e._attr_hvac_mode != HVACMode.COOL
+        rls = self._rls_heat if is_heating else self._rls_cool
+        n = rls.n
+
+        frozen_names: list[str] = []
+        active_names: list[str] = []
+        # Track features that start frozen at init (model_inputs + time_of_day).
+        # Base features (intercept, outdoor_delta) are always identifiable
+        # and never auto-frozen — they don't represent "learning progress."
+        for i, frozen_at_init in enumerate(self._features.frozen_mask()):
+            if not frozen_at_init or i >= n:
+                continue
+            name = coeff_names[i] if i < len(coeff_names) else f"β{i}"
+            if rls.frozen[i]:
+                frozen_names.append(name)
+            else:
+                active_names.append(name)
+
+        n_model = len(frozen_names) + len(active_names)
+        n_frozen = len(frozen_names)
+        if not self._control_active:
+            state = "Observing"
+        elif n_frozen == n_model:
+            state = "Learning"
+        elif n_frozen == 0:
+            state = "Optimized"
+        else:
+            state = "Optimizing"
+
+        return LearningSnapshot(
+            state=state,
+            frozen_features=tuple(frozen_names),
+            active_features=tuple(active_names),
+            observation_count=(
+                len(self._observation_buffer_heat)
+                + len(self._observation_buffer_cool)
+            ),
+            condition_number=(
+                round(self._cached_kappa, 1) if self._cached_kappa is not None
+                else None
+            ),
+        )
+
+    def _build_greybox_snapshot(self) -> GreyboxSnapshot:
+        """Compute the grey-box state-machine label.
+
+        Mirrors the legacy `get_greybox_state` logic. The fit details
+        (c0, ua_c, k_c, alpha_c, residual_rms, n_observations,
+        n_hp_on/off) are NOT duplicated here — they're already in
+        `TickOutput.greybox_observer` (opaque dict from
+        `GreyboxResult.as_dict()`). The legacy getter assembles the wire
+        format from both sources.
+        """
+        if not SCIPY_AVAILABLE:
+            return GreyboxSnapshot(state="Failed", reason="scipy unavailable")
+        if len(self._greybox_buffer) == 0:
+            return GreyboxSnapshot(state="Failed", reason="buffer empty")
+        if self._last_greybox_result is None:
+            return GreyboxSnapshot(state="Learning", reason=None)
+
+        bridge = self._last_greybox_bridge
+        gates_passed = bridge is not None and bridge.gates_passed
+        if gates_passed:
+            return GreyboxSnapshot(state="Good", reason=None)
+        if self._greybox_has_been_good:
+            return GreyboxSnapshot(state="Degraded", reason=None)
+        return GreyboxSnapshot(state="Adequate", reason=None)
+
+    def _build_learning_suppression_snapshot(self) -> LearningSuppressionSnapshot:
+        """Compute the FF-learning suppression state.
+
+        Mirrors the legacy `get_learning_status` logic. Manual flags
+        (`_manual_ff_suppress`, `_manual_ff_suppress_reason`) live in
+        `RLSModelSnapshot` already; this snapshot carries only the
+        effective suppression state and the active suppressors list.
+        """
+        return LearningSuppressionSnapshot(
+            effective_suppressed=self._disturbance_suppress_active,
+            active_suppressors=tuple(self._disturbance_active_suppressors),
         )
 
     def _build_tick_output(self) -> TickOutput:
@@ -3235,9 +3348,29 @@ class PIController:
             greybox_buffer=self._greybox_buffer.get_diagnostics(),
             boundary_estimator=be_diag,
             regime_probe=rp_diag,
+            # Advance per-tick side-effect counters BEFORE building the
+            # health snapshot — the helper reads `_health_comfort_skip`
+            # but is otherwise pure, so this update fires once per
+            # `_build_tick_output()` call.
+            health=self._build_health_snapshot_with_grace_advance(),
+            learning=self._build_learning_snapshot(),
+            greybox=self._build_greybox_snapshot(),
+            learning_suppression=self._build_learning_suppression_snapshot(),
             observation=self._last_observation_context,
             events=(),
         )
+
+    def _build_health_snapshot_with_grace_advance(self) -> HealthSnapshot:
+        """Internal: combine grace-period advance + pure snapshot build.
+
+        Used only from `_build_tick_output()`. The legacy `get_health_status`
+        getter calls `_build_health_snapshot()` directly (without the
+        grace advance) so test code that mutates state and reads the
+        getter without firing the dispatcher gets fresh state without
+        double-decrementing the grace counter.
+        """
+        self._advance_health_grace_period()
+        return self._build_health_snapshot()
 
     def _compute_multicollinearity_stats(
         self, buf: DiversityAwareBuffer,

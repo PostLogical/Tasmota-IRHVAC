@@ -558,6 +558,163 @@ class LagFilterSnapshot:
         )
 
 
+# ── State-machine snapshots ────────────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class Alert:
+    """One health-check finding.
+
+    Produced by `pi/health_checks.py` check functions; aggregated into
+    `HealthSnapshot.alerts`. The legacy `get_health_status` wire format
+    splits these into parallel `alerts` (messages) and `reasons` (codes)
+    lists; the typed snapshot keeps them paired.
+    """
+
+    message: str
+    code: str
+    severity: str  # "Warning" | "Critical"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "message": self.message,
+            "code": self.code,
+            "severity": self.severity,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Alert:
+        return cls(
+            message=data["message"],
+            code=data["code"],
+            severity=data["severity"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class HealthSnapshot:
+    """Health state-machine output.
+
+    Carries only the state-machine result. Diagnostic fields exposed via
+    the health sensor's extra_state_attributes (pi_integral, hp_setpoint,
+    rls_intercept, etc.) are read from the broader TickOutput by the
+    legacy `get_health_status` transformer — no duplication here.
+
+    `state == "Disabled"` is reserved for `pi_enabled=False`. `OK` means
+    no warning- or critical-severity alerts. `Warning`/`Critical` reflect
+    the highest severity across `alerts`.
+    """
+
+    state: str  # "OK" | "Warning" | "Critical" | "Disabled"
+    alerts: tuple[Alert, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "state": self.state,
+            "alerts": [a.to_dict() for a in self.alerts],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> HealthSnapshot:
+        return cls(
+            state=data["state"],
+            alerts=tuple(Alert.from_dict(a) for a in data["alerts"]),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class LearningSnapshot:
+    """Learning state-machine output.
+
+    `state` reflects how many of the auto-frozen-at-init features have
+    been unfrozen by batch-WLS evidence (held_features / VIF / std_err).
+
+    `observation_count` is the SUM of the heat and cool observation
+    BUFFER lengths (real-time, grows per tick). NOT to be confused with
+    `RLSModelSnapshot.{heat,cool}_observation_count` which post-pre45
+    reflects the most recent batch's `n_eligible` (lags by up to ~12h).
+
+    `condition_number` is the most recently computed κ for the active
+    buffer; `None` until the multicollinearity gate has been evaluated
+    against enough data.
+    """
+
+    state: str  # "Observing" | "Learning" | "Optimizing" | "Optimized"
+    frozen_features: tuple[str, ...]
+    active_features: tuple[str, ...]
+    observation_count: int
+    condition_number: float | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "state": self.state,
+            "frozen_features": list(self.frozen_features),
+            "active_features": list(self.active_features),
+            "observation_count": self.observation_count,
+            "condition_number": self.condition_number,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> LearningSnapshot:
+        return cls(
+            state=data["state"],
+            frozen_features=tuple(data["frozen_features"]),
+            active_features=tuple(data["active_features"]),
+            observation_count=data["observation_count"],
+            condition_number=data["condition_number"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class GreyboxSnapshot:
+    """Grey-box state-machine output.
+
+    Carries only the state-machine label and an optional reason for
+    `Failed`/`Learning` cases. The full fit details (c0, ua_c, k_c,
+    alpha_c, residual_rms, etc.) live in `TickOutput.greybox_observer`
+    (opaque dict from `GreyboxResult.as_dict()`); bridge details live in
+    `TickOutput.greybox_bridge`. The legacy `get_greybox_state`
+    transformer assembles the wire format from both sources.
+    """
+
+    state: str  # "Failed" | "Learning" | "Adequate" | "Good" | "Degraded"
+    reason: str | None  # "scipy unavailable" | "buffer empty" | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"state": self.state, "reason": self.reason}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> GreyboxSnapshot:
+        return cls(state=data["state"], reason=data["reason"])
+
+
+@dataclass(frozen=True, slots=True)
+class LearningSuppressionSnapshot:
+    """Effective FF-learning suppression state.
+
+    `effective_suppressed` reflects the OR of manual suppression
+    (`_manual_ff_suppress`) and disturbance-driven suppression
+    (`_disturbance_suppress_active`). The manual flag and reason live in
+    `RLSModelSnapshot` already and are not duplicated here.
+    """
+
+    effective_suppressed: bool
+    active_suppressors: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "effective_suppressed": self.effective_suppressed,
+            "active_suppressors": list(self.active_suppressors),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> LearningSuppressionSnapshot:
+        return cls(
+            effective_suppressed=data["effective_suppressed"],
+            active_suppressors=tuple(data["active_suppressors"]),
+        )
+
+
 # ── Per-tick observation context + events ──────────────────────────────
 
 
@@ -678,6 +835,13 @@ class TickOutput:
     ff_contributions: FFContributionsSnapshot
     lag_filter: LagFilterSnapshot
 
+    # State-machine snapshots (Stage 5c) — typed views over the four
+    # legacy sensor-feeding getters.
+    health: HealthSnapshot
+    learning: LearningSnapshot
+    greybox: GreyboxSnapshot
+    learning_suppression: LearningSuppressionSnapshot
+
     # Already-encapsulated state — referenced as opaque dicts since their
     # owning modules expose `.as_dict()` and the shapes are stable.
     plant_identification: dict[str, Any] | None
@@ -738,6 +902,10 @@ class TickOutput:
             "regime_probe": self.regime_probe,
             "ff_contributions": self.ff_contributions.to_dict(),
             "_lag_filter": self.lag_filter.to_dict(),
+            "_health": self.health.to_dict(),
+            "_learning": self.learning.to_dict(),
+            "_greybox": self.greybox.to_dict(),
+            "_learning_suppression": self.learning_suppression.to_dict(),
         }
         if self.observation is not None:
             out["_observation"] = self.observation.to_dict()
@@ -794,6 +962,12 @@ class TickOutput:
                 data["ff_contributions"]
             ),
             lag_filter=LagFilterSnapshot.from_dict(data["_lag_filter"]),
+            health=HealthSnapshot.from_dict(data["_health"]),
+            learning=LearningSnapshot.from_dict(data["_learning"]),
+            greybox=GreyboxSnapshot.from_dict(data["_greybox"]),
+            learning_suppression=LearningSuppressionSnapshot.from_dict(
+                data["_learning_suppression"]
+            ),
             plant_identification=data["plant_identification"],
             greybox_observer=data["greybox_observer"],
             greybox_bridge=data["greybox_bridge"],
@@ -872,6 +1046,15 @@ class TickOutput:
                 contributions={}, sum=0.0, blended_offset=None,
             ),
             lag_filter=LagFilterSnapshot(states=()),
+            health=HealthSnapshot(state="Disabled", alerts=()),
+            learning=LearningSnapshot(
+                state="Observing", frozen_features=(), active_features=(),
+                observation_count=0, condition_number=None,
+            ),
+            greybox=GreyboxSnapshot(state="Failed", reason="not initialized"),
+            learning_suppression=LearningSuppressionSnapshot(
+                effective_suppressed=False, active_suppressors=(),
+            ),
             plant_identification=None,
             greybox_observer=None,
             greybox_bridge=None,
