@@ -159,6 +159,89 @@ async def test_manual_suppress_emits_event(hass, setup_pi_integration):
 
 
 @pytest.mark.asyncio
+async def test_auto_perturb_state_transition_emits_event(hass, setup_pi_integration):
+    """Changing auto-perturbation state across fire_dispatcher emits AUTO_PERTURB_STATE."""
+    from custom_components.tasmota_irhvac.pi.snapshot import (
+        AutoPerturbStatePayload, TickEventKind,
+    )
+    from unittest.mock import MagicMock
+
+    entry = await setup_pi_integration({"pi_tau_estimate": 60})
+    pi = get_climate_entity(hass, entry)._controller
+
+    pi.fire_dispatcher()  # Establish baseline; records prev_auto_perturb_state
+
+    # Force a state change in the transition-detection cache. Current
+    # state is "idle" (auto-perturbation is in IDLE in basic setup);
+    # setting prev to something different triggers the transition emit.
+    pi._prev_auto_perturb_state = "DIFFERENT_FROM_CURRENT"
+    pi.fire_dispatcher()
+
+    events = _events_of_kind(pi.last_tick, TickEventKind.AUTO_PERTURB_STATE)
+    assert events
+    payload = events[-1].payload
+    assert isinstance(payload, AutoPerturbStatePayload)
+    assert payload.from_state == "DIFFERENT_FROM_CURRENT"
+    assert payload.to_state == "idle"
+
+
+@pytest.mark.asyncio
+async def test_boundary_update_emits_event_on_significant_shift(
+    hass, setup_pi_integration,
+):
+    """Posterior mean shifting > 0.1°C between fire_dispatchers emits BOUNDARY_UPDATE."""
+    from custom_components.tasmota_irhvac.pi.snapshot import (
+        BoundaryUpdatePayload, TickEventKind,
+    )
+
+    entry = await setup_pi_integration({"pi_tau_estimate": 60})
+    pi = get_climate_entity(hass, entry)._controller
+
+    # Seed prior posterior so the transition can be detected
+    pi._prev_boundary_posterior_mean = 20.0
+    # Mutate the boundary estimator's posterior to trigger the > 0.1°C threshold
+    pi._boundary_estimator._posterior_mean = 21.0
+    pi.fire_dispatcher()
+
+    events = _events_of_kind(pi.last_tick, TickEventKind.BOUNDARY_UPDATE)
+    assert events
+    payload = events[-1].payload
+    assert isinstance(payload, BoundaryUpdatePayload)
+    assert payload.posterior_mean_after == 21.0
+
+
+@pytest.mark.asyncio
+async def test_maturity_gate_emits_event_on_source_change(
+    hass, setup_pi_integration,
+):
+    """Plant-ID source changing across fire_dispatchers emits MATURITY_GATE."""
+    from custom_components.tasmota_irhvac.pi.snapshot import (
+        MaturityGatePayload, TickEventKind,
+    )
+
+    entry = await setup_pi_integration({"pi_tau_estimate": 60})
+    pi = get_climate_entity(hass, entry)._controller
+    pi.fire_dispatcher()  # Establish baseline; records prev_plant_id_sources
+
+    # Force a source mismatch by mutating the cached prior source. Real
+    # transition (seed → estimate) happens deep inside the plant
+    # identifier's update path; here we verify the emit path itself.
+    pi._prev_plant_id_sources = {
+        "tau_fast": "DIFFERENT",
+        "tau_slow": "DIFFERENT",
+        "k": "DIFFERENT",
+        "theta": "DIFFERENT",
+    }
+    pi.fire_dispatcher()
+
+    events = _events_of_kind(pi.last_tick, TickEventKind.MATURITY_GATE)
+    assert events
+    payload = events[-1].payload
+    assert isinstance(payload, MaturityGatePayload)
+    assert payload.source_before == "DIFFERENT"
+
+
+@pytest.mark.asyncio
 async def test_pending_events_cleared_each_tick(hass, setup_pi_integration):
     """pi_tick clears the pending-events buffer at the start of each tick."""
     entry = await setup_pi_integration({"pi_tau_estimate": 60})

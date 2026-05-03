@@ -1,0 +1,90 @@
+"""Persistence round-trip tests for new PIExtraStoredData fields (Stage 11).
+
+The two flags added during the tick-first refactor — `debug_capture_full_p`
+(Stage 3) and `pi_event_log_enabled` (Stage 9) — must survive a save →
+restart → restore cycle. Otherwise users would have to re-toggle them
+after every HA restart.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+
+import pytest
+
+from custom_components.tasmota_irhvac.pi.pi_stored_data import PIExtraStoredData
+
+
+def _minimal_stored_data(**overrides) -> PIExtraStoredData:
+    """Build a PIExtraStoredData with sensible defaults; overrides win."""
+    base: dict = dict(
+        pi_integral=0.0,
+        desired_temp=22.0,
+        hp_setpoint=22.0,
+    )
+    base.update(overrides)
+    return PIExtraStoredData(**base)
+
+
+def test_debug_capture_full_p_default_false():
+    """New field defaults to False."""
+    data = _minimal_stored_data()
+    assert data.debug_capture_full_p is False
+
+
+def test_pi_event_log_enabled_default_false():
+    """New field defaults to False."""
+    data = _minimal_stored_data()
+    assert data.pi_event_log_enabled is False
+
+
+def test_debug_capture_full_p_roundtrips_when_true():
+    """as_dict + from_dict preserves debug_capture_full_p=True."""
+    original = _minimal_stored_data(debug_capture_full_p=True)
+    serialized = original.as_dict()
+    assert serialized["debug_capture_full_p"] is True
+
+    restored = PIExtraStoredData.from_dict(serialized)
+    assert restored is not None
+    assert restored.debug_capture_full_p is True
+
+
+def test_pi_event_log_enabled_roundtrips_when_true():
+    """as_dict + from_dict preserves pi_event_log_enabled=True."""
+    original = _minimal_stored_data(pi_event_log_enabled=True)
+    serialized = original.as_dict()
+    assert serialized["pi_event_log_enabled"] is True
+
+    restored = PIExtraStoredData.from_dict(serialized)
+    assert restored is not None
+    assert restored.pi_event_log_enabled is True
+
+
+def test_legacy_dict_missing_new_fields_falls_back_to_default():
+    """Restoring from a legacy serialized form predating these fields succeeds."""
+    legacy = _minimal_stored_data().as_dict()
+    # Simulate a stored-data dict from before Stages 3 + 9 by deleting
+    # the keys (mimics restoration from older versions).
+    legacy.pop("debug_capture_full_p", None)
+    legacy.pop("pi_event_log_enabled", None)
+
+    restored = PIExtraStoredData.from_dict(legacy)
+    assert restored is not None
+    # Both default to False — no migration loss
+    assert restored.debug_capture_full_p is False
+    assert restored.pi_event_log_enabled is False
+
+
+def test_both_flags_roundtrip_independently():
+    """Both flags can be set independently — no aliasing."""
+    a = _minimal_stored_data(debug_capture_full_p=True, pi_event_log_enabled=False)
+    b = _minimal_stored_data(debug_capture_full_p=False, pi_event_log_enabled=True)
+
+    restored_a = PIExtraStoredData.from_dict(a.as_dict())
+    restored_b = PIExtraStoredData.from_dict(b.as_dict())
+
+    assert restored_a is not None and restored_b is not None
+    assert restored_a.debug_capture_full_p is True
+    assert restored_a.pi_event_log_enabled is False
+    assert restored_b.debug_capture_full_p is False
+    assert restored_b.pi_event_log_enabled is True

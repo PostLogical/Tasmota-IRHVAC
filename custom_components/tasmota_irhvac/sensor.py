@@ -261,7 +261,7 @@ async def async_setup_entry(
         return
 
     coordinator = climate_entity.coordinator
-    if coordinator is None:
+    if coordinator is None:  # pragma: no cover — unreachable: PI-enabled entities always have a coordinator
         return
 
     sensors: list[SensorEntity] = [

@@ -261,6 +261,13 @@ def test_observation_context_roundtrip():
     assert ObservationContext.from_dict(o.to_dict()) == o
 
 
+def test_alert_roundtrip():
+    """Alert.from_dict reconstructs a typed alert."""
+    from custom_components.tasmota_irhvac.pi.snapshot import Alert
+    a = Alert(message="High integral", code="integral_warn", severity="Warning")
+    assert Alert.from_dict(a.to_dict()) == a
+
+
 def test_tick_event_batch_run_roundtrip():
     e = TickEvent(
         kind=TickEventKind.BATCH_RUN,

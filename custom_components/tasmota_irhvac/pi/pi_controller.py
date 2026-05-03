@@ -2818,7 +2818,7 @@ class PIController:
             from .event_log import EventLogWriter
             try:
                 log_dir = Path(self._hass.config.path("tasmota_irhvac/log"))
-            except Exception:  # noqa: BLE001 — defensive on hass quirks
+            except Exception:  # noqa: BLE001  # pragma: no cover — defensive on hass quirks
                 return
             self._event_log_writer = EventLogWriter(
                 self._hass, log_dir, tick.zone_label,

@@ -222,6 +222,164 @@ def test_reader_zone_label_matches_writer_after_sanitize(tmp_path: Path):
 # ── Roundtrip ─────────────────────────────────────────────────────────
 
 
+def test_writer_handles_oserror_on_write(tmp_path: Path, caplog, monkeypatch):
+    """If the file write itself fails, the writer logs and moves on."""
+    hass = _stub_hass_with_sync_executor()
+    writer = EventLogWriter(hass, tmp_path, "test")
+
+    # Force the open() inside _sync_append to raise OSError.
+    real_path_open = Path.open
+    call_count = {"n": 0}
+    def maybe_fail_open(self, *args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:  # First call (the actual write)
+            raise OSError("disk full")
+        return real_path_open(self, *args, **kwargs)
+    monkeypatch.setattr(Path, "open", maybe_fail_open)
+
+    # Should not raise — writer logs and returns
+    writer._sync_append(_basic_tick(), date(2026, 5, 1))
+
+
+def test_gzip_file_no_op_when_src_missing(tmp_path: Path):
+    """Calling _gzip_file with a path that doesn't exist is a no-op (defensive)."""
+    hass = _stub_hass_with_sync_executor()
+    writer = EventLogWriter(hass, tmp_path, "test")
+    writer._gzip_file(tmp_path / "nonexistent.jsonl")
+    # No file created, no exception raised
+    assert not list(tmp_path.iterdir())
+
+
+def test_reader_skips_non_file_entries(tmp_path: Path):
+    """A subdirectory in the log dir is ignored."""
+    (tmp_path / "test_2026-05-01.jsonl").write_text("")
+    (tmp_path / "test_subdir").mkdir()  # not a file — should be skipped
+
+    reader = EventLogReader(tmp_path, "test")
+    files = list(reader._iter_files_in_range(None, None))
+    assert all(p.is_file() for p in files)
+
+
+def test_reader_skips_wrong_prefix(tmp_path: Path):
+    """Files for other zones are skipped."""
+    (tmp_path / "test_2026-05-01.jsonl").write_text("")
+    (tmp_path / "other_zone_2026-05-01.jsonl").write_text("")
+
+    reader = EventLogReader(tmp_path, "test")
+    files = list(reader._iter_files_in_range(None, None))
+    assert len(files) == 1
+    assert "test_" in files[0].name
+    assert "other_zone" not in files[0].name
+
+
+def test_reader_skips_files_with_unrecognized_suffix(tmp_path: Path):
+    """Files that don't end with .jsonl[.gz] are skipped."""
+    (tmp_path / "test_2026-05-01.jsonl").write_text("")
+    (tmp_path / "test_2026-05-02.txt").write_text("")  # wrong suffix
+
+    reader = EventLogReader(tmp_path, "test")
+    files = list(reader._iter_files_in_range(None, None))
+    assert len(files) == 1
+
+
+def test_reader_skips_files_with_malformed_date(tmp_path: Path):
+    """A file matching the prefix but with a non-date in place of YYYY-MM-DD is skipped."""
+    (tmp_path / "test_2026-05-01.jsonl").write_text("")
+    (tmp_path / "test_NOT_A_DATE.jsonl").write_text("")
+
+    reader = EventLogReader(tmp_path, "test")
+    files = list(reader._iter_files_in_range(None, None))
+    assert len(files) == 1
+
+
+def test_reader_skips_empty_lines(tmp_path: Path):
+    """Empty / whitespace-only lines in a JSONL file are skipped without warning."""
+    valid = json.dumps(_basic_tick().to_dict())
+    (tmp_path / "test_2026-05-01.jsonl").write_text(f"{valid}\n\n   \n{valid}\n")
+
+    reader = EventLogReader(tmp_path, "test")
+    ticks = list(reader.iter_ticks())
+    assert len(ticks) == 2
+
+
+def test_reader_handles_oserror_on_read(tmp_path: Path, caplog, monkeypatch):
+    """File-open OSError during read is logged; reader continues."""
+    path = tmp_path / "test_2026-05-01.jsonl"
+    path.write_text(json.dumps(_basic_tick().to_dict()) + "\n")
+
+    real_open = open
+    def failing_open(*args, **kwargs):
+        raise OSError("permission denied")
+    monkeypatch.setattr("builtins.open", failing_open)
+
+    reader = EventLogReader(tmp_path, "test")
+    # Should not raise — yields nothing
+    assert list(reader.iter_ticks()) == []
+
+
+@pytest.mark.asyncio
+async def test_controller_set_event_log_enabled_creates_writer(
+    hass, setup_pi_integration, tmp_path: Path, monkeypatch,
+):
+    """Toggling the flag via controller wires the writer on next fire_dispatcher."""
+    from .conftest import get_climate_entity
+    from custom_components.tasmota_irhvac.pi.event_log import EventLogWriter
+
+    monkeypatch.setattr(
+        hass.config, "path", lambda *parts: str(tmp_path.joinpath(*parts)),
+    )
+
+    entry = await setup_pi_integration({"pi_tau_estimate": 60})
+    pi = get_climate_entity(hass, entry)._controller
+
+    # Initially disabled — no writer
+    assert pi._event_log_writer is None
+
+    # Enable + fire — lazy-creates the writer
+    pi.set_event_log_enabled(enabled=True)
+    pi.fire_dispatcher()
+
+    assert isinstance(pi._event_log_writer, EventLogWriter)
+
+
+@pytest.mark.asyncio
+async def test_controller_set_event_log_disabled_drops_writer(
+    hass, setup_pi_integration, tmp_path: Path, monkeypatch,
+):
+    """Disabling the flag drops the cached writer reference."""
+    from .conftest import get_climate_entity
+
+    monkeypatch.setattr(
+        hass.config, "path", lambda *parts: str(tmp_path.joinpath(*parts)),
+    )
+
+    entry = await setup_pi_integration({"pi_tau_estimate": 60})
+    pi = get_climate_entity(hass, entry)._controller
+
+    pi.set_event_log_enabled(enabled=True)
+    pi.fire_dispatcher()
+    assert pi._event_log_writer is not None
+
+    pi.set_event_log_enabled(enabled=False)
+    assert pi._event_log_writer is None
+
+
+@pytest.mark.asyncio
+async def test_climate_handler_set_event_log_enabled(hass, setup_pi_integration):
+    """Climate handler async_set_event_log_enabled toggles the controller flag."""
+    from .conftest import get_climate_entity
+
+    entry = await setup_pi_integration({"pi_tau_estimate": 60})
+    entity = get_climate_entity(hass, entry)
+    pi = entity._controller
+
+    assert pi._pi_event_log_enabled is False
+    await entity.async_set_event_log_enabled(enabled=True)
+    assert pi._pi_event_log_enabled is True
+    await entity.async_set_event_log_enabled(enabled=False)
+    assert pi._pi_event_log_enabled is False
+
+
 def test_writer_reader_roundtrip_preserves_events(tmp_path: Path):
     """A tick with typed events roundtrips through writer + reader losslessly."""
     import dataclasses

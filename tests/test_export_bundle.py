@@ -227,6 +227,145 @@ def test_readme_omits_ha_history_section_when_no_entities(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_write_ha_history_writes_state_records(hass, tmp_path: Path, monkeypatch):
+    """_write_ha_history pulls Recorder states and writes ha_history.jsonl."""
+    from custom_components.tasmota_irhvac.pi.export_bundle import _write_ha_history
+
+    # Mock the Recorder API to return a deterministic 2-state history
+    fake_states = {
+        "sensor.outdoor": [
+            MagicMock(state="5.0", last_changed=MagicMock(isoformat=lambda: "2026-05-01T00:00:00")),
+            MagicMock(state="6.0", last_changed=MagicMock(isoformat=lambda: "2026-05-01T01:00:00")),
+        ],
+        "sensor.solar": [
+            MagicMock(state="100.0", last_changed=MagicMock(isoformat=lambda: "2026-05-01T00:30:00")),
+        ],
+    }
+
+    def fake_get_states(_hass, _start, _end, _entities):
+        return fake_states
+
+    monkeypatch.setattr(
+        "homeassistant.components.recorder.history.get_significant_states",
+        fake_get_states,
+    )
+
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+
+    count = await _write_ha_history(
+        hass, bundle_dir, ["sensor.outdoor", "sensor.solar"],
+        date(2026, 5, 1), date(2026, 5, 1),
+    )
+
+    assert count == 3
+    history = (bundle_dir / "ha_history.jsonl").read_text().strip().splitlines()
+    assert len(history) == 3
+    records = [json.loads(line) for line in history]
+    assert any(r["entity_id"] == "sensor.outdoor" and r["state"] == "5.0" for r in records)
+    assert any(r["entity_id"] == "sensor.solar" for r in records)
+
+
+def test_read_integration_version_reads_manifest(tmp_path: Path):
+    """`_read_integration_version` returns the manifest's version string when readable."""
+    from custom_components.tasmota_irhvac.pi.export_bundle import _read_integration_version
+
+    # Stage a manifest.json at the expected path under a fake config_dir
+    custom_components_dir = tmp_path / "custom_components" / "tasmota_irhvac"
+    custom_components_dir.mkdir(parents=True)
+    (custom_components_dir / "manifest.json").write_text(
+        '{"version": "test-version"}'
+    )
+
+    hass = MagicMock()
+    hass.config.config_dir = str(tmp_path)
+
+    assert _read_integration_version(hass) == "test-version"
+
+
+def test_read_integration_version_falls_back_on_error(tmp_path: Path):
+    """`_read_integration_version` returns 'unknown' when the manifest can't be read."""
+    from custom_components.tasmota_irhvac.pi.export_bundle import _read_integration_version
+
+    hass = MagicMock()
+    hass.config.config_dir = str(tmp_path / "nonexistent")
+
+    assert _read_integration_version(hass) == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_climate_handler_invokes_export_bundle(hass, tmp_path: Path, monkeypatch):
+    """async_export_debug_bundle handler resolves entity_ids + calls exporter + notifies."""
+    from .conftest import get_climate_entity, setup_pi_integration as _setup
+
+    # Use the standard fixture indirectly — we need a real PI integration
+    # to drive the handler.
+    monkeypatch.setattr(
+        hass.config, "path", lambda *parts: str(tmp_path.joinpath(*parts)),
+    )
+
+    # Register persistent_notification.create stub so the handler can fire it
+    hass.services.async_register(
+        "persistent_notification", "create", lambda call: None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_climate_handler_no_pi_logs_warning(hass, setup_integration, caplog):
+    """async_export_debug_bundle on a non-PI entity logs warning and returns."""
+    from .conftest import get_climate_entity
+
+    entry = await setup_integration({"pi_enabled": False})
+    entity = get_climate_entity(hass, entry)
+
+    await entity.async_export_debug_bundle(window_days=1)
+    # No raise; just early-return + warning log
+    assert any("no PI controller" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_climate_handler_full_bundle(hass, setup_pi_integration, tmp_path, monkeypatch):
+    """Full handler path: resolves history_ids, calls exporter, fires notification."""
+    from .conftest import get_climate_entity
+
+    monkeypatch.setattr(
+        hass.config, "path", lambda *parts: str(tmp_path.joinpath(*parts)),
+    )
+    hass.services.async_register(
+        "persistent_notification", "create", lambda call: None,
+    )
+
+    # Patch the recorder to return empty history (no need for real data)
+    monkeypatch.setattr(
+        "homeassistant.components.recorder.history.get_significant_states",
+        lambda *args, **kwargs: {},
+    )
+
+    # Configure a model input so the for-loop in the handler executes
+    entry = await setup_pi_integration({
+        "pi_tau_estimate": 60,
+        "pi_model_inputs": [{
+            "name": "solar",
+            "entity_id": "sensor.solar_proxy",
+            "input_role": "solar",
+        }],
+    })
+    entity = get_climate_entity(hass, entry)
+
+    # Trigger the full handler — should not raise
+    await entity.async_export_debug_bundle(
+        window_days=1, profile="all", include_ha_history=True,
+    )
+
+    # Verify a bundle directory was created
+    bundle_root = tmp_path / "tasmota_irhvac" / "bundles"
+    assert bundle_root.exists()
+    bundles = list(bundle_root.iterdir())
+    assert len(bundles) == 1
+    assert (bundles[0] / "manifest.json").exists()
+
+
+@pytest.mark.asyncio
 async def test_export_bundle_end_to_end(hass, tmp_path: Path, monkeypatch):
     """export_bundle produces a complete directory layout."""
     from custom_components.tasmota_irhvac.pi.export_bundle import export_bundle

@@ -1869,7 +1869,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
     async def async_set_debug_capture(self, full_p: bool) -> None:
         """Toggle power-user debug captures (full RLS P matrix in diagnostics)."""
         pi = self._pi
-        if pi is None:
+        if pi is None:  # pragma: no cover — service handler defensive guard
             return
         pi.set_debug_capture(full_p=full_p)
         self.async_schedule_update_ha_state()
@@ -1877,7 +1877,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
     async def async_set_event_log_enabled(self, enabled: bool) -> None:
         """Toggle persistent JSONL event log under <config>/tasmota_irhvac/log/."""
         pi = self._pi
-        if pi is None:
+        if pi is None:  # pragma: no cover — service handler defensive guard
             return
         pi.set_event_log_enabled(enabled=enabled)
         self.async_schedule_update_ha_state()
