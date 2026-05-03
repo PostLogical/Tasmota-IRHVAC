@@ -2824,8 +2824,9 @@ class TestFFLearningSuppression:
         entity = get_climate_entity(hass, entry)
         pi = entity._pi
 
-        # Simulate suppression active
+        # Simulate suppression active and refresh coordinator so sensor sees it
         pi._disturbance_suppress_active = True
+        pi.fire_dispatcher()
 
         from custom_components.tasmota_irhvac.binary_sensor import FFLearningSuppressedBinarySensor
         from homeassistant.helpers.entity_platform import async_get_platforms
@@ -2872,6 +2873,7 @@ class TestFFLearningSuppression:
         pi._manual_ff_suppress = True
         pi._manual_ff_suppress_reason = "setpoint_change"
         pi._disturbance_active_suppressors = ["setpoint_change"]
+        pi.fire_dispatcher()
 
         from custom_components.tasmota_irhvac.binary_sensor import FFLearningSuppressedBinarySensor
         from homeassistant.helpers.entity_platform import async_get_platforms
@@ -2889,20 +2891,12 @@ class TestFFLearningSuppression:
         assert attrs["manual_suppress_reason"] == "setpoint_change"
         assert "setpoint_change" in attrs["active_suppressors"]
 
-    @pytest.mark.asyncio
-    async def test_binary_sensor_extra_attrs_no_pi(self, hass, setup_integration):
-        """Extra state attributes should return empty dict when no PI."""
-        from custom_components.tasmota_irhvac.binary_sensor import FFLearningSuppressedBinarySensor
-        # Non-PI integration won't create the binary sensor, so test the property directly
-        # by creating a mock instance
-        entity = MagicMock()
-        entity._pi = None
-
-        sensor = FFLearningSuppressedBinarySensor.__new__(FFLearningSuppressedBinarySensor)
-        sensor._climate = entity
-
-        assert sensor.is_on is False
-        assert sensor.extra_state_attributes == {}
+    # Note: test_binary_sensor_extra_attrs_no_pi was removed when sensors
+    # migrated to CoordinatorEntity (Stage 7c). Non-PI configs no longer
+    # create the binary sensor at all (setup_entry returns early before
+    # any sensor is constructed), so the "_pi is None" code path is no
+    # longer reachable. Coverage is preserved by the setup_entry early-
+    # return logic.
 
 
 # ── button.py lines 251-277: save learned coefficients ───────────────
@@ -4816,19 +4810,36 @@ class TestBinarySensorDriftAttrs:
     async def test_drift_sensor_extra_attrs_with_drifting(self, hass, setup_pi_integration):
         """Model drifting sensor shows drifting_coefficients in extra attrs."""
         from custom_components.tasmota_irhvac.binary_sensor import ModelDriftingBinarySensor
+        from custom_components.tasmota_irhvac.pi.batch_learning import BatchResult
 
         entry = await setup_pi_integration()
         entity = get_climate_entity(hass, entry)
         pi = entity._pi
 
-        # Create the sensor directly from the climate entity
-        sensor = ModelDriftingBinarySensor(entity, entry.entry_id)
+        # Create the sensor via the new (coordinator, climate_entity) signature
+        sensor = ModelDriftingBinarySensor(
+            coordinator=entity.coordinator, climate_entity=entity,
+        )
 
-        # Simulate drift detection data — enough cycles to trigger detection
+        # Simulate drift detection data — enough cycles to trigger detection.
+        # Need a BatchResult so BatchLearningSnapshot is built and the
+        # drift_detection sub-snapshot has populated drifting_coefficients.
         pi._drift_correction_signs = [[1] * 10, [-1] * 10]
         pi._drift_threshold = 5
+        pi._last_batch_result = BatchResult(
+            n_total=10, n_eligible=10,
+            beta_batch=[0.0] * pi._rls_heat.n,
+            beta_current=[0.0] * pi._rls_heat.n,
+            residual_rms=0.1, max_coeff_change_pct=5.0,
+            recommend_update=False,
+        )
+        pi._last_batch_timestamp = 0.0
+        pi._last_batch_wallclock = "2026-05-02T10:00:00"
 
         assert len(pi.get_drifting_coefficients()) > 0
+
+        # Refresh the coordinator so the sensor sees the new tick.
+        pi.fire_dispatcher()
 
         attrs = sensor.extra_state_attributes
         assert "drifting_coefficients" in attrs

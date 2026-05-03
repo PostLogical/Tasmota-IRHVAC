@@ -1,4 +1,8 @@
-"""Companion sensor entities for the Tasmota IRHVAC PI controller."""
+"""Companion sensor entities for the Tasmota IRHVAC PI controller.
+
+All sensors are `CoordinatorEntity[TasmotaIRHVACCoordinator]` subclasses
+— refresh is automatic when the controller publishes a new TickOutput.
+"""
 
 from __future__ import annotations
 
@@ -20,11 +24,12 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory, UnitOfTemperature, UnitOfTime
-from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DATA_KEY, SIGNAL_PI_UPDATE
+from .const import DATA_KEY
+from .pi.coordinator import TasmotaIRHVACCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -255,52 +260,54 @@ async def async_setup_entry(
     if not climate_entity._pi.is_active:
         return
 
+    coordinator = climate_entity.coordinator
+    if coordinator is None:
+        return
+
     sensors: list[SensorEntity] = [
         TasmotaIrhvacPISensor(
+            coordinator=coordinator,
             climate_entity=climate_entity,
-            entry_id=entry.entry_id,
             description=desc,
         )
         for desc in PI_SENSOR_DESCRIPTIONS
     ]
     sensors.append(
         TasmotaIrhvacHealthSensor(
-            climate_entity=climate_entity,
-            entry_id=entry.entry_id,
+            coordinator=coordinator, climate_entity=climate_entity,
         )
     )
     sensors.append(
         TasmotaIrhvacLearningSensor(
-            climate_entity=climate_entity,
-            entry_id=entry.entry_id,
+            coordinator=coordinator, climate_entity=climate_entity,
         )
     )
     sensors.append(
         TasmotaIrhvacGreyboxSensor(
-            climate_entity=climate_entity,
-            entry_id=entry.entry_id,
+            coordinator=coordinator, climate_entity=climate_entity,
         )
     )
     async_add_entities(sensors)
 
 
-class TasmotaIrhvacPISensor(SensorEntity):
-    """Sensor that mirrors a PI controller value from the climate entity."""
+class TasmotaIrhvacPISensor(
+    CoordinatorEntity[TasmotaIRHVACCoordinator], SensorEntity,
+):
+    """Sensor that mirrors a PI controller value via the coordinator."""
 
     _attr_has_entity_name = True
-    _attr_should_poll = False
     entity_description: TasmotaIrhvacPISensorDescription
 
     def __init__(
         self,
+        coordinator: TasmotaIRHVACCoordinator,
         climate_entity: TasmotaIrhvac,
-        entry_id: str,
         description: TasmotaIrhvacPISensorDescription,
     ) -> None:
         """Initialize the PI sensor."""
+        super().__init__(coordinator)
         self.entity_description = description
         self._climate = climate_entity
-        self._entry_id = entry_id
         self._attr_unique_id = f"{climate_entity.unique_id}_{description.key}"
 
     @property
@@ -310,7 +317,12 @@ class TasmotaIrhvacPISensor(SensorEntity):
 
     @property
     def native_value(self) -> float | str | None:
-        """Read current value from the PI controller."""
+        """Read current value from the PI controller.
+
+        Reads private PIController attributes via `climate_attr` —
+        these stay updated by the tick path; the coordinator just
+        triggers refresh.
+        """
         pi = self._climate._pi
         if pi is None:
             return None
@@ -321,27 +333,18 @@ class TasmotaIrhvacPISensor(SensorEntity):
         """Sensor is available when the climate entity is available."""
         return bool(self._climate.available)
 
-    async def async_added_to_hass(self) -> None:
-        """Subscribe to dispatcher signal for state updates."""
 
-        @callback
-        def _update_sensor() -> None:
-            self.async_write_ha_state()
+class TasmotaIrhvacHealthSensor(
+    CoordinatorEntity[TasmotaIRHVACCoordinator], SensorEntity,
+):
+    """Sensor that evaluates PI controller health status.
 
-        self.async_on_remove(
-            async_dispatcher_connect(
-                self.hass,
-                SIGNAL_PI_UPDATE.format(self._entry_id),
-                _update_sensor,
-            )
-        )
-
-
-class TasmotaIrhvacHealthSensor(SensorEntity):
-    """Sensor that evaluates PI controller health status."""
+    Reads typed `coordinator.data.health` for state; falls back to the
+    legacy getter for the rich attribute set (which already reads from
+    `last_tick` since Stage 5c).
+    """
 
     _attr_has_entity_name = True
-    _attr_should_poll = False
     _attr_device_class = SensorDeviceClass.ENUM
     _attr_options = ["OK", "Warning", "Critical", "Disabled"]
     _attr_translation_key = "health"
@@ -349,12 +352,12 @@ class TasmotaIrhvacHealthSensor(SensorEntity):
 
     def __init__(
         self,
+        coordinator: TasmotaIRHVACCoordinator,
         climate_entity: TasmotaIrhvac,
-        entry_id: str,
     ) -> None:
         """Initialize the health sensor."""
+        super().__init__(coordinator)
         self._climate = climate_entity
-        self._entry_id = entry_id
         self._attr_unique_id = f"{climate_entity.unique_id}_health"
 
     @property
@@ -371,11 +374,8 @@ class TasmotaIrhvacHealthSensor(SensorEntity):
 
     @property
     def native_value(self) -> str | None:
-        """Return current health state."""
-        pi = self._pi
-        if pi is None:
-            return None
-        return str(pi.get_health_status()["state"])
+        """Return current health state from the typed snapshot."""
+        return self.coordinator.data.health.state
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -394,27 +394,13 @@ class TasmotaIrhvacHealthSensor(SensorEntity):
         """Sensor is available when the climate entity is available."""
         return bool(self._climate.available)
 
-    async def async_added_to_hass(self) -> None:
-        """Subscribe to dispatcher signal for state updates."""
 
-        @callback
-        def _update_sensor() -> None:
-            self.async_write_ha_state()
-
-        self.async_on_remove(
-            async_dispatcher_connect(
-                self.hass,
-                SIGNAL_PI_UPDATE.format(self._entry_id),
-                _update_sensor,
-            )
-        )
-
-
-class TasmotaIrhvacGreyboxSensor(SensorEntity):
+class TasmotaIrhvacGreyboxSensor(
+    CoordinatorEntity[TasmotaIRHVACCoordinator], SensorEntity,
+):
     """Sensor that reports grey-box model identification state."""
 
     _attr_has_entity_name = True
-    _attr_should_poll = False
     _attr_device_class = SensorDeviceClass.ENUM
     _attr_options = ["Failed", "Learning", "Adequate", "Good", "Degraded"]
     _attr_translation_key = "greybox"
@@ -422,12 +408,12 @@ class TasmotaIrhvacGreyboxSensor(SensorEntity):
 
     def __init__(
         self,
+        coordinator: TasmotaIRHVACCoordinator,
         climate_entity: TasmotaIrhvac,
-        entry_id: str,
     ) -> None:
         """Initialize the grey-box sensor."""
+        super().__init__(coordinator)
         self._climate = climate_entity
-        self._entry_id = entry_id
         self._attr_unique_id = f"{climate_entity.unique_id}_greybox"
 
     @property
@@ -444,11 +430,8 @@ class TasmotaIrhvacGreyboxSensor(SensorEntity):
 
     @property
     def native_value(self) -> str | None:
-        """Return current grey-box model state."""
-        pi = self._pi
-        if pi is None:
-            return None
-        return str(pi.get_greybox_state()["state"])
+        """Return current grey-box model state from the typed snapshot."""
+        return self.coordinator.data.greybox.state
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -470,40 +453,26 @@ class TasmotaIrhvacGreyboxSensor(SensorEntity):
         """Sensor is available when the climate entity is available."""
         return bool(self._climate.available)
 
-    async def async_added_to_hass(self) -> None:
-        """Subscribe to dispatcher signal for state updates."""
 
-        @callback
-        def _update_sensor() -> None:
-            self.async_write_ha_state()
-
-        self.async_on_remove(
-            async_dispatcher_connect(
-                self.hass,
-                SIGNAL_PI_UPDATE.format(self._entry_id),
-                _update_sensor,
-            )
-        )
-
-
-class TasmotaIrhvacLearningSensor(SensorEntity):
+class TasmotaIrhvacLearningSensor(
+    CoordinatorEntity[TasmotaIRHVACCoordinator], SensorEntity,
+):
     """Sensor that reports learning state of the PI controller."""
 
     _attr_has_entity_name = True
-    _attr_should_poll = False
     _attr_device_class = SensorDeviceClass.ENUM
-    _attr_options = ["Learning", "Optimizing", "Optimized"]
+    _attr_options = ["Observing", "Learning", "Optimizing", "Optimized"]
     _attr_translation_key = "learning"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(
         self,
+        coordinator: TasmotaIRHVACCoordinator,
         climate_entity: TasmotaIrhvac,
-        entry_id: str,
     ) -> None:
         """Initialize the learning sensor."""
+        super().__init__(coordinator)
         self._climate = climate_entity
-        self._entry_id = entry_id
         self._attr_unique_id = f"{climate_entity.unique_id}_learning"
 
     @property
@@ -520,11 +489,8 @@ class TasmotaIrhvacLearningSensor(SensorEntity):
 
     @property
     def native_value(self) -> str | None:
-        """Return current learning state."""
-        pi = self._pi
-        if pi is None:
-            return None
-        return str(pi.get_learning_state()["state"])
+        """Return current learning state from the typed snapshot."""
+        return self.coordinator.data.learning.state
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -542,18 +508,3 @@ class TasmotaIrhvacLearningSensor(SensorEntity):
     def available(self) -> bool:
         """Sensor is available when the climate entity is available."""
         return bool(self._climate.available)
-
-    async def async_added_to_hass(self) -> None:
-        """Subscribe to dispatcher signal for state updates."""
-
-        @callback
-        def _update_sensor() -> None:
-            self.async_write_ha_state()
-
-        self.async_on_remove(
-            async_dispatcher_connect(
-                self.hass,
-                SIGNAL_PI_UPDATE.format(self._entry_id),
-                _update_sensor,
-            )
-        )

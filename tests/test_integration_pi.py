@@ -129,11 +129,8 @@ class TestPICompanionSensors:
         entity._pi._manual_ff_suppress_reason = "testing"
         entity._pi._disturbance_suppress_active = True
 
-        # Fire the FF suppress signal so binary sensor re-reads state
-        async_dispatcher_send(
-            hass,
-            SIGNAL_FF_SUPPRESS_UPDATE.format(entry.entry_id),
-        )
+        # Refresh coordinator so the binary sensor (CoordinatorEntity) sees fresh state.
+        entity._pi.fire_dispatcher()
         await hass.async_block_till_done()
 
         # Find the ff_learning binary sensor

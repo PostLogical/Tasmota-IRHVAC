@@ -1,4 +1,9 @@
-"""Binary sensor entities for Tasmota IRHVAC (FF learning suppression status)."""
+"""Binary sensor entities for Tasmota IRHVAC.
+
+All binary sensors are `CoordinatorEntity[TasmotaIRHVACCoordinator]`
+subclasses — refresh is automatic when the controller publishes a new
+TickOutput.
+"""
 
 from __future__ import annotations
 
@@ -17,11 +22,12 @@ from homeassistant.components.binary_sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
-from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DATA_KEY, SIGNAL_FF_SUPPRESS_UPDATE, SIGNAL_PI_UPDATE
+from .const import DATA_KEY
+from .pi.coordinator import TasmotaIRHVACCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -41,31 +47,43 @@ async def async_setup_entry(
     if not climate_entity._pi.is_active:
         return
 
+    coordinator = climate_entity.coordinator
+    if coordinator is None:
+        return
+
     async_add_entities([
         FFLearningSuppressedBinarySensor(
-            climate_entity=climate_entity,
-            entry_id=entry.entry_id,
+            coordinator=coordinator, climate_entity=climate_entity,
         ),
         ModelDriftingBinarySensor(
-            climate_entity=climate_entity,
-            entry_id=entry.entry_id,
+            coordinator=coordinator, climate_entity=climate_entity,
         ),
     ])
 
 
-class FFLearningSuppressedBinarySensor(BinarySensorEntity):
-    """Binary sensor showing whether FF auto-learning is suppressed."""
+class FFLearningSuppressedBinarySensor(
+    CoordinatorEntity[TasmotaIRHVACCoordinator], BinarySensorEntity,
+):
+    """Binary sensor showing whether FF auto-learning is suppressed.
+
+    Reads typed `coordinator.data.learning_suppression.effective_suppressed`
+    for the on/off state. Manual-suppress fields read from the typed
+    `coordinator.data.rls_model` for the rich attribute set.
+    """
 
     _attr_has_entity_name = True
-    _attr_should_poll = False
     _attr_device_class = BinarySensorDeviceClass.PROBLEM
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_translation_key = "ff_learning"
 
-    def __init__(self, climate_entity: TasmotaIrhvac, entry_id: str) -> None:
+    def __init__(
+        self,
+        coordinator: TasmotaIRHVACCoordinator,
+        climate_entity: TasmotaIrhvac,
+    ) -> None:
         """Initialize the binary sensor."""
+        super().__init__(coordinator)
         self._climate = climate_entity
-        self._entry_id = entry_id
         self._attr_unique_id = f"{climate_entity.unique_id}_ff_learning"
 
     @property
@@ -79,62 +97,44 @@ class FFLearningSuppressedBinarySensor(BinarySensorEntity):
         return bool(self._climate.available)
 
     @property
-    def _pi(self) -> PIController | None:
-        """Return the PI controller, narrowed from the union type."""
-        from .pi import PIController
-        pi = self._climate._pi
-        return pi if isinstance(pi, PIController) else None
-
-    @property
     def is_on(self) -> bool:
-        """True when FF learning is suppressed."""
-        pi = self._pi
-        if pi is None:
-            return False
-        return bool(pi.get_learning_status()["suppressed"])
+        """True when FF learning is effectively suppressed."""
+        return self.coordinator.data.learning_suppression.effective_suppressed
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return details about what is suppressing learning."""
-        pi = self._pi
-        if pi is None:
-            return {}
-        status = pi.get_learning_status()
+        ls = self.coordinator.data.learning_suppression
+        rls = self.coordinator.data.rls_model
         return {
-            "manual_suppress": status["manual_suppress"],
-            "manual_suppress_reason": status["manual_suppress_reason"],
-            "active_suppressors": status["active_suppressors"],
+            "manual_suppress": rls.learning_suppressed,
+            "manual_suppress_reason": rls.manual_suppress_reason,
+            "active_suppressors": list(ls.active_suppressors),
         }
 
-    async def async_added_to_hass(self) -> None:
-        """Subscribe to dispatcher signal for state updates."""
 
-        @callback
-        def _update_sensor() -> None:
-            self.async_write_ha_state()
+class ModelDriftingBinarySensor(
+    CoordinatorEntity[TasmotaIRHVACCoordinator], BinarySensorEntity,
+):
+    """Binary sensor indicating persistent same-direction batch correction.
 
-        self.async_on_remove(
-            async_dispatcher_connect(
-                self.hass,
-                SIGNAL_FF_SUPPRESS_UPDATE.format(self._entry_id),
-                _update_sensor,
-            )
-        )
-
-
-class ModelDriftingBinarySensor(BinarySensorEntity):
-    """Binary sensor indicating persistent same-direction batch correction."""
+    Reads `coordinator.data.batch_learning.drift_detection.drifting_coefficients`
+    for the on/off state and the per-coefficient details.
+    """
 
     _attr_has_entity_name = True
-    _attr_should_poll = False
     _attr_device_class = BinarySensorDeviceClass.PROBLEM
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_translation_key = "model_drifting"
 
-    def __init__(self, climate_entity: TasmotaIrhvac, entry_id: str) -> None:
+    def __init__(
+        self,
+        coordinator: TasmotaIRHVACCoordinator,
+        climate_entity: TasmotaIrhvac,
+    ) -> None:
         """Initialize the binary sensor."""
+        super().__init__(coordinator)
         self._climate = climate_entity
-        self._entry_id = entry_id
         self._attr_unique_id = f"{climate_entity.unique_id}_model_drifting"
 
     @property
@@ -147,48 +147,27 @@ class ModelDriftingBinarySensor(BinarySensorEntity):
         """Available when the climate entity is available."""
         return bool(self._climate.available)
 
-    @property
-    def _pi(self) -> PIController | None:
-        """Return the PI controller, narrowed from the union type."""
-        from .pi import PIController
-        pi = self._climate._pi
-        return pi if isinstance(pi, PIController) else None
+    def _drifting(self) -> tuple:
+        """Return the drifting coefficients tuple, or empty if no batch run yet."""
+        batch = self.coordinator.data.batch_learning
+        if batch is None:
+            return ()
+        return batch.drift_detection.drifting_coefficients
 
     @property
     def is_on(self) -> bool:
         """True when any coefficient shows persistent same-direction drift."""
-        pi = self._pi
-        if pi is None:
-            return False
-        return bool(pi.get_drifting_coefficients())
+        return bool(self._drifting())
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return details about which coefficients are drifting."""
-        pi = self._pi
-        if pi is None:
-            return {}
-        drifting = pi.get_drifting_coefficients()
+        drifting = self._drifting()
         if not drifting:
             return {}
         return {
             "drifting_coefficients": [
-                {"name": name, "consecutive_cycles": count}
-                for _idx, name, count in drifting
+                {"name": d.name, "consecutive_cycles": d.consecutive_cycles}
+                for d in drifting
             ],
         }
-
-    async def async_added_to_hass(self) -> None:
-        """Subscribe to dispatcher signal for state updates."""
-
-        @callback
-        def _update_sensor() -> None:
-            self.async_write_ha_state()
-
-        self.async_on_remove(
-            async_dispatcher_connect(
-                self.hass,
-                SIGNAL_PI_UPDATE.format(self._entry_id),
-                _update_sensor,
-            )
-        )

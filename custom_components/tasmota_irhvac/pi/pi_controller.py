@@ -3472,6 +3472,8 @@ class PIController:
         self._manual_ff_suppress = True
         self._manual_ff_suppress_reason = reason or ""
         _LOGGER.info("FF learning manually suppressed: %s", reason or "(no reason)")
+        # Refresh coordinator + legacy dispatcher so binary sensors update.
+        self.fire_dispatcher()
         if hasattr(self._entity, "_config_entry_id"):
             async_dispatcher_send(
                 self._hass,
@@ -3483,6 +3485,8 @@ class PIController:
         self._manual_ff_suppress = False
         self._manual_ff_suppress_reason = ""
         _LOGGER.info("FF learning manual suppress cleared")
+        # Refresh coordinator + legacy dispatcher so binary sensors update.
+        self.fire_dispatcher()
         if hasattr(self._entity, "_config_entry_id"):
             async_dispatcher_send(
                 self._hass,
@@ -3834,6 +3838,9 @@ class PIController:
     @callback
     def _async_model_input_changed(self, event: Event[EventStateChangedData]) -> None:
         """Handle model input entity state changes — update binary sensor."""
+        # Refresh coordinator + legacy dispatcher so the FF binary sensor
+        # picks up suppression state changes.
+        self.fire_dispatcher()
         if hasattr(self._entity, "_config_entry_id"):
             async_dispatcher_send(
                 self._hass,
