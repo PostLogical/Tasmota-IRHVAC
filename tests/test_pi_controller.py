@@ -4744,6 +4744,135 @@ class TestBatchWLSApply:
                 "RLS betas should change when batch recommends update"
             )
 
+    @pytest.mark.asyncio
+    async def test_batch_apply_bumpless_transfer_preserves_output(self):
+        """Batch β write must keep raw_setpoint = desired+p+Ki·I+d+ff
+        continuous via integral back-calculation.  Same family as the
+        existing setpoint-weight back-calc and Ki-rescale (Åström &
+        Hägglund §3.5).  Without this, the integrator carries state
+        sized for the old FF model into the new regime and creates a
+        transient kick proportional to Δff.
+        """
+        import time as time_mod
+        from custom_components.tasmota_irhvac.pi.batch_learning import Observation
+
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        entity._attr_hvac_mode = HVACMode.HEAT
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 21.0
+        pi._pi_integral = 5.0
+        pi._ff_confidence = 1.0
+        pi._inputs.outdoor_temp = -5.0
+        rls = pi._rls_heat
+        # α=1 path: skip seed-blend transient so ff_effective == rls.predict.
+        rls.observation_count = 100
+
+        # FF at the operating point under OLD β.
+        outdoor_delta = pi._inputs.outdoor_temp - pi.desired_temp_celsius
+        x = pi._inputs.build_feature_vector(outdoor_delta, wall_time=time_mod.time())
+        ff_old = rls.predict(x)
+        output_old = pi._pi_ki * pi._pi_integral + ff_old
+
+        # Seed observations with non-trivial outdoor_delta variance so WLS
+        # can fit and recommend an update.
+        now = time_mod.monotonic()
+        for i in range(40):
+            pi._observation_buffer_heat.add(Observation(
+                timestamp=now + i * 900,
+                wall_time=1713650000.0 + i * 900,
+                hp_setpoint=22.0,
+                current_c=21.0 + (i % 3) * 0.1,
+                desired_c=21.0,
+                outdoor_temp_c=-5.0 + (i % 3) * 0.5 + float(i % 5 - 2),
+                room_rate=0.001,
+                raw_readings={},
+                clamped=False,
+            ))
+
+        integral_before = pi._pi_integral
+        pi._run_batch_analysis()
+
+        if pi._last_batch_result is None or not pi._last_batch_result.recommend_update:
+            pytest.skip("Batch did not recommend update; bumpless path not exercised")
+
+        ff_new = rls.predict(x)
+        output_new = pi._pi_ki * pi._pi_integral + ff_new
+
+        assert abs(output_new - output_old) < 1e-9, (
+            f"Output not continuous across batch β write: "
+            f"old=Ki·I+ff={output_old:.6f} (I={integral_before}, ff={ff_old:.6f}), "
+            f"new=Ki·I+ff={output_new:.6f} (I={pi._pi_integral}, ff={ff_new:.6f})"
+        )
+        assert pi._pi_integral != integral_before, (
+            "Integral did not change — bumpless path was a no-op"
+        )
+
+    @pytest.mark.asyncio
+    async def test_bumpless_transfer_no_op_when_ki_zero(self):
+        """With Ki=0, integral contributes nothing to output and bumpless
+        adjustment must not divide by zero or alter integral state.
+        """
+        import time as time_mod
+        from custom_components.tasmota_irhvac.pi.batch_learning import Observation
+
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._pi_ki = 0.0
+        entity._attr_hvac_mode = HVACMode.HEAT
+        pi._desired_temp = 21.0
+        pi._inputs.outdoor_temp = -5.0
+        pi._pi_integral = 5.0
+        pi._rls_heat.observation_count = 100
+
+        now = time_mod.monotonic()
+        for i in range(40):
+            pi._observation_buffer_heat.add(Observation(
+                timestamp=now + i * 900,
+                wall_time=1713650000.0 + i * 900,
+                hp_setpoint=22.0,
+                current_c=21.0 + (i % 3) * 0.1,
+                desired_c=21.0,
+                outdoor_temp_c=-5.0 + (i % 3) * 0.5 + float(i % 5 - 2),
+                room_rate=0.001,
+                raw_readings={},
+                clamped=False,
+            ))
+
+        integral_before = pi._pi_integral
+        pi._run_batch_analysis()
+        assert pi._pi_integral == integral_before
+
+    @pytest.mark.asyncio
+    async def test_bumpless_transfer_no_op_when_no_recommend_update(self):
+        """When result.recommend_update=False, integral must be unchanged."""
+        import time as time_mod
+        from custom_components.tasmota_irhvac.pi.batch_learning import Observation
+
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        entity._attr_hvac_mode = HVACMode.HEAT
+        pi._desired_temp = 21.0
+        pi._inputs.outdoor_temp = -5.0
+        pi._pi_integral = 5.0
+
+        # Below the 20-min observation threshold → batch returns early.
+        now = time_mod.monotonic()
+        for i in range(10):
+            pi._observation_buffer_heat.add(Observation(
+                timestamp=now + i * 900, wall_time=1713650000.0 + i * 900,
+                hp_setpoint=22.0, current_c=21.0, desired_c=21.0,
+                outdoor_temp_c=-5.0, room_rate=0.001,
+                raw_readings={}, clamped=False,
+            ))
+
+        integral_before = pi._pi_integral
+        pi._run_batch_analysis()
+        assert pi._pi_integral == integral_before
+
 
 class TestControllableUncontrollableMetrics:
     """Tests for controllable/uncontrollable ITAE and CVH split."""

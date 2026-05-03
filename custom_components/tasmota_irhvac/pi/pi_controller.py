@@ -1087,9 +1087,10 @@ class PIController:
             kappa = float("inf")
             self._cached_kappa = None
 
-        # Batch is the sole coefficient estimator (online RLS removed),
-        # so the per-feature step cap is unnecessary — it only existed to
-        # keep batch jumps small enough for online tracking to recover from.
+        # Batch is the sole coefficient estimator (online RLS removed).
+        # Output continuity at the moment of write is preserved by the
+        # bumpless-transfer adjustment to _pi_integral below — see the
+        # block guarded by `if result.recommend_update and result.beta_blended`.
         compute_blended_update(
             result, prior_std=1.0, max_step=float("inf"),
             max_step_per_feature=None,
@@ -1109,6 +1110,33 @@ class PIController:
                 result.recommend_update = False
 
         if result.recommend_update and result.beta_blended:
+            # Snapshot the FF the next tick *would* have produced under the
+            # OLD β at the current operating point.  After the β write we
+            # recompute it under the NEW β and adjust the integral so
+            # raw_setpoint = desired + p + Ki·I + d + ff stays continuous
+            # across the batch.  Same principle as the existing Ki-rescale
+            # in _on_gain_update and the setpoint-weight back-calc — preserve
+            # output, let the loop find the new equilibrium.
+            bumpless_x: list[float] | None = None
+            ff_eff_old: float = 0.0
+            desired_c_now = self.desired_temp_celsius
+            if (
+                self._pi_ki > 0
+                and self._pi_ff_enabled
+                and self._inputs.outdoor_temp is not None
+                and desired_c_now is not None
+            ):
+                outdoor_delta = self._inputs.outdoor_temp - desired_c_now
+                bumpless_x = self._inputs.build_feature_vector(
+                    outdoor_delta, wall_time=time.time(),
+                )
+                seeds_now = self._heat_seeds if is_heating else self._cool_seeds
+                seed_offset = sum(s * xi for s, xi in zip(seeds_now, bumpless_x))
+                pred_old = rls.predict(bumpless_x)
+                alpha_old = min(rls.observation_count / 50.0, 1.0)
+                blended_old = (1.0 - alpha_old) * seed_offset + alpha_old * pred_old
+                ff_eff_old = blended_old * self._ff_confidence
+
             for i, val in enumerate(result.beta_blended):
                 if i < rls.n:
                     rls.beta[i] = val * rls.feature_scales[i]
@@ -1128,6 +1156,27 @@ class PIController:
             # seed→learned blend to ramp up trust as data accumulates.
             if result.n_eligible > rls.observation_count:
                 rls.observation_count = result.n_eligible
+
+            # Bumpless transfer apply: with the new β (and possibly new α),
+            # recompute the effective FF at the same operating point and
+            # adjust the integral by ΔFF/Ki so output is continuous.
+            if bumpless_x is not None:
+                seeds_now = self._heat_seeds if is_heating else self._cool_seeds
+                seed_offset = sum(s * xi for s, xi in zip(seeds_now, bumpless_x))
+                pred_new = rls.predict(bumpless_x)
+                alpha_new = min(rls.observation_count / 50.0, 1.0)
+                blended_new = (1.0 - alpha_new) * seed_offset + alpha_new * pred_new
+                ff_eff_new = blended_new * self._ff_confidence
+                delta_ff = ff_eff_new - ff_eff_old
+                if delta_ff != 0.0:
+                    integral_before = self._pi_integral
+                    self._pi_integral -= delta_ff / self._pi_ki
+                    _LOGGER.info(
+                        "%sBumpless transfer: ΔFF=%+.3f → integral %+.3f → %+.3f "
+                        "(Ki=%.4f)",
+                        self._log_prefix, delta_ff,
+                        integral_before, self._pi_integral, self._pi_ki,
+                    )
 
             _LOGGER.info(
                 "%sBatch WLS: applied blended update to %s model",
