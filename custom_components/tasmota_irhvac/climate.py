@@ -777,11 +777,19 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         # Controller: PIController when enabled, NullController otherwise.
         # All calls are unconditional — no `if self._pi:` guards needed.
         from .pi import NullController
+        from .pi.coordinator import TasmotaIRHVACCoordinator
         self._controller: PIController | NullController
+        self.coordinator: TasmotaIRHVACCoordinator | None = None
         if cfg.pi_enabled:
             pi = PIController(self, raw_config)
             self._controller = pi
             self._pi: PIController | None = pi
+            # Coordinator is paired with the controller and used by all
+            # companion sensors (Stage 7+). Created here so the entity
+            # can publish ticks to it from `async_write_ha_state`.
+            self.coordinator = TasmotaIRHVACCoordinator(
+                hass, pi, name=f"tasmota_irhvac_{cfg.name}",
+            )
         else:
             self._controller = NullController()
             self._pi = None

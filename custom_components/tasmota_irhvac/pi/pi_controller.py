@@ -2733,14 +2733,20 @@ class PIController:
         return self._pi_enabled and hvac_mode in (HVACMode.AUTO, HVACMode.HEAT_COOL)
 
     def fire_dispatcher(self) -> None:
-        """Fire dispatcher signal for companion PI sensors.
+        """Notify companion PI sensors that state has updated.
 
-        Refreshes `self._last_tick` BEFORE sending the signal so handlers
-        reading from `controller.last_tick` always see current state.
+        Builds a fresh `TickOutput` and pushes it to subscribers via
+        BOTH the `DataUpdateCoordinator` (for `CoordinatorEntity`-based
+        sensors — Stage 7c+) and the legacy `SIGNAL_PI_UPDATE` dispatcher
+        (for sensors not yet migrated). The dispatcher path is removed
+        in Stage 7d once all consumers have moved.
         """
-        # Build typed tick output before notifying consumers — sensors
-        # subscribing to SIGNAL_PI_UPDATE must see post-tick state.
+        # Build typed tick output before notifying consumers — listeners
+        # reading `last_tick` or `coordinator.data` must see post-tick state.
         self._last_tick = self._build_tick_output()
+        coord = getattr(self._entity, "coordinator", None)
+        if coord is not None:
+            coord.publish(self._last_tick)
         if self._pi_enabled and hasattr(self._entity, "_config_entry_id"):
             async_dispatcher_send(
                 self._hass,
