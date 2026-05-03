@@ -1120,6 +1120,10 @@ class TickOutput:
     # stage 2+.
     observation: ObservationContext | None = None
     events: tuple[TickEvent, ...] = ()
+    # Over-temperature regime gate state — True when the gate forced HP
+    # to its idle setpoint and froze the integrator on this tick.
+    # Visible in debug bundles for post-deployment verification.
+    overtemp_regime: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to the legacy `get_full_diagnostics()` wire format.
@@ -1176,6 +1180,7 @@ class TickOutput:
             out["_observation"] = self.observation.to_dict()
         if self.events:
             out["_events"] = [e.to_dict() for e in self.events]
+        out["_overtemp_regime"] = self.overtemp_regime
         return out
 
     @classmethod
@@ -1246,6 +1251,7 @@ class TickOutput:
             events=tuple(
                 TickEvent.from_dict(e) for e in data.get("_events", [])
             ),
+            overtemp_regime=data.get("_overtemp_regime", False),
         )
 
     @classmethod

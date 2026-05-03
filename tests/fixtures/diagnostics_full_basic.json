@@ -37,6 +37,7 @@
       "active_suppressors": [],
       "effective_suppressed": false
     },
+    "_overtemp_regime": false,
     "_schema_version": 1,
     "_ts_mono": "<NORMALIZED>",
     "_ts_wall": "<NORMALIZED>",

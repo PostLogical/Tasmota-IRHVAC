@@ -3597,6 +3597,7 @@ class PIController:
             learning_suppression=self._build_learning_suppression_snapshot(),
             observation=self._last_observation_context,
             events=tuple(self._pending_events),
+            overtemp_regime=self._overtemp_regime,
         )
 
     def _build_health_snapshot_with_grace_advance(self) -> HealthSnapshot:
