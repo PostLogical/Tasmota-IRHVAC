@@ -109,9 +109,7 @@ from ..const import (
     DEFAULT_PI_TAU_ESTIMATE,
     DEFAULT_TAU_FAST_SEED,
     DEFAULT_TAU_SLOW_SEED,
-    SIGNAL_FF_SUPPRESS_UPDATE,
     SIGNAL_PI_BATCH_COMPLETE,
-    SIGNAL_PI_UPDATE,
 )
 
 from ..const import DEFAULT_RLS_P_INIT
@@ -628,8 +626,8 @@ class PIController:
         self._last_residual: float | None = None
         self._last_observation_context: ObservationContext | None = None
         # Cached typed tick output. Refreshed in fire_dispatcher() before
-        # the SIGNAL_PI_UPDATE signal fires so consumers reading via the
-        # signal handler always see fresh state.
+        # the coordinator publishes to subscribers, so listeners reading
+        # last_tick / coordinator.data always see fresh state.
         self._last_tick: TickOutput = TickOutput.empty(
             zone_label=getattr(self._entity, "entity_id", "") or ""
         )
@@ -2735,11 +2733,14 @@ class PIController:
     def fire_dispatcher(self) -> None:
         """Notify companion PI sensors that state has updated.
 
-        Builds a fresh `TickOutput` and pushes it to subscribers via
-        BOTH the `DataUpdateCoordinator` (for `CoordinatorEntity`-based
-        sensors — Stage 7c+) and the legacy `SIGNAL_PI_UPDATE` dispatcher
-        (for sensors not yet migrated). The dispatcher path is removed
-        in Stage 7d once all consumers have moved.
+        Builds a fresh `TickOutput` and publishes it via the
+        `DataUpdateCoordinator`. All `CoordinatorEntity` subscribers
+        (sensors, binary sensors) refresh automatically.
+
+        Method retains the `fire_dispatcher` name for now because it's
+        still called from many places that semantically mean "notify
+        downstream that tick state changed." Could be renamed to
+        `publish_tick` in a future cleanup.
         """
         # Build typed tick output before notifying consumers — listeners
         # reading `last_tick` or `coordinator.data` must see post-tick state.
@@ -2747,11 +2748,6 @@ class PIController:
         coord = getattr(self._entity, "coordinator", None)
         if coord is not None:
             coord.publish(self._last_tick)
-        if self._pi_enabled and hasattr(self._entity, "_config_entry_id"):
-            async_dispatcher_send(
-                self._hass,
-                SIGNAL_PI_UPDATE.format(self._entity._config_entry_id),
-            )
 
     @property
     def last_tick(self) -> TickOutput:
@@ -2996,11 +2992,11 @@ class PIController:
     def _build_tick_output(self) -> TickOutput:
         """Assemble the typed TickOutput from current controller state.
 
-        Called from `fire_dispatcher()` before SIGNAL_PI_UPDATE fires.
-        Heavy fields (multicollinearity κ, correlated_pairs, feature
-        active counts) are NOT computed here — they live in
-        `DiagnosticsBundle` and are computed only when the diagnostics
-        endpoint is queried.
+        Called from `fire_dispatcher()` before the coordinator publishes
+        to subscribers. Heavy fields (multicollinearity κ,
+        correlated_pairs, feature active counts) are NOT computed here
+        — they live in `DiagnosticsBundle` and are computed only when
+        the diagnostics endpoint is queried.
         """
         import time as time_mod
         coeff_names = self._coeff_names()
@@ -3472,26 +3468,14 @@ class PIController:
         self._manual_ff_suppress = True
         self._manual_ff_suppress_reason = reason or ""
         _LOGGER.info("FF learning manually suppressed: %s", reason or "(no reason)")
-        # Refresh coordinator + legacy dispatcher so binary sensors update.
-        self.fire_dispatcher()
-        if hasattr(self._entity, "_config_entry_id"):
-            async_dispatcher_send(
-                self._hass,
-                SIGNAL_FF_SUPPRESS_UPDATE.format(self._entity._config_entry_id),
-            )
+        self.fire_dispatcher()  # Coordinator publishes; binary sensors refresh.
 
     async def async_resume_ff_learning(self) -> None:
         """Resume FF learning after manual suppression (service call handler)."""
         self._manual_ff_suppress = False
         self._manual_ff_suppress_reason = ""
         _LOGGER.info("FF learning manual suppress cleared")
-        # Refresh coordinator + legacy dispatcher so binary sensors update.
-        self.fire_dispatcher()
-        if hasattr(self._entity, "_config_entry_id"):
-            async_dispatcher_send(
-                self._hass,
-                SIGNAL_FF_SUPPRESS_UPDATE.format(self._entity._config_entry_id),
-            )
+        self.fire_dispatcher()  # Coordinator publishes; binary sensors refresh.
 
     _SUBSYSTEM_ATTRS: dict[str, str] = {
         "control": "_control_active",
@@ -3837,15 +3821,8 @@ class PIController:
 
     @callback
     def _async_model_input_changed(self, event: Event[EventStateChangedData]) -> None:
-        """Handle model input entity state changes — update binary sensor."""
-        # Refresh coordinator + legacy dispatcher so the FF binary sensor
-        # picks up suppression state changes.
+        """Handle model input entity state changes — refresh sensors via coordinator."""
         self.fire_dispatcher()
-        if hasattr(self._entity, "_config_entry_id"):
-            async_dispatcher_send(
-                self._hass,
-                SIGNAL_FF_SUPPRESS_UPDATE.format(self._entity._config_entry_id),
-            )
 
     async def _pi_async_sensor_changed(self, was_none: bool = False) -> bool:
         """Handle temp sensor update. Returns True if send needed."""

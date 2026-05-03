@@ -88,40 +88,38 @@ async def test_last_tick_zone_label(hass, setup_pi_integration):
 
 
 @pytest.mark.asyncio
-async def test_signal_pi_update_ordering(hass, setup_pi_integration):
-    """SIGNAL_PI_UPDATE fires AFTER last_tick is set, not before.
+async def test_coordinator_publish_ordering(hass, setup_pi_integration):
+    """Coordinator listeners see fresh `last_tick` when notified.
 
-    Sensors subscribe to this signal and must see the new tick state when
-    they re-read, not the previous tick's state.
+    The coordinator's listener fires after `controller._last_tick` is
+    rebuilt, so any consumer that reads `pi.last_tick` from a listener
+    callback sees current state — not stale state from before the tick.
 
-    Stage 2: COMPLETE.
+    Stage 2/7d: COMPLETE. Replaces the legacy SIGNAL_PI_UPDATE ordering
+    test now that sensor refreshes flow through DataUpdateCoordinator.
     """
-    from custom_components.tasmota_irhvac.const import SIGNAL_PI_UPDATE
-    from homeassistant.helpers.dispatcher import async_dispatcher_connect
-
     from .conftest import get_climate_entity
 
     entry = await setup_pi_integration({"pi_tau_estimate": 60})
     climate = get_climate_entity(hass, entry)
     pi = climate._controller
+    coord = climate.coordinator
+    assert coord is not None
 
     seen_ts: list[float] = []
 
-    def callback() -> None:
-        # Signal handler reads last_tick — should reflect the just-built tick
-        seen_ts.append(pi.last_tick.ts_mono)
+    def listener() -> None:
+        # Listener reads coordinator.data — should be the just-published tick
+        seen_ts.append(coord.data.ts_mono)
 
-    async_dispatcher_connect(
-        hass,
-        SIGNAL_PI_UPDATE.format(climate._config_entry_id),
-        callback,
-    )
+    coord.async_add_listener(listener)
 
     pi.fire_dispatcher()
     await hass.async_block_till_done()
 
-    # Signal handler saw a non-zero ts_mono — meaning last_tick was rebuilt
-    # before the signal fired (initial empty tick has ts_mono=0.0).
+    # Listener saw a non-zero ts_mono — meaning the tick was rebuilt and
+    # published before the listener fired (initial empty tick has
+    # ts_mono=0.0).
     assert seen_ts
     assert seen_ts[-1] > 0.0
 

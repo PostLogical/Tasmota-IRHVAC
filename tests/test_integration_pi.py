@@ -15,7 +15,7 @@ from pytest_homeassistant_custom_component.common import async_fire_mqtt_message
 
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
-from custom_components.tasmota_irhvac.const import DATA_KEY, SIGNAL_FF_SUPPRESS_UPDATE
+from custom_components.tasmota_irhvac.const import DATA_KEY
 from custom_components.tasmota_irhvac.pi.pi_controller import PIExtraStoredData
 
 from .conftest import get_climate_entity, make_mqtt_state_payload

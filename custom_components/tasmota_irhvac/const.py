@@ -280,7 +280,10 @@ ATTR_PI_INTEGRAL = "pi_integral"
 ATTR_DESIRED_TEMP = "desired_temp"
 ATTR_FF_OFFSET = "ff_offset"
 
-# Dispatcher signals (format with entry_id)
-SIGNAL_PI_UPDATE = "tasmota_irhvac_pi_update_{}"
-SIGNAL_FF_SUPPRESS_UPDATE = "tasmota_irhvac_ff_suppress_update_{}"
+# Dispatcher signals (format with entry_id).
+# SIGNAL_PI_UPDATE and SIGNAL_FF_SUPPRESS_UPDATE were removed in Stage 7d
+# (tick-first refactor) — sensor refreshes now flow through
+# TasmotaIRHVACCoordinator. SIGNAL_PI_BATCH_COMPLETE remains because it
+# notifies tuning_repairs.py (a non-sensor consumer) that a batch run
+# finished — that's a separate concern from per-tick state distribution.
 SIGNAL_PI_BATCH_COMPLETE = "tasmota_irhvac_batch_complete_{}"
