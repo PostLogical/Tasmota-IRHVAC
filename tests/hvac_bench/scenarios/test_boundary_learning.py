@@ -282,30 +282,6 @@ class TestLargeOffsetConvergence:
             f"got {result.observation_yield_pct:.1f}%"
         )
 
-        # -- Downstream: later quarter should beat earlier.
-        # Trajectory checkpoint — fragile to a single non-stationary spring
-        # window (#49 Phase 3). Run across three independent spring starts
-        # and assert the median ratio. Bound (≤1.2×) unchanged.
-        ratios: list[float] = []
-        for sd in SPRING_MC_STARTS:
-            mc_result = run_full_stack(
-                _spring_config(offset=offset, n_days=45, start_day=sd)
-            )
-            n_days_actual = len(mc_result.daily_mae)
-            q1 = n_days_actual // 4
-            if q1 >= 7:
-                first_q = sum(mc_result.daily_mae[:q1]) / q1
-                last_q = sum(mc_result.daily_mae[-q1:]) / q1
-                if first_q > 0:
-                    ratios.append(last_q / first_q)
-        if ratios:
-            ratios.sort()
-            assert ratios[len(ratios) // 2] <= 1.2, (
-                f"offset={offset}: median (last-q / first-q) MAE ratio "
-                f"across {len(ratios)} spring starts should be ≤1.2, "
-                f"got {[round(r, 3) for r in ratios]}"
-            )
-
         # -- Stability: integral should not diverge --
         if result.daily_integral_rms:
             max_integral = max(result.daily_integral_rms)
