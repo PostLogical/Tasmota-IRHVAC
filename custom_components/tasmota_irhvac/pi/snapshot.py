@@ -88,8 +88,11 @@ class RLSModelSnapshot:
     correlate residual + gain across modes within a single tick record.
     """
 
-    heat_coefficients: dict[str, float]
-    cool_coefficients: dict[str, float]
+    # Coefficients in user-facing seed space (positive = warms room).
+    # Converted from internal β via `RLSModel.beta_to_seed` so consumers
+    # don't need to track the negation convention; see rls_model.py:281.
+    heat_seeds: dict[str, float]
+    cool_seeds: dict[str, float]
     heat_uncertainty: dict[str, float]
     heat_observation_count: int
     cool_observation_count: int
@@ -116,8 +119,8 @@ class RLSModelSnapshot:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "heat_coefficients": dict(self.heat_coefficients),
-            "cool_coefficients": dict(self.cool_coefficients),
+            "heat_seeds": dict(self.heat_seeds),
+            "cool_seeds": dict(self.cool_seeds),
             "heat_uncertainty": dict(self.heat_uncertainty),
             "heat_observation_count": self.heat_observation_count,
             "cool_observation_count": self.cool_observation_count,
@@ -137,8 +140,8 @@ class RLSModelSnapshot:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> RLSModelSnapshot:
         return cls(
-            heat_coefficients=dict(data["heat_coefficients"]),
-            cool_coefficients=dict(data["cool_coefficients"]),
+            heat_seeds=dict(data["heat_seeds"]),
+            cool_seeds=dict(data["cool_seeds"]),
             heat_uncertainty=dict(data["heat_uncertainty"]),
             heat_observation_count=data["heat_observation_count"],
             cool_observation_count=data["cool_observation_count"],
@@ -1278,7 +1281,7 @@ class TickOutput:
                 plant_id_enabled=False,
             ),
             rls_model=RLSModelSnapshot(
-                heat_coefficients={}, cool_coefficients={},
+                heat_seeds={}, cool_seeds={},
                 heat_uncertainty={}, heat_observation_count=0,
                 cool_observation_count=0, learning_suppressed=False,
                 manual_suppress_reason="",

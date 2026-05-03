@@ -177,13 +177,13 @@
       "state": "IDLE"
     },
     "rls_model": {
-      "cool_coefficients": {
+      "cool_observation_count": 0,
+      "cool_seeds": {
         "cos_hour": "<NORMALIZED_SUBTREE>",
         "intercept": 0.0,
-        "outdoor_delta": -0.25,
+        "outdoor_delta": 0.25,
         "sin_hour": "<NORMALIZED_SUBTREE>"
       },
-      "cool_observation_count": 0,
       "cusum_neg": 0.0,
       "cusum_pos": 0.0,
       "frozen_mask_cool": [
@@ -198,13 +198,13 @@
         true,
         true
       ],
-      "heat_coefficients": {
+      "heat_observation_count": 0,
+      "heat_seeds": {
         "cos_hour": "<NORMALIZED_SUBTREE>",
         "intercept": 0.0,
-        "outdoor_delta": -0.25,
+        "outdoor_delta": 0.25,
         "sin_hour": "<NORMALIZED_SUBTREE>"
       },
-      "heat_observation_count": 0,
       "heat_uncertainty": {
         "cos_hour": "<NORMALIZED_SUBTREE>",
         "intercept": 1.0,

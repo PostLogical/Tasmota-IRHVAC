@@ -65,8 +65,8 @@ def test_controller_config_roundtrip():
 
 def test_rls_model_snapshot_roundtrip():
     r = RLSModelSnapshot(
-        heat_coefficients={"intercept": 0.1, "outdoor_delta": -0.04},
-        cool_coefficients={"intercept": -0.1, "outdoor_delta": 0.05},
+        heat_seeds={"intercept": 0.1, "outdoor_delta": 0.04},
+        cool_seeds={"intercept": -0.1, "outdoor_delta": -0.05},
         heat_uncertainty={"intercept": 0.01, "outdoor_delta": 0.02},
         heat_observation_count=42, cool_observation_count=10,
         learning_suppressed=False, manual_suppress_reason="",
@@ -81,7 +81,7 @@ def test_rls_model_snapshot_roundtrip():
 def test_rls_model_snapshot_with_none_residual_and_gain():
     """Online RLS removed in pre45; last_residual/gain may be None."""
     r = RLSModelSnapshot(
-        heat_coefficients={}, cool_coefficients={}, heat_uncertainty={},
+        heat_seeds={}, cool_seeds={}, heat_uncertainty={},
         heat_observation_count=0, cool_observation_count=0,
         learning_suppressed=False, manual_suppress_reason="",
         last_residual=None, last_gain_vector=None,

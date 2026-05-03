@@ -2488,9 +2488,9 @@ class TestDiagnosticsModelInputs:
         diag = await async_get_config_entry_diagnostics(hass, entry)
         assert "pi_controller" in diag
         rls = diag["pi_controller"]["rls_model"]
-        # Should have "Stove" in heat_coefficients keys (line 52 appends model input name)
-        assert "Stove" in rls["heat_coefficients"]
-        assert "Stove" in rls["cool_coefficients"]
+        # Should have "Stove" in heat_seeds keys (line 52 appends model input name)
+        assert "Stove" in rls["heat_seeds"]
+        assert "Stove" in rls["cool_seeds"]
 
 
 # ── ExtraStoredData restore via async_added_to_hass with full RLS data ──

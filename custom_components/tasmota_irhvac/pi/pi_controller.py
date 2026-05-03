@@ -1801,13 +1801,15 @@ class PIController:
         # RLS coefficient names
         coeff_names = self._features.names
 
-        # Convert from normalized to physical units for display
-        heat_phys = self._rls_heat.get_coefficients()
-        cool_phys = self._rls_cool.get_coefficients()
-        rls_heat_coeffs = {coeff_names[i]: round(heat_phys[i], 4)
-                          for i in range(min(len(coeff_names), len(heat_phys)))}
-        rls_cool_coeffs = {coeff_names[i]: round(cool_phys[i], 4)
-                          for i in range(min(len(coeff_names), len(cool_phys)))}
+        # Coefficients in user-facing seed space (positive = warms room).
+        rls_heat_seeds = {
+            coeff_names[i]: round(self._coef_in_seed_space(self._rls_heat, i), 4)
+            for i in range(min(len(coeff_names), self._rls_heat.n))
+        }
+        rls_cool_seeds = {
+            coeff_names[i]: round(self._coef_in_seed_space(self._rls_cool, i), 4)
+            for i in range(min(len(coeff_names), self._rls_cool.n))
+        }
 
         return {
             ATTR_HP_SETPOINT: self._hp_setpoint,
@@ -1818,8 +1820,8 @@ class PIController:
             "supplemental_assist": self._supplemental.assist_active,
             ATTR_DESIRED_TEMP: self._desired_temp,
             ATTR_FF_OFFSET: round(self._ff_offset, 2),
-            "rls_heat_coefficients": rls_heat_coeffs,
-            "rls_cool_coefficients": rls_cool_coeffs,
+            "rls_heat_seeds": rls_heat_seeds,
+            "rls_cool_seeds": rls_cool_seeds,
             "rls_observation_count": self._rls_heat.observation_count,
             "control_active": self._control_active,
             "ff_enabled": self._pi_ff_enabled,
@@ -1909,6 +1911,21 @@ class PIController:
     def _coeff_names(self) -> list[str]:
         """Return coefficient name list from FeatureLayout."""
         return self._features.names
+
+    def _coef_in_seed_space(self, rls: RLSModel, index: int) -> float:
+        """Return coefficient at index in user-facing seed space.
+
+        `RLSModel.beta_to_seed` (rls_model.py:281) implements `seed = -β_phys`,
+        which matches the convention for `outdoor_delta` and model inputs but
+        NOT for `intercept` (β_phys = seed directly; pi_controller.py:431) or
+        `time_of_day` features (no user-facing seed convention).  This wrapper
+        dispatches per FeatureLayout role so callers iterating all features
+        get correctly-signed values.
+        """
+        role = self._features.role(index)
+        if role in ("intercept", "time_of_day"):
+            return rls.get_coefficient_physical(index)
+        return rls.beta_to_seed(index)
 
     def _coeff_role(self, index: int) -> str:
         """Map coefficient index to its input_role string.
@@ -3223,8 +3240,11 @@ class PIController:
 
         import time as time_mod
         coeff_names = self._coeff_names()
+
+        # Physical β for the FF contribution math below (coef × filtered =
+        # contribution to ff_offset).  Distinct from the user-facing seed
+        # space we emit in RLSModelSnapshot.{heat,cool}_seeds.
         heat_phys = self._rls_heat.get_coefficients()
-        cool_phys = self._rls_cool.get_coefficients()
 
         # Config snapshot
         config = ControllerConfig(
@@ -3240,15 +3260,17 @@ class PIController:
             plant_id_enabled=self._pi_plant_id_enabled,
         )
 
-        # RLS model snapshot
+        # RLS model snapshot. Coefficients are emitted in user-facing seed
+        # space (positive = warms room) so consumers don't track the
+        # internal-β negation convention.
         rls_model = RLSModelSnapshot(
-            heat_coefficients={
-                coeff_names[i]: round(heat_phys[i], 4)
-                for i in range(min(len(coeff_names), len(heat_phys)))
+            heat_seeds={
+                coeff_names[i]: round(self._coef_in_seed_space(self._rls_heat, i), 4)
+                for i in range(min(len(coeff_names), self._rls_heat.n))
             },
-            cool_coefficients={
-                coeff_names[i]: round(cool_phys[i], 4)
-                for i in range(min(len(coeff_names), len(cool_phys)))
+            cool_seeds={
+                coeff_names[i]: round(self._coef_in_seed_space(self._rls_cool, i), 4)
+                for i in range(min(len(coeff_names), self._rls_cool.n))
             },
             heat_uncertainty={
                 coeff_names[i]: round(self._rls_heat.get_covariance_diagonal()[i], 4)
