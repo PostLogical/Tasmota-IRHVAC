@@ -540,6 +540,12 @@ SERVICE_TO_METHOD = {
             vol.Required("full_p"): cv.boolean,
         }),
     },
+    "set_event_log_enabled": {
+        "method": "async_set_event_log_enabled",
+        "schema": IRHVAC_SERVICE_SCHEMA.extend({
+            vol.Required("enabled"): cv.boolean,
+        }),
+    },
 }
 
 
@@ -1858,6 +1864,14 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         if pi is None:
             return
         pi.set_debug_capture(full_p=full_p)
+        self.async_schedule_update_ha_state()
+
+    async def async_set_event_log_enabled(self, enabled: bool) -> None:
+        """Toggle persistent JSONL event log under <config>/tasmota_irhvac/log/."""
+        pi = self._pi
+        if pi is None:
+            return
+        pi.set_event_log_enabled(enabled=enabled)
         self.async_schedule_update_ha_state()
 
     async def async_set_coefficient(self, mode: str, name: str, value: float) -> None:

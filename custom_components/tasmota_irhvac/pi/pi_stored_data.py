@@ -74,6 +74,7 @@ class PIExtraStoredData(ExtraStoredData):
     detected_lag_tau: dict[str, float] = dataclasses.field(default_factory=dict)  # input name → auto-detected EMA tau (seconds)
     detected_lag_tau_counts: dict[str, int] = dataclasses.field(default_factory=dict)  # input name → consistent detection count
     debug_capture_full_p: bool = False  # power-user toggle for full RLS P matrix capture
+    pi_event_log_enabled: bool = False  # opt-in: persistent JSONL event log under <config>/tasmota_irhvac/log/
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize to JSON-compatible dict."""
@@ -127,6 +128,7 @@ class PIExtraStoredData(ExtraStoredData):
             "detected_lag_tau": self.detected_lag_tau,
             "detected_lag_tau_counts": self.detected_lag_tau_counts,
             "debug_capture_full_p": self.debug_capture_full_p,
+            "pi_event_log_enabled": self.pi_event_log_enabled,
         }
 
     @classmethod
@@ -194,6 +196,7 @@ class PIExtraStoredData(ExtraStoredData):
                     k: int(v) for k, v in restored.get("detected_lag_tau_counts", {}).items()
                 },
                 debug_capture_full_p=bool(restored.get("debug_capture_full_p", False)),
+                pi_event_log_enabled=bool(restored.get("pi_event_log_enabled", False)),
             )
         except (KeyError, ValueError, TypeError, AttributeError):
             return None

@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from homeassistant.core import CALLBACK_TYPE, Event, EventStateChangedData, HomeAssistant, State
 
     from ..climate import TasmotaIrhvac
+    from .event_log import EventLogWriter
 
 from homeassistant.components.climate.const import HVACMode
 from homeassistant.const import STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN, UnitOfTemperature
@@ -658,6 +659,15 @@ class PIController:
         # the `tasmota_irhvac.set_debug_capture` service. Persisted so the
         # setting survives restarts.
         self._debug_capture_full_p: bool = False
+        # Opt-in persistent event log (Stage 9). When True, fire_dispatcher
+        # writes each published TickOutput to a JSONL file under
+        # <config>/tasmota_irhvac/log/. Default off; configured via the
+        # `set_event_log_enabled` service or restored from
+        # PIExtraStoredData on startup.
+        self._pi_event_log_enabled: bool = False
+        # Writer is lazy-created on first publish when flag is on.
+        # Typed via TYPE_CHECKING import to avoid circular imports.
+        self._event_log_writer: EventLogWriter | None = None
 
     # ── Shorthand entity access ──────────────────────────────────────
 
@@ -1432,6 +1442,7 @@ class PIController:
             detected_lag_tau=dict(self._detected_lag_tau),
             detected_lag_tau_counts=dict(self._detected_lag_tau_count),
             debug_capture_full_p=self._debug_capture_full_p,
+            pi_event_log_enabled=self._pi_event_log_enabled,
         )
 
     def restore_extra_stored_data(self, data: PIExtraStoredData) -> None:
@@ -1613,6 +1624,7 @@ class PIController:
         self._pi_plant_id_enabled = data.plant_id_enabled
         # Restore power-user debug capture toggle
         self._debug_capture_full_p = data.debug_capture_full_p
+        self._pi_event_log_enabled = data.pi_event_log_enabled
         # Restore lag filter states
         if data.lag_filter_states:
             self._inputs.restore_lag_states(data.lag_filter_states)
@@ -2780,9 +2792,10 @@ class PIController:
     def fire_dispatcher(self) -> None:
         """Notify companion PI sensors that state has updated.
 
-        Builds a fresh `TickOutput` and publishes it via the
-        `DataUpdateCoordinator`. All `CoordinatorEntity` subscribers
-        (sensors, binary sensors) refresh automatically.
+        Builds a fresh `TickOutput`, publishes it via the
+        `DataUpdateCoordinator` (all `CoordinatorEntity` subscribers
+        refresh automatically), and — when the persistent event log is
+        enabled — appends the tick to the daily JSONL file.
 
         Method retains the `fire_dispatcher` name for now because it's
         still called from many places that semantically mean "notify
@@ -2795,6 +2808,22 @@ class PIController:
         coord = getattr(self._entity, "coordinator", None)
         if coord is not None:
             coord.publish(self._last_tick)
+        if self._pi_event_log_enabled:
+            self._append_to_event_log(self._last_tick)
+
+    def _append_to_event_log(self, tick: TickOutput) -> None:
+        """Lazy-create writer + append. No-op if hass or entity isn't ready."""
+        if self._event_log_writer is None:
+            from pathlib import Path
+            from .event_log import EventLogWriter
+            try:
+                log_dir = Path(self._hass.config.path("tasmota_irhvac/log"))
+            except Exception:  # noqa: BLE001 — defensive on hass quirks
+                return
+            self._event_log_writer = EventLogWriter(
+                self._hass, log_dir, tick.zone_label,
+            )
+        self._event_log_writer.append(tick)
 
     @property
     def last_tick(self) -> TickOutput:
@@ -2805,6 +2834,29 @@ class PIController:
         notifies sensors.
         """
         return self._last_tick
+
+    def set_event_log_enabled(self, *, enabled: bool) -> None:
+        """Toggle persistent JSONL event log.
+
+        When enabled, every TickOutput published via fire_dispatcher is
+        appended to `<config>/tasmota_irhvac/log/<zone>_<YYYY-MM-DD>.jsonl`.
+        Daily rotation; previous-day files gzip on rollover. Disk
+        pressure ~3 GB/year compressed for 4 zones at 1-min ticks.
+
+        Persisted via PIExtraStoredData so the setting survives
+        restarts. Wired through the
+        `tasmota_irhvac.set_event_log_enabled` service.
+        """
+        self._pi_event_log_enabled = bool(enabled)
+        # Drop the cached writer when disabling so a future re-enable
+        # creates a fresh one (in case the zone label or log dir
+        # changed).
+        if not self._pi_event_log_enabled:
+            self._event_log_writer = None
+        _LOGGER.info(
+            "%sEvent log: enabled=%s",
+            self._log_prefix, self._pi_event_log_enabled,
+        )
 
     def set_debug_capture(self, *, full_p: bool) -> None:
         """Toggle debug captures (power-user surface for deep debugging).

@@ -462,3 +462,16 @@ set_debug_capture:
       required: true
       selector:
         boolean:
+
+set_event_log_enabled:
+  name: Set event log
+  description: "Toggle persistent JSONL event log. When enabled=true, every PI tick is appended to `<config>/tasmota_irhvac/log/<zone>_<YYYY-MM-DD>.jsonl`. Daily rotation; previous-day files gzip on rollover. Disk pressure ~3 GB/year compressed for 4 zones at 1-min ticks. Default off; persists across restarts. Required for `export_debug_bundle` to have history to bundle."
+  target:
+    entity:
+      integration: tasmota_irhvac
+  fields:
+    enabled:
+      description: When true, enable the persistent event log.
+      required: true
+      selector:
+        boolean:
