@@ -123,8 +123,12 @@ from .model_input_manager import (
 )
 from .snapshot import (
     Alert,
+    AnomalyDetectedPayload,
+    AutoPerturbStatePayload,
     BatchCoeff,
     BatchLearningSnapshot,
+    BatchRunPayload,
+    BoundaryUpdatePayload,
     ControllerConfig,
     CorrelatedPair,
     DiagnosticsBundle,
@@ -137,13 +141,20 @@ from .snapshot import (
     LagFilterSnapshot,
     LagFilterState,
     LearningSnapshot,
+    LearningSuppressionChangePayload,
     LearningSuppressionSnapshot,
+    MaturityGatePayload,
+    ModeChangePayload,
     MulticollinearityStats,
     ObservationBufferSnapshot,
     ObservationContext,
     PerformanceSnapshot,
     ResidualPattern,
     RLSModelSnapshot,
+    SetpointChangeUserPayload,
+    TickEvent,
+    TickEventKind,
+    TickEventPayload,
     TickOutput,
 )
 from .health_checks import (
@@ -631,6 +642,17 @@ class PIController:
         self._last_tick: TickOutput = TickOutput.empty(
             zone_label=getattr(self._entity, "entity_id", "") or ""
         )
+        # Per-tick event accumulator. Cleared at the start of each tick
+        # (in pi_tick) and packaged into TickOutput.events at the end of
+        # fire_dispatcher.
+        self._pending_events: list[TickEvent] = []
+        # Transition-detection state for emitter sites that compare
+        # current vs prior values (mode, suppression, auto-perturb, etc.)
+        self._prev_hvac_mode: HVACMode | None = None
+        self._prev_disturbance_suppress_active: bool = False
+        self._prev_auto_perturb_state: str | None = None
+        self._prev_boundary_posterior_mean: float | None = None
+        self._prev_plant_id_sources: dict[str, str] = {}
         # Power-user debug toggle: when True, diagnostics include full RLS
         # P matrix off-diagonals. Default off (saves log size). Toggled via
         # the `tasmota_irhvac.set_debug_capture` service. Persisted so the
@@ -1113,6 +1135,18 @@ class PIController:
         self._last_batch_timestamp = time.monotonic()
         self._last_batch_wallclock = datetime.now().isoformat(timespec="seconds")
         self._metrics.batch_model_rms = result.residual_rms
+
+        # Emit typed event so the future event log captures every batch run
+        self._emit_event(
+            TickEventKind.BATCH_RUN,
+            BatchRunPayload(
+                n_eligible=result.n_eligible,
+                residual_rms=round(result.residual_rms, 4),
+                recommend_update=result.recommend_update,
+                max_coeff_change_pct=round(result.max_coeff_change_pct, 1),
+                n_outliers_excluded=result.n_outliers_excluded,
+            ),
+        )
 
         # ── Apply detected lag-tau to online path ──
         # Two-phase gate: accumulate detections per (input, mode), only
@@ -1660,6 +1694,15 @@ class PIController:
             await e.set_mode(hvac_mode)
         old_desired = self._desired_temp
         self._desired_temp = temperature
+        # Emit user-setpoint-change event for the event log
+        if old_desired != temperature:
+            self._emit_event(
+                TickEventKind.SETPOINT_CHANGE_USER,
+                SetpointChangeUserPayload(
+                    from_setpoint=old_desired,
+                    to_setpoint=temperature,
+                ),
+            )
         self._auto_perturb.abort("user_setpoint_change")
         self._plant_id.cancel_observation()
         # Bumpless transfer (Åström & Hägglund): keep output continuous
@@ -1718,6 +1761,10 @@ class PIController:
 
     async def pi_tick(self, now: datetime | None = None) -> bool:
         """Run PI tick. Returns True if send needed. Public API for climate.py."""
+        # Clear per-tick event accumulator at the start of each tick.
+        # Anything emitted during this tick will package into the
+        # TickOutput.events tuple at fire_dispatcher time.
+        self._pending_events = []
         return await self._pi_tick(now)
 
     async def sensor_changed(self, was_none: bool) -> bool:
@@ -2793,6 +2840,122 @@ class PIController:
         elif self._health_comfort_skip > 0:
             self._health_comfort_skip -= 1
 
+    def _emit_event(
+        self, kind: TickEventKind, payload: TickEventPayload,
+    ) -> None:
+        """Append a typed event to the per-tick accumulator.
+
+        Events are packaged into `TickOutput.events` at fire_dispatcher
+        time, so they appear on the coordinator's published tick and
+        get persisted by the (future) event log.
+        """
+        self._pending_events.append(TickEvent(kind=kind, payload=payload))
+
+    def _detect_and_emit_transitions(self) -> None:
+        """Detect transitions in tracked state and emit events.
+
+        Called from `_build_tick_output()`. Compares current state
+        against `_prev_*` fields, emits events for changes, then
+        updates the `_prev_*` fields for next tick. Bundled here so
+        transition logic lives next to the snapshot it gets packaged
+        into.
+        """
+        # Mode change
+        current_mode = self._entity._attr_hvac_mode
+        if (
+            self._prev_hvac_mode is not None
+            and current_mode != self._prev_hvac_mode
+        ):
+            self._emit_event(
+                TickEventKind.MODE_CHANGE,
+                ModeChangePayload(
+                    from_mode=str(self._prev_hvac_mode) if self._prev_hvac_mode else "",
+                    to_mode=str(current_mode) if current_mode else "",
+                ),
+            )
+        self._prev_hvac_mode = current_mode
+
+        # Effective suppression toggle (covers both manual + disturbance)
+        current_suppressed = self._disturbance_suppress_active
+        if current_suppressed != self._prev_disturbance_suppress_active:
+            self._emit_event(
+                TickEventKind.LEARNING_SUPPRESSION_CHANGE,
+                LearningSuppressionChangePayload(
+                    was_suppressed=self._prev_disturbance_suppress_active,
+                    is_suppressed=current_suppressed,
+                    active_suppressors=tuple(self._disturbance_active_suppressors),
+                    manual=False,  # Detected via state poll, not service call
+                ),
+            )
+        self._prev_disturbance_suppress_active = current_suppressed
+
+        # Auto-perturb FSM transitions
+        current_perturb_state = self._auto_perturb.state.value
+        if (
+            self._prev_auto_perturb_state is not None
+            and current_perturb_state != self._prev_auto_perturb_state
+        ):
+            self._emit_event(
+                TickEventKind.AUTO_PERTURB_STATE,
+                AutoPerturbStatePayload(
+                    from_state=self._prev_auto_perturb_state,
+                    to_state=current_perturb_state,
+                    cycles_completed=getattr(self._auto_perturb, "_cycles_completed", 0),
+                ),
+            )
+        self._prev_auto_perturb_state = current_perturb_state
+
+        # Boundary estimator posterior shift (>0.1°C threshold avoids noise)
+        be = self._boundary_estimator
+        current_posterior = be.posterior_mean
+        if (
+            self._prev_boundary_posterior_mean is not None
+            and current_posterior is not None
+            and abs(current_posterior - self._prev_boundary_posterior_mean) > 0.1
+        ):
+            self._emit_event(
+                TickEventKind.BOUNDARY_UPDATE,
+                BoundaryUpdatePayload(
+                    posterior_mean_before=self._prev_boundary_posterior_mean,
+                    posterior_mean_after=current_posterior,
+                    posterior_std=be.posterior_std or 0.0,
+                    n_observations=(
+                        be.last_result.n_observations
+                        if be.last_result is not None else 0
+                    ),
+                    confident=(
+                        be.last_result.confident
+                        if be.last_result is not None else False
+                    ),
+                ),
+            )
+        if current_posterior is not None:
+            self._prev_boundary_posterior_mean = current_posterior
+
+        # Maturity gate: plant-ID parameter source changes (seed → estimate)
+        if self._plant_id.enabled:
+            plant = self._plant_id.plant
+            for param_name, param_value in (
+                ("tau_fast", plant.tau_fast),
+                ("tau_slow", plant.tau_slow),
+                ("k", plant.k),
+                ("theta", plant.theta),
+            ):
+                source = getattr(param_value, "source", "seed")
+                prev_source = self._prev_plant_id_sources.get(param_name)
+                if prev_source is not None and source != prev_source:
+                    self._emit_event(
+                        TickEventKind.MATURITY_GATE,
+                        MaturityGatePayload(
+                            parameter=param_name,
+                            source_before=prev_source,
+                            source_after=source,
+                            value=float(param_value.value),
+                            observations=int(getattr(param_value, "observations", 0)),
+                        ),
+                    )
+                self._prev_plant_id_sources[param_name] = source
+
     def _build_health_snapshot(self) -> HealthSnapshot:
         """Compute the health state-machine result (PURE — no side effects).
 
@@ -2997,7 +3160,15 @@ class PIController:
         correlated_pairs, feature active counts) are NOT computed here
         — they live in `DiagnosticsBundle` and are computed only when
         the diagnostics endpoint is queried.
+
+        Detects transitions and emits typed events into the per-tick
+        accumulator before packaging the snapshot, so events appear on
+        the same `TickOutput` as the state that produced them.
         """
+        # Detect transitions and emit events first — events appear in
+        # this tick's output, not the next.
+        self._detect_and_emit_transitions()
+
         import time as time_mod
         coeff_names = self._coeff_names()
         heat_phys = self._rls_heat.get_coefficients()
@@ -3279,7 +3450,7 @@ class PIController:
             greybox=self._build_greybox_snapshot(),
             learning_suppression=self._build_learning_suppression_snapshot(),
             observation=self._last_observation_context,
-            events=(),
+            events=tuple(self._pending_events),
         )
 
     def _build_health_snapshot_with_grace_advance(self) -> HealthSnapshot:
@@ -3465,16 +3636,38 @@ class PIController:
 
     async def async_suppress_ff_learning(self, reason: str = "") -> None:
         """Manually suppress FF learning (service call handler)."""
+        was_suppressed = self._disturbance_suppress_active
         self._manual_ff_suppress = True
         self._manual_ff_suppress_reason = reason or ""
         _LOGGER.info("FF learning manually suppressed: %s", reason or "(no reason)")
+        # Manual=True signals user-initiated; differentiates from
+        # disturbance-driven suppression detected via state poll.
+        self._emit_event(
+            TickEventKind.LEARNING_SUPPRESSION_CHANGE,
+            LearningSuppressionChangePayload(
+                was_suppressed=was_suppressed,
+                is_suppressed=True,
+                active_suppressors=tuple(self._disturbance_active_suppressors),
+                manual=True,
+            ),
+        )
         self.fire_dispatcher()  # Coordinator publishes; binary sensors refresh.
 
     async def async_resume_ff_learning(self) -> None:
         """Resume FF learning after manual suppression (service call handler)."""
+        was_suppressed = self._disturbance_suppress_active
         self._manual_ff_suppress = False
         self._manual_ff_suppress_reason = ""
         _LOGGER.info("FF learning manual suppress cleared")
+        self._emit_event(
+            TickEventKind.LEARNING_SUPPRESSION_CHANGE,
+            LearningSuppressionChangePayload(
+                was_suppressed=was_suppressed,
+                is_suppressed=self._disturbance_suppress_active,
+                active_suppressors=tuple(self._disturbance_active_suppressors),
+                manual=True,
+            ),
+        )
         self.fire_dispatcher()  # Coordinator publishes; binary sensors refresh.
 
     _SUBSYSTEM_ATTRS: dict[str, str] = {
@@ -3741,6 +3934,15 @@ class PIController:
                 mode="heat" if is_heating else "cool",
             )
             self._anomaly_events.append(event)
+            self._emit_event(
+                TickEventKind.ANOMALY_DETECTED,
+                AnomalyDetectedPayload(
+                    mode=event.mode,
+                    mean_residual=round(event.mean_residual, 3),
+                    peak_cusum=round(event.peak_cusum, 1),
+                    tick_count=event.tick_count,
+                ),
+            )
             _LOGGER.info(
                 "Anomaly detected: %s, residual=%.3f°C, peak_cusum=%.1f, σ̂=%.4f",
                 now.strftime("%H:%M"),

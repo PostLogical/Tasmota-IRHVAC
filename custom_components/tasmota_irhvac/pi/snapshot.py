@@ -25,6 +25,7 @@ By convention, consumers must not mutate `last_tick` contents.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any, ClassVar
 
 
@@ -784,31 +785,266 @@ class ObservationContext:
         )
 
 
+class TickEventKind(StrEnum):
+    """Typed kinds for `TickEvent.kind`. Stable wire format (string values)."""
+
+    BATCH_RUN = "batch_run"
+    ANOMALY_DETECTED = "anomaly_detected"
+    MODE_CHANGE = "mode_change"
+    SETPOINT_CHANGE_USER = "setpoint_change_user"
+    MATURITY_GATE = "maturity_gate"
+    LEARNING_SUPPRESSION_CHANGE = "learning_suppression_change"
+    AUTO_PERTURB_STATE = "auto_perturb_state"
+    BOUNDARY_UPDATE = "boundary_update"
+
+
+# Per-kind payload dataclasses. Each is frozen+slotted; `to_dict()` keeps
+# only JSON-compatible field types so events round-trip through the
+# event log cleanly.
+
+
+@dataclass(frozen=True, slots=True)
+class BatchRunPayload:
+    """Emitted when a batch WLS run completes."""
+    n_eligible: int
+    residual_rms: float
+    recommend_update: bool
+    max_coeff_change_pct: float
+    n_outliers_excluded: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "n_eligible": self.n_eligible,
+            "residual_rms": self.residual_rms,
+            "recommend_update": self.recommend_update,
+            "max_coeff_change_pct": self.max_coeff_change_pct,
+            "n_outliers_excluded": self.n_outliers_excluded,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> BatchRunPayload:
+        return cls(
+            n_eligible=data["n_eligible"],
+            residual_rms=data["residual_rms"],
+            recommend_update=data["recommend_update"],
+            max_coeff_change_pct=data["max_coeff_change_pct"],
+            n_outliers_excluded=data["n_outliers_excluded"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class AnomalyDetectedPayload:
+    """Emitted when a CUSUM anomaly event closes (alarm threshold crossed)."""
+    mode: str  # "heat" | "cool"
+    mean_residual: float
+    peak_cusum: float
+    tick_count: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "mean_residual": self.mean_residual,
+            "peak_cusum": self.peak_cusum,
+            "tick_count": self.tick_count,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> AnomalyDetectedPayload:
+        return cls(
+            mode=data["mode"],
+            mean_residual=data["mean_residual"],
+            peak_cusum=data["peak_cusum"],
+            tick_count=data["tick_count"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ModeChangePayload:
+    """Emitted when HVAC mode transitions."""
+    from_mode: str
+    to_mode: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"from_mode": self.from_mode, "to_mode": self.to_mode}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ModeChangePayload:
+        return cls(from_mode=data["from_mode"], to_mode=data["to_mode"])
+
+
+@dataclass(frozen=True, slots=True)
+class SetpointChangeUserPayload:
+    """Emitted when the user changes the setpoint via service / UI."""
+    from_setpoint: float | None
+    to_setpoint: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "from_setpoint": self.from_setpoint,
+            "to_setpoint": self.to_setpoint,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SetpointChangeUserPayload:
+        return cls(
+            from_setpoint=data["from_setpoint"],
+            to_setpoint=data["to_setpoint"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class MaturityGatePayload:
+    """Emitted when a plant-ID parameter graduates from seed to estimate."""
+    parameter: str  # "tau_fast" | "tau_slow" | "k" | "theta"
+    source_before: str  # "seed" | "estimate"
+    source_after: str
+    value: float
+    observations: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "parameter": self.parameter,
+            "source_before": self.source_before,
+            "source_after": self.source_after,
+            "value": self.value,
+            "observations": self.observations,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> MaturityGatePayload:
+        return cls(
+            parameter=data["parameter"],
+            source_before=data["source_before"],
+            source_after=data["source_after"],
+            value=data["value"],
+            observations=data["observations"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class LearningSuppressionChangePayload:
+    """Emitted when effective FF-learning suppression toggles."""
+    was_suppressed: bool
+    is_suppressed: bool
+    active_suppressors: tuple[str, ...]
+    manual: bool  # True if change was user-initiated via service
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "was_suppressed": self.was_suppressed,
+            "is_suppressed": self.is_suppressed,
+            "active_suppressors": list(self.active_suppressors),
+            "manual": self.manual,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> LearningSuppressionChangePayload:
+        return cls(
+            was_suppressed=data["was_suppressed"],
+            is_suppressed=data["is_suppressed"],
+            active_suppressors=tuple(data["active_suppressors"]),
+            manual=data["manual"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class AutoPerturbStatePayload:
+    """Emitted when the auto-perturbation FSM transitions."""
+    from_state: str
+    to_state: str
+    cycles_completed: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "from_state": self.from_state,
+            "to_state": self.to_state,
+            "cycles_completed": self.cycles_completed,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> AutoPerturbStatePayload:
+        return cls(
+            from_state=data["from_state"],
+            to_state=data["to_state"],
+            cycles_completed=data["cycles_completed"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class BoundaryUpdatePayload:
+    """Emitted when the boundary estimator's posterior shifts notably."""
+    posterior_mean_before: float
+    posterior_mean_after: float
+    posterior_std: float
+    n_observations: int
+    confident: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "posterior_mean_before": self.posterior_mean_before,
+            "posterior_mean_after": self.posterior_mean_after,
+            "posterior_std": self.posterior_std,
+            "n_observations": self.n_observations,
+            "confident": self.confident,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> BoundaryUpdatePayload:
+        return cls(
+            posterior_mean_before=data["posterior_mean_before"],
+            posterior_mean_after=data["posterior_mean_after"],
+            posterior_std=data["posterior_std"],
+            n_observations=data["n_observations"],
+            confident=data["confident"],
+        )
+
+
+# Tagged-union of payload types. New kinds: add to TickEventKind, define
+# their payload dataclass, and append the type to this union and to the
+# `_PAYLOAD_BY_KIND` dispatch in `TickEvent.from_dict`.
+TickEventPayload = (
+    BatchRunPayload
+    | AnomalyDetectedPayload
+    | ModeChangePayload
+    | SetpointChangeUserPayload
+    | MaturityGatePayload
+    | LearningSuppressionChangePayload
+    | AutoPerturbStatePayload
+    | BoundaryUpdatePayload
+)
+
+
+_PAYLOAD_BY_KIND: dict[TickEventKind, type[TickEventPayload]] = {
+    TickEventKind.BATCH_RUN: BatchRunPayload,
+    TickEventKind.ANOMALY_DETECTED: AnomalyDetectedPayload,
+    TickEventKind.MODE_CHANGE: ModeChangePayload,
+    TickEventKind.SETPOINT_CHANGE_USER: SetpointChangeUserPayload,
+    TickEventKind.MATURITY_GATE: MaturityGatePayload,
+    TickEventKind.LEARNING_SUPPRESSION_CHANGE: LearningSuppressionChangePayload,
+    TickEventKind.AUTO_PERTURB_STATE: AutoPerturbStatePayload,
+    TickEventKind.BOUNDARY_UPDATE: BoundaryUpdatePayload,
+}
+
+
 @dataclass(frozen=True, slots=True)
 class TickEvent:
     """A discrete event that fired during this tick.
 
-    `kind` discriminates the payload shape. Known kinds (will tighten to
-    enum once emitters land in stage 2):
-    - "batch_run": full BatchResult-shaped payload
-    - "anomaly_started" / "anomaly_detected": CUSUM event boundaries
-    - "mode_change": heat ↔ cool ↔ off
-    - "setpoint_change": user-initiated
-    - "maturity_gate": seed → estimate transition for τ_slow / kp
-    - "learning_suppression_change": disturbance suppress flip
-    - "auto_perturbation_state_change"
-    - "boundary_estimator_update"
+    Tagged-union: `kind` selects the type of `payload`. Roundtrip-clean
+    through the event log via `to_dict()` / `from_dict()`.
     """
 
-    kind: str
-    payload: dict[str, Any]
+    kind: TickEventKind
+    payload: TickEventPayload
 
     def to_dict(self) -> dict[str, Any]:
-        return {"kind": self.kind, "payload": dict(self.payload)}
+        return {"kind": self.kind.value, "payload": self.payload.to_dict()}
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> TickEvent:
-        return cls(kind=data["kind"], payload=dict(data["payload"]))
+        kind = TickEventKind(data["kind"])
+        payload_cls = _PAYLOAD_BY_KIND[kind]
+        return cls(kind=kind, payload=payload_cls.from_dict(data["payload"]))
 
 
 # ── Top-level tick output ──────────────────────────────────────────────

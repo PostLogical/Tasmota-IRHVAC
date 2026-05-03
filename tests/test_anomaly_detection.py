@@ -100,6 +100,7 @@ def _make_cusum_controller():
     ctrl._cusum_cooldown_until = None
     ctrl._metrics = MagicMock()
     ctrl._metrics.batch_model_rms = None
+    ctrl._pending_events = []  # Stage 8: event accumulator (used by _emit_event)
     return ctrl
 
 

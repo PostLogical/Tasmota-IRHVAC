@@ -12,8 +12,12 @@ import dataclasses
 import pytest
 
 from custom_components.tasmota_irhvac.pi.snapshot import (
+    AnomalyDetectedPayload,
+    AutoPerturbStatePayload,
     BatchCoeff,
     BatchLearningSnapshot,
+    BatchRunPayload,
+    BoundaryUpdatePayload,
     ControllerConfig,
     CorrelatedPair,
     DiagnosticsBundle,
@@ -23,13 +27,18 @@ from custom_components.tasmota_irhvac.pi.snapshot import (
     FFContributionsSnapshot,
     LagFilterSnapshot,
     LagFilterState,
+    LearningSuppressionChangePayload,
+    MaturityGatePayload,
+    ModeChangePayload,
     MulticollinearityStats,
     ObservationBufferSnapshot,
     ObservationContext,
     PerformanceSnapshot,
     ResidualPattern,
     RLSModelSnapshot,
+    SetpointChangeUserPayload,
     TickEvent,
+    TickEventKind,
     TickOutput,
 )
 
@@ -252,10 +261,83 @@ def test_observation_context_roundtrip():
     assert ObservationContext.from_dict(o.to_dict()) == o
 
 
-def test_tick_event_roundtrip():
+def test_tick_event_batch_run_roundtrip():
     e = TickEvent(
-        kind="batch_run",
-        payload={"residual_rms": 0.045, "recommend_update": True},
+        kind=TickEventKind.BATCH_RUN,
+        payload=BatchRunPayload(
+            n_eligible=420, residual_rms=0.045, recommend_update=True,
+            max_coeff_change_pct=12.5, n_outliers_excluded=8,
+        ),
+    )
+    assert TickEvent.from_dict(e.to_dict()) == e
+
+
+def test_tick_event_anomaly_detected_roundtrip():
+    e = TickEvent(
+        kind=TickEventKind.ANOMALY_DETECTED,
+        payload=AnomalyDetectedPayload(
+            mode="heat", mean_residual=0.8, peak_cusum=12.5, tick_count=42,
+        ),
+    )
+    assert TickEvent.from_dict(e.to_dict()) == e
+
+
+def test_tick_event_mode_change_roundtrip():
+    e = TickEvent(
+        kind=TickEventKind.MODE_CHANGE,
+        payload=ModeChangePayload(from_mode="off", to_mode="heat"),
+    )
+    assert TickEvent.from_dict(e.to_dict()) == e
+
+
+def test_tick_event_setpoint_change_roundtrip():
+    e = TickEvent(
+        kind=TickEventKind.SETPOINT_CHANGE_USER,
+        payload=SetpointChangeUserPayload(from_setpoint=21.0, to_setpoint=22.5),
+    )
+    assert TickEvent.from_dict(e.to_dict()) == e
+
+
+def test_tick_event_maturity_gate_roundtrip():
+    e = TickEvent(
+        kind=TickEventKind.MATURITY_GATE,
+        payload=MaturityGatePayload(
+            parameter="tau_slow", source_before="seed", source_after="estimate",
+            value=120.5, observations=15,
+        ),
+    )
+    assert TickEvent.from_dict(e.to_dict()) == e
+
+
+def test_tick_event_learning_suppression_roundtrip():
+    e = TickEvent(
+        kind=TickEventKind.LEARNING_SUPPRESSION_CHANGE,
+        payload=LearningSuppressionChangePayload(
+            was_suppressed=False, is_suppressed=True,
+            active_suppressors=("setpoint_change", "manual"),
+            manual=True,
+        ),
+    )
+    assert TickEvent.from_dict(e.to_dict()) == e
+
+
+def test_tick_event_auto_perturb_roundtrip():
+    e = TickEvent(
+        kind=TickEventKind.AUTO_PERTURB_STATE,
+        payload=AutoPerturbStatePayload(
+            from_state="IDLE", to_state="STEP_ACTIVE", cycles_completed=3,
+        ),
+    )
+    assert TickEvent.from_dict(e.to_dict()) == e
+
+
+def test_tick_event_boundary_update_roundtrip():
+    e = TickEvent(
+        kind=TickEventKind.BOUNDARY_UPDATE,
+        payload=BoundaryUpdatePayload(
+            posterior_mean_before=20.5, posterior_mean_after=21.0,
+            posterior_std=0.3, n_observations=12, confident=True,
+        ),
     )
     assert TickEvent.from_dict(e.to_dict()) == e
 
@@ -297,8 +379,14 @@ def test_tick_output_roundtrip_with_events():
     tick = dataclasses.replace(
         _minimal_tick(),
         events=(
-            TickEvent("mode_change", {"from": "heat", "to": "cool"}),
-            TickEvent("setpoint_change", {"from": 21.0, "to": 22.0}),
+            TickEvent(
+                kind=TickEventKind.MODE_CHANGE,
+                payload=ModeChangePayload(from_mode="heat", to_mode="cool"),
+            ),
+            TickEvent(
+                kind=TickEventKind.SETPOINT_CHANGE_USER,
+                payload=SetpointChangeUserPayload(from_setpoint=21.0, to_setpoint=22.0),
+            ),
         ),
     )
     assert TickOutput.from_dict(tick.to_dict()) == tick
