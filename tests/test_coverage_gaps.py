@@ -4804,40 +4804,6 @@ class TestClimatePITimerGaps:
         assert pi._pi_timer_callback is not None
 
 
-class TestClimateDiagnosticDumpGaps:
-    """Cover async_diagnostic_dump."""
-
-    @pytest.mark.asyncio
-    async def test_diagnostic_dump_writes_file(self, hass, setup_pi_integration):
-        """Diagnostic dump writes JSON file and fires notification."""
-        entry = await setup_pi_integration()
-        entity = get_climate_entity(hass, entry)
-        entity._attr_hvac_mode = HVACMode.HEAT
-
-        # Register persistent_notification service (not available in test env)
-        hass.services.async_register(
-            "persistent_notification", "create",
-            lambda call: None,
-        )
-
-        # Mock the executor job (file write)
-        with patch.object(
-            hass, "async_add_executor_job",
-            new_callable=AsyncMock,
-        ):
-            await entity.async_diagnostic_dump()
-
-    @pytest.mark.asyncio
-    async def test_diagnostic_dump_no_pi_data(self, hass, setup_integration):
-        """Diagnostic dump with no PI data logs warning."""
-        entry = await setup_integration()
-        entity = get_climate_entity(hass, entry)
-
-        # NullController.get_diagnostic_dump() returns None
-        await entity.async_diagnostic_dump()
-        # Should not crash
-
-
 # ══════════════════════════════════════════════════════════════════════
 # Remaining file gaps
 # ══════════════════════════════════════════════════════════════════════
@@ -4871,7 +4837,7 @@ class TestBinarySensorDriftAttrs:
 
 
 class TestControllerProtocolGaps:
-    """Cover controller_protocol.py lines 130, 133 — no-op methods."""
+    """Cover controller_protocol.py no-op methods."""
 
     def test_null_controller_schedule_batch_noop(self):
         """NullController.schedule_batch_analysis is a no-op."""
@@ -4879,13 +4845,6 @@ class TestControllerProtocolGaps:
 
         ctrl = NullController()
         ctrl.schedule_batch_analysis()  # should not raise
-
-    def test_null_controller_get_diagnostic_dump_returns_none(self):
-        """NullController.get_diagnostic_dump returns None."""
-        from custom_components.tasmota_irhvac.pi.controller_protocol import NullController
-
-        ctrl = NullController()
-        assert ctrl.get_diagnostic_dump() is None
 
 
 class TestModelInputManagerGaps:

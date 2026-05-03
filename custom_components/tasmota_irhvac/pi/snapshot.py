@@ -1,13 +1,11 @@
 """Typed per-tick snapshot of PI controller state.
 
 `TickOutput` is the canonical contract for "what just happened in this tick" —
-sensors, the diagnostics endpoint, and the event log all read from it instead
-of reaching into private controller state. `DiagnosticsBundle` extends
+sensors, the diagnostics endpoint, and the future event log all read from it
+instead of reaching into private controller state. `DiagnosticsBundle` extends
 `TickOutput` with on-demand heavy fields (multicollinearity κ, correlated
 feature pairs, feature_active_counts) that are too expensive to compute every
-tick but cheap when the diagnostics endpoint is queried. `OfflineBundle`
-extends `DiagnosticsBundle` further with raw observation buffer dumps for
-offline analysis paths.
+tick but cheap when the diagnostics endpoint is queried.
 
 Schema versioning lives on `TickOutput.SCHEMA_VERSION`. Evolution rule:
 **additive only** — new fields default to None or empty; never rename or
@@ -300,7 +298,14 @@ class ResidualPattern:
 
 @dataclass(frozen=True, slots=True)
 class BatchLearningSnapshot:
-    """Last batch WLS run results."""
+    """Last batch WLS run results.
+
+    Carries the full `BatchResult` field set (typed). `beta_std_err`,
+    `blend_gains`, `feature_vif`, `beta_blended`, `plant_snapshot`,
+    `detected_tau` are additive over the basic regression-fit fields —
+    they tell offline analysis tools how identifiable each coefficient
+    was on the last batch and what blended update was actually applied.
+    """
 
     last_run_mono: float | None
     last_run_wallclock: str | None
@@ -314,6 +319,15 @@ class BatchLearningSnapshot:
     n_outliers_excluded: int
     drift_detection: DriftDetection
     residual_patterns: tuple[ResidualPattern, ...]
+    # Raw BatchResult fields preserved for offline analysis. Empty
+    # when not produced by the underlying regression (e.g., legacy
+    # batch results that pre-date these fields).
+    beta_std_err: tuple[float, ...]
+    beta_blended: tuple[float, ...]
+    blend_gains: tuple[float, ...]
+    feature_vif: tuple[float, ...]
+    detected_tau: dict[str, float]
+    plant_snapshot: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -329,6 +343,12 @@ class BatchLearningSnapshot:
             "n_outliers_excluded": self.n_outliers_excluded,
             "drift_detection": self.drift_detection.to_dict(),
             "residual_patterns": [p.to_dict() for p in self.residual_patterns],
+            "beta_std_err": list(self.beta_std_err),
+            "beta_blended": list(self.beta_blended),
+            "blend_gains": list(self.blend_gains),
+            "feature_vif": list(self.feature_vif),
+            "detected_tau": dict(self.detected_tau),
+            "plant_snapshot": dict(self.plant_snapshot),
         }
 
     @classmethod
@@ -350,6 +370,12 @@ class BatchLearningSnapshot:
             residual_patterns=tuple(
                 ResidualPattern.from_dict(p) for p in data["residual_patterns"]
             ),
+            beta_std_err=tuple(data.get("beta_std_err", ())),
+            beta_blended=tuple(data.get("beta_blended", ())),
+            blend_gains=tuple(data.get("blend_gains", ())),
+            feature_vif=tuple(data.get("feature_vif", ())),
+            detected_tau=dict(data.get("detected_tau", {})),
+            plant_snapshot=dict(data.get("plant_snapshot", {})),
         )
 
 
@@ -1102,27 +1128,3 @@ class DiagnosticsBundle:
         return out
 
 
-@dataclass(frozen=True, slots=True)
-class OfflineBundle:
-    """`DiagnosticsBundle` plus raw observation buffer dumps for offline analysis.
-
-    Used by the `get_diagnostic_dump()` path. Raw buffers are large; only
-    materialize this bundle when the caller actually needs the dumps.
-    """
-
-    diagnostics: DiagnosticsBundle
-    raw_buffer_heat: tuple[dict[str, Any], ...]
-    raw_buffer_cool: tuple[dict[str, Any], ...]
-    model_input_configs: tuple[dict[str, Any], ...]
-
-    def to_dict(self) -> dict[str, Any]:
-        out = self.diagnostics.to_dict()
-        # `get_diagnostic_dump`-shaped layout: raw buffers replace the
-        # summary buffers; counts and condition stats added separately
-        # at the top level.
-        out["observation_buffer_heat"] = list(self.raw_buffer_heat)
-        out["observation_buffer_cool"] = list(self.raw_buffer_cool)
-        out["buffer_size_heat"] = len(self.raw_buffer_heat)
-        out["buffer_size_cool"] = len(self.raw_buffer_cool)
-        out["model_input_configs"] = list(self.model_input_configs)
-        return out

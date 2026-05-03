@@ -2037,92 +2037,6 @@ class PIController:
             }
         return attrs
 
-    def get_diagnostic_dump(self) -> dict[str, Any]:
-        """Return full diagnostic state for offline analysis (debug bundles)."""
-        coeff_names = self._coeff_names()
-        heat_dict = self._rls_heat.get_coefficients()
-        cool_dict = self._rls_cool.get_coefficients()
-        dump: dict[str, Any] = {
-            "observation_buffer_heat": self._observation_buffer_heat.as_list(),
-            "observation_buffer_cool": self._observation_buffer_cool.as_list(),
-            "buffer_size_heat": len(self._observation_buffer_heat),
-            "buffer_size_cool": len(self._observation_buffer_cool),
-            "rls_heat": {
-                "coefficients": {coeff_names[i] if i < len(coeff_names) else f"β{i}": heat_dict[i]
-                                 for i in range(self._rls_heat.n)},
-                "observation_count": self._rls_heat.observation_count,
-            },
-            "rls_cool": {
-                "coefficients": {coeff_names[i] if i < len(coeff_names) else f"β{i}": cool_dict[i]
-                                 for i in range(self._rls_cool.n)},
-                "observation_count": self._rls_cool.observation_count,
-            },
-            "pi_state": {
-                "integral": self._pi_integral,
-                "ff_offset": round(self._ff_offset, 4),
-                "ff_confidence": round(self._ff_confidence, 4),
-                "hp_setpoint": self._hp_setpoint,
-                "desired_temp": self._desired_temp,
-                "outdoor_temp": self._inputs.outdoor_temp,
-                "room_temp_rate": round(self._room_temp_rate, 6),
-                "integral_convergence": round(self._metrics.integral_convergence, 4),
-                "tau_estimate": round(self._plant_id.tau, 1) if self._plant_id.enabled else None,  # backward compat
-                "tau_fast": round(self._plant_id.plant.tau_fast.value, 1) if self._plant_id.enabled else None,
-                "tau_slow": round(self._plant_id.plant.tau_slow.value, 1) if self._plant_id.enabled else None,
-                "plant_identification": self._plant_id.get_diagnostics() if self._plant_id.enabled else None,
-            },
-        }
-        # Multicollinearity per buffer — gate on sufficient data
-        for label, buf in [("heat", self._observation_buffer_heat), ("cool", self._observation_buffer_cool)]:
-            n_eligible = sum(1 for o in buf.get_all() if not o.clamped and abs(o.room_rate) < 0.02)
-            if n_eligible >= 2 * buf.n_features:
-                cond = buf.compute_condition_number()
-                if not math.isinf(cond):
-                    dump[f"condition_number_{label}"] = round(cond, 1)
-                corr = buf.get_pairwise_correlations(coeff_names)
-                dump[f"correlated_pairs_{label}"] = [
-                    {"feature_a": a, "feature_b": b, "r": round(r, 3)} for a, b, r in corr
-                ]
-            else:
-                dump[f"correlated_pairs_{label}"] = []
-        # Residual patterns
-        dump["residual_patterns"] = [
-            {
-                "start_hour": p.start_hour,
-                "end_hour": p.end_hour,
-                "mean_residual": round(p.mean_residual, 3),
-                "n_observations": p.n_observations,
-            }
-            for p in self._last_residual_patterns
-        ]
-        # Batch result
-        if self._last_batch_result is not None:
-            dump["batch_result"] = {
-                **dataclasses.asdict(self._last_batch_result),
-                "held_features": list(self._last_batch_result.held_features),
-            }
-        # Grey-box observer result + bridge
-        dump["greybox_observer"] = (
-            self._last_greybox_result.as_dict()
-            if self._last_greybox_result is not None else None
-        )
-        dump["greybox_bridge"] = (
-            self._last_greybox_bridge.as_dict()
-            if self._last_greybox_bridge is not None else None
-        )
-        dump["greybox_buffer"] = self._greybox_buffer.get_diagnostics()
-        # Model input configs (roles, names, flags for interpreting feature vectors)
-        dump["model_input_configs"] = [
-            {
-                "name": m.get("name", ""),
-                "input_role": m.get("input_role", "other"),
-                "delta_from_room": m.get("delta_from_room", False),
-                "suppress_learning": m.get("suppress_learning", False),
-            }
-            for m in self._model_inputs
-        ]
-        return dump
-
     def get_full_diagnostics(self) -> dict[str, Any]:
         """Return complete PI state for HA diagnostics platform.
 
@@ -3189,6 +3103,12 @@ class PIController:
                     )
                     for p in self._last_residual_patterns
                 ),
+                beta_std_err=tuple(br.beta_std_err),
+                beta_blended=tuple(br.beta_blended),
+                blend_gains=tuple(br.blend_gains),
+                feature_vif=tuple(br.feature_vif),
+                detected_tau=dict(br.detected_tau),
+                plant_snapshot=dict(br.plant_snapshot),
             )
 
         # Observation buffer snapshots (light fields only — multicollinearity

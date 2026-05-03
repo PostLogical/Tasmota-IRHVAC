@@ -489,31 +489,6 @@ class TestPIControllerCoverageGaps:
         assert state["state"] == "Adequate"
         assert state["tau_eff"] == 85.0
 
-    # Lines 1982-1986: diagnostic dump with sufficient buffer data
-    def test_diagnostic_dump_with_buffer(self):
-        """Diagnostic dump includes condition number when data sufficient (lines 1982-1986)."""
-        entity = _make_pi()
-        pi = entity._pi
-        _populate_buffer(pi, n=30)
-        with patch.object(pi._observation_buffer_heat, 'compute_condition_number', return_value=5.0):
-            dump = pi.get_diagnostic_dump()
-        assert "condition_number_heat" in dump
-
-    # Line 2003: diagnostic dump with batch result
-    def test_diagnostic_dump_with_batch_result(self):
-        """Diagnostic dump includes batch_result when available (line 2003)."""
-        entity = _make_pi()
-        pi = entity._pi
-        pi._last_batch_result = BatchResult(
-            n_total=50, n_eligible=40,
-            beta_batch=[2.0, 0.3], beta_current=[2.0, 0.3],
-            residual_rms=0.1, max_coeff_change_pct=5.0,
-            recommend_update=False,
-            beta_std_err=[0.1, 0.05],
-        )
-        dump = pi.get_diagnostic_dump()
-        assert "batch_result" in dump
-
     # Lines 2192, 2194: condition rating severe/moderate
     def test_condition_rating_severe(self):
         """Condition rating 'severe' when κ > 100 (line 2192)."""

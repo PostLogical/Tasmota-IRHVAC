@@ -60,8 +60,6 @@ class ControllerHook(Protocol):
 
     def schedule_batch_analysis(self) -> None: ...
 
-    def get_diagnostic_dump(self) -> dict[str, Any] | None: ...
-
     # ── State processing ─────────────────────────────────────────────
 
     async def on_remote_change(self, reported_temp: float) -> bool: ...
@@ -168,9 +166,6 @@ class NullController:
 
     def schedule_batch_analysis(self) -> None:
         pass
-
-    def get_diagnostic_dump(self) -> None:
-        return None
 
     # ── State processing ─────────────────────────────────────────────
 

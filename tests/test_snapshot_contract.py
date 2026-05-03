@@ -11,7 +11,7 @@ Stages (from `~/.claude/plans/why-don-t-you-give-dynamic-chipmunk.md`):
 - Stage 3: set_debug_capture service toggles full_p_heat/cool fields
 - Stage 4: get_full_diagnostics() reduced to last_tick.diagnostics().to_dict()
 - Stage 5: sensor-feeding getters read from last_tick
-- Stage 6: get_diagnostic_dump() reduced to offline_bundle().to_dict()
+- Stage 6: get_diagnostic_dump path removed entirely (no consumer)
 """
 
 from __future__ import annotations
@@ -233,33 +233,18 @@ def test_get_full_diagnostics_is_one_liner():
     assert "diagnostics()" in return_lines[0]
 
 
-# ── Stage 6: get_diagnostic_dump() reduced to one-liner ──────────────
+# ── Stage 6: diagnostic_dump path removed entirely ─────────────────────
 
 
-@pytest.mark.xfail(reason="Stage 6 not yet implemented", strict=False)
-def test_get_diagnostic_dump_is_one_liner():
-    """After Stage 6, get_diagnostic_dump() body is a single return statement."""
-    import inspect
+def test_get_diagnostic_dump_removed():
+    """After Stage 6, get_diagnostic_dump no longer exists on PIController.
 
+    Removed as redundant with the upcoming export_debug_bundle service
+    (Stage 10). The 6 fields unique to the legacy dump are preserved on
+    BatchLearningSnapshot (beta_std_err, blend_gains, beta_blended,
+    feature_vif, detected_tau, plant_snapshot) so no diagnostic data is
+    lost.
+    """
     from custom_components.tasmota_irhvac.pi.pi_controller import PIController
 
-    src = inspect.getsource(PIController.get_diagnostic_dump)
-    body_lines = [
-        line.strip()
-        for line in src.splitlines()
-        if line.strip()
-        and not line.strip().startswith('"""')
-        and not line.strip().startswith("def ")
-    ]
-    in_doc = False
-    body_no_doc: list[str] = []
-    for line in body_lines:
-        if '"""' in line:
-            in_doc = not in_doc
-            continue
-        if not in_doc:
-            body_no_doc.append(line)
-
-    return_lines = [line for line in body_no_doc if line.startswith("return")]
-    assert len(return_lines) == 1
-    assert "offline_bundle()" in return_lines[0]
+    assert not hasattr(PIController, "get_diagnostic_dump")

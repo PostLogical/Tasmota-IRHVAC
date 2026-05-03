@@ -1,8 +1,8 @@
 """Regression tests pinning the existing diagnostic wire format.
 
-These tests capture the output of `get_full_diagnostics()`,
-`get_diagnostic_dump()`, and the five sensor-feeding getters in JSON
-fixtures, then assert byte-for-byte equality on subsequent runs.
+These tests capture the output of `get_full_diagnostics()` and the five
+sensor-feeding getters in JSON fixtures, then assert byte-for-byte
+equality on subsequent runs.
 
 They land BEFORE the tick-first refactor begins so any drift in the wire
 format introduced by the refactor is caught immediately.
@@ -158,26 +158,7 @@ async def test_get_full_diagnostics_basic_state(hass, setup_pi_integration):
     )
 
 
-# ── Test 2: get_diagnostic_dump fixture ───────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_get_diagnostic_dump_basic_state(hass, setup_pi_integration):
-    """Pin get_diagnostic_dump output for the basic post-setup state."""
-    from .conftest import get_climate_entity
-
-    entry = await setup_pi_integration({"pi_tau_estimate": 60})
-    climate_entity = get_climate_entity(hass, entry)
-    dump = climate_entity._controller.get_diagnostic_dump()
-
-    _compare_or_regen(
-        dump,
-        FIXTURES_DIR / "diagnostic_dump_basic.json",
-        "diagnostic_dump_basic",
-    )
-
-
-# ── Test 3: sensor-feeding getter fixtures ────────────────────────────
+# ── Test 2: sensor-feeding getter fixtures ────────────────────────────
 
 
 @pytest.mark.asyncio

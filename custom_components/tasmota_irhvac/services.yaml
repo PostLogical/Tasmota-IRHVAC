@@ -257,13 +257,6 @@ resume_ff_learning:
     entity:
       integration: tasmota_irhvac
 
-diagnostic_dump:
-  name: Diagnostic dump
-  description: Write PI controller diagnostic data (observation buffer, RLS coefficients, integral state) to a JSON file for offline analysis.
-  target:
-    entity:
-      integration: tasmota_irhvac
-
 flush_observation_buffer:
   name: Flush observation buffer
   description: Clear observation buffer(s) and reset batch learning state. This is a destructive operation — accumulated observations, batch results, and drift correction history will be lost. Use after major renovation or equipment changes. Optionally flush only one mode's buffer.

@@ -26,7 +26,6 @@ from custom_components.tasmota_irhvac.pi.snapshot import (
     MulticollinearityStats,
     ObservationBufferSnapshot,
     ObservationContext,
-    OfflineBundle,
     PerformanceSnapshot,
     ResidualPattern,
     RLSModelSnapshot,
@@ -144,8 +143,31 @@ def test_batch_learning_snapshot_roundtrip():
             ResidualPattern(14, 16, -0.6, 24),
             ResidualPattern(2, 4, 0.4, 18),
         ),
+        beta_std_err=(0.01, 0.02, 0.03),
+        beta_blended=(0.105, -0.04, 0.0),
+        blend_gains=(0.5, 0.3, 0.0),
+        feature_vif=(1.2, 3.4, 1.0),
+        detected_tau={"solar": 300.0, "boiler": 60.0},
+        plant_snapshot={"tau_slow": {"value": 120.0, "observations": 50}},
     )
     assert BatchLearningSnapshot.from_dict(b.to_dict()) == b
+
+
+def test_batch_learning_snapshot_legacy_dict_missing_extras():
+    """from_dict tolerates legacy serialized form missing the BatchResult extras."""
+    legacy = {
+        "last_run_mono": 0.0, "last_run_wallclock": None,
+        "n_total": 0, "n_eligible": 0, "residual_rms": 0.0,
+        "recommend_update": False, "max_coeff_change_pct": 0.0,
+        "coefficients": {}, "held_features": [], "n_outliers_excluded": 0,
+        "drift_detection": {"drifting_coefficients": [], "correction_history": {}},
+        "residual_patterns": [],
+        # No beta_std_err / blend_gains / etc. — defaults to empty
+    }
+    b = BatchLearningSnapshot.from_dict(legacy)
+    assert b.beta_std_err == ()
+    assert b.blend_gains == ()
+    assert b.detected_tau == {}
 
 
 def test_ff_contribution_roundtrip():
@@ -335,7 +357,7 @@ def test_sub_snapshots_are_frozen():
         c.kp = 2.0  # type: ignore[misc]
 
 
-# ── DiagnosticsBundle / OfflineBundle ──────────────────────────────────
+# ── DiagnosticsBundle ──────────────────────────────────────────────────
 
 
 def _empty_multicollinearity() -> MulticollinearityStats:
@@ -388,23 +410,3 @@ def test_diagnostics_bundle_full_p_present_when_set():
     assert d["full_p_cool"] == [[1.0, 0.0], [0.0, 1.0]]
 
 
-def test_offline_bundle_includes_raw_buffers_and_counts():
-    raw_obs = {"timestamp": 0.0, "current_c": 21.0, "desired_c": 22.0}
-    diag = DiagnosticsBundle(
-        tick=_minimal_tick(),
-        heat_multicollinearity=_empty_multicollinearity(),
-        cool_multicollinearity=_empty_multicollinearity(),
-    )
-    bundle = OfflineBundle(
-        diagnostics=diag,
-        raw_buffer_heat=(raw_obs,),
-        raw_buffer_cool=(),
-        model_input_configs=({"name": "solar", "input_role": "solar"},),
-    )
-    d = bundle.to_dict()
-    # Raw buffers replace summary
-    assert d["observation_buffer_heat"] == [raw_obs]
-    assert d["observation_buffer_cool"] == []
-    assert d["buffer_size_heat"] == 1
-    assert d["buffer_size_cool"] == 0
-    assert d["model_input_configs"] == [{"name": "solar", "input_role": "solar"}]

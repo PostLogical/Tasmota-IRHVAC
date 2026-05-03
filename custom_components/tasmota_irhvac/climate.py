@@ -460,10 +460,6 @@ SERVICE_TO_METHOD = {
         "method": "async_resume_ff_learning",
         "schema": IRHVAC_SERVICE_SCHEMA,
     },
-    "diagnostic_dump": {
-        "method": "async_diagnostic_dump",
-        "schema": IRHVAC_SERVICE_SCHEMA,
-    },
     "flush_observation_buffer": {
         "method": "async_flush_observation_buffer",
         "schema": IRHVAC_SERVICE_SCHEMA.extend(
@@ -1835,40 +1831,6 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
     async def async_resume_ff_learning(self) -> None:
         """Resume FF learning after manual suppression."""
         await self._controller.async_resume_ff_learning()
-
-    async def async_diagnostic_dump(self) -> None:
-        """Write PI diagnostic dump to a JSON file for offline analysis."""
-        import json
-        from pathlib import Path
-
-        dump = self._controller.get_diagnostic_dump()
-        if not dump:
-            _LOGGER.warning("Diagnostic dump: no PI controller data available")
-            return
-
-        # Write to config/.storage/ alongside other HA data
-        storage_dir = Path(self.hass.config.config_dir) / ".storage"
-        safe_name = self.entity_id.replace(".", "_")
-        path = storage_dir / f"tasmota_irhvac_diagnostic_{safe_name}.json"
-        await self.hass.async_add_executor_job(
-            lambda: path.write_text(json.dumps(dump, indent=2))
-        )
-        buf_heat = dump.get("buffer_size_heat", 0)
-        buf_cool = dump.get("buffer_size_cool", 0)
-        _LOGGER.info("Diagnostic dump written to %s (heat=%d, cool=%d observations)", path, buf_heat, buf_cool)
-
-        # Fire persistent notification so the user knows where to find it
-        await self.hass.services.async_call(
-            "persistent_notification", "create",
-            {
-                "title": f"PI Diagnostic Dump: {self.name}",
-                "message": f"Written to `{path}`\n\n"
-                           f"Buffer heat: {buf_heat}, cool: {buf_cool} observations\n"
-                           f"RLS heat obs: {dump.get('rls_heat', {}).get('observation_count', '?')}\n"
-                           f"Integral: {dump.get('pi_state', {}).get('integral', '?')}\n"
-                           f"FF confidence: {dump.get('pi_state', {}).get('ff_confidence', '?')}",
-            },
-        )
 
     async def async_flush_observation_buffer(self, mode: str | None = None) -> None:
         """Clear observation buffer(s) and reset batch learning state."""
