@@ -475,3 +475,36 @@ set_event_log_enabled:
       required: true
       selector:
         boolean:
+
+export_debug_bundle:
+  name: Export debug bundle
+  description: "Package a window of tick log + (optional) HA Recorder history into `<config>/tasmota_irhvac/bundles/<timestamp>_<zone>/`. Writes tick_log.jsonl, event_log.jsonl, ha_history.jsonl (when include_ha_history=true), manifest.json, and README.md. Requires the persistent event log (`set_event_log_enabled`) to have been running for at least the requested window — no-op output otherwise."
+  target:
+    entity:
+      integration: tasmota_irhvac
+  fields:
+    window_days:
+      description: How many days back from today to include. 0 means today only.
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 365
+          mode: box
+    profile:
+      description: "Field-selector profile: `all` (default — include everything), `rls_drift` (RLS + batch + buffers), `comfort` (PI state + setpoints + outdoor), `phase4_validation` (RLS + greybox + plant ID + boundary)."
+      required: false
+      default: "all"
+      selector:
+        select:
+          options:
+            - "all"
+            - "rls_drift"
+            - "comfort"
+            - "phase4_validation"
+    include_ha_history:
+      description: When true, join HA Recorder history (room temp, outdoor, solar, model inputs) into ha_history.jsonl.
+      required: false
+      default: true
+      selector:
+        boolean:

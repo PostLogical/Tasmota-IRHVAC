@@ -546,6 +546,14 @@ SERVICE_TO_METHOD = {
             vol.Required("enabled"): cv.boolean,
         }),
     },
+    "export_debug_bundle": {
+        "method": "async_export_debug_bundle",
+        "schema": IRHVAC_SERVICE_SCHEMA.extend({
+            vol.Required("window_days"): vol.All(int, vol.Range(min=0, max=365)),
+            vol.Optional("profile", default="all"): cv.string,
+            vol.Optional("include_ha_history", default=True): cv.boolean,
+        }),
+    },
 }
 
 
@@ -1873,6 +1881,63 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             return
         pi.set_event_log_enabled(enabled=enabled)
         self.async_schedule_update_ha_state()
+
+    async def async_export_debug_bundle(
+        self,
+        window_days: int,
+        profile: str = "all",
+        include_ha_history: bool = True,
+    ) -> None:
+        """Export a debug bundle for this entity's zone over the requested window.
+
+        Bundle directory written under
+        `<config>/tasmota_irhvac/bundles/<timestamp>_<zone>/`. Combines
+        the persistent event log with optional HA Recorder history for
+        cross-correlation. See `services.yaml` for parameter docs.
+        """
+        from .pi.export_bundle import export_bundle
+
+        pi = self._pi
+        if pi is None:
+            _LOGGER.warning(
+                "export_debug_bundle: %s has no PI controller", self.entity_id,
+            )
+            return
+
+        # Collect the HA-side entity_ids worth joining: room temp,
+        # outdoor temp, solar proxy, configured model inputs.
+        history_ids: list[str] = []
+        if include_ha_history:
+            if pi._inputs.outdoor_temp_sensor:
+                history_ids.append(pi._inputs.outdoor_temp_sensor)
+            for m_input in pi._model_inputs:
+                eid = m_input.get("entity_id")
+                if eid:
+                    history_ids.append(str(eid))
+            # Room temp sensor (the sensor that drives the climate)
+            if self._temp_sensor:
+                history_ids.append(self._temp_sensor)
+
+        bundle_path = await export_bundle(
+            self.hass,
+            zone_label=self.entity_id,
+            window_days=window_days,
+            profile=profile,
+            include_ha_history=include_ha_history,
+            ha_history_entity_ids=history_ids if include_ha_history else None,
+        )
+
+        # User-friendly notification with the bundle path
+        await self.hass.services.async_call(
+            "persistent_notification", "create",
+            {
+                "title": f"Debug bundle: {self.name}",
+                "message": (
+                    f"Bundle written to `{bundle_path}`\n\n"
+                    f"Window: {window_days} day(s)  |  Profile: `{profile}`"
+                ),
+            },
+        )
 
     async def async_set_coefficient(self, mode: str, name: str, value: float) -> None:
         """Set an RLS coefficient by name."""
