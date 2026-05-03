@@ -235,6 +235,16 @@ DEFAULT_PI_KD = 0.0              # Literature + 72h replay: D contraindicated fo
 DEFAULT_PI_KD_FILTER_N = 8       # Derivative filter coefficient: Tf = Td/N. Higher N = less filtering.
 DEFAULT_PI_TICK_FALLBACK = 900
 DEFAULT_PI_DEADBAND = 0.5
+
+# Over-temperature regime gate: physical-state anti-windup.  When the room is
+# materially on the wrong side of desired for the active mode (over-heated in
+# heat / over-cooled in cool), the integrator is frozen and the HP forced to
+# its idle setpoint regardless of FF state.  Defends against FF misprediction
+# (e.g., dissipating absorbed solar gain) overriding the cal_midpoint freeze.
+# Hysteresis: enter at 2× deadband, exit at 1× deadband.
+DEFAULT_OVERTEMP_REGIME_ENTER_C = 1.0
+DEFAULT_OVERTEMP_REGIME_EXIT_C = 0.5
+
 DEFAULT_PI_OUTDOOR_SEED_HEAT = 0.25
 DEFAULT_PI_OUTDOOR_SEED_COOL = 0.25
 DEFAULT_PI_OUTDOOR_SEED_CLAMP_MIN = 0.0

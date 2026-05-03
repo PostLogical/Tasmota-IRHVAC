@@ -85,6 +85,8 @@ from ..const import (
     CONF_PI_FF_ENABLED,
     CONF_PI_PLANT_ID_ENABLED,
     CONF_PI_TAU_ESTIMATE,
+    DEFAULT_OVERTEMP_REGIME_ENTER_C,
+    DEFAULT_OVERTEMP_REGIME_EXIT_C,
     DEFAULT_PI_BATCH_WLS_ENABLED,
     DEFAULT_PI_DEADBAND,
     DEFAULT_PI_ENABLED,
@@ -532,6 +534,27 @@ class PIController:
 
         # Conditional integration freeze: track state for edge-triggered logging.
         self._integration_frozen: bool = False
+
+        # Over-temperature regime gate: physical-state anti-windup, hysteretic.
+        # True when room is materially on the wrong side of desired for the
+        # active mode (room > desired + ENTER in heat, room < desired - ENTER
+        # in cool).  When active, HP forced to its idle setpoint and integrator
+        # frozen via the existing skip_integration mechanism.
+        self._overtemp_regime: bool = False
+
+        # Uncontrollable-entry latch: tracks whether we've entered the existing
+        # cal_midpoint freeze (`hp_estimated_active=False`) during the current
+        # over-temp episode.  Set when existing gate fires; reset when room
+        # returns to or below desired.  Required as precondition for the
+        # over-temp regime gate: cold-snap brief overshoot never sets this
+        # latch (HP commanded high in cold snap → existing gate doesn't fire),
+        # so the gate stays dormant in cold snap.
+        self._uncontrollable_entry_latch: bool = False
+
+        # Track previous HVAC mode to detect mode changes — over-temp regime
+        # state and the latch are direction-aware (heat vs cool), so they must
+        # be cleared when the mode flips to avoid stale state.
+        self._prev_hvac_mode = None
 
         # HP thermostat deadband learning: the HP's internal thermostat has
         # its own hysteresis, so the compressor may still cycle even when
@@ -4403,6 +4426,13 @@ class PIController:
     async def _pi_tick_inner(self, now: datetime | None = None) -> bool:
         """PI + feedforward controller tick implementation. Returns True if send needed."""
         e = self._entity
+        # Detect mode change at the entry to any tick path so over-temp regime
+        # state and latch don't carry stale direction (heat vs cool vs off).
+        # Must run before the OFF early-return below.
+        if e._attr_hvac_mode != self._prev_hvac_mode:
+            self._overtemp_regime = False
+            self._uncontrollable_entry_latch = False
+            self._prev_hvac_mode = e._attr_hvac_mode
         if e._attr_hvac_mode == HVACMode.OFF:
             return self._passive_tick()
         if not self._control_active:
@@ -4800,6 +4830,72 @@ class PIController:
             self._room_temp_rate, current_c, is_heating,
         )
 
+        # ── Over-temperature regime gate (physical-state anti-windup) ──
+        # Mode-change reset is handled at the tick entry point so it fires
+        # for any mode transition (including HEAT→OFF which short-circuits
+        # before reaching this code).
+        # When room is materially on the wrong side of desired AND the
+        # existing cal_midpoint gate has already classified HP as
+        # estimated-inactive, force HP to its idle setpoint and keep the
+        # integrator frozen even when FF subsequently nudges the setpoint
+        # back above current temperature.  Hysteretic on temperature.
+        #
+        # Precondition (`hp_estimated_active=False`) excludes cold-snap
+        # brief overshoot: in cold snap, FF is aggressive, setpoint
+        # commanded high, current well below setpoint, so the existing
+        # gate sees HP as active and this gate stays dormant — HP keeps
+        # contributing as it must during cold snap.
+        if is_heating:
+            overtemp_error = current_c - desired_c     # >0 when over-heated
+        elif is_cooling:
+            overtemp_error = desired_c - current_c     # >0 when over-cooled
+        else:
+            overtemp_error = 0.0
+        # Update uncontrollable-entry latch.  Set when existing gate fires
+        # (we've "entered" the uncontrollable state).  Reset when room
+        # returns to or below desired (we've left the over-temp episode).
+        # Latch persists across transient existing-gate flicker, so my gate
+        # can fire even when FF momentarily nudges setpoint above current.
+        if not hp_estimated_active:
+            self._uncontrollable_entry_latch = True
+        elif overtemp_error <= 0.0:
+            self._uncontrollable_entry_latch = False
+
+        if self._overtemp_regime:
+            # Active: stay until temperature returns to band.  No precondition
+            # check on exit — once we've decided HP shouldn't be running,
+            # the temperature recovery is the only signal that should release.
+            if overtemp_error < DEFAULT_OVERTEMP_REGIME_EXIT_C:
+                self._overtemp_regime = False
+                _LOGGER.debug(
+                    "%sOver-temp regime exit (room=%.2f°C, desired=%.2f°C, "
+                    "mode=%s)",
+                    self._log_prefix, current_c, desired_c,
+                    "heat" if is_heating else "cool",
+                )
+        else:
+            # Inactive: enter only when over-temp AND we have entered the
+            # uncontrollable state during this episode.  Latch precondition
+            # excludes cold-snap brief overshoot — HP commanded high in cold
+            # snap means existing gate doesn't fire, latch stays False.
+            if (
+                overtemp_error > DEFAULT_OVERTEMP_REGIME_ENTER_C
+                and self._uncontrollable_entry_latch
+            ):
+                self._overtemp_regime = True
+                _LOGGER.debug(
+                    "%sOver-temp regime enter (room=%.2f°C, desired=%.2f°C, "
+                    "mode=%s) → HP forced to idle setpoint",
+                    self._log_prefix, current_c, desired_c,
+                    "heat" if is_heating else "cool",
+                )
+        if self._overtemp_regime:
+            # Freeze integrator and exclude WLS observation for this tick.
+            # Setpoint force-to-idle happens in the hysteresis block below
+            # (early force is overridden by the end-of-tick hysteresis).
+            hp_observation_usable = False
+            hp_estimated_active = False
+
         skip_integration = (
             (is_heating and self._hp_setpoint <= self._min_temp_c and error < 0)
             or (is_cooling and self._hp_setpoint >= self._max_temp_c and error > 0)
@@ -5000,7 +5096,12 @@ class PIController:
 
         # Midpoint-crossing hysteresis
         new_setpoint = self._hp_setpoint
-        if clamped_setpoint > self._hp_setpoint + 0.5:
+        if self._overtemp_regime:
+            # Over-temp regime forces HP to the idle setpoint for the active
+            # mode (heat: min, cool: max).  Overrides hysteresis because the
+            # gate is acting on physical state, not the PI's commanded value.
+            new_setpoint = int(self._min_temp_c if is_heating else self._max_temp_c)
+        elif clamped_setpoint > self._hp_setpoint + 0.5:
             new_setpoint = round(clamped_setpoint)
         elif clamped_setpoint < self._hp_setpoint - 0.5:
             new_setpoint = round(clamped_setpoint)

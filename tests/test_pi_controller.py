@@ -4904,15 +4904,23 @@ class TestControllableUncontrollableMetrics:
 
     @pytest.mark.asyncio
     async def test_controllable_itae_accumulates_above_min_setpoint(self):
-        """Error while HP has headroom → controllable."""
+        """Error while HP has headroom AND room not over-temp → controllable.
+
+        Room set just at desired (no over-temp regime triggered) with HP
+        commanded above min: classification logic should mark error as
+        controllable.  (For the over-temp regime case where the new gate
+        forces HP to floor and reclassifies as uncontrollable, see
+        `tests/test_overtemp_regime_gate.py`.)
+        """
         config = make_pi_config()
         entity = FakePIEntity(config)
         pi = entity._pi
         pi._desired_temp = 21.0
         pi._hp_setpoint = 22.0  # NOT at minimum
         entity._attr_hvac_mode = HVACMode.HEAT
-        entity._attr_current_temperature = 24.0  # above target
-        pi._pi_integral = -2.0
+        # Room 1°C below desired — error positive, no over-temp regime fires.
+        entity._attr_current_temperature = 20.0
+        pi._pi_integral = 2.0
 
         pi._metrics.controllable_itae = 0.0
         pi._metrics.uncontrollable_itae = 0.0
@@ -4951,15 +4959,23 @@ class TestControllableUncontrollableMetrics:
 
     @pytest.mark.asyncio
     async def test_controllable_cvh_when_hp_has_headroom(self):
-        """CVH controllable when HP not at limit."""
+        """CVH controllable when HP not at limit AND room not over-temp.
+
+        Room below desired (heat call) with HP commanded above min:
+        classification logic marks the violation as controllable. (For the
+        over-temp regime case — room over-temp in heat — the new gate forces
+        HP to floor, which correctly reclassifies as uncontrollable. See
+        `tests/test_overtemp_regime_gate.py`.)
+        """
         config = make_pi_config()
         entity = FakePIEntity(config)
         pi = entity._pi
         pi._desired_temp = 21.0
         pi._hp_setpoint = 22.0
         entity._attr_hvac_mode = HVACMode.HEAT
-        entity._attr_current_temperature = 23.0  # 2°C above
-        pi._pi_integral = -2.0
+        # Room 2°C below desired — heat call, no over-temp regime fires.
+        entity._attr_current_temperature = 19.0
+        pi._pi_integral = 2.0
 
         pi._metrics.controllable_cvh = 0.0
         pi._metrics.uncontrollable_cvh = 0.0
