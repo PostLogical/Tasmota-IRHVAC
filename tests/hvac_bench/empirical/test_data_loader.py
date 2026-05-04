@@ -110,6 +110,48 @@ class TestDeriveQHeatProxy:
         q = derive_q_heat_proxy_w(pd.Series([True, True], index=idx), 0.0)
         assert q.tolist() == [0.0, 0.0]
 
+    def test_setpoint_modulated_scales_by_setpoint_minus_room(self) -> None:
+        idx = pd.date_range("2026-01-01", periods=3, freq="5min", tz="UTC")
+        active = pd.Series([True, True, True], index=idx)
+        # delta = (setpoint - room) / 5: 2.5/5=0.5, 5/5=1.0 (clamped),
+        # -1/5=-0.2 → 0 (clamped)
+        sp = pd.Series([22.5, 25.0, 19.0], index=idx)
+        room = pd.Series([20.0, 18.0, 20.0], index=idx)
+        q = derive_q_heat_proxy_w(
+            active,
+            3000.0,
+            variant="setpoint_modulated",
+            hp_setpoint_c=sp,
+            room_temp_c=room,
+        )
+        assert q.tolist() == [1500.0, 3000.0, 0.0]
+
+    def test_setpoint_modulated_zero_when_inactive(self) -> None:
+        idx = pd.date_range("2026-01-01", periods=2, freq="5min", tz="UTC")
+        active = pd.Series([False, False], index=idx)
+        sp = pd.Series([25.0, 25.0], index=idx)
+        room = pd.Series([18.0, 18.0], index=idx)
+        q = derive_q_heat_proxy_w(
+            active,
+            3000.0,
+            variant="setpoint_modulated",
+            hp_setpoint_c=sp,
+            room_temp_c=room,
+        )
+        assert q.tolist() == [0.0, 0.0]
+
+    def test_setpoint_modulated_requires_setpoint_and_room(self) -> None:
+        idx = pd.date_range("2026-01-01", periods=2, freq="5min", tz="UTC")
+        active = pd.Series([True, True], index=idx)
+        with pytest.raises(ValueError, match="setpoint_modulated"):
+            derive_q_heat_proxy_w(active, 3000.0, variant="setpoint_modulated")
+
+    def test_unknown_variant_raises(self) -> None:
+        idx = pd.date_range("2026-01-01", periods=1, freq="5min", tz="UTC")
+        active = pd.Series([True], index=idx)
+        with pytest.raises(ValueError, match="unknown proxy variant"):
+            derive_q_heat_proxy_w(active, 3000.0, variant="bogus")  # type: ignore[arg-type]
+
 
 # ── Window helpers ───────────────────────────────────────────────────────
 

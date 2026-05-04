@@ -21,6 +21,7 @@ import numpy as np
 from tests.hvac_bench.empirical.data_loader import (
     TRAIN_WINDOW,
     VALIDATE_WINDOW,
+    ProxyVariant,
     Window,
     ZoneTelemetry,
     load_fit_zones,
@@ -212,11 +213,23 @@ def run_phase4_lite(
     dt: float = 300.0,
     train_window: Window = TRAIN_WINDOW,
     validate_window: Window = VALIDATE_WINDOW,
+    proxy_variant: ProxyVariant = "constant",
 ) -> CredibilityEnvelope:
-    """Run forward selection + held-out validation for all fit-target zones."""
+    """Run forward selection + held-out validation for all fit-target zones.
+
+    `proxy_variant` selects the heat-injection proxy form per
+    `project_phase4_data_survey.md`; default "constant" preserves the
+    Phase 4 lite 2026-05-01 baseline. "setpoint_modulated" tests whether
+    rate-modulation modeling lifts the structural q_scale rail seen at
+    constant-magnitude proxy.
+    """
     bundle = Path(bundle_path)
-    train_zones = load_fit_zones(bundle, window=train_window)
-    validate_zones = load_fit_zones(bundle, window=validate_window)
+    train_zones = load_fit_zones(
+        bundle, window=train_window, proxy_variant=proxy_variant
+    )
+    validate_zones = load_fit_zones(
+        bundle, window=validate_window, proxy_variant=proxy_variant
+    )
 
     zones: dict[str, ZoneCredibility] = {}
     rejection_notes: list[str] = []

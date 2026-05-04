@@ -22,7 +22,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal
+
+ProxyVariant = Literal["constant", "setpoint_modulated"]
 
 import pandas as pd
 
@@ -154,14 +156,34 @@ def derive_hp_active(
 def derive_q_heat_proxy_w(
     hp_active: pd.Series,
     nominal_capacity_w: float,
+    *,
+    variant: ProxyVariant = "constant",
+    hp_setpoint_c: pd.Series | None = None,
+    room_temp_c: pd.Series | None = None,
+    modulation_range_c: float = 5.0,
 ) -> pd.Series:
-    """Constant-magnitude heat injection when active (proxy option a).
+    """Heat-injection proxy magnitude when controller is calling.
 
-    Per `project_phase4_data_survey.md`, this is the baseline proxy. Variants
-    (b) setpoint-modulated and (c) free-parameter scaling are documented but
-    not used initially.
+    variants (per `project_phase4_data_survey.md`):
+      - "constant" (option a, default): nominal magnitude when hp_active.
+      - "setpoint_modulated" (option b): scales magnitude by
+        clip((hp_setpoint - room_temp) / modulation_range_c, 0, 1) to
+        approximate variable-speed compressor rate-modulation.
+
+    Variant (c) free-parameter scaling — fitting nominal_capacity_w as a
+    PEM parameter — is documented but not implemented (worsens identifiability).
     """
-    return hp_active.astype(float) * nominal_capacity_w
+    if variant == "constant":
+        return hp_active.astype(float) * nominal_capacity_w
+    if variant == "setpoint_modulated":
+        if hp_setpoint_c is None or room_temp_c is None:
+            raise ValueError(
+                "setpoint_modulated proxy requires hp_setpoint_c and room_temp_c"
+            )
+        delta_norm = (hp_setpoint_c - room_temp_c) / modulation_range_c
+        modulation = delta_norm.clip(lower=0.0, upper=1.0).fillna(0.0)
+        return hp_active.astype(float) * modulation * nominal_capacity_w
+    raise ValueError(f"unknown proxy variant: {variant!r}")
 
 
 # ── ZoneTelemetry ────────────────────────────────────────────────────────
@@ -206,6 +228,8 @@ def load_condenser_a_zone(
     *,
     nominal_capacity_w: float = 3000.0,
     deadband_c: float = 0.5,
+    proxy_variant: ProxyVariant = "constant",
+    modulation_range_c: float = 5.0,
 ) -> ZoneTelemetry:
     """Load a single zone's CSV from the Condenser A bundle.
 
@@ -215,6 +239,10 @@ def load_condenser_a_zone(
         nominal_capacity_w: proxy heating capacity per indoor head.
             Fujitsu rated ~3 kW per head; can override per zone.
         deadband_c: passed to `derive_hp_active`.
+        proxy_variant: heat-injection proxy variant per
+            `project_phase4_data_survey.md`. Default "constant" preserves
+            Phase 4 lite 2026-05-01 baseline.
+        modulation_range_c: passed to setpoint_modulated variant.
 
     Returns ZoneTelemetry with hp_active, q_heat_proxy_w, and a default
     valid mask (signal completeness only — call apply_default_exclusions
@@ -249,7 +277,14 @@ def load_condenser_a_zone(
         df["room_temp_c"],
         deadband_c=deadband_c,
     )
-    q_heat = derive_q_heat_proxy_w(hp_active, nominal_capacity_w)
+    q_heat = derive_q_heat_proxy_w(
+        hp_active,
+        nominal_capacity_w,
+        variant=proxy_variant,
+        hp_setpoint_c=df["hp_setpoint_c"],
+        room_temp_c=df["room_temp_c"],
+        modulation_range_c=modulation_range_c,
+    )
 
     out = df.copy()
     out["hp_active"] = hp_active
@@ -317,6 +352,8 @@ def load_fit_zones(
     window: Window = TRAIN_WINDOW,
     nominal_capacity_w: float = 3000.0,
     deadband_c: float = 0.5,
+    proxy_variant: ProxyVariant = "constant",
+    modulation_range_c: float = 5.0,
 ) -> dict[str, ZoneTelemetry]:
     """Load all fit-target zones (LR/DR/BR; NU excluded) for a window.
 
@@ -333,6 +370,8 @@ def load_fit_zones(
             name,
             nominal_capacity_w=nominal_capacity_w,
             deadband_c=deadband_c,
+            proxy_variant=proxy_variant,
+            modulation_range_c=modulation_range_c,
         )
         cleaned = apply_default_exclusions(loaded)
         sliced = slice_window(cleaned, window)
