@@ -232,6 +232,7 @@ def _print_buffer_fill(results: dict[str, dict[str, FullStackResult]]) -> None:
 
 
 @pytest.mark.design
+@pytest.mark.study
 class TestBufferVariants:
     """Compare buffer size + policy across heating seasons (real weather).
 

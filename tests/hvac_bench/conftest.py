@@ -30,9 +30,32 @@ def pytest_addoption(parser: pytest.Parser) -> None:
             "default) or 'synth' (AR(1) synthetic). Sets BENCH_WEATHER."
         ),
     )
+    parser.addoption(
+        "--run-studies",
+        action="store_true",
+        default=False,
+        help=(
+            "Include @pytest.mark.study tests (ad-hoc verdict-recapture "
+            "studies; deselected by default — too expensive even for design)."
+        ),
+    )
 
 
 def pytest_configure(config: pytest.Config) -> None:
     val = config.getoption("--weather")
     if val:
         os.environ["BENCH_WEATHER"] = val
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    """Skip @study tests unless --run-studies passed."""
+    if config.getoption("--run-studies"):
+        return
+    skip_study = pytest.mark.skip(
+        reason="ad-hoc study; opt in with --run-studies"
+    )
+    for item in items:
+        if "study" in item.keywords:
+            item.add_marker(skip_study)

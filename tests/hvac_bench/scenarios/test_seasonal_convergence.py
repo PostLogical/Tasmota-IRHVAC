@@ -406,7 +406,7 @@ def seasonal_results() -> dict[str, FullStackResult]:
 # ── Tests ────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.slow
+@pytest.mark.design
 class TestSeasonalConvergence:
     """Compare batch WLS convergence and final coefficients across heating seasons."""
 

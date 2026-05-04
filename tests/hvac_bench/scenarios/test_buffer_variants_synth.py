@@ -70,6 +70,7 @@ def synth_variant_results() -> dict[str, dict[str, FullStackResult]]:
 
 
 @pytest.mark.design
+@pytest.mark.study
 class TestBufferVariantsSynth:
     """Buffer size + policy sweep against synth AR(1) weather.
 

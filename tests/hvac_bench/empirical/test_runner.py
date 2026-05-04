@@ -180,7 +180,6 @@ class TestFormatEnvelopeMemory:
 # ── End-to-end on real bundle (slow/design) ──────────────────────────────
 
 
-@pytest.mark.slow
 @pytest.mark.design
 @pytest.mark.skipif(not BUNDLE_AVAILABLE, reason="Condenser A bundle not present")
 class TestEndToEndOnBundle:
