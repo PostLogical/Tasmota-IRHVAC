@@ -220,3 +220,45 @@ class TestEndToEndOnBundle:
     ) -> None:
         for name in envelope.zones:
             assert name in envelope.summary
+
+
+# ── Tier 1.1 discrimination study ────────────────────────────────────────
+
+
+@pytest.mark.study
+@pytest.mark.skipif(not BUNDLE_AVAILABLE, reason="Condenser A bundle not present")
+def test_phase4_lite_at_literature_minimum_restarts(capsys) -> None:
+    """Tier 1.1 ad-hoc verdict study: does Cárdenas-Rangel's ≥10-restart
+    minimum change the Phase 4 lite verdict vs the prior n_restarts=4
+    baseline (project_bench_credibility_envelope.md, 2026-05-01)?
+
+    Recording test, not regression. Captured output goes into the plan
+    file or a follow-up memory; no specific verdict is locked in. Opt in
+    via --run-studies. Wall-clock ~20-30 min.
+    """
+    envelope = run_phase4_lite(BUNDLE_PATH, seed=0)  # uses n_restarts=10 default
+
+    with capsys.disabled():
+        print()
+        print("=" * 70)
+        print("Tier 1.1: Phase 4 lite verdict at n_restarts=10")
+        print("=" * 70)
+        print(envelope.summary)
+        print()
+        for name, z in envelope.zones.items():
+            id_1 = z.train_result.identifiability_1r1c
+            print(
+                f"{name} 1R1C: rails={id_1.n_at_bound}, "
+                f"cv-fails={id_1.n_failed_cv}"
+            )
+            id_2 = z.train_result.identifiability_2r2c
+            if id_2 is not None:
+                print(
+                    f"{name} 2R2C: rails={id_2.n_at_bound}, "
+                    f"cv-fails={id_2.n_failed_cv}"
+                )
+
+    # Shape-only sanity assertions — verdict comparison is captured in stdout.
+    assert envelope.overall_classification in {"good", "close", "poor"}
+    for z in envelope.zones.values():
+        assert z.train_result.selected_model in {"1R1C", "2R2C"}

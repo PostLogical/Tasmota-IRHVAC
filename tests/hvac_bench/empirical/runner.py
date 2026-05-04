@@ -114,7 +114,7 @@ def run_zone(
     validate_telemetry: ZoneTelemetry,
     *,
     dt: float = 300.0,
-    n_restarts: int = 4,
+    n_restarts: int = 10,
     seed: int = 0,
 ) -> ZoneCredibility:
     """Run forward selection on train, residual battery on held-out validate."""
@@ -207,7 +207,7 @@ def _aggregate_classification(values: list[Classification]) -> Classification:
 def run_phase4_lite(
     bundle_path: Path | str,
     *,
-    n_restarts: int = 4,
+    n_restarts: int = 10,
     seed: int = 0,
     dt: float = 300.0,
     train_window: Window = TRAIN_WINDOW,
