@@ -2,3 +2,9 @@ pytest
 pytest-asyncio
 pytest-cov
 pytest-homeassistant-custom-component
+pytest-xdist
+hypothesis
+scipy
+# pandas<3 because 3.0 floor-bumps numpy>=2.3.3 but
+# pytest-homeassistant-custom-component pins numpy==2.3.2
+pandas<3.0

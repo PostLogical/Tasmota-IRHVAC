@@ -12,6 +12,19 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.tasmota_irhvac.const import DATA_KEY, DOMAIN
 
 
+@pytest.fixture(autouse=True)
+def expected_lingering_timers() -> bool:
+    """Allow lingering timers from HA core (MQTT periodic, etc.).
+
+    Why: pytest-homeassistant-custom-component 0.13.x began failing tests
+    for custom integrations on lingering timers, but HA core's MQTT client
+    schedules ``_async_start_misc_periodic`` that we don't own and can't
+    cancel without unloading every entry per test. HA's own ``tests/components/``
+    layer auto-allows this (plugins.py default). Mirror that policy here.
+    """
+    return True
+
+
 def make_config(overrides=None):
     """Build a config dict with sensible defaults for testing."""
     config = {

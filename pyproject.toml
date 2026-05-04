@@ -1,12 +1,16 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--ignore=tests/hvac_bench"
+# --dist loadfile: keeps tests in the same file on the same xdist worker so
+# module-scoped fixtures (e.g. seasonal_results, full_stack runs) compute once
+# per file instead of once per worker that picks up a test from that file.
+addopts = "--ignore=tests/hvac_bench --dist=loadfile"
 asyncio_mode = "auto"
 log_format = "%(asctime)s %(levelname)-8s %(name)s: %(message)s"
 log_date_format = "%H:%M:%S"
 markers = [
     "slow: marks tests as slow (run with -m slow, deselect with -m 'not slow')",
     "design: design-time / verdict-in-memo / long-horizon studies (run with -m design, deselect with -m 'not design')",
+    "study: ad-hoc verdict study, deselected by default. Opt in with --run-studies.",
 ]
 
 [tool.mypy]
