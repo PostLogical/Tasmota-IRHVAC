@@ -2,9 +2,9 @@
 
 Two phases per the bench-validation discrimination plan:
 
-  1.3a — Synthetic excitation POC. Open-loop synthetic inputs designed to
-         maximise informativeness for 1R1C identification. Decoupled from
-         bundle data; tests methodology reach on cleanest signals.
+  1.3a — Synthetic excitation POC. Open-loop synthetic inputs (PRBS-cycled
+         q_heat, diurnal outdoor, bell-curve solar). Decoupled from bundle
+         data; tests methodology reach on cleanest signals.
 
   1.3b — Bundle excitation realism check. Same literature truth, but with
          the bundle's recorded outdoor/setpoint/solar driving signals
@@ -12,11 +12,16 @@ Two phases per the bench-validation discrimination plan:
          excitation pattern is sufficient for the methodology.
 
 Both use literature-grounded truth params (Levermore 2020 winter envelope:
-τ=80h, sigma_v=0.05°C). solar_scale (β_solar) sweeps across {1.0, 2.0, 3.0}
-to test for the documented ~40% structural bias floor (project_bench_solar
-_fidelity.md) at the kernel/PEM layer rather than only the WLS layer.
+τ=80h, sigma_v=0.05°C) with **C set to match `pem_fit.C_NOMINAL_1R1C = 1e7`**.
+The 1R1C model only identifies τ = R·C (not R and C separately), and the
+fit fixes C = C_nominal. If truth uses a different C, recovered q_scale
+and solar_scale scale by C_nominal/C_truth — a parameterization artifact,
+not a bench bug. (See _truth() docstring.)
 
-Marked @slow — permanent regression property of the bench. ~30-45 min
+solar_scale (β_solar) sweeps across {1.0, 2.0, 3.0} as an optimizer
+self-consistency check on the solar dimension specifically.
+
+Marked @slow — permanent regression property of the bench. ~15-20 min
 wall-clock at n_restarts=4. Test failure means: bench can't recover its own
 kernel + that excitation level + that proxy.
 """
@@ -25,7 +30,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import numpy as np
 import pytest
 
 from tests.hvac_bench.empirical.data_loader import (
@@ -53,11 +57,20 @@ BUNDLE_AVAILABLE = BUNDLE_PATH.exists() and (BUNDLE_PATH / "living_room.csv").ex
 
 # Literature truth params — Levermore 2020 winter envelope (residential, single-zone).
 # τ = 80h, mid-range; q_scale = 1.0 (proxy uses nominal capacity directly);
-# sigma_v = 0.05°C (typical 5-min-averaged temperature sensor noise);
-# solar_scale starts at 2.0 and sweeps across the bias-floor range.
+# sigma_v = 0.05°C (typical 5-min-averaged temperature sensor noise).
+#
+# IMPORTANT: C is set to match `pem_fit.C_NOMINAL_1R1C = 1e7 J/K`. The
+# 1R1C model is underdetermined for separately identifying R and C from
+# temperature dynamics — only τ = R·C is identifiable. The fit fixes
+# C_nominal and identifies tau_s, q_scale, solar_scale relative to that
+# C. If the synthetic truth uses a different C, recovered q_scale and
+# solar_scale will scale by C_nominal/C_truth (a parameterization
+# artifact, not a bench bug). Setting C_truth = C_nominal makes truth
+# values directly comparable to recovered.
 _TAU_S = 80.0 * 3600.0
-_R = 0.005  # 5 K/kW envelope, mid-range residential
-_C = _TAU_S / _R  # = 5.76e7 J/K
+_C = 1.0e7  # matches pem_fit.C_NOMINAL_1R1C — required for clean recovery comparison
+_R = _TAU_S / _C  # = 0.0288 K/W
+_NOMINAL_HP_W = 1500.0  # modulating mini-split typical
 
 
 def _truth(solar_scale: float = 2.0) -> RCParams1R1C:
@@ -90,10 +103,16 @@ class TestSyntheticExcitationPOC:
         """Single run at canonical literature truth (β_solar=2.0)."""
         truth = _truth(solar_scale=2.0)
         train = make_synthetic_zone_telemetry(
-            truth, n_steps=_N_TRAIN_STEPS, seed=0
+            truth,
+            n_steps=_N_TRAIN_STEPS,
+            seed=0,
+            nominal_capacity_w=_NOMINAL_HP_W,
         )
         validate = make_synthetic_zone_telemetry(
-            truth, n_steps=_N_VALIDATE_STEPS, seed=100
+            truth,
+            n_steps=_N_VALIDATE_STEPS,
+            seed=100,
+            nominal_capacity_w=_NOMINAL_HP_W,
         )
         return run_zone(
             "synthetic_open_loop",
@@ -103,19 +122,6 @@ class TestSyntheticExcitationPOC:
             seed=0,
         )
 
-    @pytest.mark.xfail(
-        strict=False,
-        reason=(
-            "BENCH BUG (Tier 1.3a, 2026-05-04): on clean synthetic excitation "
-            "with literature truth (τ=80h, q_scale=1.0, solar_scale=2.0), "
-            "the methodology classifies 'poor' despite RMSE 0.053°C ≈ sensor "
-            "noise. Validate residuals fail Ljung-Box whiteness (p=0.0071) "
-            "even though the model exactly matches the truth. Either the "
-            "residual whiteness threshold is mis-calibrated, or there is "
-            "a structural issue producing non-white residuals at correctly-"
-            "specified models. Removing this xfail when the bug is fixed."
-        ),
-    )
     def test_canonical_truth_recovers_at_least_close_classification(
         self,
         canonical_credibility: ZoneCredibility,
@@ -152,22 +158,24 @@ class TestSyntheticExcitationPOC:
 
     @pytest.fixture(scope="class")
     def beta_solar_sweep(self) -> dict[float, ZoneCredibility]:
-        """Run 3 fits across solar_scale truth ∈ {1.0, 2.0, 3.0}.
-
-        Discriminates kernel-layer solar bias from regression-form bias:
-        if recovered solar_scale tracks truth → kernel clean; if it
-        saturates near ~1.2 regardless → kernel bias confirmed.
+        """Run 3 fits across solar_scale truth ∈ {1.0, 2.0, 3.0} with C
+        consistent with the optimizer's C_nominal. Recovered solar_scale
+        should track truth within ±20%.
         """
         results: dict[float, ZoneCredibility] = {}
         for truth_solar in (1.0, 2.0, 3.0):
             truth = _truth(solar_scale=truth_solar)
             train = make_synthetic_zone_telemetry(
-                truth, n_steps=_N_TRAIN_STEPS, seed=int(truth_solar * 10)
+                truth,
+                n_steps=_N_TRAIN_STEPS,
+                seed=int(truth_solar * 10),
+                nominal_capacity_w=_NOMINAL_HP_W,
             )
             validate = make_synthetic_zone_telemetry(
                 truth,
                 n_steps=_N_VALIDATE_STEPS,
                 seed=int(truth_solar * 10) + 100,
+                nominal_capacity_w=_NOMINAL_HP_W,
             )
             results[truth_solar] = run_zone(
                 f"synth_solar_{truth_solar}",
@@ -178,35 +186,18 @@ class TestSyntheticExcitationPOC:
             )
         return results
 
-    @pytest.mark.xfail(
-        strict=False,
-        reason=(
-            "BENCH BUG (Tier 1.3a, 2026-05-04): on synthetic data with literature "
-            "truth solar_scale ∈ {1.0, 2.0, 3.0}, the optimizer collapses "
-            "solar_scale to ~0 (rails at lower bound 1e-6) regardless of truth. "
-            "Same kernel on forward and inverse — suggests solar_scale is "
-            "weakly identifiable at this excitation level (outdoor diurnal "
-            "swing dominates solar in informativeness) AND/OR the bounds or "
-            "regularization in `pem_fit.py` push solar to zero in the "
-            "presence of ambiguity. This is the empirical-PEM analog of the "
-            "WLS β_solar bias floor in project_bench_solar_fidelity.md. "
-            "Removing this xfail when the underlying mechanism is fixed."
-        ),
-    )
     def test_beta_solar_recovery_tracks_truth(
         self,
         beta_solar_sweep: dict[float, ZoneCredibility],
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        """Each truth solar_scale should be recovered within ±50%.
-
-        Bias-floor signature: if all 3 truths land near ~1.2 regardless,
-        kernel-layer bias is confirmed (matching the WLS bias floor in
-        project_bench_solar_fidelity.md).
+        """Each truth solar_scale should be recovered within ±25% with
+        C-consistent truth params. Verifies optimizer self-consistency
+        on the solar dimension specifically.
         """
         with capsys.disabled():
             print()
-            print("1.3a β_solar sweep (kernel-vs-regression bias discriminator):")
+            print("1.3a β_solar sweep (optimizer self-consistency check):")
             print(f"{'truth':>8}{'recovered':>12}{'ratio':>8}{'class':>8}")
             for truth_solar, cred in beta_solar_sweep.items():
                 recovered = cred.train_result.fit_1r1c.best.params.solar_scale
@@ -216,32 +207,13 @@ class TestSyntheticExcitationPOC:
                     f"{cred.classification:>8}"
                 )
 
-        # Each truth should be within ±50% (loose bound; tightens to
-        # ±20% if kernel is well-identified). Saturation pattern is the
-        # red flag.
         for truth_solar, cred in beta_solar_sweep.items():
             recovered = cred.train_result.fit_1r1c.best.params.solar_scale
             ratio = recovered / truth_solar
-            assert 0.5 < ratio < 1.5, (
+            assert 0.75 < ratio < 1.25, (
                 f"solar_scale recovery off at truth={truth_solar}: "
                 f"recovered={recovered:.3f}, ratio={ratio:.2f}"
             )
-
-        # Saturation check: recovered values should NOT all cluster near
-        # the same value regardless of truth (the bias-floor signature).
-        recovered_values = np.array(
-            [
-                beta_solar_sweep[t].train_result.fit_1r1c.best.params.solar_scale
-                for t in (1.0, 2.0, 3.0)
-            ]
-        )
-        recovered_spread = recovered_values.max() - recovered_values.min()
-        truth_spread = 3.0 - 1.0  # 2.0
-        assert recovered_spread > 0.5 * truth_spread, (
-            f"solar_scale shows saturation (kernel bias floor): "
-            f"recovered spread {recovered_spread:.2f} < half of truth "
-            f"spread {truth_spread} — recovered={recovered_values}"
-        )
 
 
 # ── Tier 1.3b — Bundle excitation realism check ─────────────────────────
