@@ -4935,7 +4935,7 @@ class PIController:
             overtemp_error = current_c - desired_c     # >0 when over-heated
         elif is_cooling:
             overtemp_error = desired_c - current_c     # >0 when over-cooled
-        else:
+        else:  # pragma: no cover — defensive: line 4670 returns False if neither
             overtemp_error = 0.0
         # Update uncontrollable-entry latch.  Set when existing gate fires
         # (we've "entered" the uncontrollable state).  Reset when room
