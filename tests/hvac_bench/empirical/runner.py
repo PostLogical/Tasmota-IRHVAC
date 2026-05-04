@@ -161,7 +161,7 @@ def run_zone(
         classification = "close"
     elif (
         train_result.classification == "close"
-        and validate_residuals.ljung_box_pass
+        and validate_residuals.acf_magnitude_pass
     ):
         classification = "close"
     else:

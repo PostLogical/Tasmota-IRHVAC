@@ -47,9 +47,32 @@ N_PARAMS_2R2C: Final = 8
 # Per Bacher-Madsen 2011 LR-test threshold + Leprince 2022 nCPBES guidance
 DEFAULT_LR_ALPHA: Final = 0.05
 DEFAULT_CV_THRESHOLD: Final = 0.10  # Cárdenas-Rangel 2022
-DEFAULT_LJUNG_BOX_ALPHA: Final = 0.05
+DEFAULT_LJUNG_BOX_ALPHA: Final = 0.05  # informational only — see ACF magnitude gate
 DEFAULT_NCPBES_GOOD: Final = 0.005  # Leprince 2022 "good fit" envelope
 DEFAULT_NCPBES_CLOSE: Final = 0.020  # above this is "poor"
+# ACF magnitude + skew/kurtosis effect-size gates replace LB-p and
+# Shapiro-Wilk-p as the primary whiteness/normality pass criteria.
+# Rationale: both classical tests have power → 1 with sample size; at
+# n=2300 LB rejects on parameter errors of 0.1% and Shapiro-Wilk rejects
+# on residuals from the exact truth model (Tier 1.4 sensitivity
+# diagnostic, 2026-05-04). Effect-size measures scale properly:
+# practically-significant residual structure produces |ACF| > 0.10 or
+# |skew| > 0.5 or |excess kurtosis| > 1.0 regardless of n, while
+# sample-size noise stays well below these thresholds.
+DEFAULT_ACF_MAGNITUDE_FLOOR: Final = 0.10
+DEFAULT_SKEWNESS_THRESHOLD: Final = 0.5  # |skew| above this → non-Gaussian
+DEFAULT_EXCESS_KURTOSIS_THRESHOLD: Final = 1.0  # |excess kurt| above → heavy tails
+
+
+def _acf_magnitude_threshold(n: int) -> float:
+    """Sample-size-aware threshold for max |ACF| under white-noise null.
+
+    Returns max(0.10, 3.0/sqrt(n)). At n ≥ 900 the floor dominates, so
+    the threshold becomes a fixed "no practical autocorrelation" test.
+    At smaller n the n-aware term widens the threshold to avoid rejecting
+    realised white-noise multi-lag fluctuations.
+    """
+    return max(DEFAULT_ACF_MAGNITUDE_FLOOR, 3.0 / max(float(n), 1.0) ** 0.5)
 
 
 # ── LR test ──────────────────────────────────────────────────────────────
@@ -101,14 +124,27 @@ class ResidualBatteryResult:
     """Bacher-Madsen residual battery applied to one-step Kalman innovations.
 
     Sub-tests:
-      - Ljung-Box: temporal whiteness (autocorrelation up to lag K)
-      - Cumulated periodogram: frequency-domain whiteness (Annex 58 ST3b)
-      - Normality: Shapiro-Wilk on standardized residuals
+      - ACF magnitude (primary whiteness gate): max |ρ_k| over lags 1..K
+        below DEFAULT_ACF_MAGNITUDE_FLOOR = 0.10. Sample-size-robust
+        substitute for Ljung-Box (which over-rejects at large n).
+      - Skew/kurtosis (primary normality gate): |skew| < 0.5 AND
+        |excess kurtosis| < 1.0. Sample-size-robust substitute for
+        Shapiro-Wilk (which over-rejects at large n).
+      - Cumulated periodogram: frequency-domain whiteness (Annex 58 ST3b).
+      - Ljung-Box and Shapiro-Wilk: reported as informational only.
+
+    `overall_pass` requires acf_magnitude_pass AND cp_pass AND normality_pass.
+    `ljung_box_pass` and `shapiro_pass` are reported but not part of the gate.
     """
 
     ljung_box_p: float
     ljung_box_pass: bool
+    max_abs_acf_lag1to20: float
+    acf_magnitude_pass: bool
     normality_p: float
+    shapiro_pass: bool
+    skewness: float
+    excess_kurtosis: float
     normality_pass: bool
     cp: CumulatedPeriodogramResult
     cp_pass: bool
@@ -142,11 +178,16 @@ def residual_battery(
     ljung_box_alpha: float = DEFAULT_LJUNG_BOX_ALPHA,
     ks_alpha: float = 0.05,
     ncpbes_close_threshold: float = DEFAULT_NCPBES_CLOSE,
+    acf_magnitude_threshold: float | None = None,
 ) -> ResidualBatteryResult:
-    """Run Ljung-Box + CP + Shapiro-Wilk on standardized Kalman innovations.
+    """Run ACF-magnitude + LB + CP + Shapiro-Wilk on standardized Kalman innovations.
 
     Imports residual_diagnostics lazily to avoid pulling its module-level
     dependencies into rc_model_fit code paths that don't need them.
+
+    The ACF-magnitude gate (max |ρ_k| over lags 1..n_lags ≤ threshold) is
+    the primary whiteness check; LB is reported as informational only. See
+    forward_selection.py module docstring for the rationale.
     """
     from tests.hvac_bench import residual_diagnostics as rd
 
@@ -155,20 +196,41 @@ def residual_battery(
     if n < max(n_lags + 5, 50):
         raise ValueError(f"Too few residuals for diagnostic battery: {n}")
 
+    from scipy import stats as _scipy_stats
+
     lb_q, lb_p = rd.ljung_box_test(standardized, n_lags=n_lags)
     nor_test, nor_stat, nor_p = rd.normality_test(standardized)
     cp_result = cumulated_periodogram(standardized, ks_alpha=ks_alpha)
+    acf = rd.autocorrelation(standardized, max_lag=n_lags)
+    max_abs_acf = max(abs(rho) for rho in acf[1:]) if len(acf) > 1 else 0.0
+    threshold = (
+        acf_magnitude_threshold
+        if acf_magnitude_threshold is not None
+        else _acf_magnitude_threshold(n)
+    )
+    skew = float(_scipy_stats.skew(standardized))
+    excess_kurt = float(_scipy_stats.kurtosis(standardized))  # Fisher: excess
 
     ljung_pass = lb_p > ljung_box_alpha
-    normality_pass = nor_p > ljung_box_alpha
+    acf_magnitude_pass = max_abs_acf < threshold
+    shapiro_pass = nor_p > ljung_box_alpha
+    normality_pass = (
+        abs(skew) < DEFAULT_SKEWNESS_THRESHOLD
+        and abs(excess_kurt) < DEFAULT_EXCESS_KURTOSIS_THRESHOLD
+    )
     # CP is "passing" if nCPBES is below the close threshold (loose)
     cp_pass = cp_result.nCPBES < ncpbes_close_threshold
-    overall = ljung_pass and cp_pass and normality_pass
+    overall = acf_magnitude_pass and cp_pass and normality_pass
 
     return ResidualBatteryResult(
         ljung_box_p=float(lb_p),
         ljung_box_pass=bool(ljung_pass),
+        max_abs_acf_lag1to20=float(max_abs_acf),
+        acf_magnitude_pass=bool(acf_magnitude_pass),
         normality_p=float(nor_p),
+        shapiro_pass=bool(shapiro_pass),
+        skewness=skew,
+        excess_kurtosis=excess_kurt,
         normality_pass=bool(normality_pass),
         cp=cp_result,
         cp_pass=cp_pass,
@@ -270,7 +332,7 @@ def _classify(
         if selected_battery.cp.nCPBES < DEFAULT_NCPBES_GOOD:
             return "good"
         return "close"
-    if selected_id.n_at_bound >= 2 or not selected_battery.ljung_box_pass:
+    if selected_id.n_at_bound >= 2 or not selected_battery.acf_magnitude_pass:
         return "poor"
     return "close"
 
