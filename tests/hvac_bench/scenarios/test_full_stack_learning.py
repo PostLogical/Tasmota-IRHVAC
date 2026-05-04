@@ -505,12 +505,38 @@ class TestConvergenceToTruth:
             relax_kappa_gate=True,
         )
 
-    @pytest.mark.parametrize("seed_factor", [0.5, 1.0, 1.5, 2.0, 3.0],
-                             ids=["half", "correct", "1.5x", "2x", "3x"])
-    def test_coefficient_converges(self, seed_factor):
+    # All 5 seed factors plus the None baseline. Used as the @parametrize
+    # set for the shared fixture below.
+    _SEED_FACTORS = [
+        pytest.param(0.5, id="half"),
+        pytest.param(1.0, id="correct"),
+        pytest.param(1.5, id="1.5x"),
+        pytest.param(2.0, id="2x"),
+        pytest.param(3.0, id="3x"),
+    ]
+
+    @pytest.fixture(scope="class")
+    def baseline_result(self):
+        """Single PI-default-seed run, shared across the class."""
+        return run_full_stack(self._make_config(None))
+
+    @pytest.fixture(scope="class")
+    def seed_results(self):
+        """All seed-factor sims computed once for the whole class.
+
+        Returns dict[seed_factor -> FullStackResult]. Replaces the prior
+        per-test duplication where two parametrized tests + one loop
+        re-ran identical configs (~26s waste).
+        """
+        return {
+            factor: run_full_stack(self._make_config(factor))
+            for factor in (0.5, 1.0, 1.5, 2.0, 3.0)
+        }
+
+    @pytest.mark.parametrize("seed_factor", _SEED_FACTORS)
+    def test_coefficient_converges(self, seed_factor, seed_results):
         """FF coefficient should stabilize regardless of initial seed error."""
-        config = self._make_config(seed_factor)
-        result = run_full_stack(config)
+        result = seed_results[seed_factor]
 
         # Coefficient should stabilize: low variance in last 10 batch snapshots
         if len(result.coef_trajectory) >= 15:
@@ -523,44 +549,44 @@ class TestConvergenceToTruth:
                 f"(values: {[f'{v:.4f}' for v in late_ods]})"
             )
 
-    @pytest.mark.parametrize("seed_factor", [0.5, 1.0, 1.5, 2.0, 3.0],
-                             ids=["half", "correct", "1.5x", "2x", "3x"])
-    def test_all_seeds_converge_to_same_value(self, seed_factor):
+    @pytest.mark.parametrize("seed_factor", _SEED_FACTORS)
+    def test_all_seeds_converge_to_same_value(
+        self, seed_factor, seed_results, baseline_result,
+    ):
         """All seed factors should converge to approximately the same
         final coefficient, since the ground-truth physics is identical.
         """
-        result = run_full_stack(self._make_config(seed_factor))
-        baseline = run_full_stack(self._make_config(None))
+        result = seed_results[seed_factor]
 
         # Final outdoor_delta should be within 0.1 of baseline
         od = result.final_coefs.get("outdoor_delta", 0)
-        baseline_od = baseline.final_coefs.get("outdoor_delta", 0)
+        baseline_od = baseline_result.final_coefs.get("outdoor_delta", 0)
         assert abs(od - baseline_od) < 0.1, (
             f"seed_factor={seed_factor}: converged to {od:.4f}, "
             f"baseline={baseline_od:.4f}, diff={abs(od - baseline_od):.4f}"
         )
 
-    def test_worse_seeds_take_longer(self):
+    def test_worse_seeds_take_longer(self, seed_results):
         """More wrong seeds should take more batch cycles to converge."""
-        results = {}
-        for factor in [1.0, 2.0, 3.0]:
-            result = run_full_stack(self._make_config(factor))
+        first_stable_for: dict[float, int | None] = {}
+        for factor in (1.0, 2.0, 3.0):
+            result = seed_results[factor]
             # Measure when coefficient first stabilizes within 0.05 of final
             final_od = result.final_coefs.get("outdoor_delta", 0)
-            first_stable = None
+            first_stable: int | None = None
             for i, snap in enumerate(result.coef_trajectory):
                 od = snap.get("outdoor_delta", 0)
                 if abs(od - final_od) < 0.05:
                     first_stable = i
                     break
-            results[factor] = first_stable
+            first_stable_for[factor] = first_stable
 
-        print(f"\n  Convergence speed: {results}")
+        print(f"\n  Convergence speed: {first_stable_for}")
         # 3× wrong should not converge faster than 1× (correct seeds)
-        if results[1.0] is not None and results[3.0] is not None:
-            assert results[3.0] >= results[1.0], (
-                f"3× wrong seeds converged faster ({results[3.0]}) than "
-                f"correct seeds ({results[1.0]})"
+        if first_stable_for[1.0] is not None and first_stable_for[3.0] is not None:
+            assert first_stable_for[3.0] >= first_stable_for[1.0], (
+                f"3× wrong seeds converged faster ({first_stable_for[3.0]}) "
+                f"than correct seeds ({first_stable_for[1.0]})"
             )
 
 
