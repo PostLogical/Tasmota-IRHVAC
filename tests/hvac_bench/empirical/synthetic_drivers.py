@@ -98,7 +98,8 @@ def make_open_loop_inputs(
     solar_peak_wm2: float = 500.0,
     cloud_seed_period_h: float = 72.0,
     nominal_capacity_w: float = 3000.0,
-    deadband_c: float = 0.5,
+    prbs_avg_period_steps: int = 12,
+    prbs_duty_cycle: float = 0.65,
 ) -> pd.DataFrame:
     """Generate an open-loop synthetic excitation pattern for system ID.
 
@@ -110,8 +111,16 @@ def make_open_loop_inputs(
     - Outdoor: diurnal sinusoid → natural-decay information.
     - Solar: half-sine bell with multi-day cloud factor → β_solar
       identifiability not aliased with diurnal.
-    - HP active: heating heuristic (mode='heat' AND setpoint > room - deadband).
-    - q_heat: nominal capacity when active (constant proxy).
+    - HP active: pseudo-random binary sequence (PRBS) with configurable
+      average switching period and duty cycle. Decorrelated from solar
+      diurnal pattern → q_scale identifiable independently. Standard SI
+      literature recipe (Ljung 1999; Bacher-Madsen 2011 §2.4).
+    - q_heat: nominal capacity when active (binary proxy at this layer).
+
+    `prbs_avg_period_steps` controls the average dwell time between switches;
+    default 12 steps × 5 min = 60 min average dwell. `prbs_duty_cycle` is
+    the fraction of steps with HP on; default 0.65 (typical residential
+    heating duty cycle in moderate weather).
 
     Returns a DataFrame with bundle's required-signal columns (suitable
     for wrapping into a ZoneTelemetry via `make_synthetic_zone_telemetry`).
@@ -149,17 +158,31 @@ def make_open_loop_inputs(
     cycles = (np.arange(n_steps) // setpoint_period_steps) % 2
     setpoint = np.where(cycles == 0, setpoint_levels_c[0], setpoint_levels_c[1])
 
-    # Initial guess: room ≈ midpoint setpoint; refined when telemetry is built.
-    # For input generation, use setpoint - 1 as proxy room temp for hp_active heuristic.
-    proxy_room = setpoint - 1.0
-    in_heat = np.ones(n_steps, dtype=bool)  # always in heat mode for POC
-    setpoint_above = (setpoint - proxy_room) > -deadband_c
-    hp_active = in_heat & setpoint_above
+    # HP active: two-state Markov chain with geometric dwell times.
+    # Expected on-dwell = prbs_avg_period_steps; off-dwell scales to keep
+    # stationary duty cycle = prbs_duty_cycle. Standard PRBS-style SI input
+    # (Ljung 1999 §13.3; Bacher-Madsen 2011 §2.4): persistent excitation
+    # for q_scale identifiability, decorrelated from outdoor diurnal pattern.
+    if prbs_avg_period_steps <= 0:
+        raise ValueError("prbs_avg_period_steps must be positive")
+    if not 0.0 < prbs_duty_cycle < 1.0:
+        raise ValueError("prbs_duty_cycle must be in (0, 1)")
+    p_off = 1.0 / prbs_avg_period_steps  # P(switch off | currently on)
+    p_on = p_off * prbs_duty_cycle / (1.0 - prbs_duty_cycle)  # symmetry
+    hp_active = np.empty(n_steps, dtype=bool)
+    state = bool(rng.random() < prbs_duty_cycle)
+    for k in range(n_steps):
+        hp_active[k] = state
+        if state and rng.random() < p_off:
+            state = False
+        elif (not state) and rng.random() < p_on:
+            state = True
     q_heat = hp_active.astype(float) * nominal_capacity_w
 
     df = pd.DataFrame(
         {
-            "room_temp_c": proxy_room,  # placeholder; overwritten by simulator
+            # placeholder; overwritten by simulator with the actual evolved state
+            "room_temp_c": np.full(n_steps, float(setpoint_levels_c[0])),
             "hp_setpoint_c": setpoint,
             "desired_temp_c": setpoint,
             "user_setpoint_c": setpoint,

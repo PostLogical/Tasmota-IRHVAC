@@ -66,20 +66,51 @@ class TestMakeOpenLoopInputs:
         assert sw.iloc[144] > 100.0
 
     def test_q_heat_zero_when_inactive(self) -> None:
-        # Construct a case where setpoint - room is below deadband threshold by
-        # raising the proxy_room logic indirectly. The default proxy_room is
-        # setpoint - 1.0, so at deadband_c=2.0 active should be False
-        # (setpoint - proxy_room = 1.0 < 2.0 means setpoint_above is False).
-        df = make_open_loop_inputs(n_steps=10, deadband_c=2.0)
-        # Wait — actually with deadband_c larger, setpoint_above = (setpoint - room) > -deadband
-        # → 1.0 > -2.0 → True. Need to invert: setpoint < room - deadband.
-        # The current open-loop fixture always heats; we just verify it's consistent.
-        assert df["hp_active"].any()
+        # PRBS produces both states; verify q_heat = 0 on inactive rows.
+        df = make_open_loop_inputs(n_steps=2000, seed=7)
+        inactive_rows = df[~df["hp_active"]]
+        assert len(inactive_rows) > 0  # PRBS must produce some off rows
+        assert (inactive_rows["q_heat_proxy_w"] == 0.0).all()
 
     def test_q_heat_matches_nominal_when_active(self) -> None:
-        df = make_open_loop_inputs(n_steps=10, nominal_capacity_w=2500.0)
+        df = make_open_loop_inputs(n_steps=200, nominal_capacity_w=2500.0)
         active_rows = df[df["hp_active"]]
         assert (active_rows["q_heat_proxy_w"] == 2500.0).all()
+
+    def test_prbs_duty_cycle_approximates_target(self) -> None:
+        # On a long sequence, mean hp_active should approximate the target duty cycle.
+        df = make_open_loop_inputs(n_steps=10000, seed=42, prbs_duty_cycle=0.65)
+        observed_duty = df["hp_active"].mean()
+        assert abs(observed_duty - 0.65) < 0.05, (
+            f"observed duty {observed_duty:.3f} differs from target 0.65 by > 0.05"
+        )
+
+    def test_prbs_produces_both_states(self) -> None:
+        # PRBS must include transitions; not get stuck on or off.
+        df = make_open_loop_inputs(n_steps=2000, seed=0)
+        unique = set(df["hp_active"].unique())
+        assert unique == {True, False}, f"PRBS stuck in single state: {unique}"
+
+    def test_prbs_average_dwell_approximates_period(self) -> None:
+        # Mean on-dwell should approximate prbs_avg_period_steps.
+        df = make_open_loop_inputs(
+            n_steps=20000, seed=123, prbs_avg_period_steps=12, prbs_duty_cycle=0.65
+        )
+        active = df["hp_active"].to_numpy()
+        # Run-length encode the active sequence
+        diffs = np.diff(active.astype(int))
+        on_starts = np.where(diffs == 1)[0]
+        off_starts = np.where(diffs == -1)[0]
+        if len(on_starts) > 0 and len(off_starts) > 0:
+            # Match each on-start to next off-start
+            if off_starts[0] < on_starts[0]:
+                off_starts = off_starts[1:]
+            n_pairs = min(len(on_starts), len(off_starts))
+            on_dwells = off_starts[:n_pairs] - on_starts[:n_pairs]
+            mean_dwell = float(np.mean(on_dwells))
+            assert 8 < mean_dwell < 18, (
+                f"mean on-dwell {mean_dwell:.1f} far from target ~12 steps"
+            )
 
     def test_n_steps_parametrizes_length(self) -> None:
         df = make_open_loop_inputs(n_steps=42)
