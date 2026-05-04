@@ -213,15 +213,18 @@ def run_phase4_lite(
     dt: float = 300.0,
     train_window: Window = TRAIN_WINDOW,
     validate_window: Window = VALIDATE_WINDOW,
-    proxy_variant: ProxyVariant = "constant",
+    proxy_variant: ProxyVariant = "setpoint_modulated",
 ) -> CredibilityEnvelope:
     """Run forward selection + held-out validation for all fit-target zones.
 
     `proxy_variant` selects the heat-injection proxy form per
-    `project_phase4_data_survey.md`; default "constant" preserves the
-    Phase 4 lite 2026-05-01 baseline. "setpoint_modulated" tests whether
-    rate-modulation modeling lifts the structural q_scale rail seen at
-    constant-magnitude proxy.
+    `project_phase4_data_survey.md`. Default is "setpoint_modulated" per
+    Option A (`project_option_a_inverter_linearization.md`, 2026-05-04):
+    on inverter-HP truth (Fujitsu hyper-heat), the constant proxy fails
+    classification (poor) even on idealised open-loop signals, while the
+    setpoint_modulated proxy classifies "close" with τ recovered within
+    13% of truth. "constant" remains accessible for reproducing the
+    2026-05-01 baseline in `project_bench_credibility_envelope.md`.
     """
     bundle = Path(bundle_path)
     train_zones = load_fit_zones(
