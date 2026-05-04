@@ -28,10 +28,14 @@ import pandas as pd
 
 from tests.hvac_bench.empirical.data_loader import (
     REQUIRED_SIGNALS,
+    ProxyVariant,
     ZoneInfo,
     ZoneTelemetry,
+    derive_q_heat_proxy_w,
 )
 from tests.hvac_bench.empirical.rc_model import RCParams1R1C, build_1r1c
+from tests.hvac_bench.house_profiles import HouseProfile2R2C
+from tests.hvac_bench.thermal_model import ThermalModel
 
 
 # ── Forward simulator ────────────────────────────────────────────────────
@@ -304,4 +308,168 @@ def replace_room_temp_with_synthetic(
         nominal_capacity_w=real_telemetry.nominal_capacity_w,
         bundle_path=real_telemetry.bundle_path,
         applied_exclusions=real_telemetry.applied_exclusions,
+    )
+
+
+# ── Option A — proportional inverter HP forward simulator ────────────────
+
+
+def simulate_inverter_hp_room_temp(
+    inputs: pd.DataFrame,
+    *,
+    profile: HouseProfile2R2C,
+    dt: float = 300.0,
+    initial_temp_c: float = 20.0,
+    seed: int = 0,
+    solar_gain: float = 0.012,
+    sensor_noise_sigma: float = 0.05,
+) -> tuple[pd.Series, pd.Series]:
+    """Forward-simulate `room_temp_c` using ThermalModel's proportional inverter
+    HP physics with outdoor-temp capacity curve, NOT the linear 1R1C kernel.
+
+    The HP modulates output proportional to (setpoint − room) and idles
+    when room ≥ setpoint (heating). Capacity scales with outdoor temp via
+    `profile.hp_capacity` (e.g. FUJITSU_HYPERHEAT_CAPACITY). HP cycling
+    emerges from the physics — `inputs` need not provide an `hp_active`
+    column (the realised series is returned).
+
+    `inputs` must contain `outdoor_temp_c_om`, `hp_setpoint_c`, and either
+    `solar_gain_proxy` or `shortwave_w_m2` (the solar input is taken from
+    `solar_gain_proxy` if present, else `shortwave_w_m2 / 1000.0`).
+    `dt` is in seconds; the underlying ThermalModel works in minutes.
+
+    Returns (room_temp_c, hp_active) series indexed identically to `inputs`.
+    """
+    if "outdoor_temp_c_om" not in inputs.columns:
+        raise ValueError("inputs must contain 'outdoor_temp_c_om'")
+    if "hp_setpoint_c" not in inputs.columns:
+        raise ValueError("inputs must contain 'hp_setpoint_c'")
+    if "solar_gain_proxy" in inputs.columns:
+        solar = inputs["solar_gain_proxy"].to_numpy()
+    elif "shortwave_w_m2" in inputs.columns:
+        solar = inputs["shortwave_w_m2"].to_numpy() / 1000.0
+    else:
+        raise ValueError(
+            "inputs must contain 'solar_gain_proxy' or 'shortwave_w_m2'"
+        )
+
+    outdoor = inputs["outdoor_temp_c_om"].to_numpy()
+    setpoint = inputs["hp_setpoint_c"].to_numpy()
+    n = len(inputs)
+    dt_min = dt / 60.0
+
+    model = ThermalModel(
+        profile=profile,
+        initial_temp=initial_temp_c,
+        outdoor_temp=float(outdoor[0]),
+        sensor_noise_sigma=sensor_noise_sigma,
+        noise_seed=seed,
+        solar_gain=solar_gain,
+    )
+
+    room_temp = np.empty(n)
+    hp_active = np.empty(n, dtype=bool)
+
+    for k in range(n):
+        # Update outdoor before stepping so capacity-curve sees current weather
+        model.outdoor_temp = float(outdoor[k])
+        # Snapshot whether HP is "active" this step (matches ThermalModel.step
+        # internal logic with hp_lag_minutes=0 and head_sensor_offset=0).
+        hp_active[k] = bool(model.room_temp < float(setpoint[k]))
+        model.step(
+            hp_setpoint=float(setpoint[k]),
+            dt_minutes=dt_min,
+            solar_proxy=float(solar[k]),
+            stove_active=0.0,
+            tick=k,
+            mode="heat",
+        )
+        # Sensor reading (with noise) — what the empirical pipeline observes.
+        room_temp[k] = model.read_sensor()
+
+    room_series = pd.Series(room_temp, index=inputs.index, name="room_temp_c")
+    active_series = pd.Series(hp_active, index=inputs.index, name="hp_active")
+    return room_series, active_series
+
+
+def make_inverter_hp_zone_telemetry(
+    *,
+    profile: HouseProfile2R2C,
+    n_steps: int = 5184,
+    dt: float = 300.0,
+    seed: int = 0,
+    initial_temp_c: float = 20.0,
+    nominal_capacity_w: float = 1500.0,
+    proxy_variant: ProxyVariant = "constant",
+    solar_gain: float = 0.012,
+    sensor_noise_sigma: float = 0.05,
+    setpoint_levels_c: tuple[float, float] = (20.0, 22.0),
+    outdoor_mean_c: float = -5.0,
+    outdoor_diurnal_amp_c: float = 8.0,
+    info: ZoneInfo | None = None,
+) -> ZoneTelemetry:
+    """Option A wrapper: build a ZoneTelemetry whose `room_temp_c` was
+    simulated by a proportional inverter HP (with outdoor capacity curve),
+    while the empirical pipeline sees only the linear `q_heat_proxy_w` form.
+
+    Setpoint, outdoor, and solar excitation come from `make_open_loop_inputs`
+    (square-wave setpoint between `setpoint_levels_c`, diurnal outdoor sinusoid,
+    bell-curve solar with multi-day cloud factor). The PRBS `hp_active` from
+    that helper is overwritten with the on/off cycling that emerges from
+    the HP physics.
+
+    `proxy_variant` selects how the linear empirical proxy approximates the
+    realised inverter heat output ('constant' = `nominal·hp_active`;
+    'setpoint_modulated' = `nominal·hp_active·clip((sp−T)/5, 0, 1)`).
+    """
+    inputs = make_open_loop_inputs(
+        n_steps,
+        dt=dt,
+        seed=seed,
+        nominal_capacity_w=nominal_capacity_w,
+        setpoint_levels_c=setpoint_levels_c,
+        outdoor_mean_c=outdoor_mean_c,
+        outdoor_diurnal_amp_c=outdoor_diurnal_amp_c,
+    )
+
+    room_series, active_series = simulate_inverter_hp_room_temp(
+        inputs,
+        profile=profile,
+        dt=dt,
+        initial_temp_c=initial_temp_c,
+        seed=seed + 1,
+        solar_gain=solar_gain,
+        sensor_noise_sigma=sensor_noise_sigma,
+    )
+    inputs["room_temp_c"] = room_series
+    inputs["hp_active"] = active_series
+
+    # Re-derive q_heat_proxy_w from the realised hp_active and room_temp,
+    # mirroring the data_loader pipeline a real bundle goes through.
+    inputs["q_heat_proxy_w"] = derive_q_heat_proxy_w(
+        inputs["hp_active"],
+        nominal_capacity_w,
+        variant=proxy_variant,
+        hp_setpoint_c=inputs["hp_setpoint_c"],
+        room_temp_c=inputs["room_temp_c"],
+    )
+
+    if info is None:
+        info = ZoneInfo(
+            name="synthetic_inverter_hp",
+            condenser="synth",
+            fit_target=True,
+            exclusion_windows=(),
+        )
+
+    missing = [c for c in REQUIRED_SIGNALS if c not in inputs.columns]
+    if missing:
+        raise AssertionError(f"inverter-HP synth missing required signals: {missing}")
+
+    return ZoneTelemetry(
+        info=info,
+        df=inputs,
+        nominal_capacity_w=nominal_capacity_w,
+        bundle_path=__file__,  # type: ignore[arg-type]
+        applied_exclusions=(),
     )

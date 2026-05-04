@@ -9,10 +9,16 @@ import pytest
 from tests.hvac_bench.empirical.data_loader import REQUIRED_SIGNALS
 from tests.hvac_bench.empirical.rc_model import RCParams1R1C
 from tests.hvac_bench.empirical.synthetic_drivers import (
+    make_inverter_hp_zone_telemetry,
     make_open_loop_inputs,
     make_synthetic_zone_telemetry,
     replace_room_temp_with_synthetic,
     simulate_1r1c_room_temp,
+    simulate_inverter_hp_room_temp,
+)
+from tests.hvac_bench.house_profiles import (
+    FUJITSU_HYPERHEAT_CAPACITY,
+    HouseProfile2R2C,
 )
 
 
@@ -219,3 +225,130 @@ class TestReplaceRoomTempWithSynthetic:
         synth = replace_room_temp_with_synthetic(real_telemetry, _LIT_TRUTH, seed=0)
         assert synth.info == real_telemetry.info
         assert synth.applied_exclusions == real_telemetry.applied_exclusions
+
+
+# Option A inverter HP simulator helpers (proportional + capacity curve).
+_INVERTER_PROFILE = HouseProfile2R2C(
+    name="LR-1R1C-shape-Fujitsu",
+    tau_env=80 * 60,
+    tau_couple=1.0,
+    mass_ratio=1.0,
+    hp_gain=0.04,
+    hp_capacity=FUJITSU_HYPERHEAT_CAPACITY,
+)
+
+
+class TestSimulateInverterHPRoomTemp:
+    def test_returns_series_indexed_like_inputs(self) -> None:
+        inputs = make_open_loop_inputs(n_steps=200)
+        room, hp_active = simulate_inverter_hp_room_temp(
+            inputs, profile=_INVERTER_PROFILE, seed=0
+        )
+        assert isinstance(room, pd.Series)
+        assert isinstance(hp_active, pd.Series)
+        assert (room.index == inputs.index).all()
+        assert (hp_active.index == inputs.index).all()
+        assert len(room) == 200
+
+    def test_hp_active_emerges_from_physics_not_prbs(self) -> None:
+        # PRBS in inputs.hp_active should be ignored — physics decides.
+        inputs = make_open_loop_inputs(n_steps=200, seed=0)
+        room, hp_active = simulate_inverter_hp_room_temp(
+            inputs, profile=_INVERTER_PROFILE, seed=0
+        )
+        # On a heating-dominated regime (mean outdoor -5°C, sp=20-22°C)
+        # HP should be active most of the time when the simulator is running.
+        assert hp_active.dtype == bool or hp_active.dtype == object
+        # On heating regime, HP active ≫ 50%
+        assert float(hp_active.astype(int).mean()) > 0.5
+
+    def test_room_tracks_setpoint_when_hp_can_keep_up(self) -> None:
+        # In mild conditions with no solar, room should hover near setpoint.
+        idx = pd.date_range("2026-01-01", periods=600, freq="5min", tz="UTC")
+        steady = pd.DataFrame(
+            {
+                "outdoor_temp_c_om": 0.0,
+                "hp_setpoint_c": 20.0,
+                "solar_gain_proxy": 0.0,
+            },
+            index=idx,
+        )
+        room, _ = simulate_inverter_hp_room_temp(
+            steady, profile=_INVERTER_PROFILE, initial_temp_c=15.0,
+            sensor_noise_sigma=0.0, seed=0,
+        )
+        # After ample time at setpoint=20, room should sit near 20
+        assert abs(room.iloc[-1] - 20.0) < 0.5
+
+    def test_capacity_curve_zeroes_below_cutoff(self) -> None:
+        # FUJITSU_HYPERHEAT_CAPACITY has cutoff at -32°C. Below that, HP
+        # cannot heat at all — room should drift toward outdoor.
+        idx = pd.date_range("2026-01-01", periods=400, freq="5min", tz="UTC")
+        cold = pd.DataFrame(
+            {
+                "outdoor_temp_c_om": -35.0,  # below cutoff
+                "hp_setpoint_c": 20.0,
+                "solar_gain_proxy": 0.0,
+            },
+            index=idx,
+        )
+        room, _ = simulate_inverter_hp_room_temp(
+            cold, profile=_INVERTER_PROFILE, initial_temp_c=20.0,
+            sensor_noise_sigma=0.0, seed=0,
+        )
+        # τ=80h, dt=5min×400=33h ≈ 0.41τ; room drops by (1-exp(-0.41))×55=18°C
+        # i.e. lands around 20 - 18 ≈ 2°C. Cutoff means HP can't fight decay.
+        assert room.iloc[-1] < room.iloc[0] - 5.0
+
+    def test_deterministic_with_seed(self) -> None:
+        inputs = make_open_loop_inputs(n_steps=100, seed=3)
+        a, _ = simulate_inverter_hp_room_temp(
+            inputs, profile=_INVERTER_PROFILE, seed=42
+        )
+        b, _ = simulate_inverter_hp_room_temp(
+            inputs, profile=_INVERTER_PROFILE, seed=42
+        )
+        np.testing.assert_array_equal(a.to_numpy(), b.to_numpy())
+
+    def test_missing_required_input_raises(self) -> None:
+        inputs = make_open_loop_inputs(n_steps=20).drop(
+            columns=["outdoor_temp_c_om"]
+        )
+        with pytest.raises(ValueError, match="outdoor_temp_c_om"):
+            simulate_inverter_hp_room_temp(inputs, profile=_INVERTER_PROFILE)
+
+
+class TestMakeInverterHPZoneTelemetry:
+    def test_returns_zone_telemetry_with_required_signals(self) -> None:
+        zt = make_inverter_hp_zone_telemetry(
+            profile=_INVERTER_PROFILE, n_steps=200, nominal_capacity_w=1500.0
+        )
+        for sig in REQUIRED_SIGNALS:
+            assert sig in zt.df.columns
+        assert "q_heat_proxy_w" in zt.df.columns
+        assert "hp_active" in zt.df.columns
+        assert zt.info.fit_target is True
+
+    def test_constant_proxy_is_binary_at_nominal(self) -> None:
+        zt = make_inverter_hp_zone_telemetry(
+            profile=_INVERTER_PROFILE, n_steps=200,
+            nominal_capacity_w=1500.0, proxy_variant="constant",
+        )
+        unique = sorted(zt.df["q_heat_proxy_w"].unique().tolist())
+        assert unique == pytest.approx([0.0, 1500.0])
+
+    def test_setpoint_modulated_proxy_carries_modulation(self) -> None:
+        zt = make_inverter_hp_zone_telemetry(
+            profile=_INVERTER_PROFILE, n_steps=600,
+            nominal_capacity_w=1500.0, proxy_variant="setpoint_modulated",
+        )
+        # Modulated variant: q_heat_proxy_w spans a continuous range below
+        # nominal when hp_active. (Sensor noise can push the noisy reading
+        # transiently above setpoint even when hp_active=True, clipping
+        # the modulation to 0 — that's the data_loader's intended behaviour.)
+        active = zt.df["hp_active"].astype(bool)
+        active_proxy = zt.df.loc[active, "q_heat_proxy_w"]
+        assert (active_proxy >= 0).all()
+        assert (active_proxy > 0).mean() > 0.5  # majority modulated, some clipped
+        assert active_proxy.std() > 0.0  # not pinned at any single value
+        assert active_proxy.max() <= 1500.0 + 1e-9
