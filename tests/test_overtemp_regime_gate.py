@@ -325,6 +325,191 @@ async def test_restart_starts_clean():
     assert pi._prev_hvac_mode is None
 
 
+# ── Stable-bias EMA + bumpless transfer ─────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_stable_bias_ema_updates_in_stable_conditions():
+    """EMA populates from `Ki·I + FF` when system is in deadband, no regime,
+    no integration freeze, and HP estimated active."""
+    entity = _make_entity()
+    pi = entity._pi
+    pi._desired_temp = 22.0
+    # In deadband (room=desired), no regime, normal HP
+    entity._attr_current_temperature = 22.0
+    pi._hp_setpoint = 22
+    pi._pi_integral = 5.0
+    # Force EMA to start fresh
+    pi._stable_combined_bias_ema = None
+
+    await _tick(pi, mono=1000.0)
+    # First stable tick: EMA seeded with current combined bias
+    assert pi._stable_combined_bias_ema is not None
+    expected = pi._pi_ki * pi._pi_integral + pi._ff_offset
+    assert abs(pi._stable_combined_bias_ema - expected) < 0.01
+
+
+@pytest.mark.asyncio
+async def test_stable_bias_ema_does_not_update_during_regime():
+    """When regime is active, EMA must be paused (regime conditions are not
+    representative of equilibrium bias)."""
+    entity = _make_entity()
+    pi = entity._pi
+    pi._desired_temp = 22.0
+    pi._stable_combined_bias_ema = 4.5  # pre-populated
+    pi._overtemp_regime = True
+    pi._uncontrollable_entry_latch = True
+    entity._attr_current_temperature = 24.0  # over-temp, regime stays
+    pi._hp_setpoint = 22
+
+    pre_ema = pi._stable_combined_bias_ema
+    await _tick(pi, mono=1000.0)
+    # EMA unchanged
+    assert pi._stable_combined_bias_ema == pre_ema
+
+
+@pytest.mark.asyncio
+async def test_bumpless_transfer_on_regime_exit():
+    """At regime exit, integrator adjusted so `Ki·I + FF` matches the EMA."""
+    entity = _make_entity()
+    pi = entity._pi
+    pi._desired_temp = 22.0
+    pi._stable_combined_bias_ema = 4.5    # pre-populated target
+    pi._overtemp_regime = True
+    pi._uncontrollable_entry_latch = True
+    pi._pi_integral = 6.7                  # preserved at lock
+    # Drive room below exit threshold (desired+0.5°C) to trigger exit
+    entity._attr_current_temperature = 22.4
+    pi._hp_setpoint = 22
+
+    await _tick(pi, mono=1000.0)
+
+    # After exit: regime is False, integrator adjusted
+    assert pi._overtemp_regime is False
+    # Combined bias should match EMA target
+    combined = pi._pi_ki * pi._pi_integral + pi._ff_offset
+    assert abs(combined - 4.5) < 0.1, (
+        f"Bumpless target missed: combined={combined:.2f}, target=4.5"
+    )
+
+
+@pytest.mark.asyncio
+async def test_bumpless_transfer_falls_back_to_preserve_when_ema_none():
+    """If EMA never populated (fresh install), regime exit preserves
+    integrator value rather than using a garbage target."""
+    entity = _make_entity()
+    pi = entity._pi
+    pi._desired_temp = 22.0
+    pi._stable_combined_bias_ema = None    # uninitialized
+    pi._overtemp_regime = True
+    pi._uncontrollable_entry_latch = True
+    pi._pi_integral = 6.7
+    entity._attr_current_temperature = 22.4    # below exit threshold
+    pi._hp_setpoint = 22
+
+    pre_integral = pi._pi_integral
+    await _tick(pi, mono=1000.0)
+
+    # Integrator preserved (modulo tiny leak)
+    assert pi._overtemp_regime is False
+    assert abs(pi._pi_integral - pre_integral) < 0.01
+
+
+@pytest.mark.asyncio
+async def test_mode_change_clears_stable_bias_ema():
+    """Mode change invalidates EMA — different mode = different equilibrium."""
+    entity = _make_entity()
+    pi = entity._pi
+    pi._desired_temp = 22.0
+    pi._stable_combined_bias_ema = 4.5
+    # Simulate having been in heat mode for prior ticks (avoid first-tick init)
+    pi._prev_hvac_mode = HVACMode.HEAT
+
+    # Switch mode
+    entity._attr_hvac_mode = HVACMode.COOL
+    entity._pi._inputs.outdoor_temp = 30.0
+    await _tick(pi, mono=1000.0)
+
+    assert pi._stable_combined_bias_ema is None
+
+
+# ── cal_midpoint gate hysteresis ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_cal_midpoint_hysteresis_no_chatter_at_boundary():
+    """Delta oscillating near cal_midpoint with realistic noise should not
+    chatter `_hp_estimated_active_state` — the per-tick boolean would
+    otherwise flip every few ticks.  With hysteresis (margin = 0.3°C) and
+    σ=0.1°C noise, transitions should be rare across many ticks.
+    """
+    import random
+    random.seed(42)
+    entity = _make_entity()
+    pi = entity._pi
+    pi._desired_temp = 22.0
+    # Default cal_midpoint = (cal_min + cal_max) / 2 = (-2 + 2) / 2 = 0
+    # Drive delta near 0 with σ=0.1°C noise.  Need: current = setpoint + noise.
+    pi._hp_setpoint = 22
+    transitions = 0
+    prev_state = pi._hp_estimated_active_state
+    for i in range(100):
+        # Room temp = setpoint + small noise around midpoint(=0)
+        entity._attr_current_temperature = 22.0 + random.gauss(0.0, 0.1)
+        await _tick(pi, mono=1000.0 + i * 900)
+        if pi._hp_estimated_active_state != prev_state:
+            transitions += 1
+            prev_state = pi._hp_estimated_active_state
+    # Without hysteresis, expected ~50 transitions (roughly 50% sign flips).
+    # With 0.3°C hysteresis vs 0.1°C noise, should be 0 or very few.
+    assert transitions <= 5, (
+        f"State chattered {transitions} times in 100 ticks despite hysteresis "
+        f"(σ=0.1°C noise vs 0.3°C margin should give near-zero transitions)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_cal_midpoint_hysteresis_enter_inactive_above_margin():
+    """When state is active, only transition to inactive when delta clearly
+    exceeds cal_midpoint + hysteresis."""
+    entity = _make_entity()
+    pi = entity._pi
+    pi._desired_temp = 22.0
+    pi._hp_setpoint = 22
+    pi._hp_estimated_active_state = True
+
+    # Within margin: stays active
+    entity._attr_current_temperature = 22.2  # delta = +0.2 < 0 + 0.3 hyst
+    await _tick(pi, mono=1000.0)
+    assert pi._hp_estimated_active_state is True
+
+    # Beyond margin: transitions to inactive
+    entity._attr_current_temperature = 22.5  # delta = +0.5 > 0 + 0.3 hyst
+    await _tick(pi, mono=2000.0)
+    assert pi._hp_estimated_active_state is False
+
+
+@pytest.mark.asyncio
+async def test_cal_midpoint_hysteresis_reenter_active_below_margin():
+    """Symmetric: when state is inactive, only transition to active when
+    delta clearly below cal_midpoint - hysteresis."""
+    entity = _make_entity()
+    pi = entity._pi
+    pi._desired_temp = 22.0
+    pi._hp_setpoint = 22
+    pi._hp_estimated_active_state = False
+
+    # Within margin (still above lower hyst boundary): stays inactive
+    entity._attr_current_temperature = 21.8  # delta = -0.2 > 0 - 0.3 hyst
+    await _tick(pi, mono=1000.0)
+    assert pi._hp_estimated_active_state is False
+
+    # Beyond margin: transitions to active
+    entity._attr_current_temperature = 21.5  # delta = -0.5 < 0 - 0.3 hyst
+    await _tick(pi, mono=2000.0)
+    assert pi._hp_estimated_active_state is True
+
+
 @pytest.mark.asyncio
 async def test_regime_enters_in_cool_when_room_under():
     """Cool mode mirror: room < desired - ENTER triggers gate."""

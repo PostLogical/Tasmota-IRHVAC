@@ -1124,6 +1124,10 @@ class TickOutput:
     # to its idle setpoint and froze the integrator on this tick.
     # Visible in debug bundles for post-deployment verification.
     overtemp_regime: bool = False
+    # Stable-conditions combined-bias EMA used as bumpless-transfer target
+    # at regime exit.  None until enough stable observations have populated
+    # it.  Visible in debug bundles for tuning the bumpless behavior.
+    stable_combined_bias_ema: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to the legacy `get_full_diagnostics()` wire format.
@@ -1181,6 +1185,7 @@ class TickOutput:
         if self.events:
             out["_events"] = [e.to_dict() for e in self.events]
         out["_overtemp_regime"] = self.overtemp_regime
+        out["_stable_combined_bias_ema"] = self.stable_combined_bias_ema
         return out
 
     @classmethod
@@ -1252,6 +1257,7 @@ class TickOutput:
                 TickEvent.from_dict(e) for e in data.get("_events", [])
             ),
             overtemp_regime=data.get("_overtemp_regime", False),
+            stable_combined_bias_ema=data.get("_stable_combined_bias_ema"),
         )
 
     @classmethod

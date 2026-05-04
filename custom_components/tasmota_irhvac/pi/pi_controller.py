@@ -87,6 +87,8 @@ from ..const import (
     CONF_PI_TAU_ESTIMATE,
     DEFAULT_OVERTEMP_REGIME_ENTER_C,
     DEFAULT_OVERTEMP_REGIME_EXIT_C,
+    HP_ESTIMATED_HYSTERESIS_C,
+    STABLE_BIAS_EMA_ALPHA,
     DEFAULT_PI_BATCH_WLS_ENABLED,
     DEFAULT_PI_DEADBAND,
     DEFAULT_PI_ENABLED,
@@ -555,6 +557,18 @@ class PIController:
         # state and the latch are direction-aware (heat vs cool), so they must
         # be cleared when the mode flips to avoid stale state.
         self._prev_hvac_mode = None
+
+        # Hysteretic state for the cal_midpoint gate: persisted across ticks
+        # so the per-tick `delta vs cal_midpoint` evaluation doesn't chatter
+        # at the boundary.  Init True (assume HP active until proven
+        # otherwise; matches original first-tick behavior).
+        self._hp_estimated_active_state: bool = True
+
+        # Stable-conditions combined-bias EMA (`Ki·I + FF`) used as the target
+        # for bumpless transfer at over-temp regime exit.  None until enough
+        # stable observations populate it; bumpless falls back to preserve-I
+        # behavior when None.
+        self._stable_combined_bias_ema: float | None = None
 
         # HP thermostat deadband learning: the HP's internal thermostat has
         # its own hysteresis, so the compressor may still cycle even when
@@ -3598,6 +3612,7 @@ class PIController:
             observation=self._last_observation_context,
             events=tuple(self._pending_events),
             overtemp_regime=self._overtemp_regime,
+            stable_combined_bias_ema=self._stable_combined_bias_ema,
         )
 
     def _build_health_snapshot_with_grace_advance(self) -> HealthSnapshot:
@@ -4429,11 +4444,20 @@ class PIController:
         e = self._entity
         # Detect mode change at the entry to any tick path so over-temp regime
         # state and latch don't carry stale direction (heat vs cool vs off).
-        # Must run before the OFF early-return below.
-        if e._attr_hvac_mode != self._prev_hvac_mode:
+        # Must run before the OFF early-return below.  Skip the reset on the
+        # very first tick (prev=None initialization) — that's not a real mode
+        # change, just the controller learning the initial mode.
+        if (
+            self._prev_hvac_mode is not None
+            and e._attr_hvac_mode != self._prev_hvac_mode
+        ):
             self._overtemp_regime = False
             self._uncontrollable_entry_latch = False
-            self._prev_hvac_mode = e._attr_hvac_mode
+            # Stable-bias EMA invalidated on mode change — different mode
+            # means different equilibrium bias.  Will repopulate from new
+            # stable observations.
+            self._stable_combined_bias_ema = None
+        self._prev_hvac_mode = e._attr_hvac_mode
         if e._attr_hvac_mode == HVACMode.OFF:
             return self._passive_tick()
         if not self._control_active:
@@ -4756,11 +4780,25 @@ class PIController:
         # Use the midpoint of [cal_min, cal_max] as our best estimate of
         # where the HP transitions.  Integrate when the HP is probably on
         # (delta below midpoint for heating, above for cooling).
+        # Hysteresis around the midpoint (HP_ESTIMATED_HYSTERESIS_C)
+        # eliminates per-tick chatter at the boundary which would otherwise
+        # let the integrator wind during what should be a single transition.
         cal_midpoint = (cal_min + cal_max) / 2.0
         if is_heating:
-            hp_estimated_active = current_to_setpoint_delta <= cal_midpoint
-        else:
-            hp_estimated_active = current_to_setpoint_delta >= cal_midpoint
+            if self._hp_estimated_active_state:
+                if current_to_setpoint_delta > cal_midpoint + HP_ESTIMATED_HYSTERESIS_C:
+                    self._hp_estimated_active_state = False
+            else:
+                if current_to_setpoint_delta < cal_midpoint - HP_ESTIMATED_HYSTERESIS_C:
+                    self._hp_estimated_active_state = True
+        else:  # cooling: signs reversed (active when delta high in cool)
+            if self._hp_estimated_active_state:
+                if current_to_setpoint_delta < cal_midpoint - HP_ESTIMATED_HYSTERESIS_C:
+                    self._hp_estimated_active_state = False
+            else:
+                if current_to_setpoint_delta > cal_midpoint + HP_ESTIMATED_HYSTERESIS_C:
+                    self._hp_estimated_active_state = True
+        hp_estimated_active = self._hp_estimated_active_state
 
         # Passive calibration learning: after sustained time in the
         # "estimated inactive" zone, room_rate reveals whether the HP
@@ -4862,12 +4900,53 @@ class PIController:
         elif overtemp_error <= 0.0:
             self._uncontrollable_entry_latch = False
 
+        # Stable-bias EMA: track combined `Ki·I + FF` only when system is
+        # clearly in steady state (in deadband, no regime, no freeze).  Used
+        # at regime exit for bumpless transfer — restores integrator to a
+        # value matching pre-disturbance equilibrium bias.  Must be evaluated
+        # before the regime gate re-evaluates, so we use the current latched
+        # state (which reflects the END of the previous tick).
+        in_stable_conditions = (
+            abs_error < self._pi_deadband
+            and not self._overtemp_regime
+            and hp_estimated_active
+            and not self._integration_frozen
+        )
+        if in_stable_conditions:
+            current_combined = self._pi_ki * self._pi_integral + self._ff_offset
+            if self._stable_combined_bias_ema is None:
+                self._stable_combined_bias_ema = current_combined
+            else:
+                self._stable_combined_bias_ema = (
+                    STABLE_BIAS_EMA_ALPHA * current_combined
+                    + (1.0 - STABLE_BIAS_EMA_ALPHA)
+                    * self._stable_combined_bias_ema
+                )
+
         if self._overtemp_regime:
             # Active: stay until temperature returns to band.  No precondition
             # check on exit — once we've decided HP shouldn't be running,
             # the temperature recovery is the only signal that should release.
             if overtemp_error < DEFAULT_OVERTEMP_REGIME_EXIT_C:
                 self._overtemp_regime = False
+                # Bumpless transfer: restore integrator to maintain the
+                # pre-disturbance stable bias with the current FF state.
+                # Without this, preserved I + drifted FF can produce small
+                # steady-state error post-exit until P+I corrects.
+                if (
+                    self._stable_combined_bias_ema is not None
+                    and self._pi_ki != 0
+                ):
+                    new_integral = (
+                        self._stable_combined_bias_ema - self._ff_offset
+                    ) / self._pi_ki
+                    _LOGGER.debug(
+                        "%sRegime exit bumpless: I %.2f → %.2f to maintain "
+                        "stable bias %.2f with current FF=%.2f",
+                        self._log_prefix, self._pi_integral, new_integral,
+                        self._stable_combined_bias_ema, self._ff_offset,
+                    )
+                    self._pi_integral = new_integral
                 _LOGGER.debug(
                     "%sOver-temp regime exit (room=%.2f°C, desired=%.2f°C, "
                     "mode=%s)",

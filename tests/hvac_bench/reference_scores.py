@@ -114,7 +114,12 @@ REFERENCE_SCORES: dict[str, dict[str, dict[str, ScoreExpectation]]] = {
             "ener_tot": ScoreExpectation(1.452, 0.03),
             "peak_kw": ScoreExpectation(0.046, 0.003),
             "cold_time_h": ScoreExpectation(3.25, 0.5),
-            "warm_time_h": ScoreExpectation(0.25, 0.25),
+            # Updated 2026-05-04: cal_midpoint hysteresis (HP_ESTIMATED_HYSTERESIS_C=0.3)
+            # added per-tick state stability that delays integrator response in this
+            # specific cool-step scenario by ~15 min/day (1.0h vs prior 0.25h over 3 days).
+            # Trade-off: hysteresis prevents per-tick chatter that wound integrator
+            # in transitional regimes (see commit adding the gate hysteresis).
+            "warm_time_h": ScoreExpectation(1.0, 0.5),
             "setpoint_changes": ScoreExpectation(19, 3),
         },
     },

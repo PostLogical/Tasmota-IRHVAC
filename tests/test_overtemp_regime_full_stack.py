@@ -163,3 +163,76 @@ async def test_post_solar_integrator_preserved_with_gate():
         f"Regime should be active for almost all of cooldown "
         f"({cooldown_active}/{cooldown_total} ticks active)"
     )
+
+
+# ── Bumpless transfer end-to-end ─────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_bumpless_transfer_tightens_post_exit_bias():
+    """End-to-end: with EMA populated from a stable warm-up phase, bumpless
+    transfer at regime exit produces post-exit combined bias close to the
+    pre-disturbance equilibrium bias.  Without bumpless (EMA=None fallback),
+    post-exit bias depends on whatever I happened to be preserved at, which
+    can drift from equilibrium.
+    """
+    config = _make_solar_config()
+    entity = _MockedSensorEntity(config)
+    entity._attr_hvac_mode = HVACMode.HEAT
+
+    desired_c = 22.0
+    outdoor_c = 5.0
+    solar_signal = [0.0]                       # start with NO solar
+    room_temp = [22.0]                         # at desired
+
+    entity.set_sensor("sensor.solar_proxy", lambda: solar_signal[0])
+    entity.set_sensor("sensor.outdoor", lambda: outdoor_c)
+    entity._pi._inputs.outdoor_temp = outdoor_c
+
+    pi = entity._pi
+    pi._desired_temp = desired_c
+    pi_interval_s = 900.0
+    mono = max(pi_interval_s, pi._last_setpoint_change_time + pi_interval_s)
+
+    async def tick():
+        nonlocal mono
+        entity._attr_current_temperature = room_temp[0]
+        pi._pi_last_tick_time = mono - pi_interval_s
+        with patch("time.monotonic", return_value=mono):
+            await pi._pi_tick()
+        mono += pi_interval_s
+
+    # Phase 1: stable warm-up at desired (no solar) — populates EMA
+    for _ in range(20):
+        await tick()
+
+    # EMA should now be populated from the stable phase
+    assert pi._stable_combined_bias_ema is not None, "EMA never populated"
+    stable_bias_target = pi._stable_combined_bias_ema
+
+    # Phase 2: solar comes on, room rises (force the regime to engage)
+    solar_signal[0] = 1.0
+    for _ in range(4):
+        room_temp[0] += 0.7    # drive room up to ~25
+        await tick()
+    assert pi._overtemp_regime is True, "Regime didn't engage"
+
+    # Phase 3: sun goes down, room descends slowly back through EXIT
+    solar_signal[0] = 0.0
+    descent_ticks = 32
+    for i in range(descent_ticks):
+        # Linear descent from ~25 to 22.4 (just inside EXIT band)
+        room_temp[0] = 25.0 - (25.0 - 22.4) * (i + 1) / descent_ticks
+        await tick()
+
+    # By the end, regime has exited
+    assert pi._overtemp_regime is False, "Regime didn't exit"
+
+    # Combined bias post-exit should match the stable bias target
+    # (within tolerance for tick dynamics + leaky integrator).
+    combined_post_exit = pi._pi_ki * pi._pi_integral + pi._ff_offset
+    bias_gap = abs(combined_post_exit - stable_bias_target)
+    assert bias_gap < 0.5, (
+        f"Bumpless target missed: combined={combined_post_exit:.3f}, "
+        f"target={stable_bias_target:.3f}, gap={bias_gap:.3f}"
+    )

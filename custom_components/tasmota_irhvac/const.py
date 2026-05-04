@@ -245,6 +245,21 @@ DEFAULT_PI_DEADBAND = 0.5
 DEFAULT_OVERTEMP_REGIME_ENTER_C = 1.0
 DEFAULT_OVERTEMP_REGIME_EXIT_C = 0.5
 
+# Hysteresis on the cal_midpoint gate: the per-tick `delta <= cal_midpoint`
+# check would otherwise chatter at the boundary, allowing per-tick integrator
+# wind during what should be a single transition.  Hysteresis margin is ~3×
+# the typical sensor noise σ (0.1°C).  See `feedback_test_noise_realism.md`.
+HP_ESTIMATED_HYSTERESIS_C = 0.3
+
+# Stable-conditions combined-bias EMA: smoothed average of `Ki·I + FF` taken
+# only when the system is clearly in steady state (in deadband, no regime,
+# no integration freeze).  Used at regime exit to restore the integrator to a
+# value that maintains the pre-disturbance equilibrium bias with the current
+# FF state.  α = 0.05 → effective averaging window of ~20 ticks (5h at 15-min
+# ticks).  Long enough to smooth tick-level noise, short enough to track
+# slow seasonal drift.
+STABLE_BIAS_EMA_ALPHA = 0.05
+
 DEFAULT_PI_OUTDOOR_SEED_HEAT = 0.25
 DEFAULT_PI_OUTDOOR_SEED_COOL = 0.25
 DEFAULT_PI_OUTDOOR_SEED_CLAMP_MIN = 0.0
