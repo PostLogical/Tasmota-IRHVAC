@@ -135,6 +135,7 @@ from .snapshot import (
     BatchRunPayload,
     BoundaryUpdatePayload,
     ControllerConfig,
+    ControllerReloadPayload,
     CorrelatedPair,
     DiagnosticsBundle,
     DriftCoefficient,
@@ -181,6 +182,23 @@ from .plant_identifier import PlantIdentifier
 from .plant_model import GainUpdate
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _compute_prior_run_age_s(saved_at_wallclock: str) -> float | None:
+    """Seconds between `saved_at_wallclock` (ISO-8601 UTC) and now, or None.
+
+    Returns None when the input is empty (legacy stored data without the
+    field) or unparseable. Negative ages (clock skew) are clamped to 0.
+    """
+    if not saved_at_wallclock:
+        return None
+    try:
+        prior = datetime.fromisoformat(saved_at_wallclock)
+    except ValueError:
+        return None
+    if prior.tzinfo is None:
+        prior = prior.replace(tzinfo=timezone.utc)
+    return max(0.0, (datetime.now(timezone.utc) - prior).total_seconds())
 
 
 class PIController:
@@ -684,6 +702,10 @@ class PIController:
         # (in pi_tick) and packaged into TickOutput.events at the end of
         # fire_dispatcher.
         self._pending_events: list[TickEvent] = []
+        # One-shot CONTROLLER_RELOAD payload set by async_added_to_hass
+        # and emitted on the first _build_tick_output() call. Lets bundle
+        # readers locate reset boundaries without scraping HA logs.
+        self._pending_reload_payload: ControllerReloadPayload | None = None
         # Transition-detection state for emitter sites that compare
         # current vs prior values (mode, suppression, auto-perturb, etc.)
         self._prev_hvac_mode: HVACMode | None = None
@@ -772,6 +794,7 @@ class PIController:
         # 2. Auto-save Store (survives PI disable→enable cycle)
         # 3. State attributes (legacy migration)
         restored = False
+        prior_saved_wallclock: str = ""
         extra_data = await e.async_get_last_extra_data()
         if extra_data is not None:
             pi_data = PIExtraStoredData.from_dict(extra_data.as_dict())
@@ -779,6 +802,7 @@ class PIController:
                 self.restore_extra_stored_data(pi_data)
                 _LOGGER.debug("PI: restored from ExtraStoredData")
                 restored = True
+                prior_saved_wallclock = pi_data.saved_at_wallclock
         if not restored and pi_autosave is not None:
             pi_data = PIExtraStoredData.from_dict(pi_autosave)
             if pi_data is not None:
@@ -788,6 +812,7 @@ class PIController:
                     self._log_prefix,
                 )
                 restored = True
+                prior_saved_wallclock = pi_data.saved_at_wallclock
         if not restored:
             # Fall back to state attributes (migration from pre-ExtraStoredData versions)
             if old_state is None:
@@ -853,6 +878,18 @@ class PIController:
             x = self._inputs.build_feature_vector(outdoor_delta, wall_time=time.time())
             rls = self._rls_heat if is_heating else self._rls_cool
             self._ff_offset = rls.predict(x)
+
+        # Stage the reload event for the first published tick. Reason
+        # uses hass.is_running because async_added_to_hass runs during
+        # CoreState.starting on a fresh boot vs. CoreState.running on a
+        # config-entry reload. (Options-flow change reloads the entry too,
+        # but we don't currently distinguish — would need an explicit
+        # update_listener on the config entry.)
+        self._pending_reload_payload = ControllerReloadPayload(
+            reason="ha_start" if not self._hass.is_running else "integration_reload",
+            restored_from_storage=restored,
+            prior_run_age_s=_compute_prior_run_age_s(prior_saved_wallclock),
+        )
 
         # Timer and initial tick are set up by climate.py after this returns.
 
@@ -1529,6 +1566,7 @@ class PIController:
             detected_lag_tau_counts=dict(self._detected_lag_tau_count),
             debug_capture_full_p=self._debug_capture_full_p,
             pi_event_log_enabled=self._pi_event_log_enabled,
+            saved_at_wallclock=datetime.now(timezone.utc).isoformat(),
         )
 
     def restore_extra_stored_data(self, data: PIExtraStoredData) -> None:
@@ -3015,6 +3053,15 @@ class PIController:
         transition logic lives next to the snapshot it gets packaged
         into.
         """
+        # CONTROLLER_RELOAD — staged in async_added_to_hass, emitted
+        # exactly once on the first tick output. Lets bundle readers
+        # locate state-reset boundaries without scraping HA logs.
+        if self._pending_reload_payload is not None:
+            self._emit_event(
+                TickEventKind.CONTROLLER_RELOAD, self._pending_reload_payload,
+            )
+            self._pending_reload_payload = None
+
         # Mode change
         current_mode = self._entity._attr_hvac_mode
         if (

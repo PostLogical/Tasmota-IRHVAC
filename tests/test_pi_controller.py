@@ -1697,6 +1697,55 @@ class TestPIMathContinued:
         assert entity._pi._pi_integral == 8.8
         assert entity._pi._desired_temp == 22.0
 
+    @pytest.mark.asyncio
+    async def test_controller_reload_payload_when_restored_from_extra_data(self):
+        """Restore via ExtraStoredData carries restored_from_storage=True
+        and a non-None prior_run_age_s computed from saved_at_wallclock.
+        """
+        from datetime import datetime, timedelta, timezone
+        from custom_components.tasmota_irhvac.pi.snapshot import (
+            ControllerReloadPayload, TickEventKind,
+        )
+
+        config = make_pi_config({"outdoor_temp_sensor": ""})
+        entity = FakePIEntity(config)
+
+        saved_at = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        extra = PIExtraStoredData(
+            pi_integral=5.0, desired_temp=20.0, hp_setpoint=22.0,
+            saved_at_wallclock=saved_at,
+        )
+        mock_extra = MagicMock()
+        mock_extra.as_dict.return_value = extra.as_dict()
+        entity.async_get_last_extra_data = AsyncMock(return_value=mock_extra)
+
+        await entity._pi.async_added_to_hass()
+
+        payload = entity._pi._pending_reload_payload
+        assert isinstance(payload, ControllerReloadPayload)
+        assert payload.restored_from_storage is True
+        assert payload.prior_run_age_s is not None
+        # 5 min ± a few seconds
+        assert 295 <= payload.prior_run_age_s <= 310
+
+    @pytest.mark.asyncio
+    async def test_controller_reload_payload_when_no_prior_data(self):
+        """No restore source → restored_from_storage=False, age None."""
+        from custom_components.tasmota_irhvac.pi.snapshot import (
+            ControllerReloadPayload,
+        )
+
+        config = make_pi_config({"outdoor_temp_sensor": ""})
+        entity = FakePIEntity(config)
+        entity.async_get_last_extra_data = AsyncMock(return_value=None)
+
+        await entity._pi.async_added_to_hass()
+
+        payload = entity._pi._pending_reload_payload
+        assert isinstance(payload, ControllerReloadPayload)
+        assert payload.restored_from_storage is False
+        assert payload.prior_run_age_s is None
+
 
 # ── set_subsystem service + observe-only mode ──────────────────────
 

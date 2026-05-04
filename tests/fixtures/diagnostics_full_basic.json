@@ -12,6 +12,16 @@
     "vendor": "FUJITSU_AC"
   },
   "pi_controller": {
+    "_events": [
+      {
+        "kind": "controller_reload",
+        "payload": {
+          "prior_run_age_s": null,
+          "reason": "integration_reload",
+          "restored_from_storage": false
+        }
+      }
+    ],
     "_greybox": {
       "reason": "buffer empty",
       "state": "Failed"

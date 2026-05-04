@@ -75,6 +75,10 @@ class PIExtraStoredData(ExtraStoredData):
     detected_lag_tau_counts: dict[str, int] = dataclasses.field(default_factory=dict)  # input name → consistent detection count
     debug_capture_full_p: bool = False  # power-user toggle for full RLS P matrix capture
     pi_event_log_enabled: bool = False  # opt-in: persistent JSONL event log under <config>/tasmota_irhvac/log/
+    # ISO-8601 UTC wall-clock at which this snapshot was assembled. Used by
+    # async_added_to_hass to compute prior_run_age_s for the CONTROLLER_RELOAD
+    # event. Empty string on legacy stored data (pre-introduction).
+    saved_at_wallclock: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize to JSON-compatible dict."""
@@ -129,6 +133,7 @@ class PIExtraStoredData(ExtraStoredData):
             "detected_lag_tau_counts": self.detected_lag_tau_counts,
             "debug_capture_full_p": self.debug_capture_full_p,
             "pi_event_log_enabled": self.pi_event_log_enabled,
+            "saved_at_wallclock": self.saved_at_wallclock,
         }
 
     @classmethod
@@ -197,6 +202,7 @@ class PIExtraStoredData(ExtraStoredData):
                 },
                 debug_capture_full_p=bool(restored.get("debug_capture_full_p", False)),
                 pi_event_log_enabled=bool(restored.get("pi_event_log_enabled", False)),
+                saved_at_wallclock=str(restored.get("saved_at_wallclock", "")),
             )
         except (KeyError, ValueError, TypeError, AttributeError):
             return None

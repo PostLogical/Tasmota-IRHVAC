@@ -61,6 +61,11 @@ async def test_two_zones_have_independent_pending_events(hass, setup_pi_integrat
     pi_a = hass.data[DATA_KEY][entry_a.entry_id]._controller
     pi_b = hass.data[DATA_KEY][entry_b.entry_id]._controller
 
+    # Drain init-time CONTROLLER_RELOAD events from both controllers so we
+    # check isolation of subsequent emits, not the initialization state.
+    pi_a._pending_events.clear()
+    pi_b._pending_events.clear()
+
     pi_b._emit_event(
         TickEventKind.MODE_CHANGE,
         ModeChangePayload(from_mode="off", to_mode="heat"),

@@ -88,3 +88,77 @@ def test_both_flags_roundtrip_independently():
     assert restored_a.pi_event_log_enabled is False
     assert restored_b.debug_capture_full_p is False
     assert restored_b.pi_event_log_enabled is True
+
+
+def test_saved_at_wallclock_default_empty():
+    """saved_at_wallclock defaults to empty string (signals no prior save)."""
+    assert _minimal_stored_data().saved_at_wallclock == ""
+
+
+def test_saved_at_wallclock_roundtrips():
+    """ISO-8601 wallclock survives save → restore."""
+    iso = "2026-05-04T12:34:56+00:00"
+    original = _minimal_stored_data(saved_at_wallclock=iso)
+    restored = PIExtraStoredData.from_dict(original.as_dict())
+    assert restored is not None
+    assert restored.saved_at_wallclock == iso
+
+
+def test_legacy_dict_missing_saved_at_wallclock_defaults_empty():
+    """Restoring pre-introduction stored data leaves saved_at_wallclock empty."""
+    legacy = _minimal_stored_data().as_dict()
+    legacy.pop("saved_at_wallclock", None)
+    restored = PIExtraStoredData.from_dict(legacy)
+    assert restored is not None
+    assert restored.saved_at_wallclock == ""
+
+
+# ── _compute_prior_run_age_s helper ───────────────────────────────────
+
+
+def test_compute_prior_run_age_s_returns_none_for_empty():
+    from custom_components.tasmota_irhvac.pi.pi_controller import (
+        _compute_prior_run_age_s,
+    )
+    assert _compute_prior_run_age_s("") is None
+
+
+def test_compute_prior_run_age_s_returns_none_for_garbage():
+    from custom_components.tasmota_irhvac.pi.pi_controller import (
+        _compute_prior_run_age_s,
+    )
+    assert _compute_prior_run_age_s("not-an-iso-timestamp") is None
+
+
+def test_compute_prior_run_age_s_positive_for_past_timestamp():
+    from datetime import datetime, timedelta, timezone
+    from custom_components.tasmota_irhvac.pi.pi_controller import (
+        _compute_prior_run_age_s,
+    )
+    past = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    age = _compute_prior_run_age_s(past)
+    assert age is not None
+    # 2h ± a few seconds for test latency
+    assert 7195 <= age <= 7210
+
+
+def test_compute_prior_run_age_s_clamps_negative_to_zero():
+    """Future timestamps (clock skew) clamp to 0 instead of going negative."""
+    from datetime import datetime, timedelta, timezone
+    from custom_components.tasmota_irhvac.pi.pi_controller import (
+        _compute_prior_run_age_s,
+    )
+    future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    assert _compute_prior_run_age_s(future) == 0.0
+
+
+def test_compute_prior_run_age_s_treats_naive_iso_as_utc():
+    """Naive ISO timestamps are interpreted as UTC (no tz crash)."""
+    from datetime import datetime, timezone
+    from custom_components.tasmota_irhvac.pi.pi_controller import (
+        _compute_prior_run_age_s,
+    )
+    naive = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+    age = _compute_prior_run_age_s(naive)
+    assert age is not None
+    assert 0.0 <= age <= 5.0

@@ -799,6 +799,7 @@ class TickEventKind(StrEnum):
     LEARNING_SUPPRESSION_CHANGE = "learning_suppression_change"
     AUTO_PERTURB_STATE = "auto_perturb_state"
     BOUNDARY_UPDATE = "boundary_update"
+    CONTROLLER_RELOAD = "controller_reload"
 
 
 # Per-kind payload dataclasses. Each is frozen+slotted; `to_dict()` keeps
@@ -1002,6 +1003,39 @@ class BoundaryUpdatePayload:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ControllerReloadPayload:
+    """Emitted on the first published tick after PI controller __init__ runs.
+
+    Captures why the controller is starting fresh, which lets bundle
+    readers distinguish "reset boundary" from "anomaly" when they see
+    PI state discontinuities (integral=0, observation_count=0,
+    ff_confidence reset, etc.).
+
+    `reason` values: "ha_start" | "integration_reload" | "options_change" |
+    "config_change" | "unknown". Strings (not StrEnum) because the
+    distinction set may grow without a wire-format bump.
+    """
+    reason: str
+    restored_from_storage: bool
+    prior_run_age_s: float | None  # None if no prior wallclock available
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "reason": self.reason,
+            "restored_from_storage": self.restored_from_storage,
+            "prior_run_age_s": self.prior_run_age_s,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ControllerReloadPayload:
+        return cls(
+            reason=data["reason"],
+            restored_from_storage=data["restored_from_storage"],
+            prior_run_age_s=data["prior_run_age_s"],
+        )
+
+
 # Tagged-union of payload types. New kinds: add to TickEventKind, define
 # their payload dataclass, and append the type to this union and to the
 # `_PAYLOAD_BY_KIND` dispatch in `TickEvent.from_dict`.
@@ -1014,6 +1048,7 @@ TickEventPayload = (
     | LearningSuppressionChangePayload
     | AutoPerturbStatePayload
     | BoundaryUpdatePayload
+    | ControllerReloadPayload
 )
 
 
@@ -1026,6 +1061,7 @@ _PAYLOAD_BY_KIND: dict[TickEventKind, type[TickEventPayload]] = {
     TickEventKind.LEARNING_SUPPRESSION_CHANGE: LearningSuppressionChangePayload,
     TickEventKind.AUTO_PERTURB_STATE: AutoPerturbStatePayload,
     TickEventKind.BOUNDARY_UPDATE: BoundaryUpdatePayload,
+    TickEventKind.CONTROLLER_RELOAD: ControllerReloadPayload,
 }
 
 

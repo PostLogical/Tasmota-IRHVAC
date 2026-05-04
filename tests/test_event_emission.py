@@ -15,6 +15,7 @@ from homeassistant.components.climate.const import HVACMode
 from custom_components.tasmota_irhvac.pi.snapshot import (
     AnomalyDetectedPayload,
     BatchRunPayload,
+    ControllerReloadPayload,
     LearningSuppressionChangePayload,
     ModeChangePayload,
     SetpointChangeUserPayload,
@@ -242,10 +243,48 @@ async def test_maturity_gate_emits_event_on_source_change(
 
 
 @pytest.mark.asyncio
+async def test_controller_reload_emits_once_on_first_tick(
+    hass, setup_pi_integration,
+):
+    """async_added_to_hass stages CONTROLLER_RELOAD; it lands on the first
+    published tick and is consumed (not re-emitted on later ticks).
+    """
+    entry = await setup_pi_integration({"pi_tau_estimate": 60})
+    pi = get_climate_entity(hass, entry)._controller
+
+    # First fire_dispatcher after async_added_to_hass should carry the event.
+    pi.fire_dispatcher()
+    first = _events_of_kind(pi.last_tick, TickEventKind.CONTROLLER_RELOAD)
+    assert len(first) == 1, "CONTROLLER_RELOAD should fire on first published tick"
+    payload = first[0].payload
+    assert isinstance(payload, ControllerReloadPayload)
+    # Fresh setup — no prior stored data, so restored_from_storage=False
+    # and prior_run_age_s is None.
+    assert payload.restored_from_storage is False
+    assert payload.prior_run_age_s is None
+    # Reason is one of the documented strings.
+    assert payload.reason in {"ha_start", "integration_reload"}
+
+    # A pi_tick clears the per-tick event accumulator. After that, no
+    # CONTROLLER_RELOAD should appear on subsequent ticks.
+    await pi.pi_tick()
+    pi.fire_dispatcher()
+    second = _events_of_kind(pi.last_tick, TickEventKind.CONTROLLER_RELOAD)
+    assert second == [], "CONTROLLER_RELOAD must be one-shot per init"
+
+
+@pytest.mark.asyncio
 async def test_pending_events_cleared_each_tick(hass, setup_pi_integration):
     """pi_tick clears the pending-events buffer at the start of each tick."""
     entry = await setup_pi_integration({"pi_tau_estimate": 60})
     pi = get_climate_entity(hass, entry)._controller
+
+    # Drain any pre-staged init events (e.g. CONTROLLER_RELOAD) so this
+    # test exercises only the manual-emit clearing semantics.
+    await pi.pi_tick()
+    pi.fire_dispatcher()
+    await pi.pi_tick()
+    pi._pending_events.clear()
 
     pi._emit_event(
         TickEventKind.MODE_CHANGE,

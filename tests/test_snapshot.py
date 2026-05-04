@@ -19,6 +19,7 @@ from custom_components.tasmota_irhvac.pi.snapshot import (
     BatchRunPayload,
     BoundaryUpdatePayload,
     ControllerConfig,
+    ControllerReloadPayload,
     CorrelatedPair,
     DiagnosticsBundle,
     DriftCoefficient,
@@ -344,6 +345,31 @@ def test_tick_event_boundary_update_roundtrip():
         payload=BoundaryUpdatePayload(
             posterior_mean_before=20.5, posterior_mean_after=21.0,
             posterior_std=0.3, n_observations=12, confident=True,
+        ),
+    )
+    assert TickEvent.from_dict(e.to_dict()) == e
+
+
+def test_tick_event_controller_reload_roundtrip():
+    e = TickEvent(
+        kind=TickEventKind.CONTROLLER_RELOAD,
+        payload=ControllerReloadPayload(
+            reason="integration_reload",
+            restored_from_storage=True,
+            prior_run_age_s=42.5,
+        ),
+    )
+    assert TickEvent.from_dict(e.to_dict()) == e
+
+
+def test_tick_event_controller_reload_roundtrip_unknown_age():
+    """prior_run_age_s=None survives serialization (legacy stored data)."""
+    e = TickEvent(
+        kind=TickEventKind.CONTROLLER_RELOAD,
+        payload=ControllerReloadPayload(
+            reason="ha_start",
+            restored_from_storage=False,
+            prior_run_age_s=None,
         ),
     )
     assert TickEvent.from_dict(e.to_dict()) == e
