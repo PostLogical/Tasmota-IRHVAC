@@ -113,6 +113,7 @@ from .const import (
     CONF_PI_AUTO_PERTURB_ENABLED,
     CONF_PI_AUTO_PERTURB_WINDOW_START,
     CONF_PI_AUTO_PERTURB_WINDOW_END,
+    CONF_PI_AUTO_PERTURB_RESEARCH_MODE,
     CONF_PI_BATCH_WLS_ENABLED,
     CONF_PI_FF_ENABLED,
     CONF_PI_INTERCEPT_SEED_COOL,
@@ -490,6 +491,7 @@ OPTIONS_PI_ADVANCED_SCHEMA = vol.Schema(
         vol.Optional(CONF_PI_AUTO_PERTURB_WINDOW_END): NumberSelector(
             NumberSelectorConfig(min=0, max=23, step=1, mode=NumberSelectorMode.BOX)
         ),
+        vol.Optional(CONF_PI_AUTO_PERTURB_RESEARCH_MODE, default=False): BooleanSelector(),
     }
 )
 

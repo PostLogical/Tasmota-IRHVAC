@@ -13,8 +13,10 @@ from custom_components.tasmota_irhvac.pi.auto_perturbation import (
     CONVERGENCE_DELTA,
     CONVERGENCE_STOP,
     FORCE_TIMEOUT_S,
+    INFORMATIVE_DELTA_C,
     MAX_HOLD_S,
     MIN_HOLD_S,
+    RESEARCH_STALL_CAP,
     STALL_CAP,
     STEADY_STATE_DWELL_S,
     AutoPerturbation,
@@ -33,6 +35,7 @@ def _tick(ap: AutoPerturbation, now: float, **kw) -> float:
     """Tick with all steady-state conditions met."""
     defaults = dict(
         now_mono=now,
+        room_temp=20.0,
         room_temp_rate=0.0,
         integral_change_output=0.0,
         ff_settled_ticks=10,
@@ -69,7 +72,13 @@ def _enter_step(ap: AutoPerturbation, t: float = 0.0, **kw) -> float:
 
 
 def _complete_step(ap: AutoPerturbation, t: float, **kw) -> float:
-    """Advance STEP_ACTIVE past min hold + dwell to RESTORE. Returns t."""
+    """Advance STEP_ACTIVE past min hold + dwell to RESTORE.
+
+    Default simulates room moving 1°C in response to the perturbation
+    (high-quality cycle). Pass `room_temp=20.0` to simulate no movement
+    (low-quality cycle).
+    """
+    kw.setdefault("room_temp", 21.0)
     t += MIN_HOLD_S + 60.0
     _tick_unsteady(ap, t, **kw)
     t += 60.0
@@ -245,6 +254,129 @@ class TestConvergence:
         _enter_step(ap, plant_confidence=0.2)
 
 
+# ── Research mode ────────────────────────────────────────────────────
+
+class TestResearchMode:
+    """Path A0 research-mode behavior: bypass convergence gate, higher stall cap."""
+
+    def test_research_mode_default_off(self):
+        ap = _make()
+        assert ap.research_mode is False
+
+    def test_research_mode_property_reflects_init(self):
+        ap = _make(research_mode=True)
+        assert ap.research_mode is True
+
+    def test_research_mode_bypasses_convergence(self):
+        """High plant_confidence still permits perturbation in research mode."""
+        ap = _make(research_mode=True)
+        _enter_step(ap, plant_confidence=0.99)
+
+    def test_research_mode_uses_higher_stall_cap(self):
+        """Stall does not trigger after STALL_CAP cycles in research mode."""
+        ap = _make(research_mode=True)
+        t = 0.0
+        for _ in range(STALL_CAP + 5):  # exceed default cap
+            _, t = _run_cycle(ap, t, plant_confidence=0.3)
+        assert ap.state == PerturbState.IDLE
+        assert ap.cycles_without_improvement == STALL_CAP + 5
+
+    def test_research_mode_eventually_stalls(self):
+        """Research mode still stalls — at the higher cap."""
+        ap = _make(research_mode=True)
+        t = 0.0
+        for _ in range(RESEARCH_STALL_CAP):
+            _, t = _run_cycle(ap, t, plant_confidence=0.3)
+        assert ap.state == PerturbState.STALLED
+
+    def test_default_mode_unchanged_stall_cap(self):
+        """Regression: default mode still stalls at STALL_CAP."""
+        ap = _make()
+        t = 0.0
+        for _ in range(STALL_CAP):
+            _, t = _run_cycle(ap, t, plant_confidence=0.3)
+        assert ap.state == PerturbState.STALLED
+
+
+# ── Data-quality gate (A0.3) ─────────────────────────────────────────
+
+class TestDataQuality:
+    """Cycles where room_temp barely moved are flagged low-quality and don't
+    increment the stall counter — unlucky timing shouldn't penalize the system.
+    """
+
+    def test_low_quality_does_not_increment_stall(self):
+        """Cycle with no room movement: completes but skips stall counter."""
+        ap = _make()
+        t = 0.0
+        # Step starts at 20.0, restore also at 20.0 → Δ=0 < threshold
+        t = _enter_step(ap, t, room_temp=20.0)
+        t = _complete_step(ap, t, room_temp=20.0)
+        t = _run_dwell(ap, t, room_temp=20.0)
+        assert ap.state == PerturbState.IDLE
+        assert ap.cycles_completed == 1
+        assert ap.cycles_without_improvement == 0
+        assert ap.cycles_low_quality == 1
+
+    def test_high_quality_no_improvement_increments_stall(self):
+        """Cycle with movement but no plant_confidence improvement: stall counter +1."""
+        ap = _make()
+        _, _ = _run_cycle(ap, 0.0, plant_confidence=0.3)
+        assert ap.cycles_completed == 1
+        assert ap.cycles_without_improvement == 1
+        assert ap.cycles_low_quality == 0
+
+    def test_low_quality_cycles_dont_cause_stall(self):
+        """Many low-quality cycles in a row never reach STALLED state."""
+        ap = _make()
+        t = 0.0
+        for _ in range(STALL_CAP + 3):
+            t = _enter_step(ap, t, room_temp=20.0)
+            t = _complete_step(ap, t, room_temp=20.0)
+            t = _run_dwell(ap, t, room_temp=20.0)
+        assert ap.state == PerturbState.IDLE
+        assert ap.cycles_low_quality == STALL_CAP + 3
+        assert ap.cycles_without_improvement == 0
+
+    def test_just_above_threshold_is_high_quality(self):
+        """Δ slightly above INFORMATIVE_DELTA_C is treated as informative."""
+        ap = _make()
+        # 0.5°C movement is above 0.4 threshold
+        t = _enter_step(ap, 0.0, room_temp=20.0)
+        t = _complete_step(ap, t, room_temp=20.0 + INFORMATIVE_DELTA_C + 0.1)
+        t = _run_dwell(ap, t, room_temp=20.5)
+        assert ap.cycles_low_quality == 0
+        assert ap.cycles_without_improvement == 1  # no plant_confidence improvement
+
+    def test_just_below_threshold_is_low_quality(self):
+        """Δ just below INFORMATIVE_DELTA_C is flagged low-quality."""
+        ap = _make()
+        t = _enter_step(ap, 0.0, room_temp=20.0)
+        t = _complete_step(ap, t, room_temp=20.0 + INFORMATIVE_DELTA_C - 0.01)
+        t = _run_dwell(ap, t, room_temp=20.39)
+        assert ap.cycles_low_quality == 1
+
+    def test_low_quality_persists_across_restart(self):
+        """cycles_low_quality round-trips through as_dict / restore."""
+        ap = _make()
+        ap._cycles_low_quality = 7
+        ap2 = _make()
+        ap2.restore(ap.as_dict())
+        assert ap2.cycles_low_quality == 7
+
+    def test_missing_snapshots_treated_as_high_quality(self):
+        """Defensive: if snapshots aren't set (shouldn't happen via tick flow),
+        cycle is treated as high-quality so we don't accidentally suppress the
+        stall counter on stale state."""
+        ap = _make()
+        ap._step_start_temp = None
+        ap._restore_start_temp = 20.0
+        assert ap._cycle_was_low_quality() is False
+        ap._step_start_temp = 20.0
+        ap._restore_start_temp = None
+        assert ap._cycle_was_low_quality() is False
+
+
 # ── Stall detection ──────────────────────────────────────────────────
 
 class TestStall:
@@ -407,6 +539,14 @@ class TestPIControllerIntegration:
     def test_auto_perturb_disabled_by_default(self):
         entity = FakePIEntity(make_pi_config())
         assert entity._pi._auto_perturb.enabled is False
+
+    def test_research_mode_disabled_by_default(self):
+        entity = self._make_entity()
+        assert entity._pi._auto_perturb.research_mode is False
+
+    def test_research_mode_plumbed_from_config(self):
+        entity = self._make_entity(pi_auto_perturb_research_mode=True)
+        assert entity._pi._auto_perturb.research_mode is True
 
     def test_health_status_includes_perturbation_state(self):
         entity = self._make_entity()

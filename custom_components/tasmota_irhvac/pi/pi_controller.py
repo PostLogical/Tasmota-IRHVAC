@@ -81,6 +81,7 @@ from ..const import (
     CONF_PI_AUTO_PERTURB_ENABLED,
     CONF_PI_AUTO_PERTURB_WINDOW_START,
     CONF_PI_AUTO_PERTURB_WINDOW_END,
+    CONF_PI_AUTO_PERTURB_RESEARCH_MODE,
     CONF_PI_BATCH_WLS_ENABLED,
     CONF_PI_FF_ENABLED,
     CONF_PI_PLANT_ID_ENABLED,
@@ -306,6 +307,7 @@ class PIController:
             enabled=config.get(CONF_PI_AUTO_PERTURB_ENABLED, False),
             window_start=config.get(CONF_PI_AUTO_PERTURB_WINDOW_START),
             window_end=config.get(CONF_PI_AUTO_PERTURB_WINDOW_END),
+            research_mode=config.get(CONF_PI_AUTO_PERTURB_RESEARCH_MODE, False),
         )
 
         # Active probing for HP contribution regime boundary (Layer 3).
@@ -574,7 +576,7 @@ class PIController:
         # Track previous HVAC mode to detect mode changes — over-temp regime
         # state and the latch are direction-aware (heat vs cool), so they must
         # be cleared when the mode flips to avoid stale state.
-        self._prev_hvac_mode = None
+        self._prev_hvac_mode: HVACMode | None = None
 
         # Hysteretic state for the cal_midpoint gate: persisted across ticks
         # so the per-tick `delta vs cal_midpoint` evaluation doesn't chatter
@@ -707,8 +709,8 @@ class PIController:
         # readers locate reset boundaries without scraping HA logs.
         self._pending_reload_payload: ControllerReloadPayload | None = None
         # Transition-detection state for emitter sites that compare
-        # current vs prior values (mode, suppression, auto-perturb, etc.)
-        self._prev_hvac_mode: HVACMode | None = None
+        # current vs prior values (mode, suppression, auto-perturb, etc.).
+        # _prev_hvac_mode is initialized earlier; the rest are emitter-only.
         self._prev_disturbance_suppress_active: bool = False
         self._prev_auto_perturb_state: str | None = None
         self._prev_boundary_posterior_mean: float | None = None
@@ -4592,6 +4594,7 @@ class PIController:
         is_heating = e._attr_hvac_mode == HVACMode.HEAT
         desired_c += self._auto_perturb.tick(
             now_mono=now_mono,
+            room_temp=current_c,
             room_temp_rate=self._room_temp_rate,
             integral_change_output=(
                 abs(self._pi_integral - self._prev_integral_for_oodb) * self._pi_ki
@@ -4868,7 +4871,7 @@ class PIController:
         probe_result = self._regime_probe.tick(
             now_mono=now_mono,
             room_temp_rate=self._room_temp_rate,
-            hp_setpoint=self._hp_setpoint,
+            hp_setpoint=int(self._hp_setpoint),
             current_c=current_c,
             min_temp_c=self._min_temp_c,
             cal_min=cal_min,
@@ -5280,7 +5283,7 @@ class PIController:
                     # Boundary estimator Layer 2: record setpoint change
                     self._boundary_estimator.record_setpoint_change(
                         mono_time=now_mono,
-                        old_setpoint=old_setpoint,
+                        old_setpoint=int(old_setpoint),
                         new_setpoint=new_setpoint,
                         current_c=current_c,
                         room_rate=self._room_temp_rate,

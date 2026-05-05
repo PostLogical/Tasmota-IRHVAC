@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from homeassistant.core import Event, EventStateChangedData, State
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
-    from homeassistant.helpers.event import CALLBACK_TYPE  # type: ignore[attr-defined]
+    from homeassistant.helpers.event import CALLBACK_TYPE
     from homeassistant.helpers.storage import Store
     from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
@@ -73,7 +73,7 @@ from homeassistant.const import (
     STATE_UNKNOWN,
     UnitOfTemperature,
 )
-from homeassistant.core import HomeAssistant, cached_property, callback  # type: ignore[attr-defined]
+from homeassistant.core import HomeAssistant, cached_property, callback
 from homeassistant.helpers import event as ha_event
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -1333,7 +1333,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         for unsubscribe in self._unsubscribes:
             unsubscribe()
 
-    def async_write_ha_state(self) -> None:
+    def async_write_ha_state(self) -> None:  # type: ignore[misc]
         """Write state and fire PI dispatcher signal for companion sensors."""
         super().async_write_ha_state()
         self._controller.fire_dispatcher()

@@ -34,6 +34,8 @@ MAX_HOLD_S: float = 10800.0  # 3 hr maximum before advancing anyway
 CONVERGENCE_STOP: float = 0.9  # stop perturbing above this confidence
 CONVERGENCE_DELTA: float = 0.05  # minimum improvement to reset stall counter
 STALL_CAP: int = 5  # cycles without improvement before stalling
+RESEARCH_STALL_CAP: int = 30  # cycles without improvement before stalling, research mode
+INFORMATIVE_DELTA_C: float = 0.4  # ≈4×σ_v: cycles below this don't count toward stall
 FORCE_TIMEOUT_S: float = 3600.0  # 60 min timeout for perturb_now
 
 
@@ -61,10 +63,13 @@ class AutoPerturbation:
         enabled: bool = False,
         window_start: int | None = None,
         window_end: int | None = None,
+        research_mode: bool = False,
     ) -> None:
         self._enabled = enabled
         self._window_start = window_start
         self._window_end = window_end
+        self._research_mode = research_mode
+        self._stall_cap = RESEARCH_STALL_CAP if research_mode else STALL_CAP
 
         self._state = PerturbState.IDLE
         self._direction: float = 1.0  # +1 or -1, flips each cycle
@@ -74,7 +79,10 @@ class AutoPerturbation:
 
         self._cycles_completed: int = 0
         self._cycles_without_improvement: int = 0
+        self._cycles_low_quality: int = 0
         self._confidence_snapshot: float = 0.0
+        self._step_start_temp: float | None = None
+        self._restore_start_temp: float | None = None
 
     # ── Properties ───────────────────────────────────────────────────
 
@@ -98,14 +106,23 @@ class AutoPerturbation:
         return self._cycles_without_improvement
 
     @property
+    def cycles_low_quality(self) -> int:
+        return self._cycles_low_quality
+
+    @property
     def enabled(self) -> bool:
         return self._enabled
+
+    @property
+    def research_mode(self) -> bool:
+        return self._research_mode
 
     # ── Main tick ────────────────────────────────────────────────────
 
     def tick(
         self,
         now_mono: float,
+        room_temp: float,
         room_temp_rate: float,
         integral_change_output: float,
         ff_settled_ticks: int,
@@ -134,12 +151,15 @@ class AutoPerturbation:
 
         # ── IDLE: wait for steady state, then start a cycle ──────
         if self._state == PerturbState.IDLE:
+            convergence_ok = (
+                self._research_mode or plant_confidence < CONVERGENCE_STOP
+            )
             if (
                 self._dwell_met(now_mono, conditions_met)
-                and plant_confidence < CONVERGENCE_STOP
+                and convergence_ok
                 and self._in_window(current_hour)
             ):
-                self._begin_step(now_mono, mode_heating, plant_confidence)
+                self._begin_step(now_mono, mode_heating, plant_confidence, room_temp)
 
         # ── WAITING (perturb_now): like IDLE but with timeout ────
         elif self._state == PerturbState.WAITING:
@@ -149,7 +169,7 @@ class AutoPerturbation:
                 _LOGGER.info("Auto-perturbation: perturb_now timed out")
                 self._reset()
             elif self._dwell_met(now_mono, conditions_met):
-                self._begin_step(now_mono, mode_heating, plant_confidence)
+                self._begin_step(now_mono, mode_heating, plant_confidence, room_temp)
 
         # ── STEP_ACTIVE: hold the offset ─────────────────────────
         elif self._state == PerturbState.STEP_ACTIVE:
@@ -160,10 +180,10 @@ class AutoPerturbation:
                 elapsed = now_mono - self._step_start
                 if elapsed >= MAX_HOLD_S:
                     _LOGGER.info("Auto-perturbation: max hold (%.0f min)", elapsed / 60)
-                    self._begin_restore()
+                    self._begin_restore(room_temp)
                 elif elapsed >= MIN_HOLD_S and self._dwell_met(now_mono, conditions_met):
                     _LOGGER.info("Auto-perturbation: settled after %.0f min", elapsed / 60)
-                    self._begin_restore()
+                    self._begin_restore(room_temp)
                 elif elapsed < MIN_HOLD_S:
                     self._steady_since = None  # don't count dwell before min hold
 
@@ -183,6 +203,7 @@ class AutoPerturbation:
 
     def _begin_step(
         self, now_mono: float, mode_heating: bool, plant_confidence: float,
+        room_temp: float,
     ) -> None:
         direction = self._direction
         if not mode_heating:
@@ -192,6 +213,8 @@ class AutoPerturbation:
         self._step_start = now_mono
         self._steady_since = None
         self._confidence_snapshot = plant_confidence
+        self._step_start_temp = room_temp
+        self._restore_start_temp = None
         _LOGGER.info(
             "Auto-perturbation: %+.0f°C offset (cycle %d, %s)",
             direction * AMPLITUDE_C,
@@ -199,23 +222,34 @@ class AutoPerturbation:
             "heating" if mode_heating else "cooling",
         )
 
-    def _begin_restore(self) -> None:
+    def _begin_restore(self, room_temp: float) -> None:
         self._state = PerturbState.RESTORE
         self._steady_since = None
+        self._restore_start_temp = room_temp
 
     def _finish_cycle(self, plant_confidence: float) -> None:
         self._cycles_completed += 1
         # Alternate direction for next cycle
         self._direction = -self._direction
 
+        low_quality = self._cycle_was_low_quality()
+
         improvement = plant_confidence - self._confidence_snapshot
-        if improvement < CONVERGENCE_DELTA:
+        if low_quality:
+            self._cycles_low_quality += 1
+            delta = abs(self._restore_start_temp - self._step_start_temp)  # type: ignore[operator]
+            _LOGGER.info(
+                "Auto-perturbation: cycle %d done, low-quality (Δ=%.2f°C < %.2f), "
+                "skipped stall counter",
+                self._cycles_completed, delta, INFORMATIVE_DELTA_C,
+            )
+        elif improvement < CONVERGENCE_DELTA:
             self._cycles_without_improvement += 1
             _LOGGER.info(
                 "Auto-perturbation: cycle %d done, no improvement "
                 "(%.2f → %.2f, stall %d/%d)",
                 self._cycles_completed, self._confidence_snapshot,
-                plant_confidence, self._cycles_without_improvement, STALL_CAP,
+                plant_confidence, self._cycles_without_improvement, self._stall_cap,
             )
         else:
             self._cycles_without_improvement = 0
@@ -225,7 +259,7 @@ class AutoPerturbation:
                 plant_confidence,
             )
 
-        if self._cycles_without_improvement >= STALL_CAP:
+        if self._cycles_without_improvement >= self._stall_cap:
             self._state = PerturbState.STALLED
             _LOGGER.warning(
                 "Auto-perturbation: stalled after %d cycles. "
@@ -234,6 +268,16 @@ class AutoPerturbation:
             )
         else:
             self._reset()
+
+    def _cycle_was_low_quality(self) -> bool:
+        """True if the cycle's room-temp Δ is below the informativity threshold.
+
+        Both snapshots must be present; missing snapshots fall back to "high quality"
+        so we don't accidentally suppress the stall counter on stale state.
+        """
+        if self._step_start_temp is None or self._restore_start_temp is None:
+            return False
+        return abs(self._restore_start_temp - self._step_start_temp) < INFORMATIVE_DELTA_C
 
     def _reset(self) -> None:
         """Return to IDLE with clean timing state."""
@@ -333,6 +377,7 @@ class AutoPerturbation:
         return {
             "cycles_completed": self._cycles_completed,
             "cycles_without_improvement": self._cycles_without_improvement,
+            "cycles_low_quality": self._cycles_low_quality,
             "direction": self._direction,
             "confidence_snapshot": self._confidence_snapshot,
         }
@@ -341,7 +386,8 @@ class AutoPerturbation:
         """Restore counters from persisted data."""
         self._cycles_completed = int(data.get("cycles_completed", 0))
         self._cycles_without_improvement = int(data.get("cycles_without_improvement", 0))
+        self._cycles_low_quality = int(data.get("cycles_low_quality", 0))
         self._direction = float(data.get("direction", 1.0))
         self._confidence_snapshot = float(data.get("confidence_snapshot", 0.0))
-        if self._cycles_without_improvement >= STALL_CAP:
+        if self._cycles_without_improvement >= self._stall_cap:
             self._state = PerturbState.STALLED

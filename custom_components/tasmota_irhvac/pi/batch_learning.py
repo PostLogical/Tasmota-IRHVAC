@@ -29,7 +29,7 @@ try:
     from scipy.optimize import minimize_scalar as _minimize_scalar
     _SCIPY_AVAILABLE = True
 except ImportError:
-    _minimize_scalar = None  # type: ignore[assignment]
+    _minimize_scalar = None
     _SCIPY_AVAILABLE = False
 
 from .model_input_manager import tod_features
@@ -302,11 +302,12 @@ def _detect_optimal_tau(
         rows: list[int] = []
         x_input: list[float] = []
         for i in range(n):
-            if filtered[i] is None:
+            val_f = filtered[i]
+            if val_f is None:
                 continue
-            x_val = filtered[i]
+            x_val = val_f
             if delta_from_room:
-                x_val = x_val - observations[i].current_c  # type: ignore[operator]
+                x_val = x_val - observations[i].current_c
             rows.append(i)
             x_input.append(x_val)
 
@@ -428,11 +429,12 @@ def _detect_optimal_tau(
     rows_f: list[int] = []
     x_input_f: list[float] = []
     for i in range(n):
-        if filtered[i] is None:
+        val_f = filtered[i]
+        if val_f is None:
             continue
-        x_val = filtered[i]
+        x_val = val_f
         if delta_from_room:
-            x_val = x_val - observations[i].current_c  # type: ignore[operator]
+            x_val = x_val - observations[i].current_c
         rows_f.append(i)
         x_input_f.append(x_val)
     m_f = len(rows_f)
@@ -1574,11 +1576,12 @@ def weighted_least_squares(
             entity_id = input_entity_ids[feat_idx]
             if entity_id and entity_id in o.raw_readings:
                 # Use filtered value if available, else raw
+                value: float | None
                 if entity_id in _filtered_cache and _filtered_cache[entity_id][k] is not None:
-                    value = _filtered_cache[entity_id][k]  # type: ignore[assignment]
+                    value = _filtered_cache[entity_id][k]
                 else:
                     value = o.raw_readings[entity_id]
-                if m_input.get("delta_from_room"):
+                if value is not None and m_input.get("delta_from_room"):
                     value = value - o.current_c
                 row.append(value)
             else:

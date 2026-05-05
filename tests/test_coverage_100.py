@@ -1001,6 +1001,7 @@ class TestAutoPerturbationCoverageGaps:
         # Tick with is_clamped=True triggers _check_abort → pass on line 174
         result = ap.tick(
             now_mono=time.monotonic(),
+            room_temp=20.0,
             room_temp_rate=0.0,
             integral_change_output=0.0,
             ff_settled_ticks=10,
