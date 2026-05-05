@@ -627,7 +627,7 @@
       "description": "The climate entity is configured with temperature sensor `{entity_id}`, but this entity does not exist. PI control and accurate temperature display require this sensor."
     },
     "slope_divergence": {
-      "title": "Feedforward slope has drifted ({mode})",
+      "title": "{zone_label}: Feedforward slope has drifted ({mode})",
       "description": "Learned {mode} slope: {learned}, configured: {configured} ({drift_pct}% difference). Update your configured slope in Settings → Devices → Configure → PI Controller → {mode_cap} Slope, or press the Save Learned Seeds button to checkpoint all current values.",
       "fix_flow": {
         "step": {
@@ -639,7 +639,7 @@
       }
     },
     "save_seeds": {
-      "title": "Model has converged — review and save learned coefficients",
+      "title": "{zone_label}: Model has converged — review and save learned coefficients",
       "description": "The feedforward model has stabilized. Saving updates the anchor values that the system pulls coefficients toward. Review the learned values below and confirm they make physical sense before saving. Coefficients marked 'uncertain' have high variance and may not be well-determined — saving them anchors the system to a noisy estimate.\n\n{coefficient_summary}",
       "fix_flow": {
         "step": {
@@ -651,19 +651,19 @@
       }
     },
     "high_integral_immature": {
-      "title": "High integral correction (model still learning)",
+      "title": "{zone_label}: High integral correction (model still learning)",
       "description": "The PI integral is compensating with {correction}°C of setpoint adjustment. No action needed — the model is still learning ({count} of ~100 observations). Performance will improve as the model accumulates more data."
     },
     "high_integral_slope_gap": {
-      "title": "High integral correction (slope mismatch)",
+      "title": "{zone_label}: High integral correction (slope mismatch)",
       "description": "Configured {mode} slope: {configured}, learned: {learned}. The integral ({correction}°C correction) is covering this gap. Update your {mode} slope to {learned} in PI Settings to reduce integral load."
     },
     "high_integral_equipment": {
-      "title": "High integral correction (equipment at limits)",
+      "title": "{zone_label}: High integral correction (equipment at limits)",
       "description": "Your heat pump frequently reaches maximum output but cannot maintain the target temperature. This may indicate undersized equipment or a need for professional HVAC service. You can also configure a supplemental heat source in the integration settings."
     },
     "high_integral_tuning": {
-      "title": "High integral correction (tuning needed)",
+      "title": "{zone_label}: High integral correction (tuning needed)",
       "description": "Integral correction averages {correction}°C. Consider reducing Ki from {current_ki} to {suggested_ki} in PI Settings.",
       "fix_flow": {
         "step": {
@@ -675,31 +675,31 @@
       }
     },
     "model_drift": {
-      "title": "Persistent model drift on {coeff_name}",
+      "title": "{zone_label}: Persistent model drift on {coeff_name}",
       "description": "The batch model has corrected {coeff_name} {direction} for {count} consecutive cycles, suggesting a physical change. {suggestion} You can call the reset_ff_seeds service to re-learn, or flush the observation buffer to start fresh."
     },
     "intercept_absorbing": {
-      "title": "Intercept absorbing {absorbed_name} effect",
+      "title": "{zone_label}: Intercept absorbing {absorbed_name} effect",
       "description": "The intercept has grown to {intercept_value}°C, absorbing the effect of {absorbed_name} (stuck at {absorbed_clamp}). Call the reset_ff_seeds service to re-learn both coefficients. If {absorbed_name} returns to its clamp, consider widening its range in PI Settings."
     },
     "residual_pattern": {
-      "title": "Unmodeled disturbance detected ({time_range})",
+      "title": "{zone_label}: Unmodeled disturbance detected ({time_range})",
       "description": "Residuals are consistently {direction} ({mean_residual}°C) between {time_range} across {n_observations} observations. This suggests {cause_hint}. Consider adding a model input for this source."
     },
     "multicollinearity": {
-      "title": "Highly correlated model inputs",
+      "title": "{zone_label}: Highly correlated model inputs",
       "description": "The information matrix condition number is {condition_number}, indicating multicollinearity. Correlated features: {pairs}. This may cause coefficient estimates to shift between batch cycles. This often resolves on its own as the system sees more varied conditions (e.g. different weather, time of day). No action needed unless coefficients are visibly unstable."
     },
     "freeze_impact": {
-      "title": "Frozen coefficient {coeff_name} is degrading model fit",
+      "title": "{zone_label}: Frozen coefficient {coeff_name} is degrading model fit",
       "description": "Since freezing {coeff_name} ({mode} mode), batch residual RMS has increased from {rms_at_freeze} to {current_rms} (+{increase_pct}%). The model may need this coefficient to track a real change. Consider unfreezing it, or updating its value with the set_coefficient service and saving seeds."
     },
     "frequent_exclusions": {
-      "title": "Consider adding a model input or using suppress_learning",
+      "title": "{zone_label}: Consider adding a model input or using suppress_learning",
       "description": "You have excluded observations {count} times. If a recurring event causes these anomalies, consider:\n\n1. Adding a model input with a gate entity (e.g., a door/window binary sensor) to teach the model this pattern\n2. Using the suppress_learning entity before the event occurs\n3. Setting up a timer-based automation: suppress learning for N hours when the event starts"
     },
     "anomalous_observation": {
-      "title": "Unusual temperature deviation ({time_range})",
+      "title": "{zone_label}: Unusual temperature deviation ({time_range})",
       "description": "Detected {direction} (mean residual: {mean_residual}°C, severity: {peak_cusum}). This could indicate an unmodeled heat source or sink such as open windows, cooking, or a space heater.\n\nExcluding these observations prevents them from biasing the model. Dismissing keeps them in the learning buffer.",
       "fix_flow": {
         "step": {
@@ -711,7 +711,7 @@
       }
     },
     "auto_perturb_stall": {
-      "title": "Plant identification stalled ({mode})",
+      "title": "{zone_label}: Plant identification stalled ({mode})",
       "description": "Auto-perturbation completed {cycles} cycles without meaningful improvement in plant identification confidence. This may indicate insufficient excitation, an unmodeled disturbance, or sensor placement issues. Consider running a full plant test (identify_plant service) or reviewing model inputs.",
       "fix_flow": {
         "step": {
@@ -723,7 +723,7 @@
       }
     },
     "outdoor_temp_unavailable": {
-      "title": "Outdoor temperature sensor unavailable",
+      "title": "{zone_label}: Outdoor temperature sensor unavailable",
       "description": "Sensor `{sensor}` has been unavailable for an extended period. Feedforward learning, observation recording, and plant identification are paused. The controller is running on PI feedback only with a frozen FF offset. Check the sensor connection and entity status."
     }
   },

@@ -147,6 +147,7 @@ from .snapshot import (
     HealthSnapshot,
     LagFilterSnapshot,
     LagFilterState,
+    LagTauDiagnostic as LagTauDiagnosticSnapshot,
     LearningSnapshot,
     LearningSuppressionChangePayload,
     LearningSuppressionSnapshot,
@@ -661,6 +662,15 @@ class PIController:
         self._last_unlock_evaluation: list[UnlockEvaluationRecord] = []
         self._has_had_stable_batch: bool = False
         self._tuning_alert_counters: dict[str, int] = {}
+        # Issue IDs that we attempted to create with should_create=True on
+        # the previous from_batch=True invocation of _check_tuning_health.
+        # Used to emit explicit clears for issues that *vanish* between
+        # batch cycles (e.g., a residual_pattern hour-window that drops
+        # below detection threshold, or a model_drift coefficient that
+        # stops drifting). Without this, HA's issue registry retains the
+        # stale issue indefinitely because the per-issue clear branches
+        # only fire while the underlying detection is still tripping.
+        self._previously_active_issue_ids: set[str] = set()
         self._tuning_alert_snapshots: dict[str, float] = {}
 
         # Track last active mode for passive tick buffer selection
@@ -1736,6 +1746,10 @@ class PIController:
             # Convert held_features back to set (serialized as list)
             if "held_features" in br and isinstance(br["held_features"], list):
                 br["held_features"] = set(br["held_features"])
+            # Diagnostics are transient observability for debug bundles —
+            # asdict() flattens LagTauDiagnostic to dicts on save, so drop
+            # the field on restore and let it repopulate on the next batch.
+            br.pop("detected_tau_diagnostics", None)
             self._last_batch_result = BatchResult(**br)
             self._metrics.batch_model_rms = self._last_batch_result.residual_rms
         if data.last_batch_wallclock:
@@ -2538,7 +2552,14 @@ class PIController:
         )
 
         entry_id = getattr(self._entity, "_config_entry_id", "unknown")
+        # Zone label injected into every repair placeholders dict so the HA
+        # Repairs UI shows which entity each issue belongs to. Multi-zone
+        # installs were previously rendering identical titles across zones.
+        zone_label = getattr(self._entity, "entity_id", "") or "unknown"
         issues: list[tuple[str, str, str, dict[str, str], bool, bool, dict[str, Any] | None]] = []
+
+        def _attach_zone(placeholders: dict[str, str]) -> dict[str, str]:
+            return {**placeholders, "zone_label": zone_label}
 
         if not self._pi_enabled:
             return issues
@@ -2581,7 +2602,7 @@ class PIController:
                     f"{key}_{entry_id}_{mode}",
                     "warning",
                     key,
-                    placeholders,
+                    _attach_zone(placeholders),
                     should_create,
                     should_create, fix_data,
                 ))
@@ -2631,7 +2652,7 @@ class PIController:
                 f"{key}_{entry_id}",
                 "warning",
                 key,
-                placeholders,
+                _attach_zone(placeholders),
                 should_create,
                 should_create,  # is_fixable only when creating
                 fix_data,
@@ -2679,7 +2700,7 @@ class PIController:
                 f"high_integral_{entry_id}",
                 "warning",
                 key,
-                placeholders,
+                _attach_zone(placeholders),
                 should_create,
                 is_fixable, fix_data,
             ))
@@ -2695,7 +2716,7 @@ class PIController:
                 f"{key}_{entry_id}_{coeff_name}",
                 "warning",
                 key,
-                placeholders,
+                _attach_zone(placeholders),
                 should_create,
                 False, None,
             ))
@@ -2732,7 +2753,7 @@ class PIController:
                     f"{key}_{entry_id}_{mode_label}",
                     "warning",
                     key,
-                    placeholders,
+                    _attach_zone(placeholders),
                     should_create,
                     False, None,
                 ))
@@ -2759,7 +2780,7 @@ class PIController:
                     f"{key}_{entry_id}_{pattern.start_hour}_{pattern.end_hour}",
                     "warning",
                     key,
-                    placeholders,
+                    _attach_zone(placeholders),
                     should_create,
                     False, None,
                 ))
@@ -2791,7 +2812,7 @@ class PIController:
                     f"{key}_{entry_id}",
                     "warning",
                     key,
-                    placeholders,
+                    _attach_zone(placeholders),
                     should_create,
                     False, None,
                 ))
@@ -2836,7 +2857,7 @@ class PIController:
                             f"{key}_{entry_id}_{mode_label}_{name}",
                             "warning",
                             key,
-                            placeholders,
+                            _attach_zone(placeholders),
                             should_create,
                             False, None,
                         ))
@@ -2855,12 +2876,12 @@ class PIController:
                 issue_key,
                 "warning",
                 "anomalous_observation",
-                {
+                _attach_zone({
                     "time_range": time_range,
                     "mean_residual": f"{event.mean_residual:+.2f}",
                     "direction": direction,
                     "peak_cusum": f"{event.peak_cusum:.1f}",
-                },
+                }),
                 True,
                 True,
                 {
@@ -2882,7 +2903,7 @@ class PIController:
                 f"frequent_exclusions_{entry_id}",
                 "warning",
                 "frequent_exclusions",
-                {"count": str(self._exclusion_count)},
+                _attach_zone({"count": str(self._exclusion_count)}),
                 True,
                 False, None,
             ))
@@ -2891,7 +2912,11 @@ class PIController:
         hvac_mode = "heat" if self._entity._attr_hvac_mode == HVACMode.HEAT else "cool"
         stall_issue = self._auto_perturb.get_stall_issue(entry_id, hvac_mode)
         if stall_issue is not None:
-            issues.append(stall_issue)
+            issues.append((
+                stall_issue[0], stall_issue[1], stall_issue[2],
+                _attach_zone(stall_issue[3]),
+                stall_issue[4], stall_issue[5], stall_issue[6],
+            ))
 
         # ── Outdoor temp sensor unavailability ────────────────────────
         # Only relevant when an outdoor temp sensor is configured.
@@ -2912,11 +2937,43 @@ class PIController:
                 f"outdoor_temp_unavailable_{entry_id}",
                 "warning",
                 "outdoor_temp_unavailable",
-                {"sensor": self._inputs.outdoor_temp_sensor},
+                _attach_zone({"sensor": self._inputs.outdoor_temp_sensor}),
                 outdoor_unavail,
                 outdoor_unavail,
                 None,
             ))
+
+        # ── Stale-issue cleanup ──────────────────────────────────────
+        # Some repair types (residual_pattern, model_drift) only emit a
+        # tuple while their underlying detection is currently tripping.
+        # When the trip condition vanishes (a pattern drops below
+        # threshold; a coefficient stops drifting), the per-issue clear
+        # branch is never reached because the for-loop doesn't iterate
+        # over the now-absent key. Without explicit cleanup, HA's issue
+        # registry keeps the stale issue indefinitely.
+        #
+        # Only run on from_batch=True so HA-restart-time evaluations
+        # (which may legitimately not fire issues yet pending the first
+        # batch cycle) don't wipe valid issues from the registry.
+        if from_batch:
+            current_active_ids: set[str] = {
+                entry[0] for entry in issues if entry[4]  # should_create == True
+            }
+            stale_ids = self._previously_active_issue_ids - current_active_ids
+            for stale_id in stale_ids:
+                # Translation key is unused by the clear path
+                # (`ir.async_delete_issue` only needs issue_id), but the
+                # tuple shape is fixed by the consumer in __init__.py.
+                issues.append((
+                    stale_id,
+                    "warning",
+                    "",
+                    {},
+                    False,
+                    False,
+                    None,
+                ))
+            self._previously_active_issue_ids = current_active_ids
 
         return issues
 
@@ -3551,6 +3608,20 @@ class PIController:
                 detected_tau=dict(br.detected_tau),
                 plant_snapshot=dict(br.plant_snapshot),
                 unlock_evaluation=tuple(self._last_unlock_evaluation),
+                detected_tau_diagnostics={
+                    name: LagTauDiagnosticSnapshot(
+                        tau=round(d.tau, 1),
+                        tau_opt_raw=round(d.tau_opt_raw, 1),
+                        bic_gain=round(d.bic_gain, 3),
+                        bic_threshold=round(d.bic_threshold, 3),
+                        r2_improvement=round(d.r2_improvement, 4),
+                        beta_at_tau=round(d.beta_at_tau, 4),
+                        n_eff=d.n_eff,
+                        accepted=d.accepted,
+                        reject_reason=d.reject_reason,
+                    )
+                    for name, d in br.detected_tau_diagnostics.items()
+                },
             )
 
         # Observation buffer snapshots (light fields only — multicollinearity

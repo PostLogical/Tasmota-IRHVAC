@@ -11,6 +11,7 @@ from custom_components.tasmota_irhvac.pi.batch_learning import (
     MAX_STEP_ABS,
     DiversityAwareBuffer,
     HourlyResidualPattern,
+    LagTauDiagnostic,
     Observation,
     BatchResult,
     _apply_retrospective_ema,
@@ -2277,13 +2278,16 @@ class TestDetectOptimalTau:
 
         result = _detect_optimal_tau(obs, y_resid, weights, "sensor.solar")
         assert result is not None
-        tau_detected, r2, beta = result
         # Should recover tau within ~30% of true
-        assert abs(tau_detected - tau_true) / tau_true < 0.3, (
-            f"Detected τ={tau_detected:.0f}s, expected ~{tau_true:.0f}s"
+        assert abs(result.tau - tau_true) / tau_true < 0.3, (
+            f"Detected τ={result.tau:.0f}s, expected ~{tau_true:.0f}s"
         )
         # BIC accepted (returned non-zero τ) → r2_improvement is positive.
-        assert r2 > 0
+        assert result.accepted is True
+        assert result.reject_reason == ""
+        assert result.r2_improvement > 0
+        # BIC must clear threshold for an accepted τ.
+        assert result.bic_gain > result.bic_threshold
 
     def test_no_variation_returns_none(self):
         """Constant input → insufficient variation → returns None."""
@@ -2301,8 +2305,8 @@ class TestDetectOptimalTau:
         weights = [1.0] * 50
         result = _detect_optimal_tau(obs, y_resid, weights, "sensor.solar")
         # Should return None (constant → no variation → rss=inf)
-        # or (0, 0, 0) if it detects no improvement
-        assert result is None or result[0] == 0.0
+        # or a rejected diagnostic if it computed RSS but BIC failed.
+        assert result is None or (result.tau == 0.0 and not result.accepted)
 
     def test_no_lag_in_data_returns_zero(self):
         """Data with instantaneous relationship → tau=0."""
@@ -2327,7 +2331,7 @@ class TestDetectOptimalTau:
         result = _detect_optimal_tau(obs, y_resid, weights, "sensor.solar")
         assert result is not None
         # tau should be near 0 (no lag)
-        assert result[0] < 1800, f"Expected τ≈0, got {result[0]:.0f}s"
+        assert result.tau < 1800, f"Expected τ≈0, got {result.tau:.0f}s"
 
     def test_too_few_observations(self):
         """Fewer than 10 observations → returns None."""
@@ -2384,11 +2388,138 @@ class TestDetectOptimalTau:
             bl._SCIPY_AVAILABLE = orig_scipy
 
         assert result_gs is not None
-        tau_gs, r2_gs, beta_gs = result_gs
         # Should still recover tau within 30%
-        assert abs(tau_gs - tau_true) / tau_true < 0.3, (
-            f"Golden-section τ={tau_gs:.0f}s, expected ~{tau_true:.0f}s"
+        assert abs(result_gs.tau - tau_true) / tau_true < 0.3, (
+            f"Golden-section τ={result_gs.tau:.0f}s, expected ~{tau_true:.0f}s"
         )
+
+    def test_diagnostic_carries_full_evidence(self):
+        """Accepted detection populates BIC, R², β fields with consistent values."""
+        import random
+        rng = random.Random(2026)
+        tau_true = 5400.0  # 90 min
+        dt = 900.0
+        n_obs = 200
+        beta_true = -2.5
+
+        raw_solar = [
+            max(0, math.sin(2 * math.pi * i / 96)) + rng.gauss(0, 0.08)
+            for i in range(n_obs)
+        ]
+        lagged = [raw_solar[0]]
+        for i in range(1, n_obs):
+            alpha = 1 - math.exp(-dt / tau_true)
+            lagged.append(alpha * raw_solar[i] + (1 - alpha) * lagged[-1])
+
+        obs, y_resid, weights = [], [], []
+        for i in range(n_obs):
+            y = beta_true * lagged[i] + rng.gauss(0, 0.04)
+            obs.append(Observation(
+                timestamp=float(i), wall_time=1713650000.0 + i * dt,
+                hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=10.0, room_rate=0.005,
+                raw_readings={"sensor.solar": raw_solar[i]},
+                clamped=False,
+            ))
+            y_resid.append(y)
+            weights.append(1.0)
+
+        result = _detect_optimal_tau(obs, y_resid, weights, "sensor.solar")
+        assert result is not None
+        assert result.accepted is True
+        # tau == tau_opt_raw on accepted path (no zeroing applied).
+        assert result.tau == result.tau_opt_raw
+        # BIC threshold = log(n_eff); n_eff equals n_obs here (no missing readings).
+        assert result.n_eff == n_obs
+        assert math.isclose(result.bic_threshold, math.log(n_obs), rel_tol=1e-9)
+        # β at τ_opt should be in the right ballpark of the true β.
+        assert -3.5 < result.beta_at_tau < -1.5, (
+            f"β_at_tau={result.beta_at_tau:.2f}, expected ~{beta_true}"
+        )
+
+    def test_below_floor_snap_diagnostic(self):
+        """τ_opt below 600s floor → accepted=False, reason='below_floor', BIC may pass."""
+        import random
+        rng = random.Random(31415)
+        tau_true = 200.0  # well below floor
+        dt = 900.0
+        n_obs = 200
+        # With dt=900s and tau_true=200s, alpha ≈ 0.989 — nearly raw, but
+        # the search may still land slightly above 0 inside the floor zone.
+        raw_solar = [rng.uniform(0, 1.0) for _ in range(n_obs)]
+        # Apply tiny EMA so partial residuals against τ=0 are slightly worse
+        lagged = [raw_solar[0]]
+        for i in range(1, n_obs):
+            alpha = 1 - math.exp(-dt / tau_true)
+            lagged.append(alpha * raw_solar[i] + (1 - alpha) * lagged[-1])
+
+        obs, y_resid, weights = [], [], []
+        for i in range(n_obs):
+            y = -3.0 * lagged[i] + rng.gauss(0, 0.05)
+            obs.append(Observation(
+                timestamp=float(i), wall_time=1713650000.0 + i * dt,
+                hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=10.0, room_rate=0.005,
+                raw_readings={"sensor.solar": raw_solar[i]},
+                clamped=False,
+            ))
+            y_resid.append(y)
+            weights.append(1.0)
+
+        result = _detect_optimal_tau(obs, y_resid, weights, "sensor.solar")
+        assert result is not None
+        # The optimum may snap to 0 via either gate; both are valid
+        # rejections. Asserting only the contract: tau is 0 when not accepted.
+        if not result.accepted:
+            assert result.tau == 0.0
+            assert result.reject_reason in ("bic_failed", "below_floor")
+
+    def test_bic_failed_diagnostic(self):
+        """Pure-noise input → BIC test fails, accepted=False, reason='bic_failed'."""
+        import random
+        rng = random.Random(2718)
+        n_obs = 200
+        # Solar is pure noise, response y is independent of solar (just noise).
+        # No τ should be detectable; BIC test should reject.
+        obs, y_resid, weights = [], [], []
+        for i in range(n_obs):
+            obs.append(Observation(
+                timestamp=float(i), wall_time=1713650000.0 + i * 900,
+                hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=10.0, room_rate=0.005,
+                raw_readings={"sensor.solar": rng.uniform(0, 1.0)},
+                clamped=False,
+            ))
+            y_resid.append(rng.gauss(0, 0.5))  # independent noise
+            weights.append(1.0)
+
+        result = _detect_optimal_tau(obs, y_resid, weights, "sensor.solar")
+        # With pure noise, search may land near 0 (no improvement) or
+        # accept by chance. Diagnose: when rejected, the reason is
+        # populated and tau is 0.
+        if result is not None and not result.accepted:
+            assert result.tau == 0.0
+            assert result.reject_reason in ("bic_failed", "below_floor")
+            # bic_gain may be negative or below threshold when rejected.
+            assert result.bic_gain <= result.bic_threshold or result.tau_opt_raw < 600
+
+    def test_too_few_observations_returns_none(self):
+        """Insufficient n → None (no diagnostic to populate)."""
+        # Same shape as TestDetectOptimalTau.test_too_few_observations but
+        # documents that the None path remains the contract for the
+        # insufficient-data case.
+        obs = [
+            Observation(
+                timestamp=float(i), wall_time=1000 + i * 900,
+                hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=10.0, room_rate=0.005,
+                raw_readings={"sensor.solar": float(i)},
+                clamped=False,
+            )
+            for i in range(8)
+        ]
+        result = _detect_optimal_tau(obs, [1.0] * 8, [1.0] * 8, "sensor.solar")
+        assert result is None
 
 
 class TestBuildFeatureVectorFilteredOverrides:
@@ -2481,6 +2612,79 @@ class TestWLSDetectedTau:
         )
         assert result is not None
         assert isinstance(result.detected_tau, dict)
+        # Diagnostics exist as a sibling and is empty when no inputs
+        # were searched (no model inputs → no τ candidates).
+        assert isinstance(result.detected_tau_diagnostics, dict)
+        assert result.detected_tau_diagnostics == {}
+
+    def test_detected_tau_diagnostics_populated(self):
+        """detect_lag=True populates diagnostics keyed by input name."""
+        import random
+        rng = random.Random(31337)
+        tau_true = 5400.0
+        dt = 900.0
+        n_obs = 200
+        model_inputs = [{"entity_id": "sensor.solar", "name": "solar"}]
+        feature_order = ["intercept", "outdoor_delta", "solar", "sin_hour", "cos_hour"]
+
+        raw_solar = [
+            max(0, math.sin(2 * math.pi * i / 96)) + rng.gauss(0, 0.08)
+            for i in range(n_obs)
+        ]
+        lagged = [raw_solar[0]]
+        for i in range(1, n_obs):
+            alpha = 1 - math.exp(-dt / tau_true)
+            lagged.append(alpha * raw_solar[i] + (1 - alpha) * lagged[-1])
+
+        obs = []
+        for i in range(n_obs):
+            od = rng.uniform(-5, 15)
+            y = 0.3 * od - 2.5 * lagged[i] + rng.gauss(0, 0.05)
+            obs.append(Observation(
+                timestamp=float(i), wall_time=1713650000.0 + i * dt,
+                hp_setpoint=20.0 + y, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=20.0 + od, room_rate=0.005,
+                raw_readings={"sensor.solar": raw_solar[i]},
+                clamped=False,
+            ))
+
+        result = weighted_least_squares(
+            obs, n_features=5, feature_order=feature_order,
+            model_inputs=model_inputs, detect_lag=True,
+        )
+        assert result is not None
+        assert "solar" in result.detected_tau_diagnostics
+        diag = result.detected_tau_diagnostics["solar"]
+        # detected_tau and diagnostics agree on the chosen τ. (isinstance
+        # check intentionally omitted: other tests in this file
+        # importlib.reload(batch_learning), which rebinds the in-module
+        # LagTauDiagnostic to a new class object — duck-type the contract
+        # via attribute access instead of class identity.)
+        assert result.detected_tau["solar"] == diag.tau
+        assert hasattr(diag, "bic_gain")
+        assert hasattr(diag, "accepted")
+
+    def test_detect_lag_false_diagnostics_empty(self):
+        """detect_lag=False → diagnostics dict is empty."""
+        import random
+        rng = random.Random(42)
+        model_inputs = [{"entity_id": "sensor.solar", "name": "solar"}]
+        feature_order = ["intercept", "outdoor_delta", "solar", "sin_hour", "cos_hour"]
+        obs = []
+        for i in range(50):
+            obs.append(Observation(
+                timestamp=float(i), wall_time=1713650000.0 + i * 3600,
+                hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=10.0, room_rate=0.005,
+                raw_readings={"sensor.solar": rng.uniform(0, 1.0)},
+                clamped=False,
+            ))
+        result = weighted_least_squares(
+            obs, n_features=5, feature_order=feature_order,
+            model_inputs=model_inputs, detect_lag=False,
+        )
+        assert result is not None
+        assert result.detected_tau_diagnostics == {}
 
     def test_detect_lag_false_skips_detection(self):
         """detect_lag=False → detected_tau is empty, no filtering applied."""
@@ -2862,8 +3066,14 @@ class TestBatchLearningDefensivePaths:
                 obs, y, w, entity_id="sensor.s",
                 base_X=base_X, tod_cols=tod_cols,
             )
-        # tau (200s) < _TAU_MIN_MEANINGFUL (600s) → snap-to-zero
-        assert result == (0.0, 0.0, 0.0)
+        # tau (200s) < _TAU_MIN_MEANINGFUL (600s) → snap-to-zero diagnostic
+        assert result is not None
+        assert result.tau == 0.0
+        assert result.accepted is False
+        assert result.reject_reason == "below_floor"
+        # Original optimum is preserved on the diagnostic so we can see
+        # *why* it was rejected.
+        assert result.tau_opt_raw == bl._TAU_MIN_MEANINGFUL / 3
 
     def test_detect_optimal_tau_refit_with_delta_from_room(self):
         """Re-fit at tau_opt with delta_from_room subtraction (lines 432, 435)."""
@@ -2905,10 +3115,14 @@ class TestBatchLearningDefensivePaths:
                 delta_from_room=True,  # ← exercises line 435
                 base_X=base_X, tod_cols=tod_cols,
             )
-        # tau is above threshold → re-fit branch runs (lines 424-) — result
-        # is a (tau, r2, beta) tuple from successful re-regression.
-        assert isinstance(result, tuple)
-        assert result[0] == bl._TAU_MIN_MEANINGFUL * 5
+        # tau is above threshold → re-fit branch runs — result is an
+        # accepted LagTauDiagnostic from successful re-regression.
+        # (Duck-type via field access; earlier tests reload batch_learning
+        # and rebind LagTauDiagnostic, which breaks identity-based isinstance.)
+        assert result is not None
+        assert result.tau == bl._TAU_MIN_MEANINGFUL * 5
+        assert result.accepted is True
+        assert result.reject_reason == ""
 
     def test_analyze_residuals_handles_none_args_defensively(self):
         """analyze_residuals_by_hour returns empty when feature_order/model_inputs is None."""

@@ -237,6 +237,47 @@ _TAU_MIN_MEANINGFUL = 600.0  # 10 minutes
 # on small buffers and loosens on large ones — unlike a fixed R² floor.
 
 
+@dataclass(frozen=True)
+class LagTauDiagnostic:
+    """Per-input τ search diagnostics from one batch run.
+
+    Surfaces the BIC/R² evidence behind the chosen τ so debug bundles can
+    distinguish "decisive accept" from "marginal accept", and explain why
+    a τ was rejected (BIC failed vs sub-floor snap).
+
+    `tau` is the value that flows through to ``BatchResult.detected_tau``
+    and the online EMA — for rejected searches this is 0.0 even though
+    ``tau_opt_raw`` may be larger.
+    """
+
+    tau: float
+    """τ applied (seconds). 0.0 for rejected searches and below-floor snaps."""
+
+    tau_opt_raw: float
+    """τ at the RSS minimum before BIC/floor gates (seconds)."""
+
+    bic_gain: float
+    """n·log(RSS_0/RSS_τ). Accepted when ``bic_gain > log(n_eff)``."""
+
+    bic_threshold: float
+    """log(n_eff). The acceptance bar bic_gain has to clear."""
+
+    r2_improvement: float
+    """1 - RSS_τ/RSS_0. Reported only — the gate is BIC, not R²."""
+
+    beta_at_tau: float
+    """Recovered input coefficient at ``tau_opt_raw`` from the joint fit."""
+
+    n_eff: int
+    """Observations with a valid raw reading for this entity."""
+
+    accepted: bool
+    """True iff BIC passed AND τ_opt ≥ floor. Mirrors ``tau > 0``."""
+
+    reject_reason: str
+    """"" if accepted, else one of {"bic_failed", "below_floor"}."""
+
+
 def _apply_retrospective_ema(
     observations: list[Observation],
     entity_id: str,
@@ -302,7 +343,7 @@ def _detect_optimal_tau(
     delta_from_room: bool = False,
     base_X: list[list[float]] | None = None,
     tod_cols: list[tuple[float, float]] | None = None,
-) -> tuple[float, float, float] | None:
+) -> LagTauDiagnostic | None:
     """Find the optimal EMA tau for a model input via joint regression sweep.
 
     Builds X = [1, od, sin, cos, EMA(input, τ)] at candidate τ values
@@ -310,7 +351,12 @@ def _detect_optimal_tau(
     This avoids the suppression problem where diurnal correlation between
     solar and outdoor_delta hides the solar signal in partial residuals.
 
-    Returns (tau_optimal, r2_improvement, beta) or None if insufficient data.
+    Returns a ``LagTauDiagnostic`` carrying both the chosen τ and the
+    BIC/R² evidence, or None when there's nothing to diagnose
+    (insufficient observations, degenerate RSS). Rejected searches still
+    return a diagnostic with ``accepted=False`` and ``tau=0`` so debug
+    bundles can distinguish "BIC failed" from "below-floor snap".
+
     Uses scipy.optimize.minimize_scalar when available, else golden-section.
     """
     n = len(observations)
@@ -433,7 +479,8 @@ def _detect_optimal_tau(
         tau_opt = (a + b) / 2
         rss_opt = _compute_rss(tau_opt)
 
-    # Compute R² improvement (reported only — gate is BIC below).
+    # Degenerate RSS (perfect fit at τ=0, or empty regression) — no
+    # diagnostic is meaningful; the BIC test would divide by zero.
     if rss_raw <= 0 or rss_raw == float("inf") or rss_opt <= 0:
         return None
 
@@ -445,18 +492,11 @@ def _detect_optimal_tau(
     # n-aware so the threshold tightens for small buffers and loosens
     # as the buffer fills.
     bic_gain = n_eff * math.log(rss_raw / rss_opt)
-    if bic_gain < math.log(n_eff):
-        # Filtering not justified by the data — keep tau=0
-        return (0.0, 0.0, 0.0)
+    bic_threshold = math.log(n_eff)
 
-    # Snap tiny tau to 0: lags shorter than observation spacing
-    # are noise, not real thermal dynamics.
-    if tau_opt < _TAU_MIN_MEANINGFUL:
-        return (0.0, 0.0, 0.0)
-
-    # Recover the input coefficient at tau_opt for logging.
-    # Re-run the joint regression at tau_opt; the input coefficient
-    # is the last element of beta (index 4 in the 5-feature model).
+    # Recover the input coefficient at tau_opt — always, even when
+    # rejected, so debug bundles can compare β at the candidate τ
+    # against β at τ=0 and reason about why the search was rejected.
     filtered = _apply_retrospective_ema(observations, entity_id, tau_opt)
     rows_f: list[int] = []
     x_input_f: list[float] = []
@@ -469,7 +509,6 @@ def _detect_optimal_tau(
             x_val = x_val - observations[i].current_c
         rows_f.append(i)
         x_input_f.append(x_val)
-    m_f = len(rows_f)
     p = 5
     XtWX_f = [[0.0] * p for _ in range(p)]
     XtWy_f = [0.0] * p
@@ -487,7 +526,29 @@ def _detect_optimal_tau(
     beta_f = _solve_symmetric(XtWX_f, XtWy_f, p)
     beta_input = beta_f[4] if beta_f else 0.0
 
-    return (tau_opt, r2_improvement, beta_input)
+    # Apply acceptance gates: BIC first, then sub-floor snap.
+    if bic_gain < bic_threshold:
+        return LagTauDiagnostic(
+            tau=0.0, tau_opt_raw=tau_opt,
+            bic_gain=bic_gain, bic_threshold=bic_threshold,
+            r2_improvement=r2_improvement, beta_at_tau=beta_input,
+            n_eff=n_eff, accepted=False, reject_reason="bic_failed",
+        )
+
+    if tau_opt < _TAU_MIN_MEANINGFUL:
+        return LagTauDiagnostic(
+            tau=0.0, tau_opt_raw=tau_opt,
+            bic_gain=bic_gain, bic_threshold=bic_threshold,
+            r2_improvement=r2_improvement, beta_at_tau=beta_input,
+            n_eff=n_eff, accepted=False, reject_reason="below_floor",
+        )
+
+    return LagTauDiagnostic(
+        tau=tau_opt, tau_opt_raw=tau_opt,
+        bic_gain=bic_gain, bic_threshold=bic_threshold,
+        r2_improvement=r2_improvement, beta_at_tau=beta_input,
+        n_eff=n_eff, accepted=True, reject_reason="",
+    )
 
 
 class DiversityAwareBuffer:
@@ -1175,6 +1236,14 @@ class BatchResult:
     plant_snapshot: dict[str, Any] = field(default_factory=dict)  # plant ID state at batch time
     feature_vif: list[float] = field(default_factory=list)  # per-feature VIF from regression data
     detected_tau: dict[str, float] = field(default_factory=dict)  # input name → auto-detected EMA tau (seconds)
+    detected_tau_diagnostics: dict[str, LagTauDiagnostic] = field(default_factory=dict)
+    """Per-input τ search diagnostics (BIC gain, R², β, accept/reject reason).
+
+    Sibling to ``detected_tau`` rather than a replacement: the online path
+    reads ``detected_tau`` directly for the smoothed/confirmed EMA filter;
+    diagnostics are an additive observability surface for debug bundles.
+    Empty when ``detect_lag=False`` or when no model inputs are configured.
+    """
 
 
 def _weighted_variance(values: list[float], weights: list[float]) -> float:
@@ -1581,6 +1650,7 @@ def weighted_least_squares(
     # base-regression residuals.  Pre-compute filtered values using
     # the detected tau for use in the main regression.
     detected_tau: dict[str, float] = {}
+    detected_tau_diagnostics: dict[str, LagTauDiagnostic] = {}
     # Per-entity filtered values: entity_id → list[float|None] parallel to base_eligible
     _filtered_cache: dict[str, list[float | None]] = {}
 
@@ -1613,17 +1683,19 @@ def weighted_least_squares(
             )
 
             if tau_result is not None:
-                tau_opt, r2_impr, beta_at_tau = tau_result
-                detected_tau[name] = tau_opt
-                if tau_opt > 0:
+                detected_tau[name] = tau_result.tau
+                detected_tau_diagnostics[name] = tau_result
+                if tau_result.tau > 0:
                     _LOGGER.info(
                         "Lag-tau detection: %s τ=%.0fs (%.0f min), "
-                        "R²_improvement=%.3f, β=%.3f",
-                        name, tau_opt, tau_opt / 60, r2_impr, beta_at_tau,
+                        "R²_improvement=%.3f, β=%.3f, BIC gain=%.2f (>%.2f)",
+                        name, tau_result.tau, tau_result.tau / 60,
+                        tau_result.r2_improvement, tau_result.beta_at_tau,
+                        tau_result.bic_gain, tau_result.bic_threshold,
                     )
                 # Cache filtered values for this entity
                 _filtered_cache[entity_id] = _apply_retrospective_ema(
-                    base_eligible, entity_id, tau_opt,
+                    base_eligible, entity_id, tau_result.tau,
                 )
 
     # Classify model input features
@@ -1816,6 +1888,7 @@ def weighted_least_squares(
         beta_std_err=std_err,
         feature_vif=vif,
         detected_tau=detected_tau,
+        detected_tau_diagnostics=detected_tau_diagnostics,
     )
 
 

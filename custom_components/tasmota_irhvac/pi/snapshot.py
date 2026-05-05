@@ -356,14 +356,63 @@ class UnlockEvaluationRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class LagTauDiagnostic:
+    """Per-input τ search diagnostics surfaced into the tick log.
+
+    Mirrors the dataclass of the same name in
+    ``batch_learning.LagTauDiagnostic`` but is intentionally a separate
+    type — snapshot.py is the public schema boundary and consumers shouldn't
+    depend on internals of the WLS module.
+    """
+
+    tau: float
+    tau_opt_raw: float
+    bic_gain: float
+    bic_threshold: float
+    r2_improvement: float
+    beta_at_tau: float
+    n_eff: int
+    accepted: bool
+    reject_reason: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "tau": self.tau,
+            "tau_opt_raw": self.tau_opt_raw,
+            "bic_gain": self.bic_gain,
+            "bic_threshold": self.bic_threshold,
+            "r2_improvement": self.r2_improvement,
+            "beta_at_tau": self.beta_at_tau,
+            "n_eff": self.n_eff,
+            "accepted": self.accepted,
+            "reject_reason": self.reject_reason,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> LagTauDiagnostic:
+        return cls(
+            tau=data["tau"],
+            tau_opt_raw=data["tau_opt_raw"],
+            bic_gain=data["bic_gain"],
+            bic_threshold=data["bic_threshold"],
+            r2_improvement=data["r2_improvement"],
+            beta_at_tau=data["beta_at_tau"],
+            n_eff=data["n_eff"],
+            accepted=data["accepted"],
+            reject_reason=data["reject_reason"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class BatchLearningSnapshot:
     """Last batch WLS run results.
 
     Carries the full `BatchResult` field set (typed). `beta_std_err`,
     `blend_gains`, `feature_vif`, `beta_blended`, `plant_snapshot`,
-    `detected_tau` are additive over the basic regression-fit fields —
-    they tell offline analysis tools how identifiable each coefficient
-    was on the last batch and what blended update was actually applied.
+    `detected_tau`, `detected_tau_diagnostics` are additive over the basic
+    regression-fit fields — they tell offline analysis tools how identifiable
+    each coefficient was on the last batch and what blended update was actually
+    applied.
     """
 
     last_run_mono: float | None
@@ -390,6 +439,12 @@ class BatchLearningSnapshot:
     # Per-feature outcome of the last unlock evaluation. Empty before
     # the first batch cycle has run, or when no frozen features remain.
     unlock_evaluation: tuple[UnlockEvaluationRecord, ...] = ()
+    # Per-input τ search diagnostics: BIC gain vs threshold, R²
+    # improvement, β at τ_opt, accept/reject reason. Sibling to
+    # ``detected_tau`` (which the online EMA path reads); empty when
+    # ``detect_lag=False`` or no inputs were searched. Default empty
+    # so legacy bundles deserialize without bumping SCHEMA_VERSION.
+    detected_tau_diagnostics: dict[str, LagTauDiagnostic] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -412,6 +467,9 @@ class BatchLearningSnapshot:
             "detected_tau": dict(self.detected_tau),
             "plant_snapshot": dict(self.plant_snapshot),
             "unlock_evaluation": [r.to_dict() for r in self.unlock_evaluation],
+            "detected_tau_diagnostics": {
+                k: v.to_dict() for k, v in self.detected_tau_diagnostics.items()
+            },
         }
 
     @classmethod
@@ -443,6 +501,10 @@ class BatchLearningSnapshot:
                 UnlockEvaluationRecord.from_dict(r)
                 for r in data.get("unlock_evaluation", [])
             ),
+            detected_tau_diagnostics={
+                k: LagTauDiagnostic.from_dict(v)
+                for k, v in data.get("detected_tau_diagnostics", {}).items()
+            },
         )
 
 

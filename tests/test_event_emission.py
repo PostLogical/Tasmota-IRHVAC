@@ -113,6 +113,64 @@ async def test_batch_run_emits_event(hass, setup_pi_integration):
 
 
 @pytest.mark.asyncio
+async def test_batch_learning_snapshot_carries_lag_tau_diagnostics(
+    hass, setup_pi_integration,
+):
+    """BatchResult.detected_tau_diagnostics flows through to the tick log.
+
+    Pipes a BatchResult with one accepted and one rejected diagnostic
+    through `_build_tick_output` and asserts both land on
+    `tick.batch_learning.detected_tau_diagnostics` with all fields
+    preserved (including the rejected entry's reject_reason).
+    """
+    from custom_components.tasmota_irhvac.pi.batch_learning import (
+        BatchResult,
+        LagTauDiagnostic as BatchLagTauDiagnostic,
+    )
+
+    entry = await setup_pi_integration({"pi_tau_estimate": 60})
+    pi = get_climate_entity(hass, entry)._controller
+
+    accepted = BatchLagTauDiagnostic(
+        tau=5400.0, tau_opt_raw=5400.0,
+        bic_gain=12.34, bic_threshold=5.30,
+        r2_improvement=0.18, beta_at_tau=-2.45,
+        n_eff=180, accepted=True, reject_reason="",
+    )
+    rejected = BatchLagTauDiagnostic(
+        tau=0.0, tau_opt_raw=420.0,
+        bic_gain=1.5, bic_threshold=5.0,
+        r2_improvement=0.01, beta_at_tau=-0.4,
+        n_eff=150, accepted=False, reject_reason="below_floor",
+    )
+    pi._last_batch_result = BatchResult(
+        n_total=200, n_eligible=180,
+        beta_batch=[0.1, -0.05, 0.0, 0.0],
+        beta_current=[0.1, -0.04, 0.0, 0.0],
+        residual_rms=0.05, max_coeff_change_pct=2.0,
+        recommend_update=False,
+        detected_tau={"solar": 5400.0, "stove": 0.0},
+        detected_tau_diagnostics={"solar": accepted, "stove": rejected},
+    )
+    pi.fire_dispatcher()
+
+    bl = pi.last_tick.batch_learning
+    assert bl is not None
+    diag = bl.detected_tau_diagnostics
+    assert set(diag.keys()) == {"solar", "stove"}
+    # Accepted entry: τ matches, reject_reason empty, BIC clears threshold.
+    assert diag["solar"].tau == 5400.0
+    assert diag["solar"].accepted is True
+    assert diag["solar"].reject_reason == ""
+    assert diag["solar"].bic_gain > diag["solar"].bic_threshold
+    # Rejected entry: τ snapped to 0 but tau_opt_raw preserved.
+    assert diag["stove"].tau == 0.0
+    assert diag["stove"].tau_opt_raw == 420.0
+    assert diag["stove"].accepted is False
+    assert diag["stove"].reject_reason == "below_floor"
+
+
+@pytest.mark.asyncio
 async def test_anomaly_detected_emits_event(hass, setup_pi_integration):
     """An anomaly event (emit-side) lands on the tick output.
 

@@ -790,3 +790,133 @@ class TestFrequentExclusionsEscalation:
         issues = pi._check_tuning_health()
         freq_issues = [i for i in issues if "frequent_exclusions" in i[0]]
         assert len(freq_issues) == 0
+
+
+# ── Zone-label injection ─────────────────────────────────────────────
+
+
+class TestZoneLabelInPlaceholders:
+    """Every PI-controller repair issue must carry zone_label so multi-zone
+    installs can distinguish issues with otherwise-identical messages."""
+
+    @pytest.mark.asyncio
+    async def test_frequent_exclusions_carries_zone_label(self, hass, setup_pi_integration):
+        from .conftest import get_climate_entity
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+        pi._exclusion_count = 5
+        issues = pi._check_tuning_health(from_batch=True)
+        rec = next(i for i in issues if "frequent_exclusions" in i[0])
+        # Tuple shape: (id, severity, key, placeholders, ...)
+        placeholders = rec[3]
+        assert "zone_label" in placeholders
+        assert placeholders["zone_label"] == entity.entity_id
+
+    @pytest.mark.asyncio
+    async def test_high_integral_carries_zone_label(self, hass, setup_pi_integration):
+        from .conftest import get_climate_entity
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+        pi._metrics.integral_convergence = 20.0
+        pi._rls_heat.observation_count = 100
+        pi._tuning_alert_counters["high_integral"] = 5
+        issues = pi._check_tuning_health(from_batch=True)
+        rec = next(i for i in issues if "high_integral" in i[0])
+        assert rec[3]["zone_label"] == entity.entity_id
+
+    @pytest.mark.asyncio
+    async def test_save_seeds_carries_zone_label(self, hass, setup_pi_integration):
+        from .conftest import get_climate_entity
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+        pi._metrics.integral_convergence = 1.0
+        pi._rls_heat.observation_count = 100
+        pi._rls_heat.beta[1] = 0.5 * pi._rls_heat.feature_scales[1]
+        issues = pi._check_tuning_health(from_batch=True)
+        rec = next(i for i in issues if "save_seeds" in i[0])
+        assert rec[3]["zone_label"] == entity.entity_id
+
+
+# ── Stale-issue cleanup ──────────────────────────────────────────────
+
+
+class TestStaleIssueCleanup:
+    """Issues whose underlying detection vanishes between batch cycles
+    must be cleared via an explicit should_create=False entry. Without
+    this, repair types like residual_pattern that only emit a tuple
+    while the trip condition holds leave stale issues in HA's
+    registry indefinitely.
+    """
+
+    @pytest.mark.asyncio
+    async def test_vanished_residual_pattern_emits_clear(self, hass, setup_pi_integration):
+        """A pattern that fired last cycle but isn't in this cycle's
+        results gets a should_create=False clear entry."""
+        from custom_components.tasmota_irhvac.pi.batch_learning import (
+            HourlyResidualPattern,
+        )
+        from .conftest import get_climate_entity
+
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+        entry_id = pi._entity._config_entry_id
+
+        # Cycle 1: a residual pattern is detected and creates an issue.
+        pi._last_residual_patterns = [
+            HourlyResidualPattern(
+                start_hour=8, end_hour=18,
+                mean_residual=1.2, n_observations=200,
+            ),
+        ]
+        pi._tuning_alert_counters[
+            "residual_pattern_8_18"
+        ] = 5  # past min_sustained_cycles
+        issues_cycle1 = pi._check_tuning_health(from_batch=True)
+        rec1 = next(
+            i for i in issues_cycle1
+            if "residual_pattern" in i[0] and i[4] is True
+        )
+        active_id = rec1[0]
+
+        # Cycle 2: the pattern has vanished from the analyzer's output.
+        pi._last_residual_patterns = []
+        issues_cycle2 = pi._check_tuning_health(from_batch=True)
+
+        # Stale-cleanup must produce a clear entry for the previously
+        # active issue id.
+        clear_entries = [
+            i for i in issues_cycle2 if i[0] == active_id and i[4] is False
+        ]
+        assert len(clear_entries) == 1, (
+            f"Expected stale-cleanup clear for {active_id}, "
+            f"got entries: {[i for i in issues_cycle2 if i[0] == active_id]}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_stale_cleanup_only_runs_on_from_batch(self, hass, setup_pi_integration):
+        """Non-batch invocations (e.g., HA startup) must not retroactively
+        clear issues — those evaluations may legitimately have empty
+        detection state pending the first batch cycle."""
+        from custom_components.tasmota_irhvac.pi.batch_learning import (
+            HourlyResidualPattern,
+        )
+        from .conftest import get_climate_entity
+
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        # Prime: simulate a previously-active issue via the controller's
+        # ledger directly.
+        pi._previously_active_issue_ids = {"residual_pattern_fake_8_18"}
+
+        # Non-batch evaluation should not touch the ledger.
+        pi._last_residual_patterns = []
+        issues = pi._check_tuning_health(from_batch=False)
+        assert pi._previously_active_issue_ids == {"residual_pattern_fake_8_18"}
+        # No clear emitted for the stale fake id.
+        assert not any(i[0] == "residual_pattern_fake_8_18" for i in issues)

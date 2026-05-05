@@ -28,6 +28,7 @@ from custom_components.tasmota_irhvac.pi.snapshot import (
     FFContributionsSnapshot,
     LagFilterSnapshot,
     LagFilterState,
+    LagTauDiagnostic,
     LearningSuppressionChangePayload,
     MaturityGatePayload,
     ModeChangePayload,
@@ -178,6 +179,61 @@ def test_batch_learning_snapshot_legacy_dict_missing_extras():
     assert b.beta_std_err == ()
     assert b.blend_gains == ()
     assert b.detected_tau == {}
+    assert b.detected_tau_diagnostics == {}
+
+
+def test_lag_tau_diagnostic_roundtrip():
+    """LagTauDiagnostic survives to_dict → from_dict on every field."""
+    d = LagTauDiagnostic(
+        tau=5400.0, tau_opt_raw=5400.0,
+        bic_gain=12.34, bic_threshold=5.30,
+        r2_improvement=0.18, beta_at_tau=-2.45,
+        n_eff=180, accepted=True, reject_reason="",
+    )
+    assert LagTauDiagnostic.from_dict(d.to_dict()) == d
+
+
+def test_lag_tau_diagnostic_rejected_roundtrip():
+    """Rejected diagnostic preserves tau=0 and reject_reason on round-trip."""
+    d = LagTauDiagnostic(
+        tau=0.0, tau_opt_raw=420.0,
+        bic_gain=1.5, bic_threshold=5.0,
+        r2_improvement=0.01, beta_at_tau=-0.4,
+        n_eff=150, accepted=False, reject_reason="below_floor",
+    )
+    assert LagTauDiagnostic.from_dict(d.to_dict()) == d
+
+
+def test_batch_learning_snapshot_carries_diagnostics():
+    """BatchLearningSnapshot round-trips the detected_tau_diagnostics dict."""
+    diag = LagTauDiagnostic(
+        tau=3600.0, tau_opt_raw=3600.0,
+        bic_gain=8.4, bic_threshold=5.3,
+        r2_improvement=0.07, beta_at_tau=-1.9,
+        n_eff=200, accepted=True, reject_reason="",
+    )
+    b = BatchLearningSnapshot(
+        last_run_mono=12345.6, last_run_wallclock="2026-05-05T10:00:00Z",
+        n_total=200, n_eligible=180, residual_rms=0.05,
+        recommend_update=False, max_coeff_change_pct=2.0,
+        coefficients={"intercept": BatchCoeff(0.1, 0.11)},
+        held_features=(),
+        n_outliers_excluded=2,
+        drift_detection=DriftDetection(
+            drifting_coefficients=(), correction_history={},
+        ),
+        residual_patterns=(),
+        beta_std_err=(),
+        beta_blended=(),
+        blend_gains=(),
+        feature_vif=(),
+        detected_tau={"solar": 3600.0},
+        plant_snapshot={},
+        detected_tau_diagnostics={"solar": diag},
+    )
+    restored = BatchLearningSnapshot.from_dict(b.to_dict())
+    assert restored == b
+    assert restored.detected_tau_diagnostics["solar"] == diag
 
 
 def test_ff_contribution_roundtrip():

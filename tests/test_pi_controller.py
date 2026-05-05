@@ -5422,6 +5422,57 @@ class TestStoredDataNewFields:
         assert br.beta_blended == [1.05, -0.45, 0.28]
         assert pi2._metrics.batch_model_rms == pytest.approx(0.42)
 
+    def test_batch_result_diagnostics_dropped_on_restore(self):
+        """detected_tau_diagnostics is stripped on restore.
+
+        Diagnostics are transient observability for debug bundles —
+        ``dataclasses.asdict`` flattens ``LagTauDiagnostic`` to plain
+        dicts on save, so the restore path drops the field rather than
+        carrying half-typed values into the live ``BatchResult``. They
+        repopulate on the next batch run.
+        """
+        from custom_components.tasmota_irhvac.pi.batch_learning import (
+            BatchResult, LagTauDiagnostic,
+        )
+
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        diag = LagTauDiagnostic(
+            tau=3600.0, tau_opt_raw=3600.0,
+            bic_gain=8.4, bic_threshold=5.3,
+            r2_improvement=0.07, beta_at_tau=-1.9,
+            n_eff=200, accepted=True, reject_reason="",
+        )
+        pi._last_batch_result = BatchResult(
+            n_total=200, n_eligible=180,
+            beta_batch=[0.0], beta_current=[0.0],
+            residual_rms=0.05, max_coeff_change_pct=2.0,
+            recommend_update=False,
+            detected_tau={"solar": 3600.0},
+            detected_tau_diagnostics={"solar": diag},
+        )
+
+        stored = pi.get_extra_stored_data()
+        d = stored.as_dict()
+        # Serialized form: asdict flattens LagTauDiagnostic to dict.
+        serialized_diag = d["last_batch_result"]["detected_tau_diagnostics"]["solar"]
+        assert isinstance(serialized_diag, dict)
+        assert serialized_diag["accepted"] is True
+
+        restored = PIExtraStoredData.from_dict(d)
+        config2 = make_pi_config()
+        entity2 = FakePIEntity(config2)
+        pi2 = entity2._pi
+        pi2.restore_extra_stored_data(restored)
+
+        # On restore: detected_tau survives (online path needs it), but
+        # detected_tau_diagnostics is dropped to empty dict.
+        assert pi2._last_batch_result is not None
+        assert pi2._last_batch_result.detected_tau == {"solar": 3600.0}
+        assert pi2._last_batch_result.detected_tau_diagnostics == {}
+
     def test_batch_result_none_round_trip(self):
         """No batch result serializes as None and restores cleanly."""
         config = make_pi_config()
