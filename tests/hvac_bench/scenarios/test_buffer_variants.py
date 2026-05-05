@@ -22,6 +22,7 @@ import logging
 import pytest
 
 from custom_components.tasmota_irhvac.pi.batch_learning import (
+    BufferAddResult,
     DiversityAwareBuffer,
     Observation,
 )
@@ -33,6 +34,7 @@ from tests.hvac_bench.full_stack_runner import (
 )
 from tests.hvac_bench.scenarios.test_seasonal_convergence import (
     SEASONS,
+    _SEASON_WINDOWS,
     _make_config,  # default: real CSV
 )
 
@@ -62,45 +64,74 @@ class FIFOBuffer(DiversityAwareBuffer):
             self._sherman_morrison_update(x)
 
 
+class NoEvictionBuffer(DiversityAwareBuffer):
+    """Accept until full; refuse all subsequent admissions.
+
+    Diagnostic variant: isolates whether eviction (vs. accumulation) is the
+    mechanism behind solar β drift. The buffer freezes at the first
+    ``max_size`` admissions and WLS continues to regress on that fixed set.
+    """
+
+    def add(self, obs: Observation) -> BufferAddResult:  # type: ignore[override]
+        x = self._get_feature_vector(obs)
+        new_leverage = self._compute_leverage(x)
+        if len(self._buffer) < self._max_size:
+            self._buffer.append(obs)
+            self._sherman_morrison_update(x)
+            return BufferAddResult(
+                admitted=True, candidate_leverage=new_leverage,
+                evicted_timestamp=None, min_incumbent_leverage=None,
+                rejection_reason=None,
+            )
+        return BufferAddResult(
+            admitted=False, candidate_leverage=new_leverage,
+            evicted_timestamp=None, min_incumbent_leverage=None,
+            rejection_reason="no_eviction_buffer_full",
+        )
+
+
 # ── Variant patching ─────────────────────────────────────────────────────
 
 
-def _replace_buffers(pi, *, max_size: int, fifo: bool) -> None:
+def _replace_buffers(pi, *, max_size: int, policy: str) -> None:
     """Swap heat/cool buffers on a freshly-built PI for the given variant."""
-    cls = FIFOBuffer if fifo else DiversityAwareBuffer
     n = pi._observation_buffer_heat._n_features
     feature_order = pi._observation_buffer_heat._feature_order
     model_inputs = pi._observation_buffer_heat._model_inputs
-    pi._observation_buffer_heat = cls(
-        n_features=n,
-        max_size=max_size,
-        feature_order=feature_order,
-        model_inputs=model_inputs,
+    common_kwargs = dict(
+        n_features=n, max_size=max_size,
+        feature_order=feature_order, model_inputs=model_inputs,
     )
-    pi._observation_buffer_cool = cls(
-        n_features=n,
-        max_size=max_size,
-        feature_order=feature_order,
-        model_inputs=model_inputs,
-    )
+    if policy == "fifo":
+        heat_buf = FIFOBuffer(**common_kwargs)
+        cool_buf = FIFOBuffer(**common_kwargs)
+    elif policy == "no_eviction":
+        heat_buf = NoEvictionBuffer(**common_kwargs)
+        cool_buf = NoEvictionBuffer(**common_kwargs)
+    else:
+        heat_buf = DiversityAwareBuffer(**common_kwargs)
+        cool_buf = DiversityAwareBuffer(**common_kwargs)
+    pi._observation_buffer_heat = heat_buf
+    pi._observation_buffer_cool = cool_buf
 
 
-VARIANTS: list[tuple[str, int, bool]] = [
-    ("default-2000",  2000, False),
-    ("half-1000",     1000, False),
-    ("double-4000",   4000, False),
-    ("FIFO-2000",     2000, True),
+VARIANTS: list[tuple[str, int, str]] = [
+    ("default-2000",          2000, "leverage"),
+    ("half-1000",             1000, "leverage"),
+    ("double-4000",           4000, "leverage"),
+    ("FIFO-2000",             2000, "fifo"),
+    ("no-eviction-2000",      2000, "no_eviction"),
 ]
 
 
-def _run_with_variant(season_name: str, *, max_size: int, fifo: bool,
+def _run_with_variant(season_name: str, *, max_size: int, policy: str,
                       n_days: int = 90) -> FullStackResult:
     """Run a season (real CSV) with patched buffer config."""
     orig_init = TasmotaPIAdapter.__init__
 
     def patched(self, *args, **kwargs):
         orig_init(self, *args, **kwargs)
-        _replace_buffers(self._pi, max_size=max_size, fifo=fifo)
+        _replace_buffers(self._pi, max_size=max_size, policy=policy)
 
     TasmotaPIAdapter.__init__ = patched
     try:
@@ -125,11 +156,11 @@ def _compute_variant_results(
     pi_logger.setLevel(logging.ERROR)
     try:
         out: dict[str, dict[str, FullStackResult]] = {}
-        for vname, size, fifo in VARIANTS:
+        for vname, size, policy in VARIANTS:
             out[vname] = {}
             for sname in SEASONS:
                 out[vname][sname] = runner(
-                    sname, max_size=size, fifo=fifo, n_days=n_days,
+                    sname, max_size=size, policy=policy, n_days=n_days,
                 )
         return out
     finally:
@@ -250,3 +281,72 @@ class TestBufferVariants:
                 solar = r.final_coefs.get("Solar Proxy", 0.0)
                 assert -2.0 < od < 0.0, f"{vname}/{sname}: outdoor_delta={od:.4f}"
                 assert -5.0 < solar < 1.0, f"{vname}/{sname}: solar={solar:.4f}"
+
+
+# ── Cell-parametrized variant runs (xdist-parallelizable) ───────────────────
+
+
+import json as _json
+import os as _os
+import pathlib as _pathlib
+
+_VARIANT_RESULTS_DIR = _pathlib.Path(
+    _os.environ.get(
+        "BUFFER_VARIANT_RESULTS_DIR",
+        "/tmp/buffer_variant_results",
+    )
+)
+
+
+@pytest.mark.design
+@pytest.mark.study
+@pytest.mark.parametrize("variant", VARIANTS, ids=lambda v: v[0])
+@pytest.mark.parametrize("season", list(_SEASON_WINDOWS.keys()))
+def test_variant_cell(variant: tuple[str, int, str], season: str) -> None:
+    """One (variant × season) cell. xdist runs cells across workers.
+
+    Writes per-cell results to ``BUFFER_VARIANT_RESULTS_DIR/{variant}__{season}.json``
+    so a post-run aggregation step can read them. Set the env var to redirect.
+    """
+    vname, size, policy = variant
+    r = _run_with_variant(season, max_size=size, policy=policy, n_days=90)
+    bs = r.final_coefs.get("Solar Proxy", float("nan"))
+    od = r.final_coefs.get("outdoor_delta", float("nan"))
+    # Trajectory at canonical days for drift inspection
+    traj_days = [5, 15, 30, 45, 60, 75, 90]
+    traj_solar: dict[int, float] = {}
+    for d in traj_days:
+        idx = min(int(d * 2), len(r.coef_trajectory) - 1) if r.coef_trajectory else 0
+        if r.coef_trajectory:
+            traj_solar[d] = r.coef_trajectory[idx].get("Solar Proxy", float("nan"))
+    # Buffer-fill day (utilization first reaches 100%)
+    fill_day = next(
+        (i for i, u in enumerate(r.daily_buffer_utilization) if u >= 0.999),
+        None,
+    )
+    # β_solar exactly at fill day (closest 12h batch snapshot)
+    beta_solar_at_fill: float = float("nan")
+    beta_outdoor_at_fill: float = float("nan")
+    if fill_day is not None and r.coef_trajectory:
+        fill_idx = min(int(fill_day * 2), len(r.coef_trajectory) - 1)
+        beta_solar_at_fill = r.coef_trajectory[fill_idx].get("Solar Proxy", float("nan"))
+        beta_outdoor_at_fill = r.coef_trajectory[fill_idx].get("outdoor_delta", float("nan"))
+    _VARIANT_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    out = {
+        "variant": vname, "season": season,
+        "max_size": size, "policy": policy,
+        "beta_solar": bs, "beta_outdoor": od,
+        "fill_day": fill_day,
+        "beta_solar_at_fill": beta_solar_at_fill,
+        "beta_outdoor_at_fill": beta_outdoor_at_fill,
+        "traj_solar": traj_solar,
+    }
+    out_path = _VARIANT_RESULTS_DIR / f"{vname}__{season}.json"
+    out_path.write_text(_json.dumps(out, indent=2))
+    # Solar truth may be overridden by BENCH_TRUE_SOLAR_COEF env var; widen
+    # bound to handle larger truth values (e.g., -6.0 for high-SNR studies).
+    import os as _os2
+    _true_solar = float(_os2.environ.get("BENCH_TRUE_SOLAR_COEF", "-2.0"))
+    _solar_lo = min(_true_solar - 5.0, -10.0)
+    assert -2.0 < od < 0.0, f"{vname}/{season}: outdoor_delta={od:.4f}"
+    assert _solar_lo < bs < 1.0, f"{vname}/{season}: solar={bs:.4f}"

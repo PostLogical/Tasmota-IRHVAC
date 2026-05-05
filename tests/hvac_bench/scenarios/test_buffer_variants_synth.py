@@ -32,14 +32,14 @@ from tests.hvac_bench.scenarios.test_seasonal_convergence import (
 )
 
 
-def _run_with_variant(season_name: str, *, max_size: int, fifo: bool,
+def _run_with_variant(season_name: str, *, max_size: int, policy: str,
                       n_days: int = 90) -> FullStackResult:
     """Run a season (synth AR(1)) with patched buffer config."""
     orig_init = TasmotaPIAdapter.__init__
 
     def patched(self, *args, **kwargs):
         orig_init(self, *args, **kwargs)
-        _replace_buffers(self._pi, max_size=max_size, fifo=fifo)
+        _replace_buffers(self._pi, max_size=max_size, policy=policy)
 
     TasmotaPIAdapter.__init__ = patched
     try:

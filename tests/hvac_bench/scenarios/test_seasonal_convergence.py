@@ -67,6 +67,9 @@ _SEASON_WINDOWS: dict[str, WeatherWindow] = {
     "winter": WINTER_TYPICAL,
     "fall": SHOULDER_FALL,
     "spring": SHOULDER_SPRING,
+    # Late-spring / early-summer 90d window (start 2025-05-30) — for
+    # investigating identifiability when heating demand drops.
+    "spring_plus_60": WeatherWindow(start_day=880, season="spring"),
 }
 
 
@@ -213,7 +216,15 @@ def _make_real_config(season_name: str, n_days: int = 90) -> FullStackConfig:
     seed as the synth path so only the weather distribution differs. Produces
     verdicts that survive real cloud clustering, weather fronts, and seasonal
     day-length shifts.
+
+    The solar truth coefficient (``_true_ff_coef``) defaults to -2.0 but can be
+    overridden via the ``BENCH_TRUE_SOLAR_COEF`` environment variable for
+    SNR-amplified investigations (e.g., comparing identifiability across solar
+    magnitudes).
     """
+    import os
+    true_solar = float(os.environ.get("BENCH_TRUE_SOLAR_COEF", "-2.0"))
+
     window = _SEASON_WINDOWS[season_name]
     outdoor_fn, solar_fn, n_days = windowed_real_weather(
         start_day=window.start_day, n_days=n_days,
@@ -232,7 +243,7 @@ def _make_real_config(season_name: str, n_days: int = 90) -> FullStackConfig:
                 name="Solar Proxy",
                 entity_id="sensor.solar_proxy",
                 input_role="solar",
-                _true_ff_coef=-2.0,
+                _true_ff_coef=true_solar,
                 seed_heat=0.0,
                 lag_tau=120,
                 clamp_min=0,
