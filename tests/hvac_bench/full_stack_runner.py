@@ -881,6 +881,7 @@ def run_full_stack(
             day_saturated += 1
 
         # Record history
+        oc = getattr(pi, "_last_observation_context", None)
         history.append({
             "tick": tick,
             "room_temp": model.room_temp,
@@ -893,6 +894,11 @@ def run_full_stack(
             "outdoor": model.outdoor_temp,
             "d_term": getattr(pi, "_pi_d_filtered", 0.0),
             "rls_obs_count": pi._rls_heat.observation_count,
+            "obs_admitted": oc.admitted if oc is not None else None,
+            "obs_leverage": oc.leverage_score if oc is not None else None,
+            "obs_evicted_ts": oc.evicted_timestamp if oc is not None else None,
+            "obs_min_incumbent_lev": oc.min_incumbent_leverage if oc is not None else None,
+            "obs_rejection_reason": oc.rejection_reason if oc is not None else None,
             **{f"input_{mi.name}": input_values[mi.name]
                for mi in config.model_inputs},
         })
@@ -1152,6 +1158,23 @@ def _snapshot_coefs(pi, batch_count, model_inputs, true_coefs, trajectory):
         if idx < pi._rls_heat.n:
             snapshot[name] = coef_dict[idx]
             snapshot[f"{name}_frozen"] = pi._rls_heat.frozen[idx]
+    br = getattr(pi, "_last_batch_result", None)
+    if br is not None and br.detected_tau_diagnostics:
+        for mi in model_inputs:
+            diag = br.detected_tau_diagnostics.get(mi.name)
+            if diag is None:
+                continue
+            snapshot[f"{mi.name}_tau"] = diag.tau
+            snapshot[f"{mi.name}_tau_opt_raw"] = diag.tau_opt_raw
+            snapshot[f"{mi.name}_beta_at_tau"] = diag.beta_at_tau
+            snapshot[f"{mi.name}_bic_gain"] = diag.bic_gain
+            snapshot[f"{mi.name}_bic_threshold"] = diag.bic_threshold
+            snapshot[f"{mi.name}_tau_accepted"] = diag.accepted
+    if br is not None and br.feature_vif:
+        # feature_vif is indexed by full coef position [intercept, outdoor_delta, inputs...]
+        for idx, name in enumerate(names):
+            if idx < len(br.feature_vif):
+                snapshot[f"{name}_vif"] = br.feature_vif[idx]
     trajectory.append(snapshot)
 
 
