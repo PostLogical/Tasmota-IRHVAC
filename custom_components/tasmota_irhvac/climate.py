@@ -1918,6 +1918,15 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             if self._temp_sensor:
                 history_ids.append(self._temp_sensor)
 
+        # Snapshot the live buffers at export time. Bundle readers can
+        # filter by `obs.wall_time` to reproduce buffer state at any
+        # tick within the eviction-free window.
+        observation_buffers = {
+            "observation_buffer_heat": pi._observation_buffer_heat.get_all(),
+            "observation_buffer_cool": pi._observation_buffer_cool.get_all(),
+            "greybox_buffer": pi._greybox_buffer.get_all(),
+        }
+
         bundle_path = await export_bundle(
             self.hass,
             zone_label=self.entity_id,
@@ -1925,6 +1934,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             profile=profile,
             include_ha_history=include_ha_history,
             ha_history_entity_ids=history_ids if include_ha_history else None,
+            observation_buffers=observation_buffers,
         )
 
         # User-friendly notification with the bundle path

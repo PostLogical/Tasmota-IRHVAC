@@ -25,6 +25,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .batch_learning import Observation
 from .event_log import EventLogReader, _sanitize_zone_label
 from .snapshot import TickEventKind, TickOutput
 
@@ -62,6 +63,7 @@ async def export_bundle(
     profile: str = "all",
     include_ha_history: bool = True,
     ha_history_entity_ids: list[str] | None = None,
+    observation_buffers: dict[str, list[Observation]] | None = None,
 ) -> Path:
     """Generate a debug bundle for one zone over the requested window.
 
@@ -71,6 +73,13 @@ async def export_bundle(
     `ha_history_entity_ids` is the list of HA-side entities (room temp
     sensor, outdoor temp, solar proxy, model inputs) to include in the
     history join. If None, only tick log + manifest are emitted.
+
+    `observation_buffers` maps a filename stem (e.g.
+    `observation_buffer_heat`) to the live observation list to dump
+    into a JSONL artifact. The current in-memory buffer is captured;
+    bundle readers can filter by `obs.wall_time <= tick.ts_wall` to
+    reconstruct buffer state at any tick within the eviction-free
+    window. If None, no buffers are dumped.
     """
     end_date = date.today()
     start_date = end_date - timedelta(days=max(window_days, 0))
@@ -96,6 +105,12 @@ async def export_bundle(
             hass, bundle_dir, ha_history_entity_ids, start_date, end_date,
         )
 
+    buffer_counts: dict[str, int] = {}
+    if observation_buffers:
+        buffer_counts = await hass.async_add_executor_job(
+            _write_observation_buffers, bundle_dir, observation_buffers,
+        )
+
     manifest = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "zone_label": zone_label,
@@ -106,6 +121,7 @@ async def export_bundle(
         "tick_record_count": tick_count,
         "event_record_count": event_count,
         "ha_history_record_count": history_count,
+        "buffer_record_counts": buffer_counts,
         "integration_version": integration_version,
         "schema_version": TickOutput.SCHEMA_VERSION,
     }
@@ -212,6 +228,28 @@ def _profile_filter(
     return _keep
 
 
+def _write_observation_buffers(
+    bundle_dir: Path,
+    buffers: dict[str, list[Observation]],
+) -> dict[str, int]:
+    """Sync helper: dump each buffer to `<stem>.jsonl` in the bundle dir.
+
+    Returns a `{stem: count}` map. Skips empty buffers (no file emitted)
+    so consumers can distinguish "buffer mode never engaged" from
+    "buffer was empty at export time" via manifest counts.
+    """
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    counts: dict[str, int] = {}
+    for stem, obs_list in buffers.items():
+        path = bundle_dir / f"{stem}.jsonl"
+        with path.open("w", encoding="utf-8") as f:
+            for obs in obs_list:
+                f.write(json.dumps(obs.as_dict(), default=str))
+                f.write("\n")
+        counts[stem] = len(obs_list)
+    return counts
+
+
 async def _write_ha_history(
     hass: HomeAssistant,
     bundle_dir: Path,
@@ -295,6 +333,16 @@ def _write_manifest_and_readme(
             "state-change records from HA's recorder for the joined "
             "entities (room temp, outdoor, solar, model inputs).",
         ])
+    buffer_counts = manifest.get("buffer_record_counts") or {}
+    for stem, count in buffer_counts.items():
+        readme_lines.append(
+            f"- **`{stem}.jsonl`** — {count} `Observation` records from "
+            f"the live `{stem}` buffer at export time. "
+            f"Load via `Observation.from_dict(json.loads(line))`. "
+            "Filter by `obs.wall_time <= tick.ts_wall` to reproduce "
+            "buffer state at any tick (exact within the eviction-free "
+            "window)."
+        )
     readme_lines.extend([
         "- **`manifest.json`** — bundle metadata (this README's source).",
         "",

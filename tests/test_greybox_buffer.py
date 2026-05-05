@@ -5,7 +5,10 @@ import time
 
 import pytest
 
-from custom_components.tasmota_irhvac.pi.batch_learning import Observation
+from custom_components.tasmota_irhvac.pi.batch_learning import (
+    BufferAddResult,
+    Observation,
+)
 from custom_components.tasmota_irhvac.pi.greybox_buffer import (
     DEFAULT_GREYBOX_BUFFER_SIZE,
     GreyboxBuffer,
@@ -334,3 +337,60 @@ class TestGetAll:
         result = buf.get_all()
         result.clear()
         assert len(buf) == 1
+
+
+# ── BufferAddResult contract ─────────────────────────────────────────
+
+
+class TestAddReturnsDecision:
+    """Same admission-observability contract as DiversityAwareBuffer,
+    plus the greybox-specific `no_outdoor_temp` rejection reason that
+    fires before leverage is even computed.
+    """
+
+    def test_no_outdoor_temp_rejection_returns_named_reason(self):
+        buf = GreyboxBuffer(max_size=10)
+        r = buf.add(_make_obs(outdoor_temp_c=None))
+        # Structural check rather than isinstance — test_batch_learning.py
+        # reloads the module which replaces BufferAddResult in module
+        # globals, breaking isinstance against the frozen test import.
+        assert hasattr(r, "admitted")
+        assert r.admitted is False
+        assert r.rejection_reason == "no_outdoor_temp"
+        assert r.candidate_leverage is None
+        assert r.evicted_timestamp is None
+        assert r.min_incumbent_leverage is None
+
+    def test_admitted_into_empty_buffer_returns_admitted(self):
+        buf = GreyboxBuffer(max_size=10)
+        r = buf.add(_make_obs(outdoor_temp_c=5.0))
+        assert r.admitted is True
+        assert r.rejection_reason is None
+        assert r.candidate_leverage is not None and r.candidate_leverage >= 0
+        assert r.evicted_timestamp is None
+        assert r.min_incumbent_leverage is None
+
+    def test_full_buffer_with_higher_leverage_admits_and_reports_evicted(self):
+        buf = GreyboxBuffer(max_size=4)
+        for i in range(4):
+            buf.add(_make_obs(outdoor_temp_c=10.0 + i, room_rate=0.001))
+
+        r = buf.add(_make_obs(outdoor_temp_c=-30.0, room_rate=0.05))
+        assert r.admitted is True
+        assert r.candidate_leverage is not None
+        assert r.min_incumbent_leverage is not None
+        assert r.evicted_timestamp is not None
+        assert r.rejection_reason is None
+
+    def test_full_buffer_with_equal_leverage_rejects_with_low_leverage(self):
+        buf = GreyboxBuffer(max_size=4)
+        for i in range(4):
+            buf.add(_make_obs(outdoor_temp_c=10.0, room_rate=0.001))
+
+        r = buf.add(_make_obs(outdoor_temp_c=10.0, room_rate=0.001))
+        assert r.admitted is False
+        assert r.rejection_reason == "low_leverage"
+        assert r.candidate_leverage is not None
+        assert r.min_incumbent_leverage is not None
+        assert r.evicted_timestamp is None
+        assert len(buf) == 4

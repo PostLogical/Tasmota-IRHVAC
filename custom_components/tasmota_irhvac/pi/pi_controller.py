@@ -39,7 +39,7 @@ from homeassistant.util.unit_conversion import TemperatureConverter
 
 import math
 
-from .batch_learning import BatchResult, CollinearGroup, DiversityAwareBuffer, HourlyResidualPattern, Observation, analyze_residuals_by_hour, build_feature_vector_from_raw, compute_belsley_diagnostics, fuse_batch_greybox, weighted_least_squares, compare_and_report, compute_blended_update
+from .batch_learning import BatchResult, BufferAddResult, CollinearGroup, DiversityAwareBuffer, HourlyResidualPattern, Observation, analyze_residuals_by_hour, build_feature_vector_from_raw, compute_belsley_diagnostics, fuse_batch_greybox, weighted_least_squares, compare_and_report, compute_blended_update
 from .greybox_buffer import GreyboxBuffer
 from .greybox_observer import (
     GreyboxBridgeResult,
@@ -163,6 +163,7 @@ from .snapshot import (
     TickEventKind,
     TickEventPayload,
     TickOutput,
+    UnlockEvaluationRecord,
 )
 from .health_checks import (
     check_comfort,
@@ -657,6 +658,7 @@ class PIController:
         self._detected_lag_tau: dict[str, float] = {}  # input name → smoothed detected tau (seconds)
         self._detected_lag_tau_count: dict[str, int] = {}  # input name → consecutive consistent detections
         self._last_residual_patterns: list[HourlyResidualPattern] = []
+        self._last_unlock_evaluation: list[UnlockEvaluationRecord] = []
         self._has_had_stable_batch: bool = False
         self._tuning_alert_counters: dict[str, int] = {}
         self._tuning_alert_snapshots: dict[str, float] = {}
@@ -2094,6 +2096,12 @@ class PIController:
         3. Per-feature VIF < 10 (Belsley 1980)
         4. For adjacent_zone inputs: additionally κ < 100
         Auto-gating skips features with a manual override (not None).
+
+        Writes one `UnlockEvaluationRecord` per evaluated frozen
+        coefficient into `self._last_unlock_evaluation` so the next
+        snapshot surfaces *why* each frozen feature stayed held — a
+        feature with `gate_failed="vif"` and `full_model_vif=14.3` is
+        unambiguously diagnosed.
         """
         n = rls.n
         coeff_names = self._coeff_names()
@@ -2109,6 +2117,8 @@ class PIController:
         # Compute κ once for adjacent_zone gate
         kappa = self._cached_kappa
 
+        records: list[UnlockEvaluationRecord] = []
+
         for i in range(n):
             if not rls.frozen[i]:
                 continue  # Already unfrozen
@@ -2116,52 +2126,101 @@ class PIController:
                 continue  # Manual override — auto-gating doesn't touch
 
             name = coeff_names[i] if i < len(coeff_names) else f"β{i}"
+            is_adjacent = self._coeff_role(i) == "adjacent_zone"
 
-            # 1. Not held in full model (sufficient variance in data)
-            if i in full_result.held_features:
-                _LOGGER.debug(
-                    "%sFeature unlock: %s[%d] — held (insufficient variance)",
-                    self._log_prefix, name, i,
-                )
-                continue
-
-            # 2. Finite std_err in full model (feature is estimable)
-            se = (
+            # Capture the values inputs to each gate. Inf std_err is
+            # serialized as None for downstream JSON-friendliness.
+            in_held = i in full_result.held_features
+            se_raw = (
                 full_result.beta_std_err[i]
                 if i < len(full_result.beta_std_err)
                 else float("inf")
             )
-            if not math.isfinite(se):
+            se: float | None = se_raw if math.isfinite(se_raw) else None
+            vif_raw = vif[i] if i < len(vif) else float("inf")
+            feat_vif: float | None = vif_raw if math.isfinite(vif_raw) else None
+            kappa_at_decision: float | None = kappa if is_adjacent else None
+
+            # 1. Not held in full model (sufficient variance in data)
+            if in_held:
+                _LOGGER.debug(
+                    "%sFeature unlock: %s[%d] — held (insufficient variance)",
+                    self._log_prefix, name, i,
+                )
+                records.append(UnlockEvaluationRecord(
+                    feature_name=name, coefficient_index=i,
+                    gate_failed="held", unfrozen=False,
+                    in_full_model_held=True,
+                    full_model_std_err=se, full_model_vif=feat_vif,
+                    is_adjacent_zone=is_adjacent,
+                    kappa_at_decision=kappa_at_decision,
+                ))
+                continue
+
+            # 2. Finite std_err in full model (feature is estimable)
+            if not math.isfinite(se_raw):
                 _LOGGER.debug(
                     "%sFeature unlock: %s[%d] — infinite std_err",
                     self._log_prefix, name, i,
                 )
+                records.append(UnlockEvaluationRecord(
+                    feature_name=name, coefficient_index=i,
+                    gate_failed="std_err", unfrozen=False,
+                    in_full_model_held=False,
+                    full_model_std_err=None, full_model_vif=feat_vif,
+                    is_adjacent_zone=is_adjacent,
+                    kappa_at_decision=kappa_at_decision,
+                ))
                 continue
 
             # 3. VIF < 10 (per-feature multicollinearity check)
-            feat_vif = vif[i] if i < len(vif) else float("inf")
-            if feat_vif >= 10.0:
+            if vif_raw >= 10.0:
                 _LOGGER.debug(
                     "%sFeature unlock: %s[%d] — VIF=%.1f (≥10, collinear)",
-                    self._log_prefix, name, i, feat_vif,
+                    self._log_prefix, name, i, vif_raw,
                 )
+                records.append(UnlockEvaluationRecord(
+                    feature_name=name, coefficient_index=i,
+                    gate_failed="vif", unfrozen=False,
+                    in_full_model_held=False,
+                    full_model_std_err=se, full_model_vif=feat_vif,
+                    is_adjacent_zone=is_adjacent,
+                    kappa_at_decision=kappa_at_decision,
+                ))
                 continue
 
             # 4. Adjacent zone: additionally require κ < 100
-            if self._coeff_role(i) == "adjacent_zone":
-                if kappa is not None and kappa >= 100:
-                    _LOGGER.debug(
-                        "%sFeature unlock: %s[%d] — adjacent_zone gated by κ=%.0f",
-                        self._log_prefix, name, i, kappa,
-                    )
-                    continue
+            if is_adjacent and kappa is not None and kappa >= 100:
+                _LOGGER.debug(
+                    "%sFeature unlock: %s[%d] — adjacent_zone gated by κ=%.0f",
+                    self._log_prefix, name, i, kappa,
+                )
+                records.append(UnlockEvaluationRecord(
+                    feature_name=name, coefficient_index=i,
+                    gate_failed="kappa", unfrozen=False,
+                    in_full_model_held=False,
+                    full_model_std_err=se, full_model_vif=feat_vif,
+                    is_adjacent_zone=True,
+                    kappa_at_decision=kappa,
+                ))
+                continue
 
             # All conditions met — unfreeze
             self.set_frozen(mode, i, frozen=False, manual=False)
             _LOGGER.info(
                 "%sFeature unlock: %s[%d] unfrozen (σ=%.4f, VIF=%.1f)",
-                self._log_prefix, name, i, se, feat_vif,
+                self._log_prefix, name, i, se_raw, vif_raw,
             )
+            records.append(UnlockEvaluationRecord(
+                feature_name=name, coefficient_index=i,
+                gate_failed=None, unfrozen=True,
+                in_full_model_held=False,
+                full_model_std_err=se, full_model_vif=feat_vif,
+                is_adjacent_zone=is_adjacent,
+                kappa_at_decision=kappa_at_decision,
+            ))
+
+        self._last_unlock_evaluation = records
 
     def get_learning_state(self) -> dict[str, Any]:
         """Return learning state for the learning sensor.
@@ -3491,6 +3550,7 @@ class PIController:
                 feature_vif=tuple(br.feature_vif),
                 detected_tau=dict(br.detected_tau),
                 plant_snapshot=dict(br.plant_snapshot),
+                unlock_evaluation=tuple(self._last_unlock_evaluation),
             )
 
         # Observation buffer snapshots (light fields only — multicollinearity
@@ -5199,24 +5259,46 @@ class PIController:
             )
             # RLS observation buffer: only when we have a valid feature vector
             # (ff_enabled + outdoor temp available) and HP is clearly contributing.
-            obs_admitted = False
+            wls_result: BufferAddResult | None = None
             if x is not None and hp_observation_usable:
                 active_buffer = self._observation_buffer_heat if is_heating else self._observation_buffer_cool
-                active_buffer.add(obs)
-                obs_admitted = True
+                wls_result = active_buffer.add(obs)
             # Grey-box buffer gets ALL observations (including HP-off) when
             # data is complete — greybox learns from room_rate + outdoor temp
             # independently of FF.
-            self._greybox_buffer.add(obs)
+            gb_result = self._greybox_buffer.add(obs)
             # Capture per-tick observation context for the typed tick output.
+            # `admitted` reflects ACTUAL buffer admission, not "add() was
+            # called" — a candidate that loses on leverage to a full buffer
+            # is recorded as admitted=False with rejection_reason.
+            if wls_result is not None:
+                wls_admitted = wls_result.admitted
+                wls_lev = wls_result.candidate_leverage
+                wls_evicted = wls_result.evicted_timestamp
+                wls_min_inc = wls_result.min_incumbent_leverage
+                wls_rej = wls_result.rejection_reason
+            else:
+                wls_admitted = False
+                wls_lev = None
+                wls_evicted = None
+                wls_min_inc = None
+                wls_rej = None
             self._last_observation_context = ObservationContext(
-                admitted=obs_admitted,
+                admitted=wls_admitted,
                 clamped=obs_clamped,
                 clamped_reason=obs_clamped_reason or "",
-                leverage_score=None,  # leverage is computed lazily; skip for hot path
+                leverage_score=wls_lev,
                 mode="heat" if is_heating else "cool",
                 raw_readings=dict(obs.raw_readings),
                 feature_vector=tuple(x) if x is not None else (),
+                evicted_timestamp=wls_evicted,
+                min_incumbent_leverage=wls_min_inc,
+                rejection_reason=wls_rej,
+                gb_admitted=gb_result.admitted,
+                gb_leverage_score=gb_result.candidate_leverage,
+                gb_evicted_timestamp=gb_result.evicted_timestamp,
+                gb_min_incumbent_leverage=gb_result.min_incumbent_leverage,
+                gb_rejection_reason=gb_result.rejection_reason,
             )
 
         # CUSUM anomaly detection — requires valid feature vector (x).

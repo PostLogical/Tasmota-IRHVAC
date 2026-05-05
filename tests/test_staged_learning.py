@@ -635,6 +635,90 @@ class TestEvaluateFeatureUnlocks:
         pi._evaluate_feature_unlocks(result, rls, is_heating=True)
         assert not rls.frozen[2], "Already unfrozen should stay unfrozen"
 
+    def test_records_capture_all_passed_unfrozen(self):
+        """Successful unlock records gate_failed=None, unfrozen=True with full-model values."""
+        entity = self._make_entity_with_inputs(n=1)
+        pi = entity._pi
+        rls = pi._rls_heat
+        n = rls.n
+        result = self._make_full_result(n, std_err=[0.1, 0.05, 0.08], vif=[1.0, 1.5, 2.0])
+        pi._cached_kappa = 15.0
+
+        pi._evaluate_feature_unlocks(result, rls, is_heating=True)
+
+        records = pi._last_unlock_evaluation
+        # 1 model input + 2 ToD = 3 frozen at start; sin/cos lack entity_id
+        # so they end up `held` in the full_result (unset in this stub).
+        # Locate the model_input record (coefficient_index=2).
+        rec = next(r for r in records if r.coefficient_index == 2)
+        assert rec.gate_failed is None
+        assert rec.unfrozen is True
+        assert rec.full_model_std_err == 0.08
+        assert rec.full_model_vif == 2.0
+        assert rec.is_adjacent_zone is False
+
+    def test_records_capture_held_gate_failure(self):
+        """Held-feature failure surfaces gate_failed='held' with in_full_model_held=True."""
+        entity = self._make_entity_with_inputs(n=1)
+        pi = entity._pi
+        rls = pi._rls_heat
+        n = rls.n
+        result = self._make_full_result(n, held={2}, vif=[1.0, 1.5, 2.0])
+        pi._cached_kappa = 15.0
+
+        pi._evaluate_feature_unlocks(result, rls, is_heating=True)
+        rec = next(r for r in pi._last_unlock_evaluation if r.coefficient_index == 2)
+        assert rec.gate_failed == "held"
+        assert rec.unfrozen is False
+        assert rec.in_full_model_held is True
+
+    def test_records_capture_vif_gate_failure(self):
+        """VIF≥10 surfaces gate_failed='vif' with the offending VIF preserved."""
+        entity = self._make_entity_with_inputs(n=1)
+        pi = entity._pi
+        rls = pi._rls_heat
+        n = rls.n
+        result = self._make_full_result(n, std_err=[0.1, 0.05, 0.08], vif=[1.0, 1.5, 14.3])
+        pi._cached_kappa = 15.0
+
+        pi._evaluate_feature_unlocks(result, rls, is_heating=True)
+        rec = next(r for r in pi._last_unlock_evaluation if r.coefficient_index == 2)
+        assert rec.gate_failed == "vif"
+        assert rec.unfrozen is False
+        assert rec.full_model_vif == 14.3
+        assert rec.full_model_std_err == 0.08  # std_err passed; only VIF failed
+
+    def test_records_capture_std_err_gate_failure(self):
+        """Infinite std_err surfaces gate_failed='std_err' with std_err=None."""
+        entity = self._make_entity_with_inputs(n=1)
+        pi = entity._pi
+        rls = pi._rls_heat
+        n = rls.n
+        result = self._make_full_result(n, std_err=[0.1, 0.05, float("inf")], vif=[1.0, 1.5, 2.0])
+        pi._cached_kappa = 15.0
+
+        pi._evaluate_feature_unlocks(result, rls, is_heating=True)
+        rec = next(r for r in pi._last_unlock_evaluation if r.coefficient_index == 2)
+        assert rec.gate_failed == "std_err"
+        assert rec.unfrozen is False
+        assert rec.full_model_std_err is None
+
+    def test_records_capture_kappa_gate_failure(self):
+        """Adjacent_zone with κ≥100 surfaces gate_failed='kappa'."""
+        entity = self._make_entity_with_inputs(n=1, roles=["adjacent_zone"])
+        pi = entity._pi
+        rls = pi._rls_heat
+        n = rls.n
+        result = self._make_full_result(n, std_err=[0.1, 0.05, 0.08], vif=[1.0, 1.5, 2.0])
+        pi._cached_kappa = 150.0
+
+        pi._evaluate_feature_unlocks(result, rls, is_heating=True)
+        rec = next(r for r in pi._last_unlock_evaluation if r.coefficient_index == 2)
+        assert rec.gate_failed == "kappa"
+        assert rec.unfrozen is False
+        assert rec.is_adjacent_zone is True
+        assert rec.kappa_at_decision == 150.0
+
 
 # ── Part 3: Learning State Sensor ────────────────────────────────────────
 

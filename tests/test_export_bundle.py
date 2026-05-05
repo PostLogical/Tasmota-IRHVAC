@@ -9,11 +9,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from custom_components.tasmota_irhvac.pi.batch_learning import Observation
 from custom_components.tasmota_irhvac.pi.event_log import EventLogWriter
 from custom_components.tasmota_irhvac.pi.export_bundle import (
     _profile_filter,
     _write_logs_to_bundle,
     _write_manifest_and_readme,
+    _write_observation_buffers,
 )
 from custom_components.tasmota_irhvac.pi.snapshot import (
     ModeChangePayload,
@@ -221,6 +223,80 @@ def test_readme_omits_ha_history_section_when_no_entities(tmp_path: Path):
     _write_manifest_and_readme(bundle_dir, manifest, None)
     readme = (bundle_dir / "README.md").read_text()
     assert "ha_history.jsonl" not in readme
+
+
+# ── Observation buffer dump ────────────────────────────────────────────
+
+
+def _make_obs(timestamp: float, wall_time: float, current_c: float = 21.0) -> Observation:
+    return Observation(
+        timestamp=timestamp,
+        wall_time=wall_time,
+        hp_setpoint=22.0,
+        current_c=current_c,
+        desired_c=22.0,
+        outdoor_temp_c=10.0,
+        room_rate=0.001,
+        raw_readings={"sensor.outdoor": 10.0},
+        clamped=False,
+    )
+
+
+def test_write_observation_buffers_writes_jsonl_per_buffer(tmp_path: Path):
+    """Each buffer dumped to `<stem>.jsonl`; counts returned per stem."""
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    buffers = {
+        "observation_buffer_heat": [
+            _make_obs(timestamp=1.0, wall_time=1000.0),
+            _make_obs(timestamp=2.0, wall_time=1060.0, current_c=21.5),
+        ],
+        "observation_buffer_cool": [],
+        "greybox_buffer": [_make_obs(timestamp=3.0, wall_time=1120.0)],
+    }
+    counts = _write_observation_buffers(bundle_dir, buffers)
+    assert counts == {
+        "observation_buffer_heat": 2,
+        "observation_buffer_cool": 0,
+        "greybox_buffer": 1,
+    }
+    heat_lines = (bundle_dir / "observation_buffer_heat.jsonl").read_text().splitlines()
+    assert len(heat_lines) == 2
+    first = json.loads(heat_lines[0])
+    # Observation.as_dict format includes schema version + compact keys
+    roundtrip = Observation.from_dict(first)
+    assert roundtrip.timestamp == 1.0
+    assert roundtrip.wall_time == 1000.0
+    # Empty buffer file exists but is empty.
+    cool_path = bundle_dir / "observation_buffer_cool.jsonl"
+    assert cool_path.exists()
+    assert cool_path.read_text() == ""
+
+
+def test_readme_lists_buffer_files_when_present(tmp_path: Path):
+    """README mentions each buffer artifact present in manifest counts."""
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    manifest = {
+        "generated_at": "2026-05-04T12:00:00+00:00",
+        "zone_label": "climate.living_room",
+        "window_days": 1, "window_start": "2026-05-03", "window_end": "2026-05-04",
+        "profile": "all", "tick_record_count": 10, "event_record_count": 0,
+        "ha_history_record_count": 0,
+        "buffer_record_counts": {
+            "observation_buffer_heat": 711,
+            "observation_buffer_cool": 0,
+            "greybox_buffer": 507,
+        },
+        "integration_version": "0.19.2-pre49",
+        "schema_version": 1,
+    }
+    _write_manifest_and_readme(bundle_dir, manifest, None)
+    readme = (bundle_dir / "README.md").read_text()
+    assert "observation_buffer_heat.jsonl" in readme
+    assert "711" in readme
+    assert "greybox_buffer.jsonl" in readme
+    assert "507" in readme
 
 
 # ── End-to-end via export_bundle ──────────────────────────────────────

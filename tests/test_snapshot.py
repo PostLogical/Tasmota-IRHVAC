@@ -262,6 +262,89 @@ def test_observation_context_roundtrip():
     assert ObservationContext.from_dict(o.to_dict()) == o
 
 
+def test_observation_context_roundtrip_with_buffer_decisions():
+    """All admission-observability fields survive serialization."""
+    o = ObservationContext(
+        admitted=True,
+        clamped=False,
+        clamped_reason="",
+        leverage_score=0.42,
+        mode="heat",
+        raw_readings={"sensor.outdoor": 5.0},
+        feature_vector=(1.0, 12.5),
+        evicted_timestamp=12345.6,
+        min_incumbent_leverage=0.18,
+        rejection_reason=None,
+        gb_admitted=True,
+        gb_leverage_score=0.05,
+        gb_evicted_timestamp=None,
+        gb_min_incumbent_leverage=None,
+        gb_rejection_reason=None,
+    )
+    assert ObservationContext.from_dict(o.to_dict()) == o
+
+
+def test_observation_context_roundtrip_with_rejections():
+    """A rejection on each buffer round-trips without losing reasons."""
+    o = ObservationContext(
+        admitted=False,
+        clamped=False,
+        clamped_reason="",
+        leverage_score=0.10,
+        mode="cool",
+        raw_readings={},
+        feature_vector=(),
+        evicted_timestamp=None,
+        min_incumbent_leverage=0.10,
+        rejection_reason="low_leverage",
+        gb_admitted=False,
+        gb_leverage_score=None,
+        gb_evicted_timestamp=None,
+        gb_min_incumbent_leverage=None,
+        gb_rejection_reason="no_outdoor_temp",
+    )
+    assert ObservationContext.from_dict(o.to_dict()) == o
+
+
+def test_unlock_evaluation_record_roundtrip():
+    from custom_components.tasmota_irhvac.pi.snapshot import UnlockEvaluationRecord
+    rec = UnlockEvaluationRecord(
+        feature_name="Solar Proxy",
+        coefficient_index=3,
+        gate_failed="vif",
+        unfrozen=False,
+        in_full_model_held=False,
+        full_model_std_err=0.082,
+        full_model_vif=14.3,
+        is_adjacent_zone=False,
+        kappa_at_decision=None,
+    )
+    assert UnlockEvaluationRecord.from_dict(rec.to_dict()) == rec
+
+
+def test_observation_context_legacy_dict_back_compat():
+    """`from_dict` accepts dicts written before the new fields existed.
+
+    This covers persistent-log records written by pre48 and older
+    schema-version-1 ticks; missing keys default to None.
+    """
+    legacy = {
+        "admitted": True,
+        "clamped": False,
+        "clamped_reason": "",
+        "leverage_score": None,
+        "mode": "heat",
+        "raw_readings": {"sensor.outdoor": 5.0},
+        "feature_vector": [1.0, 12.5],
+    }
+    o = ObservationContext.from_dict(legacy)
+    assert o.admitted is True
+    assert o.evicted_timestamp is None
+    assert o.gb_admitted is None
+    assert o.rejection_reason is None
+    assert o.gb_rejection_reason is None
+
+
 def test_alert_roundtrip():
     """Alert.from_dict reconstructs a typed alert."""
     from custom_components.tasmota_irhvac.pi.snapshot import Alert

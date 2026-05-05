@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 from typing import Any, TYPE_CHECKING
 
-from .batch_learning import DiversityAwareBuffer, Observation
+from .batch_learning import BufferAddResult, DiversityAwareBuffer, Observation
 
 if TYPE_CHECKING:
     pass
@@ -79,15 +79,23 @@ class GreyboxBuffer(DiversityAwareBuffer):
     def solar_entity(self, value: str | None) -> None:
         self._solar_entity = value
 
-    def add(self, obs: Observation) -> None:
+    def add(self, obs: Observation) -> BufferAddResult:
         """Admit an observation into the buffer.
 
-        Only rejects observations with outdoor_temp_c=None.
-        Unlike the WLS buffer, admits HP-off observations.
+        Returns a `BufferAddResult` describing the decision. Only rejects
+        observations with outdoor_temp_c=None up front; otherwise
+        delegates to the leverage-scored super().add(). Unlike the WLS
+        buffer, admits HP-off observations.
         """
         if obs.outdoor_temp_c is None:
-            return
-        super().add(obs)
+            return BufferAddResult(
+                admitted=False,
+                candidate_leverage=None,
+                evicted_timestamp=None,
+                min_incumbent_leverage=None,
+                rejection_reason="no_outdoor_temp",
+            )
+        return super().add(obs)
 
     def _get_feature_vector(self, obs: Observation) -> list[float]:
         """Build the 4-feature vector for grey-box leverage scoring.

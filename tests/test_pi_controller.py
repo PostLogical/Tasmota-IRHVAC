@@ -4134,6 +4134,65 @@ class TestHPNoOutput:
         )
 
     @pytest.mark.asyncio
+    async def test_observation_context_carries_admission_decision(self):
+        """ObservationContext exposes actual admission, leverage, and gb decision."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 23  # above room
+        pi._last_raw_setpoint = 23.0
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 20.0
+        pi._pi_integral = 0.0
+        pi._inputs.outdoor_temp = 5.0
+
+        await pi._pi_tick()
+
+        ctx = pi._last_observation_context
+        assert ctx is not None
+        # WLS side: admitted into a buffer that's far from full → admitted=True,
+        # leverage_score now populated (was always None before this fix),
+        # no eviction, no min-incumbent comparison.
+        assert ctx.admitted is True
+        assert ctx.leverage_score is not None and ctx.leverage_score > 0
+        assert ctx.evicted_timestamp is None
+        assert ctx.min_incumbent_leverage is None
+        assert ctx.rejection_reason is None
+        # Greybox side: same observation accepted independently.
+        assert ctx.gb_admitted is True
+        assert ctx.gb_leverage_score is not None and ctx.gb_leverage_score > 0
+        assert ctx.gb_evicted_timestamp is None
+        assert ctx.gb_min_incumbent_leverage is None
+        assert ctx.gb_rejection_reason is None
+
+    @pytest.mark.asyncio
+    async def test_observation_context_records_clamped_no_wls_admission(self):
+        """When HP has no output, WLS admission is skipped but greybox still admits."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 17  # below room → HP has no output (clamped)
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 24.0
+        pi._pi_integral = -5.0
+        pi._inputs.outdoor_temp = 5.0
+
+        await pi._pi_tick()
+
+        ctx = pi._last_observation_context
+        assert ctx is not None
+        # WLS skipped before reaching the buffer — clamped, no leverage, no rejection.
+        assert ctx.admitted is False
+        assert ctx.leverage_score is None
+        assert ctx.evicted_timestamp is None
+        assert ctx.min_incumbent_leverage is None
+        # Greybox still receives the obs (HP-off is informative for greybox).
+        assert ctx.gb_admitted is True
+        assert ctx.gb_leverage_score is not None
+
+    @pytest.mark.asyncio
     async def test_heating_hp_active_but_overshooting_integrates(self):
         """Zone 2: HP setpoint > room but room > target → HP is causing overshoot.
 

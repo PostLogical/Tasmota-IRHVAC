@@ -15,6 +15,7 @@ import random
 import pytest
 
 from custom_components.tasmota_irhvac.pi.batch_learning import (
+    BufferAddResult,
     DiversityAwareBuffer,
     Observation,
     weighted_least_squares,
@@ -841,3 +842,87 @@ class TestMulticollinearityWithFewFeatures:
         with_top = buf.get_pairwise_correlations(names, include_top=True)
         assert len(with_top) == 1
         assert with_top[0][0] in names and with_top[0][1] in names
+
+
+# ── BufferAddResult contract (admission observability) ───────────────
+
+
+class TestAddReturnsDecision:
+    """Decision metadata returned by `DiversityAwareBuffer.add()`.
+
+    Exposes admission outcome, candidate leverage, eviction target, and
+    the worst-incumbent leverage at decision time so callers (the
+    controller's tick output) don't have to re-derive buffer state.
+    """
+
+    def _buf(self, max_size: int = 5) -> DiversityAwareBuffer:
+        return DiversityAwareBuffer(
+            n_features=3, max_size=max_size,
+            feature_order=TEST_FEATURE_ORDER[:3],
+            model_inputs=TEST_MODEL_INPUTS[:1],
+        )
+
+    def test_add_into_empty_buffer_returns_admitted_no_eviction(self):
+        buf = self._buf()
+        r = buf.add(_make_obs(t=0.0, outdoor_delta=5.0, n_features=3))
+        # Structural check rather than isinstance — `test_batch_learning.py`
+        # reloads the batch_learning module to exercise the no-numpy path,
+        # which replaces `BufferAddResult` in module globals so an
+        # isinstance check against the test's frozen import would fail
+        # depending on test execution order.
+        assert hasattr(r, "admitted")
+        assert r.admitted is True
+        assert r.candidate_leverage is not None and r.candidate_leverage > 0
+        assert r.evicted_timestamp is None
+        assert r.min_incumbent_leverage is None
+        assert r.rejection_reason is None
+
+    def test_add_into_partially_full_buffer_returns_admitted_no_eviction(self):
+        buf = self._buf(max_size=5)
+        for i in range(3):
+            buf.add(_make_obs(t=float(i), outdoor_delta=5.0 + i, n_features=3))
+        r = buf.add(_make_obs(t=10.0, outdoor_delta=20.0, n_features=3))
+        assert r.admitted is True
+        assert r.evicted_timestamp is None
+        assert r.min_incumbent_leverage is None
+        assert r.rejection_reason is None
+
+    def test_add_into_full_buffer_with_higher_leverage_admits_and_reports_evicted(self):
+        buf = self._buf(max_size=5)
+        # Fill with redundant observations.
+        for i in range(5):
+            buf.add(_make_obs(t=float(i), outdoor_delta=5.0, n_features=3))
+
+        # Snapshot current min-leverage timestamp via the buffer's API
+        scores = buf.get_leverage_scores()
+        min_idx = scores.index(min(scores))
+        evicted_ts = buf._buffer[min_idx].timestamp
+
+        # A novel observation (large outdoor_delta) should beat the worst incumbent.
+        r = buf.add(_make_obs(t=100.0, outdoor_delta=30.0, n_features=3))
+        assert r.admitted is True
+        assert r.evicted_timestamp == evicted_ts
+        assert r.min_incumbent_leverage is not None
+        assert r.candidate_leverage is not None
+        assert r.candidate_leverage > r.min_incumbent_leverage
+        assert r.rejection_reason is None
+
+    def test_add_into_full_buffer_with_lower_leverage_rejects_with_reason(self):
+        buf = self._buf(max_size=5)
+        # Fill with identical observations.  Each slot ends up with the
+        # same leverage; another identical candidate has equal leverage,
+        # which fails the strict `new > min` admission check.
+        for i in range(5):
+            buf.add(_make_obs(t=float(i), outdoor_delta=5.0, n_features=3))
+
+        r = buf.add(_make_obs(t=100.0, outdoor_delta=5.0, n_features=3))
+        assert r.admitted is False
+        assert r.evicted_timestamp is None
+        assert r.min_incumbent_leverage is not None
+        assert r.candidate_leverage is not None
+        assert r.candidate_leverage <= r.min_incumbent_leverage + 1e-9
+        assert r.rejection_reason == "low_leverage"
+        # Buffer size unchanged; original timestamps still present.
+        assert len(buf._buffer) == 5
+        timestamps = [o.timestamp for o in buf._buffer]
+        assert 100.0 not in timestamps

@@ -301,6 +301,61 @@ class ResidualPattern:
 
 
 @dataclass(frozen=True, slots=True)
+class UnlockEvaluationRecord:
+    """Per-feature outcome of a single unlock-evaluation cycle.
+
+    Captures *why* a frozen feature stayed frozen (or was unfrozen)
+    based on the full-model batch result. Built by
+    `_evaluate_feature_unlocks` so bundles can answer "why is feature X
+    still held" without re-running batch WLS offline.
+
+    `gate_failed` is one of:
+      - "held"     — feature in `full_result.held_features` (variance gate)
+      - "std_err"  — full-model std_err non-finite
+      - "vif"      — full-model VIF >= 10
+      - "kappa"    — adjacent_zone feature, condition number >= 100
+      - None       — all gates passed; `unfrozen` is True
+    """
+
+    feature_name: str
+    coefficient_index: int
+    gate_failed: str | None
+    unfrozen: bool
+    in_full_model_held: bool
+    full_model_std_err: float | None
+    full_model_vif: float | None
+    is_adjacent_zone: bool
+    kappa_at_decision: float | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "feature_name": self.feature_name,
+            "coefficient_index": self.coefficient_index,
+            "gate_failed": self.gate_failed,
+            "unfrozen": self.unfrozen,
+            "in_full_model_held": self.in_full_model_held,
+            "full_model_std_err": self.full_model_std_err,
+            "full_model_vif": self.full_model_vif,
+            "is_adjacent_zone": self.is_adjacent_zone,
+            "kappa_at_decision": self.kappa_at_decision,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> UnlockEvaluationRecord:
+        return cls(
+            feature_name=data["feature_name"],
+            coefficient_index=data["coefficient_index"],
+            gate_failed=data.get("gate_failed"),
+            unfrozen=data.get("unfrozen", False),
+            in_full_model_held=data.get("in_full_model_held", False),
+            full_model_std_err=data.get("full_model_std_err"),
+            full_model_vif=data.get("full_model_vif"),
+            is_adjacent_zone=data.get("is_adjacent_zone", False),
+            kappa_at_decision=data.get("kappa_at_decision"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class BatchLearningSnapshot:
     """Last batch WLS run results.
 
@@ -332,6 +387,9 @@ class BatchLearningSnapshot:
     feature_vif: tuple[float, ...]
     detected_tau: dict[str, float]
     plant_snapshot: dict[str, Any]
+    # Per-feature outcome of the last unlock evaluation. Empty before
+    # the first batch cycle has run, or when no frozen features remain.
+    unlock_evaluation: tuple[UnlockEvaluationRecord, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -353,6 +411,7 @@ class BatchLearningSnapshot:
             "feature_vif": list(self.feature_vif),
             "detected_tau": dict(self.detected_tau),
             "plant_snapshot": dict(self.plant_snapshot),
+            "unlock_evaluation": [r.to_dict() for r in self.unlock_evaluation],
         }
 
     @classmethod
@@ -380,6 +439,10 @@ class BatchLearningSnapshot:
             feature_vif=tuple(data.get("feature_vif", ())),
             detected_tau=dict(data.get("detected_tau", {})),
             plant_snapshot=dict(data.get("plant_snapshot", {})),
+            unlock_evaluation=tuple(
+                UnlockEvaluationRecord.from_dict(r)
+                for r in data.get("unlock_evaluation", [])
+            ),
         )
 
 
@@ -754,6 +817,16 @@ class ObservationContext:
 
     None when this tick didn't produce an observation (HP off, sensor
     unavailable, etc.).
+
+    `admitted` reflects actual buffer admission for the WLS heat/cool
+    buffer (corrected from earlier semantics where it meant "we tried
+    to call add()"). `evicted_timestamp` and `min_incumbent_leverage`
+    are populated when the WLS buffer was at capacity at decision time.
+    `rejection_reason` is set on rejection ("low_leverage" today).
+
+    `gb_*` fields mirror the same observability for the grey-box
+    buffer, which has independent admission rules (admits HP-off
+    observations, rejects only `outdoor_temp_c=None`).
     """
 
     admitted: bool
@@ -763,6 +836,14 @@ class ObservationContext:
     mode: str  # "heat" or "cool"
     raw_readings: dict[str, float]  # entity_id → value at this tick
     feature_vector: tuple[float, ...]  # x vector that fed RLS
+    evicted_timestamp: float | None = None
+    min_incumbent_leverage: float | None = None
+    rejection_reason: str | None = None
+    gb_admitted: bool | None = None
+    gb_leverage_score: float | None = None
+    gb_evicted_timestamp: float | None = None
+    gb_min_incumbent_leverage: float | None = None
+    gb_rejection_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -773,6 +854,14 @@ class ObservationContext:
             "mode": self.mode,
             "raw_readings": dict(self.raw_readings),
             "feature_vector": list(self.feature_vector),
+            "evicted_timestamp": self.evicted_timestamp,
+            "min_incumbent_leverage": self.min_incumbent_leverage,
+            "rejection_reason": self.rejection_reason,
+            "gb_admitted": self.gb_admitted,
+            "gb_leverage_score": self.gb_leverage_score,
+            "gb_evicted_timestamp": self.gb_evicted_timestamp,
+            "gb_min_incumbent_leverage": self.gb_min_incumbent_leverage,
+            "gb_rejection_reason": self.gb_rejection_reason,
         }
 
     @classmethod
@@ -785,6 +874,14 @@ class ObservationContext:
             mode=data["mode"],
             raw_readings=dict(data["raw_readings"]),
             feature_vector=tuple(data["feature_vector"]),
+            evicted_timestamp=data.get("evicted_timestamp"),
+            min_incumbent_leverage=data.get("min_incumbent_leverage"),
+            rejection_reason=data.get("rejection_reason"),
+            gb_admitted=data.get("gb_admitted"),
+            gb_leverage_score=data.get("gb_leverage_score"),
+            gb_evicted_timestamp=data.get("gb_evicted_timestamp"),
+            gb_min_incumbent_leverage=data.get("gb_min_incumbent_leverage"),
+            gb_rejection_reason=data.get("gb_rejection_reason"),
         )
 
 

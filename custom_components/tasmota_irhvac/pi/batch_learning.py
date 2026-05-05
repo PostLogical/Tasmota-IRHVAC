@@ -118,6 +118,38 @@ DEFAULT_DIVERSITY_BUFFER_SIZE = 2000
 INFO_MATRIX_REGULARIZATION = 1e-4
 
 
+@dataclass(frozen=True, slots=True)
+class BufferAddResult:
+    """Outcome of a single observation admission attempt.
+
+    Returned by `DiversityAwareBuffer.add()` (and subclass overrides) so
+    callers can populate observability snapshots without re-deriving
+    buffer-internal state.
+
+    Fields:
+      admitted: True iff the observation is now in the buffer.
+      candidate_leverage: leverage score the candidate received during
+          the decision. None when the candidate was rejected before
+          leverage scoring (e.g. greybox `no_outdoor_temp`).
+      evicted_timestamp: monotonic timestamp of the displaced incumbent
+          when admission into a full buffer caused an eviction. None
+          otherwise.
+      min_incumbent_leverage: leverage of the worst-scoring incumbent
+          at decision time, present only when the buffer was at capacity
+          (so the candidate was actually compared). None when the buffer
+          had room or admission was rejected before leverage scoring.
+      rejection_reason: short string identifying why admission was
+          declined ("low_leverage", "no_outdoor_temp", ...). None when
+          `admitted` is True.
+    """
+
+    admitted: bool
+    candidate_leverage: float | None
+    evicted_timestamp: float | None
+    min_incumbent_leverage: float | None
+    rejection_reason: str | None
+
+
 def build_feature_vector_from_raw(
     obs: Observation,
     model_inputs: list[dict[str, Any]],
@@ -597,8 +629,12 @@ class DiversityAwareBuffer:
             self.recompute_info_matrix()
         return removed
 
-    def add(self, obs: Observation) -> None:
-        """Add an observation, using leverage-scored eviction when full."""
+    def add(self, obs: Observation) -> BufferAddResult:
+        """Add an observation, using leverage-scored eviction when full.
+
+        Returns a `BufferAddResult` describing the decision so callers
+        can populate observability snapshots without re-deriving state.
+        """
         x = self._get_feature_vector(obs)
         new_leverage = self._compute_leverage(x)
 
@@ -606,16 +642,39 @@ class DiversityAwareBuffer:
             # Buffer not full — always accept.
             self._buffer.append(obs)
             self._sherman_morrison_update(x)
-        else:
-            min_idx, min_lev = self._find_min_leverage_idx()
-            if new_leverage > min_lev:
-                # Downdate the evicted observation, then update with new.
-                old_x = self._get_feature_vector(self._buffer[min_idx])
-                self._sherman_morrison_downdate(old_x)
-                self._buffer[min_idx] = obs
-                self._sherman_morrison_update(x)
-            # else: new observation is less informative than everything
-            # in the buffer — discard it silently.
+            return BufferAddResult(
+                admitted=True,
+                candidate_leverage=new_leverage,
+                evicted_timestamp=None,
+                min_incumbent_leverage=None,
+                rejection_reason=None,
+            )
+
+        min_idx, min_lev = self._find_min_leverage_idx()
+        if new_leverage > min_lev:
+            # Downdate the evicted observation, then update with new.
+            evicted_ts = self._buffer[min_idx].timestamp
+            old_x = self._get_feature_vector(self._buffer[min_idx])
+            self._sherman_morrison_downdate(old_x)
+            self._buffer[min_idx] = obs
+            self._sherman_morrison_update(x)
+            return BufferAddResult(
+                admitted=True,
+                candidate_leverage=new_leverage,
+                evicted_timestamp=evicted_ts,
+                min_incumbent_leverage=min_lev,
+                rejection_reason=None,
+            )
+
+        # New observation is less informative than everything in the
+        # buffer — discard it.
+        return BufferAddResult(
+            admitted=False,
+            candidate_leverage=new_leverage,
+            evicted_timestamp=None,
+            min_incumbent_leverage=min_lev,
+            rejection_reason="low_leverage",
+        )
 
     def _find_min_leverage_idx(self) -> tuple[int, float]:
         """Find the index and value of the lowest-leverage observation.
