@@ -159,6 +159,11 @@ class FullStackConfig:
     # zone (prior bench behavior).
     head_calibration_bounds: tuple[float, float] | None = None
 
+    # Optional per-batch callback fired after pi._run_batch_analysis().
+    # Receives (batch_index, pi) — useful for capturing greybox bridge state,
+    # gate failures, etc. without modifying the runner. Index is 1-based.
+    batch_callback: Callable[[int, object], None] | None = None
+
 
 # ── Checkpoint system ────────────────────────────────────────────────────
 
@@ -776,10 +781,13 @@ def run_full_stack(
             _hp_off = delta < cal_min
         if _hp_on:
             ticks_hp_on += 1
+            hp_state = "on"
         elif _hp_off:
             ticks_hp_off += 1
+            hp_state = "off"
         else:
             ticks_uncertain += 1
+            hp_state = "uncertain"
 
         # Advance thermal model.  All heat sources enter through the
         # 2R2C air/wall split (solar inside the model; non-solar via
@@ -887,6 +895,7 @@ def run_full_stack(
             "room_temp": model.room_temp,
             "sensor_reading": sensor_reading,
             "hp_setpoint": hp_setpoint,
+            "hp_state": hp_state,
             "integral": pi._pi_integral,
             "ff_offset": pi._ff_offset,
             "ff_fraction": ff_abs / denom if denom > 0 else 0.0,
@@ -907,6 +916,9 @@ def run_full_stack(
         if tick > 0 and tick % batch_interval_ticks == 0:
             pi._run_batch_analysis()
             batch_count += 1
+
+            if config.batch_callback is not None:
+                config.batch_callback(batch_count, pi)
 
             # Snapshot coefficients
             _snapshot_coefs(pi, batch_count, config.model_inputs,

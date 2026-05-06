@@ -1,8 +1,8 @@
 """Real-CSV seasonal validation of 2R2C grey-box (#47 sibling success criterion #2).
 
-Sibling to ``test_wls_vs_greybox.py``: same WLS-only / GB-only / Fused
-comparison, but driven by real Open-Meteo CSV windows for fall, winter,
-and spring instead of a single synthetic spring scenario.
+Sibling to ``test_wls_vs_greybox.py``: same WLS-only vs Fused comparison,
+but driven by real Open-Meteo CSV windows for fall, winter, and spring
+instead of a synthetic spring scenario.
 
 Per ``project_greybox_1r1c_limitation.md`` Phase 3, the synthetic spring
 result was 30/119 gates passed and β_outdoor within ~10% of truth — a
@@ -12,20 +12,33 @@ fronts, and seasonal day-length shifts? ``feedback_synthetic_vs_real_bench.md``
 is the precedent; the FIFO/leverage finding looked clean on synth and
 inverted on real weather. Same risk applies here.
 
-Marked ``@design``: 9 sims (3 seasons × 3 modes × ~60d each), runs on
+History note: this file previously ran an inline simulation loop with a
+third arm (``gb_only``) that monkey-patched ``pi._run_batch_analysis`` to
+revert WLS coefficient writes. That arm was dropped (2026-05-06) when
+migrating to ``full_stack_runner``: the verdict memory established that
+gb_only rails the same way wls_only and fused do. The inline loop also
+hardcoded ``solar_gain=0.06`` while asserting ``solar_true=-2.0``, producing
+a physics inconsistency (β_solar implied by physics is −solar_gain/hp_gain
+= −1.5, not −2.0). Migrating to ``full_stack_runner`` fixes this:
+``ModelInputSpec.resolve()`` derives ``solar_thermal_gain = |β_solar_truth|
+× hp_gain`` so the model and the asserted truth agree.
+
+Marked ``@design``: 6 sims (3 seasons × 2 modes × ~60d each), runs on
 demand alongside the synthetic-spring sibling.
 """
 
 from __future__ import annotations
 
-import math
-import time as _time
 from dataclasses import dataclass
 
 import pytest
 
-from tests.hvac_bench.adapters import TasmotaPIAdapter
-from tests.hvac_bench.full_stack_runner import TICK_MINUTES_DEFAULT
+from tests.hvac_bench.full_stack_runner import (
+    FullStackConfig,
+    ModelInputSpec,
+    run_full_stack,
+    TICK_MINUTES_DEFAULT,
+)
 from tests.hvac_bench.house_profiles import PROFILES_2R2C
 from tests.hvac_bench.scenarios._weather_mode import (
     SHOULDER_FALL,
@@ -34,7 +47,6 @@ from tests.hvac_bench.scenarios._weather_mode import (
     WeatherWindow,
     windowed_real_weather,
 )
-from tests.hvac_bench.thermal_model import ThermalModel2R2C
 
 
 # Fall=2024-10-01, Winter=2024-01-01 (typical), Spring=2025-03-31. Same
@@ -62,7 +74,6 @@ class ScenarioResult:
     is_2r2c_dispatched: bool
     final_tau_fast: float | None
     final_tau_slow: float | None
-    # Diagnostic capture (2026-05-06 re-verdict re-run)
     n_2r2c_batches: int = 0
     gate_failure_counts: dict[str, int] | None = None
     final_greybox_summary: dict[str, float | int | str | None] | None = None
@@ -74,214 +85,140 @@ def _run_scenario(
     outdoor_fn,
     solar_fn,
     n_days: int,
-    initial_outdoor: float,
     season_label: str,
 ) -> ScenarioResult:
     """One real-CSV scenario at a given (mode, season).
 
-    mode: "wls_only", "gb_only", "fused". Same custom batch-intercept
-    pattern as ``test_wls_vs_greybox._run_spring_scenario``.
+    mode: "wls_only" (greybox blending off) or "fused" (greybox blending on).
     """
     profile = PROFILES_2R2C["living_room"]
 
-    pi_config = {
-        "pi_model_inputs": [{
-            "entity_id": "sensor.solar_proxy",
-            "name": "Solar Proxy",
-            "input_role": "solar",
-            "seed_heat": 0.0,
-            "seed_cool": 0.0,
-            "lag_tau": 120,
-            "delta_from_room": False,
-            "clamp_min": 0,
-        }],
-        "pi_outdoor_seed_heat": profile.true_seed,
-        "pi_outdoor_seed_cool": profile.true_seed,
-        "pi_ki": 0.15,
-        "pi_kp": 1.5,
-        "pi_deadband": 0.5,
-        "pi_setpoint_weight": 0.3,
-        "pi_greybox_blending": (mode == "fused"),
+    # Per-batch state captured via callback
+    state: dict = {
+        "gb_gates_passed": 0,
+        "gb_total": 0,
+        "is_2r2c_seen": False,
+        "n_2r2c_batches": 0,
+        "gate_failure_counts": {},
+        "final_greybox_summary": None,
+        "final_tau_fast": None,
+        "final_tau_slow": None,
     }
 
-    adapter = TasmotaPIAdapter(pi_config)
-    pi = adapter._pi
-    pi._batch_kappa_threshold = 10000
-    pi._rls_online_learning = False  # batch-only for all modes
+    def _on_batch(batch_idx: int, pi: object) -> None:
+        state["gb_total"] += 1
+        bridge = getattr(pi, "_last_greybox_bridge", None)
+        last_gb = getattr(pi, "_last_greybox_result", None)
+        if bridge is not None:
+            if bridge.gates_passed:
+                state["gb_gates_passed"] += 1
+            if bridge.greybox.is_2r2c:
+                state["is_2r2c_seen"] = True
+                state["n_2r2c_batches"] += 1
+            for gate_name, passed in bridge.gate_details.items():
+                if not passed:
+                    state["gate_failure_counts"][gate_name] = (
+                        state["gate_failure_counts"].get(gate_name, 0) + 1
+                    )
+            state["final_tau_fast"] = bridge.tau_fast
+            state["final_tau_slow"] = bridge.tau_slow
+        if last_gb is not None:
+            state["final_greybox_summary"] = {
+                "is_2r2c": last_gb.is_2r2c,
+                "c0": last_gb.c0,
+                "ua_c": last_gb.ua_c,
+                "k_c": last_gb.k_c,
+                "alpha_c": last_gb.alpha_c,
+                "k_w": last_gb.k_w,
+                "mass_ratio": last_gb.mass_ratio,
+                "tau_eff": last_gb.tau_eff,
+                "tau_fast": last_gb.tau_fast,
+                "tau_slow": last_gb.tau_slow,
+                "residual_rms": last_gb.residual_rms,
+                "cost": last_gb.cost,
+                "n_function_evals": last_gb.n_function_evals,
+                "n_observations": last_gb.n_observations,
+                "n_hp_on": last_gb.n_hp_on,
+                "n_hp_off": last_gb.n_hp_off,
+                "param_std_err": dict(last_gb.param_std_err)
+                if last_gb.param_std_err else None,
+            }
 
-    if mode == "gb_only":
-        pi._greybox_blending_enabled = True
-
-    model = ThermalModel2R2C(
-        profile=profile,
-        initial_temp=20.5,
-        outdoor_temp=initial_outdoor,
-        sensor_noise_sigma=0.1,
+    config = FullStackConfig(
+        n_days=n_days,
+        profile_name="living_room",
+        desired_c=20.5,
+        mode="heat",
+        noise_sigma=0.1,
         noise_seed=42,
-        solar_gain=0.06,
-        stove_gain=0.0,
+        tick_minutes=TICK_MINUTES_DEFAULT,
+        outdoor_schedule=outdoor_fn,
+        model_inputs=[
+            ModelInputSpec(
+                name="Solar Proxy",
+                entity_id="sensor.solar_proxy",
+                input_role="solar",
+                _true_ff_coef=-2.0,
+                seed_heat=0.0,
+                seed_cool=0.0,
+                lag_tau=120,
+                clamp_min=0,
+                schedule=solar_fn,
+            ),
+        ],
+        pi_overrides={
+            "pi_outdoor_seed_heat": profile.true_seed,
+            "pi_outdoor_seed_cool": profile.true_seed,
+            "pi_ki": 0.15,
+            "pi_kp": 1.5,
+            "pi_setpoint_weight": 0.3,
+            "pi_greybox_blending": (mode == "fused"),
+            "pi_rls_online_learning": False,
+        },
+        relax_kappa_gate=True,
+        batch_callback=_on_batch,
     )
 
-    adapter.set_desired_temp(20.5)
-    adapter.set_mode("heat")
+    result = run_full_stack(config)
 
-    tick_min = TICK_MINUTES_DEFAULT
-    n_ticks = int(n_days * 24 * 60 / tick_min)
-    batch_interval = int(12 * 60 / tick_min)
-
-    history: list[dict] = []
-    gb_gates_passed = 0
-    gb_total = 0
-    is_2r2c_seen = False
-    n_2r2c_batches = 0
-    gate_failure_counts: dict[str, int] = {}
-
-    if mode == "gb_only":
-        _orig_run_batch = pi._run_batch_analysis
-
-        def _gb_only_batch():
-            beta_before = list(pi._rls_heat.beta)
-            _orig_run_batch()
-            if (pi._last_greybox_bridge is None or
-                    not pi._last_greybox_bridge.gates_passed):
-                for i in range(len(beta_before)):
-                    pi._rls_heat.beta[i] = beta_before[i]
-            else:
-                bridge = pi._last_greybox_bridge
-                for i in range(min(len(bridge.beta), pi._rls_heat.n)):
-                    if (bridge.beta[i] is not None
-                            and math.isfinite(bridge.beta_std_err[i])):
-                        pi._rls_heat.beta[i] = (
-                            bridge.beta[i] * pi._rls_heat.feature_scales[i]
-                        )
-
-        pi._run_batch_analysis = _gb_only_batch
-
-    for tick in range(n_ticks):
-        dt_seconds = tick_min * 60.0
-        model.outdoor_temp = outdoor_fn(tick)
-        solar_val = solar_fn(tick) if solar_fn is not None else 0.0
-
-        sensor_reading = model.read_sensor()
-
-        adapter._sim_clock += dt_seconds
-        adapter._entity._attr_current_temperature = sensor_reading
-        pi._inputs.outdoor_temp = model.outdoor_temp
-
-        ms = type("MockState", (), {
-            "state": str(solar_val),
-            "attributes": {"unit_of_measurement": None},
-        })()
-        _mock_states = {"sensor.solar_proxy": ms}
-        pi._hass.states.get = lambda eid, _s=_mock_states: _s.get(eid)
-
-        original = _time.monotonic
-        _time.monotonic = lambda: adapter._sim_clock
-        try:
-            adapter._loop.run_until_complete(pi._pi_tick())
-        finally:
-            _time.monotonic = original
-
-        hp_setpoint = float(pi._hp_setpoint)
-        model.step(hp_setpoint=hp_setpoint, dt_minutes=tick_min,
-                   tick=tick, solar_proxy=solar_val, mode="heat")
-
-        error = 20.5 - model.room_temp
-        history.append({"error": error})
-
-        if tick > 0 and tick % batch_interval == 0:
-            pi._run_batch_analysis()
-            gb_total += 1
-            bridge = pi._last_greybox_bridge
-            if bridge is not None:
-                if bridge.gates_passed:
-                    gb_gates_passed += 1
-                if bridge.greybox.is_2r2c:
-                    is_2r2c_seen = True
-                    n_2r2c_batches += 1
-                for gate_name, passed in bridge.gate_details.items():
-                    if not passed:
-                        gate_failure_counts[gate_name] = (
-                            gate_failure_counts.get(gate_name, 0) + 1
-                        )
-
-    in_band = sum(1 for h in history if abs(h["error"]) <= 0.5)
-    comfort = 100.0 * in_band / len(history)
-    integral_sq = sum(h["error"] ** 2 for h in history)
-    integral_rms = math.sqrt(integral_sq / len(history))
-
-    final_coefs = pi._rls_heat.get_coefficients()
-    od_final = final_coefs.get(1, 0.0)
-    solar_final = final_coefs.get(2, 0.0) if pi._rls_heat.n > 2 else 0.0
-
-    od_true = profile.true_seed
-    solar_true = -2.0  # parity with test_wls_vs_greybox
-
-    last_bridge = pi._last_greybox_bridge
-    final_tau_fast = (last_bridge.tau_fast if last_bridge is not None
-                      else None)
-    final_tau_slow = (last_bridge.tau_slow if last_bridge is not None
-                      else None)
-
-    final_greybox_summary: dict[str, float | int | str | None] | None = None
-    last_gb = pi._last_greybox_result
-    if last_gb is not None:
-        final_greybox_summary = {
-            "is_2r2c": last_gb.is_2r2c,
-            "c0": last_gb.c0,
-            "ua_c": last_gb.ua_c,
-            "k_c": last_gb.k_c,
-            "alpha_c": last_gb.alpha_c,
-            "k_w": last_gb.k_w,
-            "mass_ratio": last_gb.mass_ratio,
-            "tau_eff": last_gb.tau_eff,
-            "tau_fast": last_gb.tau_fast,
-            "tau_slow": last_gb.tau_slow,
-            "residual_rms": last_gb.residual_rms,
-            "cost": last_gb.cost,
-            "n_function_evals": last_gb.n_function_evals,
-            "n_observations": last_gb.n_observations,
-            "n_hp_on": last_gb.n_hp_on,
-            "n_hp_off": last_gb.n_hp_off,
-            "param_std_err": dict(last_gb.param_std_err)
-            if last_gb.param_std_err else None,
-        }
+    od_final = result.final_coefs.get("outdoor_delta", 0.0)
+    solar_final = result.final_coefs.get("Solar Proxy", 0.0)
+    od_truth = result.true_coefs.get("outdoor_delta", profile.true_seed)
+    solar_truth = result.true_coefs.get("Solar Proxy", -2.0)
 
     return ScenarioResult(
         season=season_label,
         mode=mode,
-        comfort=comfort,
-        integral_rms=integral_rms,
-        od_error=abs(od_final - (-od_true)),
-        solar_error=abs(solar_final - solar_true),
-        gb_gates_passed=gb_gates_passed,
-        gb_total_batches=gb_total,
+        comfort=result.comfort_hours_pct,
+        integral_rms=result.integral_rms,
+        od_error=abs(od_final - od_truth),
+        solar_error=abs(solar_final - solar_truth),
+        gb_gates_passed=state["gb_gates_passed"],
+        gb_total_batches=state["gb_total"],
         final_outdoor_beta=od_final,
         final_solar_beta=solar_final,
-        is_2r2c_dispatched=is_2r2c_seen,
-        final_tau_fast=final_tau_fast,
-        final_tau_slow=final_tau_slow,
-        n_2r2c_batches=n_2r2c_batches,
-        gate_failure_counts=gate_failure_counts,
-        final_greybox_summary=final_greybox_summary,
+        is_2r2c_dispatched=state["is_2r2c_seen"],
+        final_tau_fast=state["final_tau_fast"],
+        final_tau_slow=state["final_tau_slow"],
+        n_2r2c_batches=state["n_2r2c_batches"],
+        gate_failure_counts=state["gate_failure_counts"],
+        final_greybox_summary=state["final_greybox_summary"],
     )
 
 
 def _run_one_season(season: str, n_days: int = 60) -> dict[str, ScenarioResult]:
-    """Run all 3 modes for one season and return {mode: ScenarioResult}."""
+    """Run wls_only + fused for one season and return {mode: ScenarioResult}."""
     window = SEASONS[season]
     outdoor_fn, solar_fn, max_days = windowed_real_weather(
         start_day=window.start_day, n_days=n_days,
     )
-    initial_outdoor = outdoor_fn(0)
     out: dict[str, ScenarioResult] = {}
-    for mode in ("wls_only", "gb_only", "fused"):
+    for mode in ("wls_only", "fused"):
         out[mode] = _run_scenario(
             mode=mode,
             outdoor_fn=outdoor_fn,
             solar_fn=solar_fn,
             n_days=max_days,
-            initial_outdoor=initial_outdoor,
             season_label=season,
         )
     return out
@@ -290,9 +227,9 @@ def _run_one_season(season: str, n_days: int = 60) -> dict[str, ScenarioResult]:
 def _print_summary(
     all_results: dict[str, dict[str, ScenarioResult]],
 ) -> None:
-    """3 seasons × 3 modes table: gates, β errors, comfort."""
+    """3 seasons × 2 modes table: gates, β errors, comfort."""
     print(f"\n{'=' * 90}")
-    print(f"  2R2C Grey-box Real-CSV Validation (living_room, ~60d per season)")
+    print("  2R2C Grey-box Real-CSV Validation (living_room, ~60d per season)")
     print(f"{'=' * 90}")
     header = (f"{'Season':<8}{'Mode':<11}{'Gates':>10}"
               f"{'2R2C':>7}{'β_out err':>11}{'β_sol err':>11}"
@@ -300,7 +237,7 @@ def _print_summary(
     print(header)
     print("-" * len(header))
     for season, by_mode in all_results.items():
-        for mode in ("wls_only", "gb_only", "fused"):
+        for mode in ("wls_only", "fused"):
             r = by_mode[mode]
             gates = f"{r.gb_gates_passed}/{r.gb_total_batches}"
             tf = (f"{r.final_tau_fast:>9.0f}"
@@ -321,10 +258,10 @@ def _print_diagnostics(
 ) -> None:
     """Per-(season, mode) breakdown: gate failure histogram + final fit dump."""
     print(f"\n{'=' * 90}")
-    print(f"  Diagnostic detail (gate-failure counts + final fit values)")
+    print("  Diagnostic detail (gate-failure counts + final fit values)")
     print(f"{'=' * 90}")
     for season, by_mode in all_results.items():
-        for mode in ("wls_only", "gb_only", "fused"):
+        for mode in ("wls_only", "fused"):
             r = by_mode[mode]
             print(f"\n[{season} / {mode}]  "
                   f"2R2C dispatched on {r.n_2r2c_batches}/{r.gb_total_batches} batches")
@@ -338,10 +275,10 @@ def _print_diagnostics(
                 )
                 print(f"  Gate failures (out of {r.gb_total_batches}): {fail_str}")
             else:
-                print(f"  Gate failures: none recorded")
+                print("  Gate failures: none recorded")
             s = r.final_greybox_summary
             if s is None:
-                print(f"  Final fit: <no greybox result captured>")
+                print("  Final fit: <no greybox result captured>")
                 continue
             kind = "2R2C" if s["is_2r2c"] else "1R1C"
             print(f"  Final fit ({kind}): "
@@ -370,7 +307,7 @@ def _print_diagnostics(
                 for name, sigma in pse.items():
                     val = raw.get(name)
                     if val is not None and abs(val) > 1e-12:
-                        cv_parts.append(f"{name}: σ={sigma:.5f} CV={sigma/abs(val):.3f}")
+                        cv_parts.append(f"{name}: σ={sigma:.5f} CV={sigma / abs(val):.3f}")
                     else:
                         cv_parts.append(f"{name}: σ={sigma:.5f}")
                 print(f"    std_err: {', '.join(cv_parts)}")
@@ -385,7 +322,7 @@ def run_greybox_real_csv_summary() -> None:
 
 @pytest.fixture(scope="module")
 def real_csv_results() -> dict[str, dict[str, ScenarioResult]]:
-    """Run all (season × mode) combos once. 9 sims, ~5–10 minutes."""
+    """Run all (season × mode) combos once. 6 sims, ~5–10 minutes."""
     return {s: _run_one_season(s) for s in SEASONS}
 
 
