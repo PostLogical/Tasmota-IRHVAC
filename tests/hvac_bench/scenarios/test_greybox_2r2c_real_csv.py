@@ -62,6 +62,10 @@ class ScenarioResult:
     is_2r2c_dispatched: bool
     final_tau_fast: float | None
     final_tau_slow: float | None
+    # Diagnostic capture (2026-05-06 re-verdict re-run)
+    n_2r2c_batches: int = 0
+    gate_failure_counts: dict[str, int] | None = None
+    final_greybox_summary: dict[str, float | int | str | None] | None = None
 
 
 def _run_scenario(
@@ -129,6 +133,8 @@ def _run_scenario(
     gb_gates_passed = 0
     gb_total = 0
     is_2r2c_seen = False
+    n_2r2c_batches = 0
+    gate_failure_counts: dict[str, int] = {}
 
     if mode == "gb_only":
         _orig_run_batch = pi._run_batch_analysis
@@ -192,6 +198,12 @@ def _run_scenario(
                     gb_gates_passed += 1
                 if bridge.greybox.is_2r2c:
                     is_2r2c_seen = True
+                    n_2r2c_batches += 1
+                for gate_name, passed in bridge.gate_details.items():
+                    if not passed:
+                        gate_failure_counts[gate_name] = (
+                            gate_failure_counts.get(gate_name, 0) + 1
+                        )
 
     in_band = sum(1 for h in history if abs(h["error"]) <= 0.5)
     comfort = 100.0 * in_band / len(history)
@@ -211,6 +223,30 @@ def _run_scenario(
     final_tau_slow = (last_bridge.tau_slow if last_bridge is not None
                       else None)
 
+    final_greybox_summary: dict[str, float | int | str | None] | None = None
+    last_gb = pi._last_greybox_result
+    if last_gb is not None:
+        final_greybox_summary = {
+            "is_2r2c": last_gb.is_2r2c,
+            "c0": last_gb.c0,
+            "ua_c": last_gb.ua_c,
+            "k_c": last_gb.k_c,
+            "alpha_c": last_gb.alpha_c,
+            "k_w": last_gb.k_w,
+            "mass_ratio": last_gb.mass_ratio,
+            "tau_eff": last_gb.tau_eff,
+            "tau_fast": last_gb.tau_fast,
+            "tau_slow": last_gb.tau_slow,
+            "residual_rms": last_gb.residual_rms,
+            "cost": last_gb.cost,
+            "n_function_evals": last_gb.n_function_evals,
+            "n_observations": last_gb.n_observations,
+            "n_hp_on": last_gb.n_hp_on,
+            "n_hp_off": last_gb.n_hp_off,
+            "param_std_err": dict(last_gb.param_std_err)
+            if last_gb.param_std_err else None,
+        }
+
     return ScenarioResult(
         season=season_label,
         mode=mode,
@@ -225,6 +261,9 @@ def _run_scenario(
         is_2r2c_dispatched=is_2r2c_seen,
         final_tau_fast=final_tau_fast,
         final_tau_slow=final_tau_slow,
+        n_2r2c_batches=n_2r2c_batches,
+        gate_failure_counts=gate_failure_counts,
+        final_greybox_summary=final_greybox_summary,
     )
 
 
@@ -277,10 +316,71 @@ def _print_summary(
         print()
 
 
+def _print_diagnostics(
+    all_results: dict[str, dict[str, ScenarioResult]],
+) -> None:
+    """Per-(season, mode) breakdown: gate failure histogram + final fit dump."""
+    print(f"\n{'=' * 90}")
+    print(f"  Diagnostic detail (gate-failure counts + final fit values)")
+    print(f"{'=' * 90}")
+    for season, by_mode in all_results.items():
+        for mode in ("wls_only", "gb_only", "fused"):
+            r = by_mode[mode]
+            print(f"\n[{season} / {mode}]  "
+                  f"2R2C dispatched on {r.n_2r2c_batches}/{r.gb_total_batches} batches")
+            if r.gate_failure_counts:
+                sorted_fails = sorted(
+                    r.gate_failure_counts.items(),
+                    key=lambda kv: kv[1], reverse=True,
+                )
+                fail_str = ", ".join(
+                    f"{name}={count}" for name, count in sorted_fails
+                )
+                print(f"  Gate failures (out of {r.gb_total_batches}): {fail_str}")
+            else:
+                print(f"  Gate failures: none recorded")
+            s = r.final_greybox_summary
+            if s is None:
+                print(f"  Final fit: <no greybox result captured>")
+                continue
+            kind = "2R2C" if s["is_2r2c"] else "1R1C"
+            print(f"  Final fit ({kind}): "
+                  f"n_obs={s['n_observations']} "
+                  f"n_hp_on={s['n_hp_on']} n_hp_off={s['n_hp_off']} "
+                  f"cost={s['cost']:.5f} nfev={s['n_function_evals']} "
+                  f"residual_rms={s['residual_rms']:.5f}")
+            print(f"    c0={s['c0']:.5f}  ua_c={s['ua_c']:.5f}  "
+                  f"k_c={s['k_c']:.5f}  alpha_c={s['alpha_c']:.5f}")
+            if s["is_2r2c"]:
+                k_w = s["k_w"] if s["k_w"] is not None else float("nan")
+                mr = s["mass_ratio"] if s["mass_ratio"] is not None else float("nan")
+                tf = s["tau_fast"] if s["tau_fast"] is not None else float("nan")
+                ts = s["tau_slow"] if s["tau_slow"] is not None else float("nan")
+                print(f"    k_w={k_w:.5f}  mass_ratio={mr:.2f}  "
+                      f"τ_fast={tf:.0f}min  τ_slow={ts:.0f}min")
+            else:
+                print(f"    τ_eff={s['tau_eff']:.0f}min")
+            pse = s["param_std_err"]
+            if pse:
+                cv_parts = []
+                raw = {
+                    "ua_c": s["ua_c"], "k_c": s["k_c"], "alpha_c": s["alpha_c"],
+                    "k_w": s["k_w"], "mass_ratio": s["mass_ratio"],
+                }
+                for name, sigma in pse.items():
+                    val = raw.get(name)
+                    if val is not None and abs(val) > 1e-12:
+                        cv_parts.append(f"{name}: σ={sigma:.5f} CV={sigma/abs(val):.3f}")
+                    else:
+                        cv_parts.append(f"{name}: σ={sigma:.5f}")
+                print(f"    std_err: {', '.join(cv_parts)}")
+
+
 def run_greybox_real_csv_summary() -> None:
     """CLI entry: run all (season × mode) combos and print the summary."""
     results = {s: _run_one_season(s) for s in SEASONS}
     _print_summary(results)
+    _print_diagnostics(results)
 
 
 @pytest.fixture(scope="module")
@@ -369,3 +469,4 @@ class TestGreybox2R2CRealCSV:
     def test_summary_print(self, real_csv_results):
         """Print-only: surface the comparison table for memory updates."""
         _print_summary(real_csv_results)
+        _print_diagnostics(real_csv_results)
