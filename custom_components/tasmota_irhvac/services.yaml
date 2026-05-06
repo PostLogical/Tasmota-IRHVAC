@@ -373,13 +373,13 @@ perturb_now:
 
 learning_reset:
   name: Learning reset
-  description: Selectively reset learning subsystems. Choose which targets to reset — any combination of seeds, buffers, integral, plant_id, greybox. Mode param applies to seeds and buffers only.
+  description: Selectively reset learning subsystems. Choose which targets to reset — any combination of seeds, buffers, integral, plant_id, greybox, head_offset. Mode param applies to seeds and buffers only; head_offset always resets both modes (the offset estimator is shared).
   target:
     entity:
       integration: tasmota_irhvac
   fields:
     targets:
-      description: Which subsystems to reset.
+      description: Which subsystems to reset. "head_offset" clears the system's learned offset between your room sensor and the HP's internal sensor — use after a sensor swap, hardware change, or model_input change.
       required: true
       selector:
         select:
@@ -390,6 +390,7 @@ learning_reset:
             - integral
             - plant_id
             - greybox
+            - head_offset
     mode:
       description: Reset only this mode (heat or cool). Applies to seeds and buffers. Omit to reset both.
       required: false

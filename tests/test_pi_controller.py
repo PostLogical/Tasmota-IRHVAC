@@ -2179,6 +2179,57 @@ class TestOnRemoteChangeStandalone:
 # ── async_reset_ff_seeds RLS beta reset ──────────────────────────────
 
 
+class TestResetHeadOffset:
+    """Tests for the head_offset reset path (BE state + head_cal bands)."""
+
+    @pytest.mark.asyncio
+    async def test_reset_head_offset_restores_default_band(self):
+        """Reset clears narrowed cal_band and BE posterior."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        # Simulate a converged BE narrowing the band aggressively.
+        pi._head_calibration_min_heat = -0.6
+        pi._head_calibration_max_heat = -0.0
+        pi._head_calibration_min_cool = 0.1
+        pi._head_calibration_max_cool = 0.7
+        pi._boundary_estimator._posterior_mean = -0.31
+        pi._boundary_estimator._posterior_std = 0.10
+        pi._boundary_estimator._updates_applied = 11
+
+        pi._reset_head_offset()
+
+        # Default ±2°C band restored for both modes.
+        assert pi._head_calibration_min_heat == -2.0
+        assert pi._head_calibration_max_heat == 2.0
+        assert pi._head_calibration_min_cool == -2.0
+        assert pi._head_calibration_max_cool == 2.0
+        # BE state back to priors / fresh.
+        assert pi._boundary_estimator.posterior_mean == 0.0
+        assert pi._boundary_estimator.posterior_std == 2.0
+        assert pi._boundary_estimator.updates_applied == 0
+
+    @pytest.mark.asyncio
+    async def test_reset_head_offset_via_async_learning_reset(self):
+        """async_learning_reset(targets=['head_offset']) wires through."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+
+        pi._head_calibration_min_heat = -0.5
+        pi._head_calibration_max_heat = 0.5
+        pi._boundary_estimator._posterior_mean = -0.2
+        pi._boundary_estimator._updates_applied = 7
+
+        await pi.async_learning_reset(targets=["head_offset"])
+
+        assert pi._head_calibration_min_heat == -2.0
+        assert pi._head_calibration_max_heat == 2.0
+        assert pi._boundary_estimator.posterior_mean == 0.0
+        assert pi._boundary_estimator.updates_applied == 0
+
+
 class TestResetFFSeedsRLS:
     """Tests for async_reset_ff_seeds with model inputs."""
 
@@ -4175,22 +4226,98 @@ class TestHPNoOutput:
         pi._desired_temp = 21.0
         pi._hp_setpoint = 17  # below room → HP has no output (clamped)
         entity._attr_hvac_mode = HVACMode.HEAT
-        entity._attr_current_temperature = 24.0
-        pi._pi_integral = -5.0
+        # Room above desired by less than ENTER_C (1.0) so the over-temp regime
+        # gate doesn't fire — keeps this test focused on no_output specifically.
+        entity._attr_current_temperature = 21.6
+        pi._pi_integral = -1.0
         pi._inputs.outdoor_temp = 5.0
 
         await pi._pi_tick()
 
         ctx = pi._last_observation_context
         assert ctx is not None
-        # WLS skipped before reaching the buffer — clamped, no leverage, no rejection.
+        # WLS skipped before reaching the buffer — clamped, no leverage.
         assert ctx.admitted is False
         assert ctx.leverage_score is None
         assert ctx.evicted_timestamp is None
         assert ctx.min_incumbent_leverage is None
+        # Reason matches the upstream gate: HP definitely off → clamped no_output.
+        assert ctx.rejection_reason == "no_output"
         # Greybox still receives the obs (HP-off is informative for greybox).
         assert ctx.gb_admitted is True
         assert ctx.gb_leverage_score is not None
+
+    @pytest.mark.asyncio
+    async def test_rejection_reason_overtemp_regime(self):
+        """When the over-temp regime gate is active, rejection_reason names it."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 23
+        pi._last_raw_setpoint = 23.0
+        entity._attr_hvac_mode = HVACMode.HEAT
+        # Room above desired by 1.0°C — enough to keep the regime active
+        # (overtemp_error >= EXIT_C=0.5) but in the calibration band so
+        # obs_clamped does not also fire.
+        entity._attr_current_temperature = 22.0
+        pi._pi_integral = 0.0
+        pi._inputs.outdoor_temp = 5.0
+        # Force the override directly — the gate logic is the same regardless
+        # of how the regime got entered.
+        pi._overtemp_regime = True
+
+        await pi._pi_tick()
+
+        ctx = pi._last_observation_context
+        assert ctx is not None
+        assert ctx.admitted is False
+        assert ctx.rejection_reason == "overtemp_regime"
+
+    @pytest.mark.asyncio
+    async def test_rejection_reason_hp_uncertain_middle_band(self):
+        """Room in the calibration middle band (neither on nor off) gets hp_uncertain."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 21
+        pi._last_raw_setpoint = 21.0
+        entity._attr_hvac_mode = HVACMode.HEAT
+        # current - hp_setpoint = -1.0, inside [cal_min=-2.0, cal_max=2.0] →
+        # neither hp_definitely_on nor hp_definitely_off → uncertain.
+        entity._attr_current_temperature = 20.0
+        pi._pi_integral = 0.0
+        pi._inputs.outdoor_temp = 5.0
+
+        await pi._pi_tick()
+
+        ctx = pi._last_observation_context
+        assert ctx is not None
+        assert ctx.admitted is False
+        assert ctx.rejection_reason == "hp_uncertain"
+
+    @pytest.mark.asyncio
+    async def test_rejection_reason_ff_disabled(self):
+        """FF disabled → no feature vector → rejection_reason names the cause."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 23
+        pi._last_raw_setpoint = 23.0
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 20.0
+        pi._pi_integral = 0.0
+        pi._inputs.outdoor_temp = 5.0
+        pi._pi_ff_enabled = False  # x stays None even though HP is active
+
+        await pi._pi_tick()
+
+        ctx = pi._last_observation_context
+        assert ctx is not None
+        assert ctx.admitted is False
+        assert ctx.rejection_reason == "ff_disabled"
 
     @pytest.mark.asyncio
     async def test_heating_hp_active_but_overshooting_integrates(self):

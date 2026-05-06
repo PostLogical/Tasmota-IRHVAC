@@ -155,6 +155,10 @@ class BoundaryEstimator:
         self._stall_threshold = stall_threshold
         self._confidence_std = confidence_std
 
+        # Priors retained for reset() — restoring posterior to construction priors.
+        self._prior_mean = prior_mean
+        self._prior_std = prior_std
+
         # Bayesian state: boundary ~ N(μ, σ²)
         self._posterior_mean: float = prior_mean
         self._posterior_std: float = prior_std
@@ -166,6 +170,23 @@ class BoundaryEstimator:
         # Layer 2: pending setpoint-change events
         self._pending_events: list[SetpointChangeEvent] = []
         self._setpoint_evidence: list[tuple[float, float]] = []  # (bp_evidence, weight)
+
+    def reset(self) -> None:
+        """Reset estimator state to construction priors.
+
+        Used when something material has changed (sensor, hardware, model
+        inputs) and the historical narrowing of the head-offset band no
+        longer reflects the current operating envelope. After reset the
+        cal_band reverts to its prior-driven default, observations
+        re-accumulate, and the BE re-converges from scratch.
+        """
+        self._posterior_mean = self._prior_mean
+        self._posterior_std = self._prior_std
+        self._stall_count = 0
+        self._updates_applied = 0
+        self._last_result = None
+        self._pending_events = []
+        self._setpoint_evidence = []
 
     # ── Layer 1: Envelope-residual batch estimation ────────────────
 

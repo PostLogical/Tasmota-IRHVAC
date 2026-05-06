@@ -508,7 +508,7 @@ SERVICE_TO_METHOD = {
         "schema": IRHVAC_SERVICE_SCHEMA.extend({
             vol.Required("targets"): vol.All(
                 cv.ensure_list,
-                [vol.In(["seeds", "buffers", "integral", "plant_id", "greybox"])],
+                [vol.In(["seeds", "buffers", "integral", "plant_id", "greybox", "head_offset"])],
             ),
             vol.Optional("mode"): vol.In(["heat", "cool"]),
         }),

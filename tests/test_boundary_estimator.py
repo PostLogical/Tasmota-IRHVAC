@@ -677,3 +677,36 @@ class TestEdgeCases:
         # shifted toward target by max_step=0.1, midpoint stays near -0.4).
         midpoint = (new_min + new_max) / 2.0
         assert -1.0 < midpoint < 0.0
+
+
+class TestBoundaryEstimatorReset:
+    """Reset returns the estimator to a fresh-deploy state."""
+
+    def test_reset_restores_priors_and_clears_counters(self):
+        est = BoundaryEstimator(prior_mean=0.0, prior_std=2.0)
+        # Mutate posterior + counters as if many batch cycles have run.
+        est._posterior_mean = -0.5
+        est._posterior_std = 0.08
+        est._stall_count = 3
+        est._updates_applied = 12
+        est._setpoint_evidence.append((-0.4, 1.0))
+
+        est.reset()
+
+        assert est.posterior_mean == 0.0
+        assert est.posterior_std == 2.0
+        assert est.stall_count == 0
+        assert est.updates_applied == 0
+        assert est._last_result is None
+        assert est._pending_events == []
+        assert est._setpoint_evidence == []
+
+    def test_reset_uses_priors_passed_at_construction(self):
+        est = BoundaryEstimator(prior_mean=-0.3, prior_std=1.5)
+        est._posterior_mean = 1.0
+        est._posterior_std = 0.05
+
+        est.reset()
+
+        assert est.posterior_mean == -0.3
+        assert est.posterior_std == 1.5

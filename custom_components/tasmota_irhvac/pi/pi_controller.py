@@ -4110,7 +4110,8 @@ class PIController:
 
         Args:
             targets: List of subsystems to reset. Valid values:
-                "seeds", "buffers", "integral", "plant_id", "greybox".
+                "seeds", "buffers", "integral", "plant_id", "greybox",
+                "head_offset".
             mode: "heat", "cool", or None (both). Applies to seeds and buffers.
         """
         if "seeds" in targets:
@@ -4123,9 +4124,26 @@ class PIController:
             self._reset_plant_id()
         if "greybox" in targets:
             self._flush_greybox()
+        if "head_offset" in targets:
+            self._reset_head_offset()
         _LOGGER.info(
             "Learning reset: targets=%s, mode=%s", targets, mode or "heat+cool"
         )
+
+    def _reset_head_offset(self) -> None:
+        """Reset the learned room-sensor ↔ HP-head-sensor offset.
+
+        Resets the BoundaryEstimator state and the head_calibration band
+        to defaults (±2°C). Use when a sensor swap, hardware change, or
+        model_input change has invalidated the BE's historical narrowing
+        of the band — the BE re-converges from scratch on subsequent
+        batch cycles. Both modes reset together (BE state is shared).
+        """
+        self._boundary_estimator.reset()
+        self._head_calibration_min_heat = -2.0
+        self._head_calibration_max_heat = 2.0
+        self._head_calibration_min_cool = -2.0
+        self._head_calibration_max_cool = 2.0
 
     def get_learning_snapshot(self) -> dict[str, Any]:
         """Capture current learning state for save/restore."""
@@ -5330,8 +5348,22 @@ class PIController:
             )
             # RLS observation buffer: only when we have a valid feature vector
             # (ff_enabled + outdoor temp available) and HP is clearly contributing.
+            # When the upstream gate rejects, classify the cause for observability
+            # — overrides take precedence over physical state, then clamp reasons,
+            # then the calibration-band catch-all.
             wls_result: BufferAddResult | None = None
-            if x is not None and hp_observation_usable:
+            upstream_rej: str | None = None
+            if x is None:
+                upstream_rej = "ff_disabled"
+            elif self._overtemp_regime:
+                upstream_rej = "overtemp_regime"
+            elif probe_result.force_min_setpoint:
+                upstream_rej = "regime_probe_active"
+            elif obs_clamped:
+                upstream_rej = obs_clamped_reason
+            elif not hp_observation_usable:
+                upstream_rej = "hp_uncertain"
+            else:
                 active_buffer = self._observation_buffer_heat if is_heating else self._observation_buffer_cool
                 wls_result = active_buffer.add(obs)
             # Grey-box buffer gets ALL observations (including HP-off) when
@@ -5353,7 +5385,7 @@ class PIController:
                 wls_lev = None
                 wls_evicted = None
                 wls_min_inc = None
-                wls_rej = None
+                wls_rej = upstream_rej
             self._last_observation_context = ObservationContext(
                 admitted=wls_admitted,
                 clamped=obs_clamped,

@@ -237,6 +237,35 @@ class TestLearningReset:
         assert pi._plant_id.plant.tau_fast.source == "seed"
 
     @pytest.mark.asyncio
+    async def test_reset_head_offset(self, hass, setup_pi_integration):
+        """head_offset target resets BE state and head_cal band to defaults."""
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+        pi = entity._pi
+
+        pi._head_calibration_min_heat = -0.6
+        pi._head_calibration_max_heat = -0.0
+        pi._head_calibration_min_cool = 0.1
+        pi._head_calibration_max_cool = 0.7
+        pi._boundary_estimator._posterior_mean = -0.31
+        pi._boundary_estimator._posterior_std = 0.10
+        pi._boundary_estimator._updates_applied = 11
+
+        await hass.services.async_call(
+            DOMAIN, "learning_reset",
+            {"entity_id": entity.entity_id, "targets": ["head_offset"]},
+            blocking=True,
+        )
+
+        assert pi._head_calibration_min_heat == -2.0
+        assert pi._head_calibration_max_heat == 2.0
+        assert pi._head_calibration_min_cool == -2.0
+        assert pi._head_calibration_max_cool == 2.0
+        assert pi._boundary_estimator.posterior_mean == 0.0
+        assert pi._boundary_estimator.posterior_std == 2.0
+        assert pi._boundary_estimator.updates_applied == 0
+
+    @pytest.mark.asyncio
     async def test_reset_all_targets(self, hass, setup_pi_integration):
         """All targets at once."""
         entry = await setup_pi_integration()
@@ -247,12 +276,17 @@ class TestLearningReset:
         pi._rls_heat.beta[0] = 99.0
         pi._observation_buffer_heat._buffer.append(_dummy_obs())
         pi._greybox_buffer._buffer.append(_dummy_obs())
+        pi._head_calibration_min_heat = -0.5
+        pi._boundary_estimator._updates_applied = 9
 
         await hass.services.async_call(
             DOMAIN, "learning_reset",
             {
                 "entity_id": entity.entity_id,
-                "targets": ["seeds", "buffers", "integral", "plant_id", "greybox"],
+                "targets": [
+                    "seeds", "buffers", "integral",
+                    "plant_id", "greybox", "head_offset",
+                ],
             },
             blocking=True,
         )
@@ -261,6 +295,8 @@ class TestLearningReset:
         assert pi._rls_heat.beta[0] == 0.0
         assert len(pi._observation_buffer_heat._buffer) == 0
         assert len(pi._greybox_buffer._buffer) == 0
+        assert pi._head_calibration_min_heat == -2.0
+        assert pi._boundary_estimator.updates_applied == 0
 
     @pytest.mark.asyncio
     async def test_reset_with_mode_heat(self, hass, setup_pi_integration):
