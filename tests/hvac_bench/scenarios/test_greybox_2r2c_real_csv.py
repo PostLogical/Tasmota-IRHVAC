@@ -377,13 +377,6 @@ class TestGreybox2R2CRealCSV:
                     f"out of plausible range"
                 )
 
-    @pytest.mark.xfail(
-        reason="On real CSV the 2R2C fit converges to τ_fast≈700–800 min and "
-        "τ_slow≈100,000+ min — degenerate solutions with τ_fast above the "
-        "5–60 plausible band. Same root cause as test_gates_pass_at_least_"
-        "once_per_season. See project_greybox_2r2c_real_csv_finding.md.",
-        strict=True,
-    )
     def test_tau_fast_in_plausible_range_when_2r2c(self, real_csv_results):
         """Where 2R2C dispatched, the final τ_fast must land in the plant-ID
         plausible band (5–60 min). Verifies the dual-τ provider feeds

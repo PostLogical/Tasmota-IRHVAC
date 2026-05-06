@@ -818,7 +818,12 @@ GATE_MAX_TAU = 1500.0  # minutes (25h) — 2R2C slow mode can reach 20-100h
 GATE_MIN_TAU_FAST = 5.0     # minutes — air-node response (2R2C)
 GATE_MAX_TAU_FAST = 60.0    # minutes
 GATE_MIN_TAU_SLOW = 60.0    # minutes — wall mode (2R2C)
-GATE_MAX_TAU_SLOW = 1500.0  # minutes
+# 3500 min ≈ 58h covers lit-typical residential (15–55h per design_auto_-
+# perturbation.md citation: NA-residential survey of 10,000+ buildings via
+# Bacher-Madsen 2011 family). Old threshold of 1500 min cut off the upper
+# half of typical residential. Passive-House range (90–200h) intentionally
+# excluded — those buildings would need a separate gate.
+GATE_MAX_TAU_SLOW = 3500.0  # minutes
 GATE_MIN_TAU_SEPARATION = 2.0  # τ_slow / τ_fast — separation needed for 2R2C
 GATE_MIN_MASS_RATIO = 1.0   # Bacher-Madsen typical 5–10; allow 1–20
 GATE_MAX_MASS_RATIO = 20.0
