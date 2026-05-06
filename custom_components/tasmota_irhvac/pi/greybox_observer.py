@@ -54,6 +54,7 @@ _LOGGER = logging.getLogger(__name__)
 # Try to import scipy; gracefully degrade if unavailable.
 try:
     from scipy.optimize import least_squares as _least_squares
+    from scipy.linalg import expm as _expm
     SCIPY_AVAILABLE = True
 except ImportError:
     SCIPY_AVAILABLE = False
@@ -90,35 +91,19 @@ K_W_BOUNDS = (0.001, 0.2)
 # residential; allow margins for fit, gate to a tighter range.
 MASS_RATIO_BOUNDS = (1.0, 30.0)
 
-# 2R2C Bayesian priors on the parameter pair that's not separately
-# identifiable from operational rate-residual data (Marty-Stabat 2022 —
-# these two are correlated in the regressor; the optimizer can rail one
-# against the other to fit residuals). Priors anchor at literature values;
-# implemented as ridge-style penalty residuals appended to the least-
-# squares loss (Hollick 2020 occupied-home approach, MAP estimation with
-# Gaussian priors).
+# 2R2C wall-mode parameters held at literature-typical residential values
+# (Bacher-Madsen 2011: mass_ratio 5-10, τ_couple 30-80 min). These are
+# NOT fitted from operational data — wall-mode identifiability requires
+# active excitation (Radecki-Hencey 2015 §IV; Marty-Stabat 2022; Reynders
+# 2014; Annex 71 ST3 negative result for closed-loop residential).
+# Hollick 2020 fixes capacity-related parameters at lit values for
+# occupied-home identification — same architectural choice here.
 #
-# Prior means: lit-typical residential per Bacher-Madsen 2011 (mass_ratio
-# 5-10, τ_couple 30-80 min so k_w ≈ 0.012-0.033).
-#
-# Prior stds: empirically tuned. mass_ratio at std=5 lets data move it
-# noticeably when informative (CV before prior was ~0.5, often railing
-# at 30; with prior, CV drops near 0 only when data carries no signal).
-# k_w at std=0.001 is effectively a pin — under rate-residual at 12-h
-# batch cadence, k_w is not separately identifiable from ua_c·mass_ratio
-# combinations, and any prior loose enough to "release with data" lets
-# k_w rail at the lower bound (data fit improves at k_w → 0 since the
-# wall-coupling term in the residual vanishes). Effective k_w pin matches
-# what Hollick 2020 and Marty-Stabat 2022 advise for the operational-data
-# regime: fix the parameter the data can't separately identify.
-#
-# Once sim-error PEM (or a Kalman state estimator) replaces the rate-
-# residual formulation, k_w gains a real signal source and the prior std
-# can be relaxed.
-MASS_RATIO_PRIOR_MEAN = 8.0
-MASS_RATIO_PRIOR_STD = 5.0   # 95% CI ≈ [-2, 18], clipped by bounds [1, 30]
-K_W_PRIOR_MEAN = 1.0 / 50.0  # τ_couple = 50 min
-K_W_PRIOR_STD = 0.001         # effective pin under rate-residual; relax post-PEM
+# Stage B identification (perturbation regime) can release these in a
+# separate fit when active perturbation data is available; see
+# project_greybox_redesign_evidence.md for the staged-fit architecture.
+MASS_RATIO_FIXED = 8.0           # Bacher-Madsen typical residential
+K_W_FIXED = 1.0 / 50.0            # τ_couple = 50 min — typical residential
 
 # ASHRAE Ch. 18 / bench convention: solar through a window splits ~30% to
 # the air node (convective) and ~70% to the wall node (radiative). Fixed
@@ -181,6 +166,11 @@ class GreyboxResult:
     tau_fast: float | None = None    # natural fast eigenvalue (min)
     tau_slow: float | None = None    # natural slow eigenvalue (min)
 
+    # Median observation interval — used by cadence-adaptive gates so the
+    # residual_rms threshold scales with the data's actual sample rate.
+    # None means "unknown / fallback to legacy threshold."
+    dt_median_min: float | None = None
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "n_observations": self.n_observations,
@@ -202,6 +192,7 @@ class GreyboxResult:
             "mass_ratio": self.mass_ratio,
             "tau_fast": self.tau_fast,
             "tau_slow": self.tau_slow,
+            "dt_median_min": self.dt_median_min,
         }
 
 
@@ -281,6 +272,26 @@ def fit_greybox(
         return r_1r1c
 
     return r_2r2c
+
+
+def _compute_dt_median_min(eligible: list[Observation]) -> float | None:
+    """Median observation interval in minutes, or None if not computable.
+
+    Used by cadence-adaptive gates. Returns the most-common dt (mode of
+    rounded values to 0.1 min) since real-world streams have small jitter
+    around a nominal cadence.
+    """
+    if len(eligible) < 2:
+        return None
+    dts: list[float] = []
+    for i in range(1, len(eligible)):
+        d = (eligible[i].timestamp - eligible[i - 1].timestamp) / 60.0
+        if d > 0:
+            dts.append(round(d, 1))
+    if not dts:
+        return None
+    # Modal dt — robust to occasional gaps from missed observations.
+    return max(set(dts), key=dts.count)
 
 
 def _fit_greybox_1r1c(
@@ -468,6 +479,7 @@ def _fit_greybox_1r1c(
         plant_tau_slow=plant_tau_slow,
         tau_agreement_pct=float(tau_agreement) if tau_agreement is not None else None,
         param_std_err=std_err,
+        dt_median_min=_compute_dt_median_min(eligible),
     )
 
 
@@ -529,16 +541,18 @@ def _fit_greybox_2r2c(
     t_air = [o.current_c for o in eligible]
     t_out: list[float] = [o.outdoor_temp_c for o in eligible]  # type: ignore[misc]
 
-    hp_offset: list[float] = []
+    # Sim-error PEM residual needs hp_setpoint (raw, not offset) when active
+    # so HP feedback can enter the A matrix as -k_c·T_a + k_c·sp.
+    hp_setpoint_arr: list[float | None] = []
     n_hp_on = 0
     n_hp_off = 0
     for o in eligible:
         if (o.clamped_reason == "no_output" or o.hp_setpoint is None
                 or o.hp_contribution_uncertain):
-            hp_offset.append(0.0)
+            hp_setpoint_arr.append(None)
             n_hp_off += 1
         else:
-            hp_offset.append(o.hp_setpoint - o.current_c)
+            hp_setpoint_arr.append(float(o.hp_setpoint))
             n_hp_on += 1
 
     if solar_entity is not None:
@@ -547,8 +561,15 @@ def _fit_greybox_2r2c(
         solar = [0.0] * m
     has_solar = solar_entity is not None and any(abs(s) > 1e-6 for s in solar)
 
-    hp_mean = sum(hp_offset) / m
-    hp_var = sum((h - hp_mean) ** 2 for h in hp_offset) / m
+    # PE check: HP must vary across observations or k_c is not separable
+    # from ua_c. Use observed (sp - T_a) variance as a proxy (same logic as
+    # the 1R1C rate-residual path).
+    hp_offset_proxy = [
+        (sp - t_air[i]) if sp is not None else 0.0
+        for i, sp in enumerate(hp_setpoint_arr)
+    ]
+    hp_mean = sum(hp_offset_proxy) / m
+    hp_var = sum((h - hp_mean) ** 2 for h in hp_offset_proxy) / m
     if hp_var < MIN_HP_VARIANCE:
         # Without HP-on data we can't separate k_c from ua_c — same constraint
         # as 1R1C. Fall back rather than fit a degenerate model.
@@ -559,114 +580,169 @@ def _fit_greybox_2r2c(
     for i in range(1, m):
         d = (timestamps[i] - timestamps[i - 1]) / 60.0
         dt_min[i] = d if d > 0 else 0.0
+    # Cache the typical dt so the matrix-exponential cost is paid once per
+    # parameter eval, not once per observation.
+    nonzero_dts = [d for d in dt_min if d > 0]
+    typical_dt = (max(set(nonzero_dts), key=nonzero_dts.count)
+                  if nonzero_dts else 0.0)
 
-    # Parameter packing.
-    # Without solar: [c0, ua_c, k_c, k_w, mass_ratio]
-    # With solar:    [c0, ua_c, k_c, alpha_total, k_w, mass_ratio]
+    # Parameter packing — Stage A operational regime fit.
+    # mass_ratio and k_w are HARD-FIXED at literature values (constants);
+    # the optimizer fits only (c0, ua_c, k_c, [α_c]). Wall-mode params are
+    # not separately identifiable from operational closed-loop data
+    # (Bacher-Madsen 2011, Marty-Stabat 2022, Reynders 2014, Annex 71 ST3).
+    # Stage B (perturbation regime) handles wall-mode identification when
+    # active perturbation data is available; see
+    # project_greybox_redesign_evidence.md.
     if has_solar:
-        param_names = ["c0", "ua_c", "k_c", "alpha_c", "k_w", "mass_ratio"]
+        param_names = ["c0", "ua_c", "k_c", "alpha_c"]
         lower = [
-            C0_BOUNDS[0], UA_C_BOUNDS[0], K_C_BOUNDS[0],
-            ALPHA_C_BOUNDS[0], K_W_BOUNDS[0], MASS_RATIO_BOUNDS[0],
+            C0_BOUNDS[0], UA_C_BOUNDS[0], K_C_BOUNDS[0], ALPHA_C_BOUNDS[0],
         ]
         upper = [
-            C0_BOUNDS[1], UA_C_BOUNDS[1], K_C_BOUNDS[1],
-            ALPHA_C_BOUNDS[1], K_W_BOUNDS[1], MASS_RATIO_BOUNDS[1],
+            C0_BOUNDS[1], UA_C_BOUNDS[1], K_C_BOUNDS[1], ALPHA_C_BOUNDS[1],
         ]
     else:
-        param_names = ["c0", "ua_c", "k_c", "k_w", "mass_ratio"]
-        lower = [
-            C0_BOUNDS[0], UA_C_BOUNDS[0], K_C_BOUNDS[0],
-            K_W_BOUNDS[0], MASS_RATIO_BOUNDS[0],
-        ]
-        upper = [
-            C0_BOUNDS[1], UA_C_BOUNDS[1], K_C_BOUNDS[1],
-            K_W_BOUNDS[1], MASS_RATIO_BOUNDS[1],
-        ]
+        param_names = ["c0", "ua_c", "k_c"]
+        lower = [C0_BOUNDS[0], UA_C_BOUNDS[0], K_C_BOUNDS[0]]
+        upper = [C0_BOUNDS[1], UA_C_BOUNDS[1], K_C_BOUNDS[1]]
 
     # Warm start from 1R1C result, with plant ID hint on ua_c if available.
     ua_c_init = r_1r1c.ua_c
     if plant_tau_slow is not None and plant_tau_slow > 0:
         ua_c_init = max(UA_C_BOUNDS[0], min(UA_C_BOUNDS[1], 1.0 / plant_tau_slow))
-    # Bacher-Madsen typical residential: τ_couple ≈ 30–80 min, mass_ratio 5–10.
-    k_w_init = 1.0 / 50.0
-    mass_ratio_init = 8.0
 
     if has_solar:
         x0 = [
             r_1r1c.c0, ua_c_init, r_1r1c.k_c,
             max(ALPHA_C_BOUNDS[0], r_1r1c.alpha_c),
-            k_w_init, mass_ratio_init,
         ]
     else:
-        x0 = [
-            r_1r1c.c0, ua_c_init, r_1r1c.k_c,
-            k_w_init, mass_ratio_init,
-        ]
+        x0 = [r_1r1c.c0, ua_c_init, r_1r1c.k_c]
     # Clamp warm-start values into bounds.
     for i, (lo, hi) in enumerate(zip(lower, upper)):
         x0[i] = max(lo, min(hi, x0[i]))
 
-    # Penalty residuals for Bayesian priors on (mass_ratio, k_w). Each
-    # contributes (param - prior_mean) / prior_std as an extra residual,
-    # which least_squares squares and adds to the loss. Mathematically
-    # equivalent to MAP estimation with Gaussian priors on those two
-    # parameters. When data is informative on these params (low CV),
-    # the data residuals dominate and the prior is gently pulled toward.
-    # When data is uninformative (the rail-saturation case), the prior
-    # holds the params at literature-typical values rather than letting
-    # the optimizer route them to the corner.
-    n_data = m  # data residuals come first; penalties appended after
-    n_penalties = 2  # (mass_ratio, k_w)
+    # Wall-mode params held constant (Stage A operational regime).
+    k_w = K_W_FIXED
+    mass_ratio = MASS_RATIO_FIXED
+    n_data = m
+
+    # Sim-error PEM residual: forward-simulate state x = [T_a, T_w] via
+    # matrix-exponential with HP-as-feedback in A; data residual =
+    # predicted T_a − observed T_a (in °C). Replaces the prior rate-
+    # residual / HP-as-input formulation that produced biased β_outdoor
+    # and ~14× underestimate of raw RC params on real CSV (project_grey-
+    # box_2r2c_real_csv_finding.md, project_greybox_rate_convention_bug.md).
+    # Formulation matches Probe 8 of the multi-restart probe series:
+    #
+    #   Active:   dx/dt = A_active   · x + b_active
+    #             A_active   = [[-(ua_c + k_c + k_w),  k_w           ],
+    #                           [ k_w/mr,             -k_w/mr        ]]
+    #             b_active[0]   = c0 + ua_c·t_out + k_c·hp_setpoint
+    #                                 + α_air·solar
+    #
+    #   Inactive: dx/dt = A_inactive · x + b_inactive
+    #             A_inactive = [[-(ua_c + k_w),         k_w           ],
+    #                           [ k_w/mr,              -k_w/mr        ]]
+    #             b_inactive[0] = c0 + ua_c·t_out + α_air·solar
+    #
+    #   Always:   b[1] = α_wall·solar / mr
+    #
+    # Zero-order hold inputs at start of interval:
+    #   x(i) = exp(A·dt)·x(i-1) + ψ(dt)·b(i-1)
+    #   ψ(dt) = A⁻¹·(exp(A·dt) − I)
+    #
+    # Matrix exp + ψ are precomputed once per parameter eval at typical_dt.
+    # Lit-canonical output-error PEM (Ljung) — what Bacher-Madsen 2011 /
+    # Hollick 2020 / CTSM-R use, modulo the Kalman filter (which Probe 8
+    # didn't include and which we're testing whether priors substitute for).
+    import numpy as np  # local-import to honour scipy-optional pattern
+
+    def _expm_psi(A, dt):
+        eA = _expm(A * dt)
+        try:
+            psi = np.linalg.solve(A, eA - np.eye(2))
+        except np.linalg.LinAlgError:
+            psi = np.zeros((2, 2))
+        return eA, psi
+
+    # k_w and mass_ratio are constants in this fit (Stage A operational regime
+    # — see project_greybox_redesign_evidence.md). Build A matrices outside
+    # the residual function since wall structure doesn't change with the
+    # fitted params.
+    a_wall_rate_fixed = k_w / mass_ratio
 
     def residual_fn(params: list[float]) -> list[float]:
         if has_solar:
-            c0, ua_c, k_c, alpha_total, k_w, mass_ratio = params
+            c0, ua_c, k_c, alpha_total = params
         else:
-            c0, ua_c, k_c, k_w, mass_ratio = params
+            c0, ua_c, k_c = params
             alpha_total = 0.0
         alpha_air = alpha_total * SOLAR_AIR_FRACTION
         alpha_wall = alpha_total * SOLAR_WALL_FRACTION
-        a_wall = k_w / mass_ratio  # wall-side rate (min⁻¹)
 
-        # Initial wall state: assume equilibrium with air at t=0.
-        t_wall = t_air[0]
-        residuals = [0.0] * (n_data + n_penalties)
+        A_active = np.array([
+            [-(ua_c + k_c + k_w),  k_w               ],
+            [ a_wall_rate_fixed,  -a_wall_rate_fixed ],
+        ], dtype=float)
+        A_inactive = np.array([
+            [-(ua_c + k_w),         k_w               ],
+            [ a_wall_rate_fixed,   -a_wall_rate_fixed ],
+        ], dtype=float)
 
-        # First tick: t_wall = t_air → coupling term contributes 0.
-        residuals[0] = (
-            room_rate[0] - c0
-            - ua_c * (t_out[0] - t_air[0])
-            - k_c * hp_offset[0]
-            - alpha_air * solar[0]
-        )
+        if typical_dt > 0:
+            try:
+                expA_act, psi_act = _expm_psi(A_active, typical_dt)
+                expA_inact, psi_inact = _expm_psi(A_inactive, typical_dt)
+            except Exception:
+                # Numerical failure (e.g. expm overflow at extreme params):
+                # return large residuals so optimizer steers away.
+                return [1e6] * n_data
+        else:
+            expA_act = expA_inact = np.eye(2)
+            psi_act = psi_inact = np.zeros((2, 2))
+
+        # Initial state: assume wall at air temperature at t=0 (equilibrium
+        # is the best we can do from a single observation).
+        x = np.array([t_air[0], t_air[0]], dtype=float)
+        residuals = [0.0] * n_data
+        # First-tick residual identically zero — no inter-sample propagation
+        # is possible. Optimizer learns from i=1 onward.
 
         for i in range(1, m):
             dt = dt_min[i]
-            # Step t_wall using piecewise-exponential integration.
-            # dT_w/dt = a_wall*(T_a - T_w) + (α_wall/mass_ratio)*solar
-            # Equilibrium with previous T_a, solar held constant over dt:
-            #   T_w_eq = T_a + α_wall*solar / k_w
-            # (a_wall * mass_ratio = k_w cancels the mass_ratio in the
-            #  forcing scaled by C_wall.)
-            if dt > 0:
-                t_w_eq = t_air[i - 1] + alpha_wall * solar[i - 1] / k_w
-                decay = math.exp(-a_wall * dt)
-                t_wall = t_w_eq + (t_wall - t_w_eq) * decay
+            if dt <= 0:
+                residuals[i] = 0.0
+                continue
+            sp_prev = hp_setpoint_arr[i - 1]
+            t_a_prev = t_air[i - 1]
+            # bench_form active flag: HP delivers heating only when
+            # room_temp < setpoint (matches thermal_model.py:315 thermo-
+            # static cycling). Per probe truth-validation, this halves
+            # tracking RMS vs the simpler `sp is not None` proxy.
+            # Heating-mode assumption (bench is heating-only).
+            active_prev = (sp_prev is not None) and (t_a_prev < sp_prev)
+            if dt == typical_dt:
+                eA = expA_act if active_prev else expA_inact
+                psi = psi_act if active_prev else psi_inact
+            else:
+                try:
+                    eA, psi = _expm_psi(
+                        A_active if active_prev else A_inactive, dt,
+                    )
+                except Exception:
+                    return [1e6] * n_data
+            if active_prev:
+                b1 = (c0 + ua_c * t_out[i - 1] + k_c * sp_prev
+                      + alpha_air * solar[i - 1])
+            else:
+                b1 = (c0 + ua_c * t_out[i - 1] + alpha_air * solar[i - 1])
+            b2 = alpha_wall * solar[i - 1] / mass_ratio
+            b = np.array([b1, b2], dtype=float)
+            x = eA @ x + psi @ b
+            residuals[i] = float(x[0] - t_air[i])
 
-            residuals[i] = (
-                room_rate[i] - c0
-                - ua_c * (t_out[i] - t_air[i])
-                - k_c * hp_offset[i]
-                - alpha_air * solar[i]
-                - k_w * (t_wall - t_air[i])
-            )
-
-        # Bayesian prior penalty residuals (Gaussian, ridge-style). Scaled
-        # by 1/prior_std so contribution is comparable across parameters
-        # regardless of natural magnitude.
-        residuals[n_data] = (mass_ratio - MASS_RATIO_PRIOR_MEAN) / MASS_RATIO_PRIOR_STD
-        residuals[n_data + 1] = (k_w - K_W_PRIOR_MEAN) / K_W_PRIOR_STD
         return residuals
 
     try:
@@ -675,7 +751,11 @@ def _fit_greybox_2r2c(
             bounds=(lower, upper),
             method="trf",
             loss="huber",
-            f_scale=0.005,
+            # Sim-error PEM residuals are in °C (T_a prediction error),
+            # not °C/min (rate). With sensor noise σ=0.1°C, typical
+            # residuals are 0.1–1.0°C; f_scale=0.1 puts them in the
+            # Huber linear regime. Was 0.005 (rate-residual scale).
+            f_scale=0.1,
             max_nfev=400,  # cap; 6-param fit usually converges in <100
         )
     except Exception:
@@ -687,35 +767,30 @@ def _fit_greybox_2r2c(
     ua_c = float(params_fit["ua_c"])
     k_c = float(params_fit["k_c"])
     alpha_total = float(params_fit.get("alpha_c", 0.0))
-    k_w = float(params_fit["k_w"])
-    mass_ratio = float(params_fit["mass_ratio"])
+    # k_w and mass_ratio held at constants in this fit
+    # (Stage A operational regime); see project_greybox_redesign_evidence.md.
 
     tau_fast, tau_slow = _natural_eigenvalues(ua_c, k_w, mass_ratio)
     tau_eff = tau_slow  # dominant for legacy consumers
-    # residual_rms reflects data-fit quality only — exclude the prior penalty
-    # residuals (last n_penalties entries of result.fun) so the gate
-    # threshold stays comparable to 1R1C and pre-prior 2R2C runs.
+    # residual_rms reflects data-fit quality (sim-error PEM units: °C of
+    # T_a prediction error, NOT °C/min like rate-residual). Existing gate
+    # threshold GATE_MAX_RMS = 0.02 °C/min is incompatible — see
+    # cadence-adaptive replacement.
     if result.fun is not None and m > 0:
-        data_residuals = result.fun[:n_data]
         residual_rms = math.sqrt(
-            sum(float(r) * float(r) for r in data_residuals) / m
+            sum(float(r) * float(r) for r in result.fun) / m
         )
     else:
         residual_rms = 0.0
 
-    # Standard errors via Jacobian. sigma² uses data residuals only so the
-    # std_errs reflect data-fit uncertainty; the prior contributions don't
-    # inflate DoF the way independent observations do.
+    # Standard errors via Jacobian.
     std_err: dict[str, float] = {}
     if result.jac is not None:
         try:
             import numpy as np
             J = result.jac
             n_params = len(param_names)
-            data_cost = 0.5 * sum(
-                float(r) * float(r) for r in result.fun[:n_data]
-            ) if result.fun is not None else result.cost
-            sigma2 = 2.0 * data_cost / max(1, m - n_params)
+            sigma2 = 2.0 * result.cost / max(1, m - n_params)
             JtJ_inv = np.linalg.pinv(J.T @ J) * sigma2
             for i, name in enumerate(param_names):
                 var = JtJ_inv[i, i]
@@ -747,6 +822,7 @@ def _fit_greybox_2r2c(
         mass_ratio=mass_ratio,
         tau_fast=tau_fast,
         tau_slow=tau_slow,
+        dt_median_min=typical_dt if typical_dt > 0 else None,
     )
 
 
@@ -828,7 +904,44 @@ GATE_MIN_TAU_SEPARATION = 2.0  # τ_slow / τ_fast — separation needed for 2R2
 GATE_MIN_MASS_RATIO = 1.0   # Bacher-Madsen typical 5–10; allow 1–20
 GATE_MAX_MASS_RATIO = 20.0
 GATE_MAX_CV = 0.5      # coefficient of variation (std_err / |estimate|)
-GATE_MAX_RMS = 0.02    # °C/min — residual quality threshold
+
+# Cadence-adaptive residual_rms thresholds. The fit residual scales with
+# both the residual formulation (rate vs state) and observation cadence
+# (sensor-noise floor depends on dt for rate, dt-independent for state).
+# Choose threshold = K_RMS_GATE × analytical_noise_floor so we accept fits
+# within K× the irreducible measurement noise.
+SIGMA_SENSOR_DEFAULT = 0.1   # °C — typical HA temp sensor σ
+K_RMS_GATE = 5.0              # multiplier on noise floor (lit-typical 3-5×)
+# 5-tick FD averaging window used by production room_rate computation
+RATE_FD_TICKS = 5
+
+# Legacy constant kept for back-compat with downstream consumers and the
+# 1R1C gate fallback when dt_median_min is not available. Production fits
+# should use _gate_max_rms() below.
+GATE_MAX_RMS = 0.02    # °C/min — legacy fixed threshold (15-min cadence)
+
+
+def _gate_max_rms(
+    is_2r2c: bool,
+    dt_median_min: float | None,
+    sigma_sensor: float = SIGMA_SENSOR_DEFAULT,
+) -> float:
+    """Cadence-adaptive residual_rms gate threshold.
+
+    For sim-error PEM (2R2C): residual is in °C of state-prediction error.
+    Noise floor is sensor-noise σ directly, independent of dt.
+
+    For rate-residual (1R1C): residual is in °C/min. Noise floor is the
+    propagated sensor noise on the 5-tick FD: σ × √2 / (5 × dt_median_min).
+
+    Returns K_RMS_GATE × analytical_noise_floor.
+    """
+    if is_2r2c:
+        return K_RMS_GATE * sigma_sensor
+    if dt_median_min is None or dt_median_min <= 0:
+        return GATE_MAX_RMS  # legacy fallback
+    rate_noise_floor = sigma_sensor * math.sqrt(2.0) / (RATE_FD_TICKS * dt_median_min)
+    return K_RMS_GATE * rate_noise_floor
 
 
 @dataclass
@@ -942,8 +1055,12 @@ def _check_quality_gates(
     gates["k_c_positive"] = result.k_c > 0
     gates["alpha_c_nonnegative"] = result.alpha_c >= 0.0 or "alpha_c" not in se
 
-    # Gate 4: residual quality
-    gates["residual_rms"] = result.residual_rms < GATE_MAX_RMS
+    # Gate 4: residual quality (cadence-adaptive — see _gate_max_rms).
+    # 2R2C uses sim-error PEM (residual in °C); 1R1C uses rate residual
+    # (°C/min). The threshold scales with observation cadence so the gate
+    # is consistent with the analytical noise floor at any sampling rate.
+    rms_threshold = _gate_max_rms(result.is_2r2c, result.dt_median_min)
+    gates["residual_rms"] = result.residual_rms < rms_threshold
 
     return gates
 

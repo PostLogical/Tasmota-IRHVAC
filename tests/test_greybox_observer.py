@@ -593,8 +593,24 @@ class TestFitGreybox2R2C:
     UA_C_TRUE = 0.01
     K_C_TRUE = 0.04
     ALPHA_TOTAL_TRUE = 0.05
-    K_W_TRUE = 1.0 / 40.0
+    # Wall-mode truth aligned with K_W_FIXED / MASS_RATIO_FIXED hard-fixed
+    # constants in greybox_observer.py (Stage A operational regime — wall
+    # params not separately identifiable from operational data per
+    # Bacher-Madsen 2011 / Hollick 2020). Was 1/40 before architectural
+    # change; aligned to remove false-negative recovery error.
+    K_W_TRUE = 1.0 / 50.0
     MASS_RATIO_TRUE = 8.0
+
+    # HP setpoint commands (fixed, not leashed to room temp — unlike a real
+    # PI controller that updates sp each tick, but constant sp is sufficient
+    # for testing parameter recovery).
+    #   SP_FIXED chosen so steady-state T_a ≈ 20°C with truth params and
+    #   t_out averaging 5°C:
+    #     0 = ua_c·(t_out − T_a) + k_c·(sp − T_a)  [no solar, wall in eq]
+    #     0 = 0.01·(5 − 20) + 0.04·(sp − 20)
+    #     sp − 20 = 0.15/0.04 = 3.75   ⇒  sp = 23.75 ≈ 24
+    SP_FIXED_HEAT = 24.0
+    SP_HEAT_OFF = 16.0  # well below typical t_air → bench_form active=False
 
     def _generate_2r2c_observations(
         self,
@@ -604,10 +620,21 @@ class TestFitGreybox2R2C:
     ) -> list[Observation]:
         """Simulate a 2R2C plant forward and emit Observations.
 
-        Uses exact piecewise-exponential integration on the same wall ODE
-        as the fitter so the fit can recover parameters within tolerance.
+        Uses matrix-exponential integration on the joint [T_a, T_w] state to
+        match the fitter's residual computation. HP setpoint is fixed (not
+        leashed to current room temp) so the trajectory is self-consistent
+        for sim-error PEM — a real HVAC commands an absolute setpoint and
+        the room reaches whatever steady state the physics produce.
+
+        Pre-2026-05-06: synth used hp_setpoint = t_air + 1.5 (leash) plus a
+        clamp on t_air ∈ [15, 25] to mask the resulting non-physical
+        equilibrium. Worked for rate-residual fitter (per-tick local) but
+        fails sim-error PEM (trajectory-level). Rewrote to use fixed sp +
+        no clamp; equilibrium is now physically self-consistent.
         """
         import random
+        from scipy.linalg import expm
+        import numpy as np
         random.seed(42)
         rng_t_air = random.Random(43)
 
@@ -619,28 +646,36 @@ class TestFitGreybox2R2C:
         a_wall = self.K_W_TRUE / self.MASS_RATIO_TRUE
 
         obs = []
-        t_air = 20.0
-        t_wall = 20.0
+        x = np.array([20.0, 20.0], dtype=float)  # [t_air, t_wall] init
+        eye2 = np.eye(2)
         for i in range(m):
             hour = (i * tick_minutes / 60.0) % 24.0
             t_out = 5.0 + 7.0 * math.sin(2 * math.pi * (hour - 6) / 24)
             solar = max(0.0, 0.6 * math.sin(2 * math.pi * (hour - 6) / 24))
+            t_air = x[0]
+            t_wall = x[1]
 
-            # PI-like behaviour: HP off when solar warms the room near setpoint.
+            # HP idles when solar warming + mild outdoor → no HP demand.
             hp_off = solar > 0.45 and t_out > 8.0
             if hp_off:
-                hp_setpoint = t_air - 1.0
-                hp_offset = 0.0
+                hp_setpoint = self.SP_HEAT_OFF
                 clamped_reason = "no_output"
             else:
-                hp_offset = 1.5 + 0.5 * math.sin(i * 0.05)  # vary HP demand
-                hp_setpoint = t_air + hp_offset
+                hp_setpoint = self.SP_FIXED_HEAT
                 clamped_reason = ""
 
-            # True air rate from 2R2C ODE (excluding c0/intercept term).
+            # True air rate (for room_rate observation field; the actual
+            # state advance below uses matrix-exp on the joint system).
+            # bench_form active flag: HP heats only when room < setpoint
+            # AND not in hp_off mode.
+            active = (not hp_off) and (t_air < hp_setpoint)
+            if active:
+                hp_term = self.K_C_TRUE * (hp_setpoint - t_air)
+            else:
+                hp_term = 0.0
             air_rate = (
                 self.UA_C_TRUE * (t_out - t_air)
-                + self.K_C_TRUE * hp_offset
+                + hp_term
                 + alpha_air * solar
                 + self.K_W_TRUE * (t_wall - t_air)
             )
@@ -660,14 +695,38 @@ class TestFitGreybox2R2C:
                 clamped_reason=clamped_reason,
             ))
 
-            # Advance the plant forward by dt minutes (exact 2R2C step).
-            # T_w ODE: dT_w/dt = a_wall*(T_a - T_w) + (alpha_wall/mass_ratio)*solar
-            t_w_eq = t_air + alpha_wall * solar / self.K_W_TRUE
-            t_wall = t_w_eq + (t_wall - t_w_eq) * math.exp(-a_wall * dt)
-            # T_a evolves at the air_rate; accumulate the drift.
-            t_air += air_rate * dt
-            # Don't let t_air drift too far (PI would correct in real life).
-            t_air = max(15.0, min(25.0, t_air))
+            # Advance the joint [T_a, T_w] state by dt minutes via matrix-exp.
+            # System matrix depends on bench_form active flag (matches
+            # thermal_model.py:315 thermostatic cycling).
+            #   active:   dT_a/dt = -(ua_c + k_c + k_w)·T_a + k_w·T_w + b1
+            #             b1 = ua_c·T_out + k_c·hp_setpoint + α_air·solar
+            #   inactive: dT_a/dt = -(ua_c + k_w)·T_a + k_w·T_w + b1
+            #             b1 = ua_c·T_out + α_air·solar
+            #   always:   dT_w/dt = a_wall·T_a - a_wall·T_w + b2
+            #             b2 = α_wall·solar / mass_ratio
+            # x(i+1) = exp(A·dt)·x(i) + ψ(dt)·b(i)  where ψ = A⁻¹·(exp(A·dt) − I)
+            if active:
+                A = np.array([
+                    [-(self.UA_C_TRUE + self.K_C_TRUE + self.K_W_TRUE), self.K_W_TRUE],
+                    [a_wall, -a_wall],
+                ], dtype=float)
+                b1 = (self.UA_C_TRUE * t_out
+                      + self.K_C_TRUE * hp_setpoint
+                      + alpha_air * solar)
+            else:
+                A = np.array([
+                    [-(self.UA_C_TRUE + self.K_W_TRUE), self.K_W_TRUE],
+                    [a_wall, -a_wall],
+                ], dtype=float)
+                b1 = self.UA_C_TRUE * t_out + alpha_air * solar
+            b2 = alpha_wall * solar / self.MASS_RATIO_TRUE
+            b = np.array([b1, b2], dtype=float)
+            eA = expm(A * dt)
+            try:
+                psi = np.linalg.solve(A, eA - eye2)
+            except np.linalg.LinAlgError:
+                psi = np.zeros((2, 2))
+            x = eA @ x + psi @ b
 
         return obs
 
