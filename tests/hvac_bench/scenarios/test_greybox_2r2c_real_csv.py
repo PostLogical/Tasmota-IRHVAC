@@ -39,7 +39,7 @@ from tests.hvac_bench.full_stack_runner import (
     run_full_stack,
     TICK_MINUTES_DEFAULT,
 )
-from tests.hvac_bench.house_profiles import PROFILES_2R2C
+from tests.hvac_bench.house_profiles import PROFILES, PROFILES_2R2C
 from tests.hvac_bench.scenarios._weather_mode import (
     SHOULDER_FALL,
     SHOULDER_SPRING,
@@ -79,6 +79,17 @@ class ScenarioResult:
     final_greybox_summary: dict[str, float | int | str | None] | None = None
 
 
+def _resolve_profile(profile_name: str):
+    """Look up a HouseProfile2R2C from either PROFILES (lit-grounded) or
+    PROFILES_2R2C (production-calibrated). Mirrors full_stack_runner.py
+    lookup so callers can use names from either dict."""
+    if profile_name in PROFILES_2R2C:
+        return PROFILES_2R2C[profile_name]
+    if profile_name in PROFILES:
+        return PROFILES[profile_name]
+    raise ValueError(f"Unknown profile: {profile_name}")
+
+
 def _run_scenario(
     *,
     mode: str,
@@ -86,12 +97,14 @@ def _run_scenario(
     solar_fn,
     n_days: int,
     season_label: str,
+    profile_name: str = "living_room",
 ) -> ScenarioResult:
-    """One real-CSV scenario at a given (mode, season).
+    """One real-CSV scenario at a given (mode, season, profile).
 
     mode: "wls_only" (greybox blending off) or "fused" (greybox blending on).
+    profile_name: looked up in PROFILES_2R2C first, then PROFILES (lit-grounded).
     """
-    profile = PROFILES_2R2C["living_room"]
+    profile = _resolve_profile(profile_name)
 
     # Per-batch state captured via callback
     state: dict = {
@@ -146,7 +159,7 @@ def _run_scenario(
 
     config = FullStackConfig(
         n_days=n_days,
-        profile_name="living_room",
+        profile_name=profile_name,
         desired_c=20.5,
         mode="heat",
         noise_sigma=0.1,
@@ -206,7 +219,11 @@ def _run_scenario(
     )
 
 
-def _run_one_season(season: str, n_days: int = 60) -> dict[str, ScenarioResult]:
+def _run_one_season(
+    season: str,
+    n_days: int = 60,
+    profile_name: str = "living_room",
+) -> dict[str, ScenarioResult]:
     """Run wls_only + fused for one season and return {mode: ScenarioResult}."""
     window = SEASONS[season]
     outdoor_fn, solar_fn, max_days = windowed_real_weather(
@@ -220,6 +237,7 @@ def _run_one_season(season: str, n_days: int = 60) -> dict[str, ScenarioResult]:
             solar_fn=solar_fn,
             n_days=max_days,
             season_label=season,
+            profile_name=profile_name,
         )
     return out
 
@@ -400,3 +418,172 @@ class TestGreybox2R2CRealCSV:
         """Print-only: surface the comparison table for memory updates."""
         _print_summary(real_csv_results)
         _print_diagnostics(real_csv_results)
+
+
+# ── Lit-grounded validation against PROFILES["standard_residential"] ─────
+#
+# Bacher-Madsen 2011 typical residential params, used as ground truth so
+# greybox recovery can be validated against known values rather than
+# fitted-from-uncertain-data placeholders. Per
+# feedback_living_room_calibration_suspect.md, the production-calibrated
+# living_room profile shouldn't be cited as truth; this scenario fills
+# the gap.
+
+
+# Truth values derived from PROFILES["standard_residential"]:
+#   tau_env=100, tau_couple=80, mass_ratio=8, hp_gain=0.025
+_LIT_TRUE_UA_C = 1.0 / 100.0      # = 0.01 min⁻¹
+_LIT_TRUE_K_C = 0.025              # min⁻¹
+_LIT_TRUE_K_W = 1.0 / 80.0         # = 0.0125 min⁻¹
+_LIT_TRUE_MASS_RATIO = 8.0
+_LIT_TRUE_FF_COEF = -2.0           # asserted; α_total = 2.0 × 0.025 = 0.05
+_LIT_TRUE_ALPHA_TOTAL = abs(_LIT_TRUE_FF_COEF) * _LIT_TRUE_K_C
+_LIT_TRUE_BETA_OUTDOOR = -_LIT_TRUE_UA_C / _LIT_TRUE_K_C   # = -0.4
+_LIT_TRUE_BETA_SOLAR = _LIT_TRUE_FF_COEF                     # = -2.0
+
+
+@pytest.fixture(scope="module")
+def lit_grounded_results() -> dict[str, dict[str, ScenarioResult]]:
+    """Single season (spring) on standard_residential, both modes.
+
+    Spring chosen because shoulder-season weather mixes outdoor variation
+    with non-trivial solar — best regime for excitation per
+    project_buffer_seasonal_findings.md.
+    """
+    return {"spring": _run_one_season(
+        "spring", n_days=60, profile_name="standard_residential",
+    )}
+
+
+@pytest.mark.design
+class TestGreybox2R2CLitGrounded:
+    """Lit-grounded recovery validation: does greybox recover known truth
+    parameters when driven by real Open-Meteo weather + the lit-grounded
+    standard_residential profile (Bacher-Madsen typical residential)?
+
+    This is the validation that was missing — the existing real-CSV test
+    used the production-calibrated living_room profile (suspect — see
+    feedback_living_room_calibration_suspect.md), so its results couldn't
+    be assessed against any reference. With known-truth driving the
+    thermal model, fit quality is directly measurable.
+    """
+
+    def test_2r2c_dispatched(self, lit_grounded_results):
+        """Sanity: 60 days × 96 ticks/day clears the 2R2C dispatch gates."""
+        for season, by_mode in lit_grounded_results.items():
+            assert any(r.is_2r2c_dispatched for r in by_mode.values()), (
+                f"{season}: 2R2C never dispatched — dispatch logic regression?"
+            )
+
+    @pytest.mark.xfail(
+        reason="ua_c lands at ~14× underestimate of standard_residential "
+        "truth on real-CSV bench. Diagnosis: rate-convention bug — "
+        "production room_rate is 5-tick trailing FD (averaged); residual "
+        "evaluates instantaneous predicted rate at i. Magnitude-scale "
+        "bias preserves ratios (β_outdoor ≈ truth) but underestimates "
+        "raw RC params. residual_rms ≈ 0.0075 °C/min is below the "
+        "sensor-noise rate floor — fit is converging to sub-physical "
+        "scaled params. See project_greybox_rate_convention_bug.md "
+        "Probes 2/3 — greybox-on-synthetic-with-instantaneous-rate "
+        "recovers truth.",
+        strict=True,
+    )
+    def test_recovers_ua_c(self, lit_grounded_results):
+        """Recovered ua_c within 30% of truth (= 0.01 min⁻¹).
+
+        ua_c is a free parameter (not pinned by priors) so this is a
+        direct test of greybox identification on real-weather data.
+        """
+        r = lit_grounded_results["spring"]["fused"]
+        s = r.final_greybox_summary
+        assert s is not None and s["is_2r2c"], "no 2R2C summary captured"
+        ua_c = s["ua_c"]
+        rel_err = abs(ua_c - _LIT_TRUE_UA_C) / _LIT_TRUE_UA_C
+        assert rel_err < 0.30, (
+            f"ua_c={ua_c:.5f} vs truth {_LIT_TRUE_UA_C} ({100 * rel_err:.0f}% off)"
+        )
+
+    @pytest.mark.xfail(
+        reason="k_c underestimated by same factor as ua_c (rate-convention "
+        "bug); ratios preserved so β_outdoor ≈ truth despite raw param "
+        "scale being wrong. See test_recovers_ua_c.",
+        strict=True,
+    )
+    def test_recovers_k_c(self, lit_grounded_results):
+        """Recovered k_c within 30% of truth (= 0.025 min⁻¹). Free param."""
+        r = lit_grounded_results["spring"]["fused"]
+        s = r.final_greybox_summary
+        assert s is not None and s["is_2r2c"]
+        k_c = s["k_c"]
+        rel_err = abs(k_c - _LIT_TRUE_K_C) / _LIT_TRUE_K_C
+        assert rel_err < 0.30, (
+            f"k_c={k_c:.5f} vs truth {_LIT_TRUE_K_C} ({100 * rel_err:.0f}% off)"
+        )
+
+    @pytest.mark.xfail(
+        reason="α_total underestimated proportionally with ua_c, k_c "
+        "(rate-convention bug, magnitude-scale family). See "
+        "test_recovers_ua_c.",
+        strict=True,
+    )
+    def test_recovers_alpha_total(self, lit_grounded_results):
+        """Recovered α_total within 50% of truth (= 0.05). Free param.
+
+        Looser tolerance than ua_c/k_c because α_total identification is
+        harder under closed-loop solar (project_bench_solar_fidelity.md);
+        50% covers the lit-grounded "right sign + same order of magnitude"
+        bar from earlier sessions.
+        """
+        r = lit_grounded_results["spring"]["fused"]
+        s = r.final_greybox_summary
+        assert s is not None and s["is_2r2c"]
+        alpha_c = s["alpha_c"]
+        rel_err = abs(alpha_c - _LIT_TRUE_ALPHA_TOTAL) / _LIT_TRUE_ALPHA_TOTAL
+        assert rel_err < 0.50, (
+            f"α_total={alpha_c:.5f} vs truth {_LIT_TRUE_ALPHA_TOTAL} "
+            f"({100 * rel_err:.0f}% off)"
+        )
+
+    def test_tau_fast_in_band(self, lit_grounded_results):
+        """Final τ_fast in [5, 60] min plausible band."""
+        r = lit_grounded_results["spring"]["fused"]
+        assert r.final_tau_fast is not None
+        assert 5.0 <= r.final_tau_fast <= 60.0, (
+            f"τ_fast={r.final_tau_fast:.1f} min outside [5, 60]"
+        )
+
+    def test_tau_slow_in_band(self, lit_grounded_results):
+        """Final τ_slow in [60, 3500] min plausible band.
+
+        Truth-implied τ_slow with priors: ~1250 min (priors pin k_w=0.02,
+        mass_ratio=8; ua_c truth gives this τ_slow). Should comfortably
+        clear the gate.
+        """
+        r = lit_grounded_results["spring"]["fused"]
+        assert r.final_tau_slow is not None
+        assert 60.0 <= r.final_tau_slow <= 3500.0, (
+            f"τ_slow={r.final_tau_slow:.0f} min outside [60, 3500]"
+        )
+
+    def test_gates_pass_at_least_once(self, lit_grounded_results):
+        """At least one batch passes the full gate set on standard_residential
+        spring data. This is the headline: with lit-grounded truth + priors,
+        does the greybox actually pass its quality gates?"""
+        r = lit_grounded_results["spring"]["fused"]
+        assert r.gb_gates_passed > 0, (
+            f"0/{r.gb_total_batches} batches passed gates on lit-grounded "
+            f"profile — greybox doesn't deliver usable bridge under "
+            f"realistic-weather + known-truth conditions"
+        )
+
+    def test_summary_print_lit_grounded(self, lit_grounded_results):
+        """Print-only: surface the lit-grounded comparison vs truth."""
+        print(f"\n{'=' * 90}")
+        print("  Lit-Grounded Validation (standard_residential, spring, 60d)")
+        print(f"  Truth: ua_c={_LIT_TRUE_UA_C}, k_c={_LIT_TRUE_K_C}, "
+              f"α_total={_LIT_TRUE_ALPHA_TOTAL}, mass_ratio={_LIT_TRUE_MASS_RATIO}")
+        print(f"  Truth-derived: β_outdoor={_LIT_TRUE_BETA_OUTDOOR}, "
+              f"β_solar={_LIT_TRUE_BETA_SOLAR}")
+        print(f"{'=' * 90}")
+        _print_summary(lit_grounded_results)
+        _print_diagnostics(lit_grounded_results)
