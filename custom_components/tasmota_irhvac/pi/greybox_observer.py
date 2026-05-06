@@ -90,6 +90,36 @@ K_W_BOUNDS = (0.001, 0.2)
 # residential; allow margins for fit, gate to a tighter range.
 MASS_RATIO_BOUNDS = (1.0, 30.0)
 
+# 2R2C Bayesian priors on the parameter pair that's not separately
+# identifiable from operational rate-residual data (Marty-Stabat 2022 —
+# these two are correlated in the regressor; the optimizer can rail one
+# against the other to fit residuals). Priors anchor at literature values;
+# implemented as ridge-style penalty residuals appended to the least-
+# squares loss (Hollick 2020 occupied-home approach, MAP estimation with
+# Gaussian priors).
+#
+# Prior means: lit-typical residential per Bacher-Madsen 2011 (mass_ratio
+# 5-10, τ_couple 30-80 min so k_w ≈ 0.012-0.033).
+#
+# Prior stds: empirically tuned. mass_ratio at std=5 lets data move it
+# noticeably when informative (CV before prior was ~0.5, often railing
+# at 30; with prior, CV drops near 0 only when data carries no signal).
+# k_w at std=0.001 is effectively a pin — under rate-residual at 12-h
+# batch cadence, k_w is not separately identifiable from ua_c·mass_ratio
+# combinations, and any prior loose enough to "release with data" lets
+# k_w rail at the lower bound (data fit improves at k_w → 0 since the
+# wall-coupling term in the residual vanishes). Effective k_w pin matches
+# what Hollick 2020 and Marty-Stabat 2022 advise for the operational-data
+# regime: fix the parameter the data can't separately identify.
+#
+# Once sim-error PEM (or a Kalman state estimator) replaces the rate-
+# residual formulation, k_w gains a real signal source and the prior std
+# can be relaxed.
+MASS_RATIO_PRIOR_MEAN = 8.0
+MASS_RATIO_PRIOR_STD = 5.0   # 95% CI ≈ [-2, 18], clipped by bounds [1, 30]
+K_W_PRIOR_MEAN = 1.0 / 50.0  # τ_couple = 50 min
+K_W_PRIOR_STD = 0.001         # effective pin under rate-residual; relax post-PEM
+
 # ASHRAE Ch. 18 / bench convention: solar through a window splits ~30% to
 # the air node (convective) and ~70% to the wall node (radiative). Fixed
 # in v1; expose as config later if real-CSV validation flags it.
@@ -577,6 +607,18 @@ def _fit_greybox_2r2c(
     for i, (lo, hi) in enumerate(zip(lower, upper)):
         x0[i] = max(lo, min(hi, x0[i]))
 
+    # Penalty residuals for Bayesian priors on (mass_ratio, k_w). Each
+    # contributes (param - prior_mean) / prior_std as an extra residual,
+    # which least_squares squares and adds to the loss. Mathematically
+    # equivalent to MAP estimation with Gaussian priors on those two
+    # parameters. When data is informative on these params (low CV),
+    # the data residuals dominate and the prior is gently pulled toward.
+    # When data is uninformative (the rail-saturation case), the prior
+    # holds the params at literature-typical values rather than letting
+    # the optimizer route them to the corner.
+    n_data = m  # data residuals come first; penalties appended after
+    n_penalties = 2  # (mass_ratio, k_w)
+
     def residual_fn(params: list[float]) -> list[float]:
         if has_solar:
             c0, ua_c, k_c, alpha_total, k_w, mass_ratio = params
@@ -589,7 +631,7 @@ def _fit_greybox_2r2c(
 
         # Initial wall state: assume equilibrium with air at t=0.
         t_wall = t_air[0]
-        residuals = [0.0] * m
+        residuals = [0.0] * (n_data + n_penalties)
 
         # First tick: t_wall = t_air → coupling term contributes 0.
         residuals[0] = (
@@ -619,6 +661,12 @@ def _fit_greybox_2r2c(
                 - alpha_air * solar[i]
                 - k_w * (t_wall - t_air[i])
             )
+
+        # Bayesian prior penalty residuals (Gaussian, ridge-style). Scaled
+        # by 1/prior_std so contribution is comparable across parameters
+        # regardless of natural magnitude.
+        residuals[n_data] = (mass_ratio - MASS_RATIO_PRIOR_MEAN) / MASS_RATIO_PRIOR_STD
+        residuals[n_data + 1] = (k_w - K_W_PRIOR_MEAN) / K_W_PRIOR_STD
         return residuals
 
     try:
@@ -644,16 +692,30 @@ def _fit_greybox_2r2c(
 
     tau_fast, tau_slow = _natural_eigenvalues(ua_c, k_w, mass_ratio)
     tau_eff = tau_slow  # dominant for legacy consumers
-    residual_rms = math.sqrt(2.0 * result.cost / m) if m > 0 else 0.0
+    # residual_rms reflects data-fit quality only — exclude the prior penalty
+    # residuals (last n_penalties entries of result.fun) so the gate
+    # threshold stays comparable to 1R1C and pre-prior 2R2C runs.
+    if result.fun is not None and m > 0:
+        data_residuals = result.fun[:n_data]
+        residual_rms = math.sqrt(
+            sum(float(r) * float(r) for r in data_residuals) / m
+        )
+    else:
+        residual_rms = 0.0
 
-    # Standard errors via Jacobian.
+    # Standard errors via Jacobian. sigma² uses data residuals only so the
+    # std_errs reflect data-fit uncertainty; the prior contributions don't
+    # inflate DoF the way independent observations do.
     std_err: dict[str, float] = {}
     if result.jac is not None:
         try:
             import numpy as np
             J = result.jac
             n_params = len(param_names)
-            sigma2 = 2.0 * result.cost / max(1, m - n_params)
+            data_cost = 0.5 * sum(
+                float(r) * float(r) for r in result.fun[:n_data]
+            ) if result.fun is not None else result.cost
+            sigma2 = 2.0 * data_cost / max(1, m - n_params)
             JtJ_inv = np.linalg.pinv(J.T @ J) * sigma2
             for i, name in enumerate(param_names):
                 var = JtJ_inv[i, i]
