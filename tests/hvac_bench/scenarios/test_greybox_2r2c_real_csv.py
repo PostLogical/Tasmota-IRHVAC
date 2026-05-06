@@ -520,12 +520,6 @@ class TestGreybox2R2CLitGrounded:
             f"k_c={k_c:.5f} vs truth {_LIT_TRUE_K_C} ({100 * rel_err:.0f}% off)"
         )
 
-    @pytest.mark.xfail(
-        reason="α_total underestimated proportionally with ua_c, k_c "
-        "(rate-convention bug, magnitude-scale family). See "
-        "test_recovers_ua_c.",
-        strict=True,
-    )
     def test_recovers_alpha_total(self, lit_grounded_results):
         """Recovered α_total within 50% of truth (= 0.05). Free param.
 
