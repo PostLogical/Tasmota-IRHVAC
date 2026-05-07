@@ -964,6 +964,231 @@ class TestLog2R2C:
         assert "mass_ratio" in caplog.text
 
 
+class TestFitGreybox2R2CStageB:
+    """Stage B perturbation-regime fit validation via direct injection.
+
+    Bypasses auto-perturbation (Layer 2.5) and the leverage-buffer
+    eviction policy by constructing observations with
+    ``during_perturbation=True`` directly. This validates that Stage B
+    math correctly recovers wall-mode params (k_w, mass_ratio) from
+    perturbation transients when those transients are exposed to the
+    fitter — a question independent of whether the production pipeline
+    successfully delivers such transients to the buffer.
+
+    See project_auto_perturb_threshold_issue.md for the AP/buffer
+    issues that motivate direct injection here. The greybox redesign
+    architecture (Stage A + Stage B) is separable from those concerns.
+
+    Truth wall params chosen DIFFERENT from K_W_FIXED / MASS_RATIO_FIXED
+    so we can observe Stage B updating params away from Stage A's hard-
+    fixed defaults:
+      k_w = 1/30 = 0.0333  (vs K_W_FIXED = 1/50 = 0.0200, 67% off)
+      mass_ratio = 6.0     (vs MASS_RATIO_FIXED = 8.0, 25% off)
+    """
+
+    UA_C_TRUE = 0.01
+    K_C_TRUE = 0.04
+    ALPHA_TOTAL_TRUE = 0.05
+    K_W_TRUE = 1.0 / 30.0      # τ_couple = 30 min
+    MASS_RATIO_TRUE = 6.0      # τ_wall_natural = 30 × 6 = 180 min
+
+    SP_BASELINE = 24.0           # operational HP setpoint
+    PERTURB_AMPLITUDE = 1.0      # ±1°C step
+    PERTURB_DURATION_MIN = 180.0  # 3 hours per cycle (1× τ_wall)
+    PERTURB_INTERVAL_HOURS = 12.0  # cycle every 12 hours
+
+    def _generate_with_perturbation(
+        self,
+        n_days: float = 21.0,
+        tick_minutes: float = 10.0,
+        noise_std: float = 0.0008,
+    ) -> list[Observation]:
+        """Generate 2R2C observations with periodic perturbation cycles.
+
+        Same matrix-exp integration as TestFitGreybox2R2C; differs by
+        injecting ±1°C setpoint perturbations every PERTURB_INTERVAL_HOURS
+        for PERTURB_DURATION_MIN, alternating direction across cycles.
+        Observations during a perturbation are flagged
+        ``during_perturbation=True`` so Stage B can pick them up.
+        """
+        import random
+        from scipy.linalg import expm
+        import numpy as np
+        random.seed(43)
+        rng = random.Random(44)
+
+        m = int(n_days * 24 * 60 / tick_minutes)
+        dt = tick_minutes
+        alpha_air = self.ALPHA_TOTAL_TRUE * SOLAR_AIR_FRACTION
+        alpha_wall = self.ALPHA_TOTAL_TRUE * SOLAR_WALL_FRACTION
+        a_wall = self.K_W_TRUE / self.MASS_RATIO_TRUE
+        eye2 = np.eye(2)
+
+        perturb_interval_min = self.PERTURB_INTERVAL_HOURS * 60.0
+
+        obs = []
+        x = np.array([20.0, 20.0], dtype=float)
+        cycle_idx = 0
+        for i in range(m):
+            t_min = i * tick_minutes
+            hour = (t_min / 60.0) % 24.0
+            t_out = 5.0 + 7.0 * math.sin(2 * math.pi * (hour - 6) / 24)
+            solar = max(0.0, 0.6 * math.sin(2 * math.pi * (hour - 6) / 24))
+            t_air = x[0]
+            t_wall = x[1]
+
+            # Determine if we're inside a perturbation cycle.
+            # Cycles start every PERTURB_INTERVAL_HOURS, last
+            # PERTURB_DURATION_MIN. Direction alternates per cycle.
+            cycle_phase_min = t_min % perturb_interval_min
+            in_perturbation = cycle_phase_min < self.PERTURB_DURATION_MIN
+            if in_perturbation:
+                # Determine which cycle and its direction
+                cur_cycle = int(t_min // perturb_interval_min)
+                direction = 1.0 if (cur_cycle % 2 == 0) else -1.0
+                hp_setpoint = self.SP_BASELINE + direction * self.PERTURB_AMPLITUDE
+            else:
+                hp_setpoint = self.SP_BASELINE
+
+            active = t_air < hp_setpoint
+            if active:
+                hp_term = self.K_C_TRUE * (hp_setpoint - t_air)
+            else:
+                hp_term = 0.0
+            air_rate = (
+                self.UA_C_TRUE * (t_out - t_air)
+                + hp_term
+                + alpha_air * solar
+                + self.K_W_TRUE * (t_wall - t_air)
+            )
+            room_rate = air_rate + rng.gauss(0, noise_std)
+
+            obs.append(Observation(
+                timestamp=float(i * tick_minutes * 60),
+                wall_time=1713650000.0 + i * tick_minutes * 60,
+                hp_setpoint=hp_setpoint,
+                current_c=t_air,
+                desired_c=20.0,
+                outdoor_temp_c=t_out,
+                room_rate=room_rate,
+                raw_readings={"sensor.solar_proxy": solar},
+                clamped=False,
+                clamped_reason="",
+                during_perturbation=in_perturbation,
+            ))
+
+            # Joint matrix-exp advance
+            if active:
+                A = np.array([
+                    [-(self.UA_C_TRUE + self.K_C_TRUE + self.K_W_TRUE), self.K_W_TRUE],
+                    [a_wall, -a_wall],
+                ], dtype=float)
+                b1 = (self.UA_C_TRUE * t_out
+                      + self.K_C_TRUE * hp_setpoint
+                      + alpha_air * solar)
+            else:
+                A = np.array([
+                    [-(self.UA_C_TRUE + self.K_W_TRUE), self.K_W_TRUE],
+                    [a_wall, -a_wall],
+                ], dtype=float)
+                b1 = self.UA_C_TRUE * t_out + alpha_air * solar
+            b2 = alpha_wall * solar / self.MASS_RATIO_TRUE
+            b = np.array([b1, b2], dtype=float)
+            eA = expm(A * dt)
+            try:
+                psi = np.linalg.solve(A, eA - eye2)
+            except np.linalg.LinAlgError:
+                psi = np.zeros((2, 2))
+            x = eA @ x + psi @ b
+
+        return obs
+
+    def test_perturbation_observations_present(self):
+        """Sanity: synth produces a meaningful number of perturbation obs."""
+        obs = self._generate_with_perturbation(n_days=21.0, tick_minutes=10.0)
+        n_perturb = sum(1 for o in obs if o.during_perturbation)
+        # 21 days × 2 cycles/day × 18 ticks/cycle (3hr at 10min) = 756
+        assert n_perturb >= 500, (
+            f"Expected ≥500 perturbation obs, got {n_perturb}"
+        )
+
+    def test_stage_b_fires_when_perturbation_present(self):
+        """Stage B updates wall params when perturbation observations exist.
+
+        With truth k_w = 1/30 ≠ K_W_FIXED = 1/50, the fitter's wall
+        params should END UP something other than the hard-fix because
+        Stage B kicked in. The exact value depends on identifiability;
+        this test only checks that Stage B was active.
+        """
+        from custom_components.tasmota_irhvac.pi.greybox_observer import (
+            K_W_FIXED, MASS_RATIO_FIXED,
+        )
+        obs = self._generate_with_perturbation(n_days=21.0, tick_minutes=10.0)
+        model_inputs = [
+            {"name": "Solar Proxy", "entity_id": "sensor.solar_proxy",
+             "input_role": "solar"},
+        ]
+        result = fit_greybox(obs, model_inputs)
+        assert result is not None and result.is_2r2c
+        # Stage B should have moved at least one wall param off the
+        # hard-fix, since truth differs from hard-fix and there's enough
+        # perturbation data to inform the fit.
+        moved = (
+            abs(result.k_w - K_W_FIXED) > 1e-6
+            or abs(result.mass_ratio - MASS_RATIO_FIXED) > 1e-6
+        )
+        assert moved, (
+            f"Stage B didn't update wall params: k_w={result.k_w} "
+            f"(K_W_FIXED={K_W_FIXED}), mass_ratio={result.mass_ratio} "
+            f"(MASS_RATIO_FIXED={MASS_RATIO_FIXED})"
+        )
+
+    def test_stage_b_recovers_k_w_within_tolerance(self):
+        """Stage B's k_w estimate should be closer to truth than the hard-fix."""
+        from custom_components.tasmota_irhvac.pi.greybox_observer import (
+            K_W_FIXED,
+        )
+        obs = self._generate_with_perturbation(n_days=21.0, tick_minutes=10.0)
+        model_inputs = [
+            {"name": "Solar Proxy", "entity_id": "sensor.solar_proxy",
+             "input_role": "solar"},
+        ]
+        result = fit_greybox(obs, model_inputs)
+        assert result is not None and result.is_2r2c
+
+        err_fitted = abs(result.k_w - self.K_W_TRUE)
+        err_hard_fix = abs(K_W_FIXED - self.K_W_TRUE)
+        assert err_fitted < err_hard_fix, (
+            f"Stage B k_w={result.k_w:.5f} farther from truth "
+            f"({self.K_W_TRUE:.5f}) than hard-fix {K_W_FIXED:.5f}"
+        )
+
+    def test_stage_b_skipped_when_no_perturbation(self):
+        """Without perturbation observations, Stage B should NOT fire — wall
+        params should be exactly the hard-fix values."""
+        from custom_components.tasmota_irhvac.pi.greybox_observer import (
+            K_W_FIXED, MASS_RATIO_FIXED,
+        )
+        obs = self._generate_with_perturbation(n_days=21.0, tick_minutes=10.0)
+        # Strip the perturbation flag from all observations
+        for o in obs:
+            o.during_perturbation = False
+        model_inputs = [
+            {"name": "Solar Proxy", "entity_id": "sensor.solar_proxy",
+             "input_role": "solar"},
+        ]
+        result = fit_greybox(obs, model_inputs)
+        assert result is not None and result.is_2r2c
+        assert result.k_w == K_W_FIXED, (
+            f"Stage B fired without perturbation observations: "
+            f"k_w={result.k_w} != K_W_FIXED={K_W_FIXED}"
+        )
+        assert result.mass_ratio == MASS_RATIO_FIXED, (
+            f"Stage B fired without perturbation observations: "
+            f"mass_ratio={result.mass_ratio} != MASS_RATIO_FIXED={MASS_RATIO_FIXED}"
+        )
+
+
 class TestFitGreybox2R2CEdgeCases:
     """Edge cases for the 2R2C fit and dispatch logic."""
 

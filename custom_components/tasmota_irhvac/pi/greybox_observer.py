@@ -810,13 +810,11 @@ def _fit_greybox_2r2c(
     # with Stage A's free params (c0, ua_c, k_c, α_total) frozen. If
     # Stage B succeeds, its wall params replace the Stage A hard-fix in
     # the returned GreyboxResult; otherwise Stage A's fixed values stand.
-    perturb_eligible = [
-        (i, o) for i, o in enumerate(eligible) if o.during_perturbation
-    ]
-    n_perturb = len(perturb_eligible)
+    perturb_indices = [i for i, o in enumerate(eligible) if o.during_perturbation]
+    n_perturb = len(perturb_indices)
     if n_perturb >= MIN_OBSERVATIONS_STAGE_B:
         stage_b = _fit_stage_b_wall(
-            perturb_eligible_with_idx=perturb_eligible,
+            perturb_indices=perturb_indices,
             t_air=t_air, t_out=t_out, solar=solar,
             hp_setpoint_arr=hp_setpoint_arr, dt_min=dt_min,
             c0=c0, ua_c=ua_c, k_c=k_c, alpha_total=alpha_total,
@@ -876,7 +874,7 @@ MIN_OBSERVATIONS_STAGE_B = 100
 
 def _fit_stage_b_wall(
     *,
-    perturb_eligible_with_idx: list[tuple[int, Any]],
+    perturb_indices: list[int],
     t_air: list[float],
     t_out: list[float],
     solar: list[float],
@@ -891,8 +889,14 @@ def _fit_stage_b_wall(
     """Stage B wall-mode fit on perturbation observations.
 
     With Stage A's free params (c0, ua_c, k_c, α_total) frozen, fit ONLY
-    (k_w, mass_ratio) using the perturbation subset of observations.
-    Re-uses sim-error PEM residual machinery from Stage A.
+    (k_w, mass_ratio).
+
+    State is forward-simulated over ALL observations (using actual inputs
+    at each tick), so the wall correctly equilibrates during operational
+    periods. Residuals are summed only over the perturbation subset
+    (`during_perturbation=True`) — that's where the wall mode is excited
+    and its dynamics are observable. This is the cleanest formulation:
+    full-trajectory state propagation + regime-restricted loss.
 
     Returns {"k_w": ..., "mass_ratio": ...} on success, None on failure.
     """
@@ -900,13 +904,9 @@ def _fit_stage_b_wall(
         return None
     import numpy as np
 
-    # Take the perturbation observations in order. Forward-simulate from
-    # the first perturbation observation; each tick's residual is
-    # predicted - observed. For non-contiguous indices we just use the
-    # observation timestamps to compute dt for that step (single-step
-    # propagation across gaps is approximate but acceptable since the
-    # wall mode time constant >> any reasonable inter-observation gap).
-    n_pe = len(perturb_eligible_with_idx)
+    m = len(t_air)
+    n_pe = len(perturb_indices)
+    perturb_set = set(perturb_indices)
 
     alpha_air = alpha_total * SOLAR_AIR_FRACTION
     alpha_wall = alpha_total * SOLAR_WALL_FRACTION
@@ -924,38 +924,42 @@ def _fit_stage_b_wall(
             [a_wall_rate, -a_wall_rate],
         ], dtype=float)
 
-        first_idx, _ = perturb_eligible_with_idx[0]
-        x = np.array([t_air[first_idx], t_air[first_idx]], dtype=float)
-        residuals = [0.0] * n_pe
+        # Forward-simulate over the FULL trajectory. State propagates
+        # correctly across operational gaps using their actual inputs.
+        x = np.array([t_air[0], t_air[0]], dtype=float)
+        residuals = []
 
-        for k, (i, _o) in enumerate(perturb_eligible_with_idx):
-            if k == 0:
-                # First-tick residual zero (state initialized at observation)
-                continue
-            prev_idx = perturb_eligible_with_idx[k - 1][0]
-            dt = (dt_min[i] if (i == prev_idx + 1) else
-                  sum(dt_min[prev_idx + 1: i + 1]))
+        for i in range(1, m):
+            dt = dt_min[i]
             if dt <= 0:
+                if i in perturb_set:
+                    residuals.append(0.0)
                 continue
-            sp_prev = hp_setpoint_arr[prev_idx]
-            t_a_prev = t_air[prev_idx]
+            sp_prev = hp_setpoint_arr[i - 1]
+            t_a_prev = t_air[i - 1]
             active_prev = (sp_prev is not None) and (t_a_prev < sp_prev)
             try:
                 A = A_active if active_prev else A_inactive
                 eA = _expm(A * dt)
                 psi = np.linalg.solve(A, eA - np.eye(2))
             except Exception:
+                # Numerical failure — return large residuals to steer
+                # the optimizer away
                 return [1e6] * n_pe
             if active_prev:
-                b1 = (c0 + ua_c * t_out[prev_idx] + k_c * sp_prev
-                      + alpha_air * solar[prev_idx])
+                b1 = (c0 + ua_c * t_out[i - 1] + k_c * sp_prev
+                      + alpha_air * solar[i - 1])
             else:
-                b1 = c0 + ua_c * t_out[prev_idx] + alpha_air * solar[prev_idx]
-            b2 = alpha_wall * solar[prev_idx] / mass_ratio
+                b1 = c0 + ua_c * t_out[i - 1] + alpha_air * solar[i - 1]
+            b2 = alpha_wall * solar[i - 1] / mass_ratio
             b = np.array([b1, b2], dtype=float)
             x = eA @ x + psi @ b
-            residuals[k] = float(x[0] - t_air[i])
+            if i in perturb_set:
+                residuals.append(float(x[0] - t_air[i]))
 
+        # Pad to n_pe if any perturb-set members were skipped (dt<=0)
+        while len(residuals) < n_pe:
+            residuals.append(0.0)
         return residuals
 
     x0 = [K_W_FIXED, MASS_RATIO_FIXED]
