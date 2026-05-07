@@ -124,7 +124,14 @@ VARIANTS: list[tuple[str, int, str]] = [
     # (half/double) are kept for backwards compatibility with the
     # historical leverage-vs-FIFO study but become secondary signal here.
     ("leverage-2000",         2000, "leverage"),
-    ("min_eig-2000",          2000, "min_eig"),
+    # ("min_eig-2000",          2000, "min_eig"),
+    # ↑ EXCLUDED — MinEigPolicy.find_evictee currently does m=buffer_size
+    #   independent eigvalsh calls per admission attempt
+    #   (~m·n³ × O(post-fill admissions)).  At max_size=2000 and 5-min
+    #   ticks this puts a single cell at ~40 minutes wall time, vs
+    #   ~2 minutes for the other policies.  Re-include after a
+    #   Bunch-Nielsen-Sorensen 1978 rank-1 eigenvalue update lands in
+    #   buffer_policies.py (drops cost to O(m·n) per admission).
     ("d_optimal-2000",        2000, "d_optimal"),
     ("a_optimal-2000",        2000, "a_optimal"),
     ("FIFO-2000",             2000, "fifo"),
