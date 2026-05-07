@@ -728,15 +728,24 @@ class DiversityAwareBuffer:
 
         Returns a `BufferAddResult` describing the decision so callers
         can populate observability snapshots without re-deriving state.
+
+        Dispatch:
+        - Buffer not full → unconditionally admit; ``score_candidate``
+          is called only for observability.
+        - Buffer full with a joint policy (``hasattr(policy,
+          'attempt_exchange')``) → policy returns ``ExchangeChoice``
+          covering both admit and evictee selection.
+        - Buffer full with a simple policy → use ``score_candidate``
+          + ``find_evictee`` + ``should_admit`` independently.
         """
         x = self._get_feature_vector(obs)
-        cand_score = self._policy.score_candidate(
-            x, self._info_inv, self._xtx_matrix, len(self._buffer),
-        )
         policy_name = self._policy.name
 
         if len(self._buffer) < self._max_size:
             # Buffer not full — always accept.
+            cand_score = self._policy.score_candidate(
+                x, self._info_inv, self._xtx_matrix, len(self._buffer),
+            )
             self._buffer.append(obs)
             self._sherman_morrison_update(x)
             return BufferAddResult(
@@ -749,11 +758,52 @@ class DiversityAwareBuffer:
             )
 
         feature_vectors = [self._get_feature_vector(o) for o in self._buffer]
+
+        # Joint-optimization policies (e.g. DOptimalPolicy) supply
+        # ``attempt_exchange`` so admit/evict can consider the candidate↔
+        # incumbent interaction together.  Falls back to the simple path
+        # when not implemented.
+        attempt = getattr(self._policy, "attempt_exchange", None)
+        if attempt is not None:
+            decision = attempt(
+                x, self._buffer, feature_vectors,
+                self._info_inv, self._xtx_matrix,
+            )
+            if decision is not None:
+                if decision.admit:
+                    evicted_ts = self._buffer[decision.evictee_index].timestamp
+                    old_x = feature_vectors[decision.evictee_index]
+                    self._sherman_morrison_downdate(old_x)
+                    self._buffer[decision.evictee_index] = obs
+                    self._sherman_morrison_update(x)
+                    return BufferAddResult(
+                        admitted=True,
+                        candidate_score=decision.candidate_score,
+                        evicted_timestamp=evicted_ts,
+                        min_incumbent_score=decision.evictee_score,
+                        rejection_reason=None,
+                        policy_name=policy_name,
+                    )
+                return BufferAddResult(
+                    admitted=False,
+                    candidate_score=decision.candidate_score,
+                    evicted_timestamp=None,
+                    min_incumbent_score=decision.evictee_score,
+                    rejection_reason=(
+                        decision.rejection_reason
+                        or f"{policy_name}_rejected"
+                    ),
+                    policy_name=policy_name,
+                )
+
+        # Simple-policy path: independent score / find_evictee / admit.
+        cand_score = self._policy.score_candidate(
+            x, self._info_inv, self._xtx_matrix, len(self._buffer),
+        )
         evictee = self._policy.find_evictee(
             self._buffer, feature_vectors, self._info_inv, self._xtx_matrix,
         )
         if self._policy.should_admit(cand_score, evictee.score):
-            # Downdate the evicted observation, then update with new.
             evicted_ts = self._buffer[evictee.index].timestamp
             old_x = feature_vectors[evictee.index]
             self._sherman_morrison_downdate(old_x)
@@ -768,8 +818,6 @@ class DiversityAwareBuffer:
                 policy_name=policy_name,
             )
 
-        # New observation is less informative than everything in the
-        # buffer under this policy — discard it.
         return BufferAddResult(
             admitted=False,
             candidate_score=cand_score,

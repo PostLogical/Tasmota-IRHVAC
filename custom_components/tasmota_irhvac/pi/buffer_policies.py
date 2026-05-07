@@ -39,8 +39,61 @@ class EvicteeChoice:
     score: float
 
 
+@dataclass(frozen=True, slots=True)
+class ExchangeChoice:
+    """Outcome of a joint candidate↔incumbent admission evaluation.
+
+    Returned by the optional ``BufferPolicy.attempt_exchange`` method
+    when the policy's admission decision depends on the candidate↔
+    incumbent interaction rather than independent scores (e.g. Fedorov
+    D-optimal exchange where the optimal evictee depends on which
+    incumbent's removal best complements the candidate).
+
+    Fields:
+      admit: True iff the policy decided to admit the candidate.
+      evictee_index: index of the displaced incumbent.  Use ``-1`` when
+          ``admit`` is False (no exchange chosen).
+      candidate_score, evictee_score: policy-defined scalar metrics for
+          BufferAddResult observability — the meaning is policy-specific
+          (typically leverage or λ_min gain) but should be comparable
+          across consecutive ticks of the same policy.
+      rejection_reason: short label when ``admit`` is False; the buffer
+          falls back to ``f"{policy.name}_rejected"`` if None is given.
+    """
+
+    admit: bool
+    evictee_index: int
+    candidate_score: float | None
+    evictee_score: float | None
+    rejection_reason: str | None = None
+
+
 class BufferPolicy(Protocol):
-    """Strategy interface for ``DiversityAwareBuffer`` admit/evict decisions."""
+    """Strategy interface for ``DiversityAwareBuffer`` admit/evict decisions.
+
+    Required methods (all policies):
+      - ``score_candidate``: scalar metric for an incoming observation
+      - ``find_evictee``:    pick the lowest-value incumbent
+      - ``should_admit``:    compare two scalar scores
+
+    Optional method (joint-optimization policies):
+      - ``attempt_exchange``: evaluate the candidate↔incumbent swap
+        jointly.  Used by ``DOptimalPolicy`` (Fedorov exchange) where
+        the optimal evictee depends on the candidate.
+
+    The buffer's ``add()`` dispatches on ``hasattr(policy,
+    'attempt_exchange')``: if present, the policy's joint decision wins;
+    otherwise the simple ``score_candidate`` / ``find_evictee`` /
+    ``should_admit`` path runs.  This split lets the simple policies
+    (LeveragePolicy, MinEigPolicy, SlidingWindowPolicy) stay decoupled
+    while joint policies opt in.
+
+    Long-term: if a joint-optimization policy ends up being the
+    production choice, refactor to a single ``evaluate_admission``
+    method that all policies implement uniformly — that removes the
+    two-paths-in-add() dispatch.  See branch ``buffer-policy-strategy``
+    discussion (commit 3) for the analysis.
+    """
 
     name: str
 
@@ -130,6 +183,118 @@ class LeveragePolicy:
         evictee_score: float,
     ) -> bool:
         return candidate_score > evictee_score
+
+
+class DOptimalPolicy(LeveragePolicy):
+    """D-optimal sequential exchange (Fedorov 1972).
+
+    Maximizes ``det(X^T X)`` via joint candidate↔incumbent exchange.
+    For each incumbent ``xᵢ`` and the candidate ``x``, evaluates the
+    determinant ratio of the swap:
+
+        ratio_i = (1 − ℓᵢ) · (1 + ℓ(x) + cross_i² / (1 − ℓᵢ))
+                = (1 − ℓᵢ)(1 + ℓ(x)) + cross_i²
+
+    where:
+        ℓᵢ      = xᵢᵀ A⁻¹ xᵢ           (incumbent leverage)
+        ℓ(x)    = xᵀ  A⁻¹ x            (candidate leverage)
+        cross_i = xᵀ  A⁻¹ xᵢ           (bilinear cross term)
+
+    The cross term distinguishes Fedorov from LeveragePolicy: when ``x``
+    and ``xᵢ`` are correlated (large cross_i), the exchange is more
+    valuable than leverage scoring alone would suggest — sometimes
+    favoring eviction of an incumbent whose own leverage is high but
+    whose direction is already covered by the candidate.
+
+    Admit iff ``max_i ratio_i > 1`` (strictly positive log-det gain).
+    Evictee = argmax of ``ratio_i``.
+
+    Inherits ``score_candidate`` / ``find_evictee`` / ``should_admit``
+    from LeveragePolicy as fallbacks for the buffer-not-full path; the
+    joint logic only runs when the buffer is full and add() routes to
+    ``attempt_exchange``.
+
+    References:
+    - Fedorov, V. V. (1972), "Theory of Optimal Experiments"
+    - Mitchell, T. J. (1974), "An algorithm for the construction of
+      D-optimal experimental designs" (DETMAX)
+    - Atkinson, A. C. & Donev, A. N. (1992), "Optimum Experimental Designs"
+    """
+
+    name = "d_optimal"
+
+    def attempt_exchange(
+        self,
+        candidate: list[float],
+        observations: list[Observation],
+        feature_vectors: list[list[float]],
+        info_inv: list[list[float]],
+        xtx: list[list[float]] | None,
+    ) -> ExchangeChoice | None:
+        m = len(feature_vectors)
+        if m == 0:
+            return None  # buffer empty — buffer's add() handles unconditional admission
+
+        if _NUMPY_AVAILABLE:
+            x = np.asarray(candidate, dtype=np.float64)
+            Ainv = np.asarray(info_inv, dtype=np.float64)
+            X_inc = np.asarray(feature_vectors, dtype=np.float64)
+
+            Ainv_x = Ainv @ x
+            leverage_x = float(x @ Ainv_x)
+
+            # Per-incumbent leverage and bilinear cross term.
+            Ainv_Xinc = X_inc @ Ainv  # (m, n)
+            leverage_i = np.einsum("ij,ij->i", X_inc, Ainv_Xinc)  # (m,)
+            cross_i = X_inc @ Ainv_x  # (m,)
+
+            # Determinant-ratio formula for the joint swap.  Equivalent to
+            # log-det gain via log(ratio_i).  Maximize ratio_i directly.
+            ratios = (1.0 - leverage_i) * (1.0 + leverage_x) + cross_i**2
+
+            best_idx = int(np.argmax(ratios))
+            best_ratio = float(ratios[best_idx])
+            evictee_lev = float(leverage_i[best_idx])
+        else:
+            n = len(candidate)
+            leverage_x = sum(
+                candidate[i] * sum(info_inv[i][j] * candidate[j] for j in range(n))
+                for i in range(n)
+            )
+            best_idx = 0
+            best_ratio = -float("inf")
+            evictee_lev = 0.0
+            for k in range(m):
+                xi = feature_vectors[k]
+                # leverage_i = xᵢᵀ A⁻¹ xᵢ
+                Ainv_xi = [
+                    sum(info_inv[i][j] * xi[j] for j in range(n))
+                    for i in range(n)
+                ]
+                ell_i = sum(xi[i] * Ainv_xi[i] for i in range(n))
+                # cross_i = xᵀ A⁻¹ xᵢ
+                cross = sum(candidate[i] * Ainv_xi[i] for i in range(n))
+                ratio = (1.0 - ell_i) * (1.0 + leverage_x) + cross * cross
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_idx = k
+                    evictee_lev = ell_i
+
+        if best_ratio > 1.0:
+            return ExchangeChoice(
+                admit=True,
+                evictee_index=best_idx,
+                candidate_score=leverage_x,
+                evictee_score=evictee_lev,
+                rejection_reason=None,
+            )
+        return ExchangeChoice(
+            admit=False,
+            evictee_index=-1,
+            candidate_score=leverage_x,
+            evictee_score=evictee_lev,
+            rejection_reason=None,  # buffer fills in f"{policy.name}_rejected"
+        )
 
 
 class MinEigPolicy:

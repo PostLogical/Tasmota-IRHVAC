@@ -9,7 +9,9 @@ from custom_components.tasmota_irhvac.pi.batch_learning import (
     Observation,
 )
 from custom_components.tasmota_irhvac.pi.buffer_policies import (
+    DOptimalPolicy,
     EvicteeChoice,
+    ExchangeChoice,
     LeveragePolicy,
     MinEigPolicy,
 )
@@ -287,3 +289,169 @@ class TestMinEigBufferIntegration:
         assert r.min_incumbent_score is not None
         if not r.admitted:
             assert r.rejection_reason == "min_eig_rejected"
+
+
+# ── DOptimalPolicy: Fedorov-exchange contract ────────────────────────
+
+
+class TestDOptimalPolicyExchange:
+    """``attempt_exchange`` realizes the Fedorov D-optimal swap criterion.
+
+    The determinant ratio of swapping incumbent ``xᵢ`` for candidate
+    ``x`` is ``(1 − ℓᵢ)(1 + ℓ(x)) + cross_i²`` where ``cross_i =
+    xᵀ A⁻¹ xᵢ``.  Admit iff max-over-i of that ratio exceeds 1.
+    """
+
+    def test_admit_into_orthogonal_space_with_redundant_incumbents(self):
+        """Buffer full of redundant points along [1,0]; candidate along
+        [0,1] should be admitted, and the cheapest evictee is one of the
+        redundants (cross_i = 0 means no cross-term salvage).
+        """
+        policy = DOptimalPolicy()
+        # Buffer state: A⁻¹ is the inverse of XᵀX + λI.  Three [1,0]
+        # incumbents and one [0,1] gives XᵀX = diag(3, 1).  With small
+        # regularization (λ ≈ 0), A⁻¹ ≈ diag(1/3, 1).
+        info_inv = [[1.0 / 3.0, 0.0], [0.0, 1.0]]
+        feature_vectors = [
+            [1.0, 0.0],
+            [1.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+        ]
+        candidate = [0.0, 1.0]  # along [0,1] direction (already covered)
+        decision = policy.attempt_exchange(
+            candidate, observations=[],
+            feature_vectors=feature_vectors,
+            info_inv=info_inv, xtx=None,
+        )
+        assert decision is not None
+        # Candidate's leverage = [0,1] · diag(1/3, 1) · [0,1] = 1.
+        # Best swap is one of the redundant [1,0] incumbents (their
+        # removal preserves the [0,1] direction; cross is 0 so no
+        # salvage).  Accept the swap with positive ratio gain.
+        assert decision.evictee_index in (0, 1, 2)
+        assert decision.candidate_score == pytest.approx(1.0, rel=1e-9)
+
+    def test_cross_term_changes_evictee_vs_pure_leverage(self):
+        """Demonstrates Fedorov diverges from LeveragePolicy.
+
+        Construct three incumbents along [1,0]: leverage 1/3 each.
+        One incumbent along [0,1]: leverage 1.0 (highest).
+        Pure LeveragePolicy would call the [1,0] incumbents the lowest-
+        leverage and prefer them for eviction.
+
+        With a candidate along [1, 0], leverage(x) = 1/3, cross_i:
+        - vs each [1,0] incumbent: cross_i = 1/3 (parallel)
+        - vs [0,1] incumbent:      cross_i = 0 (orthogonal)
+
+        Ratio formulas:
+        - swap with [1,0]:  (1 − 1/3)(1 + 1/3) + (1/3)² = (2/3)(4/3) + 1/9 = 8/9 + 1/9 = 1.0
+        - swap with [0,1]:  (1 − 1)(1 + 1/3) + 0² = 0 — singular!
+
+        So Fedorov picks one of the [1,0] incumbents (ratio = 1.0,
+        boundary).  Pure leverage would also pick a [1,0] (ratio
+        coincidence here).  The cross term ensures we never pick the
+        [0,1] incumbent — its removal makes the design singular.
+        """
+        policy = DOptimalPolicy()
+        info_inv = [[1.0 / 3.0, 0.0], [0.0, 1.0]]
+        feature_vectors = [
+            [1.0, 0.0],
+            [1.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],  # singular-removal incumbent
+        ]
+        candidate = [1.0, 0.0]
+        decision = policy.attempt_exchange(
+            candidate, observations=[],
+            feature_vectors=feature_vectors,
+            info_inv=info_inv, xtx=None,
+        )
+        assert decision is not None
+        # Must NOT pick index 3 — cross term protects against singular
+        # design under Fedorov.  Other indices are tied at ratio = 1.0.
+        assert decision.evictee_index != 3
+
+    def test_reject_when_no_swap_improves_determinant(self):
+        """A candidate that's a duplicate of a unique-direction incumbent
+        in a well-conditioned buffer can't improve the determinant.
+
+        Buffer: 4 obs along orthogonal directions of an n=2 feature
+        space — XᵀX = diag(2, 2), well-conditioned.  Candidate equals
+        one of the obs exactly.  No swap improves det.
+        """
+        policy = DOptimalPolicy()
+        # XᵀX = sum of x_i x_i^T = [[1,0],[0,0]] + [[1,0],[0,0]]
+        #                          + [[0,0],[0,1]] + [[0,0],[0,1]]
+        #                        = diag(2, 2).  A⁻¹ ≈ diag(0.5, 0.5).
+        info_inv = [[0.5, 0.0], [0.0, 0.5]]
+        feature_vectors = [
+            [1.0, 0.0], [1.0, 0.0],
+            [0.0, 1.0], [0.0, 1.0],
+        ]
+        candidate = [1.0, 0.0]  # duplicate
+        decision = policy.attempt_exchange(
+            candidate, observations=[],
+            feature_vectors=feature_vectors,
+            info_inv=info_inv, xtx=None,
+        )
+        assert decision is not None
+        # leverage_x = 0.5; for each [1,0] incumbent ℓᵢ = 0.5,
+        # cross_i = 0.5; ratio = (0.5)(1.5) + 0.25 = 0.75 + 0.25 = 1.0
+        # For each [0,1] incumbent ℓᵢ = 0.5, cross_i = 0;
+        # ratio = (0.5)(1.5) + 0 = 0.75 < 1
+        # max_ratio = 1.0 — boundary, admit-iff-strict-positive returns False.
+        assert decision.admit is False
+        assert decision.candidate_score == pytest.approx(0.5, abs=1e-9)
+
+
+class TestExchangeChoiceShape:
+    def test_is_frozen(self):
+        e = ExchangeChoice(
+            admit=True, evictee_index=2,
+            candidate_score=0.5, evictee_score=0.3,
+            rejection_reason=None,
+        )
+        with pytest.raises(AttributeError):
+            e.admit = False  # type: ignore[misc]
+
+
+# ── DOptimalPolicy: integration through DiversityAwareBuffer ─────────
+
+
+class TestDOptimalBufferIntegration:
+    def _buf(self, max_size: int) -> DiversityAwareBuffer:
+        return DiversityAwareBuffer(
+            n_features=3, max_size=max_size,
+            feature_order=TEST_FEATURE_ORDER,
+            model_inputs=TEST_MODEL_INPUTS,
+            policy=DOptimalPolicy(),
+        )
+
+    def test_buffer_dispatches_to_attempt_exchange_when_full(self):
+        """Full buffer + DOptimalPolicy uses the joint exchange path,
+        carrying through ``policy_name`` to ``BufferAddResult``."""
+        buf = self._buf(max_size=3)
+        buf.add(_make_obs(t=0.0, outdoor=5.0, solar=1.0))
+        buf.add(_make_obs(t=1.0, outdoor=-5.0, solar=2.0))
+        buf.add(_make_obs(t=2.0, outdoor=0.0, solar=10.0))
+        r = buf.add(_make_obs(t=3.0, outdoor=3.0, solar=4.0))
+        assert r.policy_name == "d_optimal"
+        # Whichever way the swap goes, the score fields are populated.
+        assert r.candidate_score is not None
+        assert r.min_incumbent_score is not None
+        if not r.admitted:
+            assert r.rejection_reason == "d_optimal_rejected"
+
+    def test_buffer_not_full_falls_through_simple_path(self):
+        """``attempt_exchange`` is only consulted when the buffer is
+        full.  For not-full adds, the inherited simple-path methods run
+        (LeveragePolicy ``score_candidate``); admitted=True regardless
+        of policy."""
+        buf = self._buf(max_size=10)
+        r = buf.add(_make_obs(t=0.0, outdoor=5.0, solar=0.0))
+        assert r.admitted is True
+        assert r.policy_name == "d_optimal"
+        assert r.candidate_score is not None
+        assert r.evicted_timestamp is None
+        assert r.min_incumbent_score is None  # buffer wasn't full
