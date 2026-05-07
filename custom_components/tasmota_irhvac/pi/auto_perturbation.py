@@ -38,6 +38,21 @@ RESEARCH_STALL_CAP: int = 30  # cycles without improvement before stalling, rese
 INFORMATIVE_DELTA_C: float = 0.4  # ≈4×σ_v: cycles below this don't count toward stall
 FORCE_TIMEOUT_S: float = 3600.0  # 60 min timeout for perturb_now
 
+# Steady-state detection thresholds. Original 0.015 °C/min was set
+# assuming ~10-min sensor cadence (5-tick FD averaging window of ~50 min;
+# noise floor √2 × 0.1 / 50 ≈ 0.003 °C/min, gives 5× headroom). At
+# production 60s ticks the same 5-tick FD averages over 5 min → noise
+# floor 0.028 °C/min, ABOVE the old fixed threshold — AP can never
+# detect steady state.
+#
+# Cadence-adaptive: caller passes a noise-floor estimate (derived from
+# observation cadence and sensor σ) and we use 4× that as the steady-
+# state threshold (Åström-Hägglund process-control convention). When no
+# noise floor is provided, fall back to the legacy fixed 0.015 °C/min.
+ROOM_RATE_STEADY_THRESHOLD_DEFAULT: float = 0.015  # °C/min, legacy fallback
+ROOM_RATE_STEADY_K: float = 4.0  # multiplier on noise floor
+ROOM_RATE_STEADY_FLOOR: float = 0.005  # °C/min, prevents over-loose threshold
+
 
 class PerturbState(enum.Enum):
     """State machine states."""
@@ -133,14 +148,33 @@ class AutoPerturbation:
         mode_heating: bool,
         plant_confidence: float,
         current_hour: int,
+        room_rate_noise_floor: float | None = None,
     ) -> float:
-        """Advance the state machine. Returns the current offset (°C)."""
+        """Advance the state machine. Returns the current offset (°C).
+
+        ``room_rate_noise_floor``: caller-provided estimate of the analytical
+        noise floor on room_temp_rate at the current sensor cadence (e.g.
+        σ_sensor × √2 / (5 × dt_min) for the 5-tick FD pipeline). When
+        provided, the steady-state threshold is set to ``K × noise_floor``
+        (Åström-Hägglund 4× convention). When None, falls back to the
+        legacy fixed 0.015 °C/min — wrong for cadences faster than ~10
+        min, see project_auto_perturb_threshold_issue.md.
+        """
         if not self._enabled:
             return 0.0
 
+        # Cadence-adaptive steady-state-rate threshold.
+        if room_rate_noise_floor is not None and room_rate_noise_floor > 0:
+            steady_threshold = max(
+                ROOM_RATE_STEADY_FLOOR,
+                ROOM_RATE_STEADY_K * room_rate_noise_floor,
+            )
+        else:
+            steady_threshold = ROOM_RATE_STEADY_THRESHOLD_DEFAULT
+
         # Pack the steady-state inputs for reuse.
         conditions_met = (
-            abs(room_temp_rate) < 0.015
+            abs(room_temp_rate) < steady_threshold
             and integral_change_output < 0.075
             and ff_settled_ticks >= 4
             and not is_clamped

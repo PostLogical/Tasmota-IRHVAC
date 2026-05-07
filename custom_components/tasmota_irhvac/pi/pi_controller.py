@@ -4747,6 +4747,20 @@ class PIController:
         # Auto-perturbation offset (Layer 2.5): inject before error computation.
         # FF sees original desired_c (feature vectors, not error signal).
         is_heating = e._attr_hvac_mode == HVACMode.HEAT
+        # Cadence-adaptive steady-state threshold: room_rate noise floor
+        # for the 5-tick FD pipeline at current sensor cadence.
+        # σ=0.1°C (HA temp sensor typical) × √2 / (5 × dt_min). At 60s
+        # ticks this is 0.028 °C/min; the legacy fixed 0.015 threshold
+        # was unreachable. See project_auto_perturb_threshold_issue.md.
+        if (len(self._room_temp_history) >= 2
+                and self._room_temp_history[-1][0] > self._room_temp_history[0][0]):
+            window_min = (
+                self._room_temp_history[-1][0]
+                - self._room_temp_history[0][0]
+            ) / 60.0
+            noise_floor = 0.1 * math.sqrt(2.0) / max(window_min, 0.1)
+        else:
+            noise_floor = None  # AutoPerturbation falls back to legacy default
         desired_c += self._auto_perturb.tick(
             now_mono=now_mono,
             room_temp=current_c,
@@ -4771,6 +4785,7 @@ class PIController:
                 self._plant_id.plant.tau_slow.confidence,
             ) if self._plant_id.enabled else 1.0,
             current_hour=datetime.now().hour,
+            room_rate_noise_floor=noise_floor,
         )
 
         error = desired_c - current_c
