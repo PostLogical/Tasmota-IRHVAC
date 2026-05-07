@@ -4,7 +4,13 @@ A structured guide for an intelligent developer to understand this Home Assistan
 integration — from zero to "I could extend this myself."
 
 **Prerequisites:** Basic Python, vague awareness that Home Assistant exists, willingness
-to read ~4,000 lines of code.
+to read ~22,000 lines of code (most of it in the PI subsystem).
+
+**Where this stands:** version `0.19.2-pre50`, branch lineage `architecture-rework →
+tick-first-snapshot → bench-validation → bench-id-discrimination → greybox-redesign`.
+~22,000 lines of Python across 38 files, 2,382 tests with 100% production-code coverage
+on most milestone tags. The integration has matured well past a thermostat — it's now
+closer to a building-thermal-identification kit that happens to drive an AC.
 
 ---
 
@@ -14,22 +20,25 @@ to read ~4,000 lines of code.
 2. [The Physical Setup](#2-the-physical-setup)
 3. [How Home Assistant Custom Integrations Work](#3-how-home-assistant-custom-integrations-work)
 4. [File Map — What Lives Where](#4-file-map--what-lives-where)
-5. [Lesson 1: Constants and Configuration](#lesson-1-constants-and-configuration)
-6. [Lesson 2: The Base Climate Entity](#lesson-2-the-base-climate-entity)
-7. [Lesson 3: MQTT — The Nervous System](#lesson-3-mqtt--the-nervous-system)
-8. [Lesson 4: Sending IR Commands](#lesson-4-sending-ir-commands)
-9. [Lesson 5: The PI Controller — Theory](#lesson-5-the-pi-controller--theory)
-10. [Lesson 6: The PI Controller — Implementation](#lesson-6-the-pi-controller--implementation)
-11. [Lesson 7: Feedforward and Auto-Learning](#lesson-7-feedforward-and-auto-learning)
-12. [Lesson 8: Plant Identification](#lesson-8-plant-identification)
-13. [Lesson 9: Grey-Box Observer and Auto-Perturbation](#lesson-9-grey-box-observer-and-auto-perturbation)
-14. [Lesson 10: The Fujitsu Vendor Handler](#lesson-10-the-fujitsu-vendor-handler)
-15. [Lesson 11: Config Flow and Options](#lesson-11-config-flow-and-options)
-16. [Lesson 12: Buttons, Sensors, and IR Actions](#lesson-12-buttons-sensors-and-ir-actions)
-17. [Lesson 13: State Restoration and Resilience](#lesson-13-state-restoration-and-resilience)
-18. [Lesson 14: End-to-End Walkthroughs](#lesson-14-end-to-end-walkthroughs)
-19. [Common Gotchas](#common-gotchas)
-20. [Further Reading](#further-reading)
+5. [Architecture Evolution — Then vs. Now](#5-architecture-evolution--then-vs-now)
+6. [Lesson 1: Constants and Configuration](#lesson-1-constants-and-configuration)
+7. [Lesson 2: The Base Climate Entity](#lesson-2-the-base-climate-entity)
+8. [Lesson 3: MQTT — The Nervous System](#lesson-3-mqtt--the-nervous-system)
+9. [Lesson 4: Sending IR Commands](#lesson-4-sending-ir-commands)
+10. [Lesson 5: The PI Controller — Theory](#lesson-5-the-pi-controller--theory)
+11. [Lesson 6: The PI Controller — Implementation](#lesson-6-the-pi-controller--implementation)
+12. [Lesson 7: Feedforward, Batch Learning, and the Boundary Estimator](#lesson-7-feedforward-batch-learning-and-the-boundary-estimator)
+13. [Lesson 8: Plant Identification](#lesson-8-plant-identification)
+14. [Lesson 9: Grey-Box Observer, Auto-Perturbation, and the Regime Probe](#lesson-9-grey-box-observer-auto-perturbation-and-the-regime-probe)
+15. [Lesson 10: Tick-First Snapshot Architecture](#lesson-10-tick-first-snapshot-architecture)
+16. [Lesson 11: The Fujitsu Vendor Handler](#lesson-11-the-fujitsu-vendor-handler)
+17. [Lesson 12: Config Flow and Options](#lesson-12-config-flow-and-options)
+18. [Lesson 13: Buttons, Sensors, Repairs, and IR Actions](#lesson-13-buttons-sensors-repairs-and-ir-actions)
+19. [Lesson 14: State Restoration and Resilience](#lesson-14-state-restoration-and-resilience)
+20. [Lesson 15: Service Reference](#lesson-15-service-reference)
+21. [Lesson 16: End-to-End Walkthroughs](#lesson-16-end-to-end-walkthroughs)
+22. [Common Gotchas](#common-gotchas)
+23. [Further Reading](#further-reading)
 
 ---
 
@@ -154,36 +163,44 @@ This split matters: changing `entry.data` requires reconfiguration; changing
 
 ```
 custom_components/tasmota_irhvac/
-├── __init__.py           (277 lines)  — Entry point: setup, services, migration
-├── const.py              (268 lines)  — All constants, defaults, config keys
+├── __init__.py           (378 lines)  — Entry point: setup, services, migration (MINOR_VERSION=12)
+├── const.py              (315 lines)  — All constants, defaults, config keys
 ├── config_model.py       (211 lines)  — Typed, frozen config dataclass (parsed once)
-├── climate.py           (2029 lines)  — Base climate entity: MQTT, state, IR commands
-├── config_flow.py       (1481 lines)  — Setup wizard + options flow UI
+├── climate.py           (2217 lines)  — Base climate entity: MQTT, state, IR commands
+├── config_flow.py       (1501 lines)  — Setup wizard + options flow UI
 ├── repairs.py            (306 lines)  — HA Repairs fix flows (fixable repairs)
-├── sensor.py             (465 lines)  — 18 PI diagnostic sensors + health + learning sensor
-├── binary_sensor.py      (194 lines)  — FF learning suppression status
-├── button.py             (281 lines)  — Vane buttons + user-defined IR action buttons
+├── sensor.py             (510 lines)  — 18 PI diagnostic sensors + health + learning sensor
+├── binary_sensor.py      (173 lines)  — FF learning suppression status (CoordinatorEntity)
+├── button.py             (282 lines)  — Vane buttons + user-defined IR action buttons
 ├── diagnostics.py         (59 lines)  — HA diagnostics dump
+├── services.yaml                      — Service schemas (23 services)
 ├── pi/                                — PI + feedforward + plant ID subpackage
 │   ├── __init__.py                    — Public API: PIController, NullController, BatchResult
-│   ├── pi_controller.py (3950 lines)  — Core PI tick, anti-windup, learning, CUSUM, per-feature gating
-│   ├── pi_stored_data.py  (133 lines) — ExtraStoredData for cross-restart persistence
-│   ├── controller_protocol.py (201)   — Protocol class + NullController stub
-│   ├── rls_model.py       (315 lines) — Recursive Least Squares with forgetting + ridge
-│   ├── batch_learning.py (1645 lines) — Diversity-aware buffer, WLS (+ VIF), residual analysis
-│   ├── greybox_observer.py (589 lines)— 1R1C energy balance observer + β bridge
+│   ├── pi_controller.py (5512 lines)  — Core PI tick, anti-windup, learning, CUSUM, regime gate, subsystem toggles
+│   ├── pi_stored_data.py  (208 lines) — ExtraStoredData for cross-restart persistence
+│   ├── controller_protocol.py (245)   — Protocol class + NullController stub
+│   ├── coordinator.py     (98 lines)  — TasmotaIRHVACCoordinator (DataUpdateCoordinator[TickOutput])
+│   ├── snapshot.py       (1576 lines) — TickOutput / DiagnosticsBundle / OfflineBundle / TickEvent dataclasses
+│   ├── event_log.py       (218 lines) — Persistent JSONL log (daily rotation, gzip rollover)
+│   ├── export_bundle.py   (361 lines) — `export_debug_bundle` service implementation
+│   ├── rls_model.py       (393 lines) — Recursive Least Squares (predict-only since pre45)
+│   ├── batch_learning.py (2493 lines) — Diversity-aware buffer, WLS (+ VIF), residual analysis, sole estimator
+│   ├── boundary_estimator.py (737)    — 3-layer Bayesian boundary estimator (HP-on/off transition)
+│   ├── regime_probe.py    (556 lines) — Active HP-off probing for boundary detection (PWARX regime switching)
+│   ├── greybox_observer.py (1322 lines)— 1R1C + 2R2C energy balance observer (Stage A + Stage B sim-error PEM)
+│   ├── greybox_buffer.py  (172 lines) — Greybox-specific observation buffer (separate retention policy)
 │   ├── smith_predictor.py (113 lines) — FOPDT Smith predictor (delay compensation)
-│   ├── plant_identifier.py (584 lines)— Multi-provider plant ID orchestrator (replaces tau_estimator)
-│   ├── plant_model.py     (128 lines) — Frozen SOPDT data structures (K, θ, τ_fast, τ_slow)
-│   ├── auto_perturbation.py (347 lines)— Layer 2.5: automatic ±1°C perturbation state machine
-│   ├── model_input_manager.py (210)   — External HA entity feature management
+│   ├── plant_identifier.py (652 lines)— Multi-provider plant ID orchestrator
+│   ├── plant_model.py     (138 lines) — Frozen SOPDT data structures (K, θ, τ_fast, τ_slow)
+│   ├── auto_perturbation.py (427 lines)— Layer 2.5: ±1°C perturbation state machine + research mode
+│   ├── model_input_manager.py (355)   — External HA entity feature management
 │   ├── supplemental_controller.py (136) — Supplemental heat source coordination
 │   ├── performance_metrics.py (135)   — ITAE, CVH, FF load fraction accumulators
-│   ├── health_checks.py  (744 lines)  — Health checks, repairs, CUSUM anomaly detection
+│   ├── health_checks.py  (677 lines)  — Health checks, repairs, CUSUM anomaly detection
 │   └── providers/                     — Plant identification methods
 │       ├── __init__.py                — Provider package docstring
 │       ├── step_response.py (189)     — Layer 1: τ_fast from 63.2% crossing
-│       ├── area_method.py   (285)     — Layer 2: τ_slow from step-response tail area
+│       ├── area_method.py   (329)     — Layer 2: τ_slow from step-response tail area (hardened)
 │       ├── plant_test.py    (389)     — Layer 3: relay feedback + step-hold active test
 │       └── closed_loop.py   (269)     — Cross-check: SOPDT fit to closed-loop data
 ├── vendors/                           — Vendor handler registry (composition, not inheritance)
@@ -191,15 +208,106 @@ custom_components/tasmota_irhvac/
 │   ├── base.py           (168 lines)  — VendorHandler base + IRDecode/EntityState types
 │   ├── fujitsu.py        (393 lines)  — Fujitsu presets, raw IR, vane cycling
 │   └── electra.py         (49 lines)  — Electra vendor quirks
-├── manifest.json                      — Integration metadata (dependencies, version)
+├── manifest.json                      — Integration metadata (version 0.19.2-pre50, requires scipy)
 ├── strings.json                       — UI text (English, with formatjs syntax)
 └── translations/
     └── en.json                        — Compiled English translations
 ```
 
-**Read order for learning:** `const.py` → `climate.py` → `pi/pi_controller.py` →
-`pi/rls_model.py` → `pi/plant_model.py` → `pi/plant_identifier.py` →
-`vendors/fujitsu.py` → `config_flow.py` → everything else.
+**Read order for learning:** `const.py` → `climate.py` → `pi/snapshot.py` (tick contract) →
+`pi/pi_controller.py` → `pi/rls_model.py` + `pi/batch_learning.py` →
+`pi/boundary_estimator.py` → `pi/plant_model.py` → `pi/plant_identifier.py` →
+`pi/greybox_observer.py` → `vendors/fujitsu.py` → `config_flow.py` → everything else.
+
+---
+
+## 5. Architecture Evolution — Then vs. Now
+
+The integration started life as a thin MQTT-to-HA bridge for IR HVAC. The control layer
+has gone through several distinct architectural eras. Knowing where you are on this
+timeline makes the code much easier to read — old comments often refer to mechanisms
+that have since been replaced.
+
+### Era 1: Mixin Era (early 2025)
+
+`TasmotaIrhvac` was assembled from a stack of mixins (`PIControlMixin`, `FujitsuMixin`,
+etc.). Vendor branches lived inside the climate entity. PI gains were fixed.
+**No traces remain in the code** — fully retired.
+
+### Era 2: Composition + Online RLS (2025 → early 2026)
+
+Mixins replaced by composition: `PIController` and `VendorHandler` are objects the
+climate entity holds. Recursive Least Squares (RLS) learned feedforward coefficients
+on every tick that satisfied a learning gate. A diversity-aware observation buffer
+fed a twice-daily batch WLS that cross-checked the online RLS.
+
+### Era 3: Tick-First Snapshot (pre45–pre47, 2026-04-30 → 2026-05-04)
+
+Two structural changes landed back-to-back:
+
+1. **Online RLS was removed** (pre45, 8 phased commits). The RLS object survives —
+   it's still queried for FF predictions and persists across restarts — but
+   `rls.update()` is never called. Batch WLS is now the **sole** coefficient
+   estimator. The buffer fully drives learning; RLS is a cached predict-time
+   evaluator.
+
+2. **Tick-first snapshot architecture** (pre46, Stages 0–11). Sensors, diagnostics,
+   the event log, and the debug bundle all read from a single typed dataclass
+   `TickOutput` produced once per tick. `SIGNAL_PI_UPDATE` and `SIGNAL_FF_SUPPRESS_UPDATE`
+   were deleted; everything goes through `TasmotaIRHVACCoordinator`
+   (HA's `DataUpdateCoordinator`). A `CONTROLLER_RELOAD` `TickEvent` (pre47) marks
+   reset boundaries so debug bundles can locate them.
+
+### Era 4: Subsystem Gating + Persistent Logging (pre43–pre50)
+
+Runtime toggles for each subsystem (`control`, `ff`, `batch_wls`, `plant_id`) via
+the `set_subsystem` service — no reload, persists across restarts. **Observe-only
+mode** disables PI output while keeping every learning subsystem alive (useful
+for shadowing). Persistent JSONL event log (`set_event_log_enabled`) and
+`export_debug_bundle` service ship full reproducible windows of state.
+
+Other Era-4 additions:
+- **Boundary estimator** (`boundary_estimator.py`): three-layer Bayesian estimator
+  for the HP-on/off transition point — split-model RSS sweep on the buffer (Layer 1),
+  setpoint-change response (Layer 2), and active probe (Layer 3).
+- **Regime probe** (`regime_probe.py`): briefly forces HP to minimum setpoint to
+  resolve sensor-calibration ambiguity at the boundary.
+- **Over-temperature regime gate**: physical-state anti-windup that blocks integral
+  growth when the room is above the cooling band even without saturation.
+- **Bumpless transfer**: integral re-derives to keep raw-setpoint output continuous
+  across batch-β writes, regime exits, and gain updates.
+- **`learning_save` / `learning_restore`**: snapshot slots (max 3) for stashing a
+  known-good learning state before a renovation, sensor swap, or experiment.
+
+### Era 5: Grey-Box Redesign (current — `greybox-redesign` branch)
+
+The Bench Validation work (Phases 1–4 lite) found that the static WLS was leverage-
+clustered and that the 1R1C grey-box failed to estimate `ua_c` from operational data.
+The 2R2C upgrade landed with `tau_fast`/`tau_slow` plant-ID feedback. Real-CSV
+validation produced 0/119 gates per season (May 2026), prompting a redesign:
+
+- **Stage A**: hard-fix wall parameters; fit air-mode rate coefficients only.
+- **Stage B**: forward-simulate over the full trajectory using sim-error PEM with
+  HP feedback; estimate wall-mode parameters from perturbation regimes.
+- **Cadence-adaptive RMS gate**: tightens with sensor-update rate.
+- **Bayesian priors on (mass_ratio, k_w)**: dropped 2026-05-06; reintroduce only
+  when grey-box bridges go live and wall params need a deployment-safety pin.
+
+**Status:** in flight. Grey-box β fusion to WLS is **default off** until the redesign
+clears its bench gates. Don't trust greybox-derived β in production yet.
+
+### Branches in flight
+
+| Branch | Purpose | Status |
+|--------|---------|--------|
+| `master` | Last known good (LKG) reference | Lags pre-release tags |
+| `tick-first-snapshot` | TickOutput contract + coordinator | 16 commits, not yet merged |
+| `bench-validation` | Phase 4 lite credibility envelope | Phases 1–3 + 4a done |
+| `bench-id-discrimination` | Real-bench-bug fixes (LB hyper-sensitivity, HP proxy) | DR shifted poor → close |
+| `greybox-redesign` | **current branch** — Stage A/B fits | In progress |
+
+The user's "what's next?" reasoning is about *substance*, not branch status. Treat
+the current branch as master.
 
 ---
 
@@ -243,7 +351,7 @@ happen if I changed this?" The defaults encode real-world tuning decisions.
 
 ## Lesson 2: The Base Climate Entity
 
-**File:** `climate.py` (~1899 lines)
+**File:** `climate.py` (~2217 lines)
 
 This is the largest file and the heart of the integration. It implements HA's
 `ClimateEntity` interface — the standard API that makes this show up as a thermostat
@@ -284,6 +392,9 @@ and climate.py orchestrates both without subclass MRO complexity.
 2. Subscribe to MQTT topics
 3. Set up external sensor listeners (temp, humidity, power)
 4. Initialize PI controller (if enabled)
+5. Construct the `TasmotaIRHVACCoordinator` (when PI is enabled) and bind it to
+   the controller. Sensors and binary sensors will subscribe to this coordinator
+   instead of the legacy dispatcher signals.
 
 **`_handle_state_payload`** (~line 400-500): Parses MQTT JSON from Tasmota into
 entity state. This is where the AC's reported state becomes HA state.
@@ -568,9 +679,12 @@ This prevents the AC from constantly cycling on/off around the setpoint.
 
 ## Lesson 6: The PI Controller — Implementation
 
-**File:** `pi/pi_controller.py` (~3503 lines)
+**File:** `pi/pi_controller.py` (~5512 lines)
 
-Now let's see how the theory maps to code.
+Now let's see how the theory maps to code. The size growth from ~3500 to ~5500 lines
+(pre41 → pre50) reflects the tick-first contract, runtime subsystem gating,
+the boundary estimator, the regime probe, the over-temperature regime gate, and
+bumpless transfer machinery — none of which existed in the early-2026 curriculum.
 
 ### Class Structure
 
@@ -591,11 +705,16 @@ Sets up all PI state:
 - Gains: `_pi_kp`, `_pi_ki` (may be overridden by IMC — see below)
 - Timing: `_pi_min_interval`, `_pi_last_tick`
 - State: `_pi_integral` (starts at 0), `_hp_setpoint`, `_desired_temp`
-- Feedforward: `_rls_heat`, `_rls_cool` (RLS model objects), `_ff_offset`
+- **Subsystem gates:** `_control_active`, `_pi_ff_enabled`, `_pi_batch_wls_enabled`,
+  `_pi_plant_id_enabled` — runtime toggles persisted in options
+- Feedforward: `_rls_heat`, `_rls_cool` (RLS model objects, **predict-only** since pre45), `_ff_offset`
 - Smith predictor: `_smith` (FOPDT delay-compensation model)
 - Plant ID: `_plant_id` (multi-provider SOPDT estimation + IMC gain scheduling)
-- Auto-perturbation: `_auto_perturb` (Layer 2.5 state machine)
-- Grey-box: `_greybox` (1R1C energy balance observer, runs alongside batch WLS)
+- Auto-perturbation: `_auto_perturb` (Layer 2.5 state machine, with optional research mode)
+- Grey-box: `_greybox` (1R1C + 2R2C energy balance observer)
+- Boundary estimator: `_boundary_estimator` (3-layer Bayesian posterior on the HP-on/off transition)
+- Regime probe: `_regime_probe` (active probing for boundary detection)
+- Over-temperature regime: `_overtemp_regime` (physical-state anti-windup flag)
 - Learning: `_ff_settled_ticks`, `_stable_oodb_ticks`, `_observation_buffer`, per-feature frozen state
 - Metrics: `_itae_accumulator`, `_comfort_violation_hours`, `_ff_load_fraction`
 
@@ -681,8 +800,8 @@ def _pi_tick_inner(self):
 
 ### Anti-Windup Mechanisms
 
-Integral windup is the #1 enemy of PI controllers. This implementation has *four*
-defenses:
+Integral windup is the #1 enemy of PI controllers. This implementation has *five*
+defenses (the over-temperature regime gate landed pre46):
 
 1. **Conditional integration freeze:** When the HP setpoint is at its physical
    limit *and* the error opposes what the actuator can deliver (e.g., heating at
@@ -692,17 +811,35 @@ defenses:
    above in cooling), meaning the compressor is off and the controller has
    no actuator authority (Åström §6.4).
 
-2. **Leaky integrator:** Exponential decay with α=0.9999 per nominal tick
+2. **Over-temperature regime gate (pre46):** A *physical-state* anti-windup,
+   distinct from the actuator-saturation-state defenses above. When the room
+   is above the cooling band (or below the heating band) by more than the
+   `cal_midpoint` hysteresis, the controller declares an "over-temp regime"
+   and the integral is forced toward zero rather than continuing to accumulate
+   in the wrong direction. Bumpless transfer applies on regime exit so the
+   raw-setpoint output stays continuous. Solves the post-solar wind-down
+   pathology (room overshoots target on a sunny afternoon, integral
+   accumulates negative debt that fights heating that evening).
+
+3. **Leaky integrator:** Exponential decay with α=0.9999 per nominal tick
    (~10,000 tick time constant ≈ 104 days). Bounds integral growth universally.
    α=0.9999 was chosen over 0.999 to preserve correction for slow-τ houses.
 
-3. **Back-calculation:** If the clamped setpoint differs from the raw setpoint
+4. **Back-calculation:** If the clamped setpoint differs from the raw setpoint
    (actuator saturation), the integral is adjusted backward to the value that
    produces the clamped output. Skipped when conditional freeze already applied.
 
-4. **Quantization-error feedback:** Nudges integral to align clamped setpoint
+5. **Quantization-error feedback:** Nudges integral to align clamped setpoint
    with integer values, preventing 1°C HP step limit cycles. Only acts in
    deadband when misalignment is 0.3–0.5°C.
+
+### Bumpless Transfer
+
+Whenever a controller parameter changes mid-run — IMC gain update, batch β write,
+regime exit — the integral is re-derived to keep `desired + p + Ki·I + d + ff`
+continuous across the change. Same Åström-style back-calc principle as the
+saturation case, applied to *every* discontinuous parameter change. Without it,
+batch β writes would step the output and the loop would have to re-equilibrate.
 
 ### Smith Predictor (Delay Compensation)
 
@@ -746,17 +883,57 @@ If the room temperature sensor goes offline:
 - **After 60s:** Falls back to feedforward-only (no P or I, just FF offset)
 - **When sensor returns:** Full PI resumes immediately
 
-### Interface with Climate Entity
+### Subsystem Gating (`set_subsystem` service, persisted)
 
-The controller communicates with climate.py through a clean interface:
+Each major subsystem can be toggled at runtime without a reload:
+
+| Subsystem | Attribute | Effect when off |
+|-----------|-----------|----------------|
+| `control` | `_control_active` | **Observe-only mode** — PI computes everything but never writes the HP setpoint. Useful for shadowing, validation, vacation mode. |
+| `ff` | `_pi_ff_enabled` | FF offset forced to 0; RLS no longer queried for predictions |
+| `batch_wls` | `_pi_batch_wls_enabled` | Twice-daily WLS doesn't run; coefficients never get updated |
+| `plant_id` | `_pi_plant_id_enabled` | Plant identifier doesn't observe step responses or relay tests; gains don't reschedule |
+
+Toggles persist across restarts via options. The controller falls back gracefully when
+a subsystem is off (e.g., FF off → uses last-known offset of 0; plant_id off → keeps
+the IMC gains it last computed).
+
+### The Over-Temperature Regime Gate
+
+A separate state machine runs alongside `_pi_tick_inner`. It tracks whether
+the room is in an "over-temp regime" — meaningfully above the cooling deadband
+(or below the heating one) for a sustained window. The regime has hysteresis
+on entry/exit (`cal_midpoint` — typically 0.3°C) so single-tick excursions
+don't toggle it.
+
+When the regime is active:
+- Integral is forced toward zero rather than accumulating
+- Bumpless transfer applies on exit so the controller doesn't snap when the
+  regime clears
+
+This is *physical-state* anti-windup: it responds to where the room actually is,
+not to whether the actuator is saturated. The classic anti-windup mechanisms
+(saturation back-calc, conditional freeze) only act when the HP setpoint hits
+its rail; they miss the case where the HP is mid-range but the room is way past
+target because of unmodeled solar gain.
+
+### Interface with Climate Entity (Tick-First Contract)
+
+Since pre46 (Stages 0–11), the controller exposes a typed contract via
+`pi/snapshot.py`:
 
 | Climate Entity Calls | Controller Provides |
 |---------------------|-------------------|
-| `controller.tick()` | New HP setpoint (or None if no change) |
-| `controller.get_hp_setpoint()` | Current computed setpoint |
-| `controller.get_diagnostics()` | Dict of all PI state for sensors/attributes |
+| `controller.tick()` | Updates internal state, builds and caches `last_tick: TickOutput` |
+| `controller.last_tick` | Read-only access to the most recent `TickOutput` |
+| `controller.get_diagnostics()` | Returns a `DiagnosticsBundle` (typed); legacy callers get `to_dict()` |
 | `controller.set_desired_temp(t)` | Stores target, triggers recalculation |
 | `controller.on_mode_change()` | Resets Smith predictor, adjusts integral |
+| `controller.set_subsystem(name, enabled)` | Toggles a runtime subsystem |
+
+Sensors, the binary sensor, and the persistent event log all read from the
+`TickOutput` cached on the controller — they don't reach into controller internals.
+See Lesson 10 for the full snapshot architecture.
 
 ### Exercise
 Read `_pi_tick_inner()` line by line. For each section, identify which of the
@@ -766,10 +943,17 @@ correction is selectively applied.
 
 ---
 
-## Lesson 7: Feedforward and Auto-Learning
+## Lesson 7: Feedforward, Batch Learning, and the Boundary Estimator
 
 This is the most novel part of the controller. Most home HVAC PI implementations
 don't have feedforward, let alone one that *learns*.
+
+> **Architectural change (pre45):** The earlier era used online RLS that updated
+> on every settled tick, with batch WLS as a corrective second pass. As of pre45,
+> **batch WLS is the sole estimator.** RLS persists as a predict-time evaluator —
+> coefficients and covariance are still tracked, restored across restarts, and
+> queried for FF predictions, but `rls.update()` is never called. The buffer is
+> the single source of truth.
 
 ### How Feedforward Works
 
@@ -777,10 +961,9 @@ The outdoor temperature directly affects how hard the AC must work. Feedforward
 pre-computes an offset based on outdoor temp and other conditions, so PI doesn't
 have to "discover" the needed adjustment through accumulated error.
 
-### RLS Model (`pi/rls_model.py`)
+### RLS Model (`pi/rls_model.py`) — Predict-Only Since pre45
 
-The feedforward uses **Recursive Least Squares** — a multivariate linear model
-that learns online from observations:
+The feedforward uses a multivariate linear model:
 
 ```
 ff_offset = β₀ + β₁ × outdoor_delta + β₂ × solar_proxy + β₃ × boiler + ...
@@ -790,11 +973,26 @@ ff_offset = β₀ + β₁ × outdoor_delta + β₂ × solar_proxy + β₃ × boi
 - `β₁` = outdoor delta coefficient (how much colder outdoor → more offset)
 - `β₂...βₙ` = model input coefficients (solar, boiler, stove, etc.)
 
-Each coefficient is learned by RLS from settled observations. The model runs in
-normalized feature space (all features scaled to O(1)) with:
-- **Variable forgetting factor** (base λ=0.99, adapts based on residual surprise)
-- **Ridge regularization** (δ=1e-4) to prevent covariance collapse
-- **Coefficient clamping** with P-matrix zeroing when boundaries hit
+The class is still called `RLSModel` for git-history continuity, but **it no
+longer updates on its own**. Coefficients are written to it only by the batch
+WLS solver. The covariance matrix `P` is still updated (P-aware blended apply
+zeroes off-diagonals that the batch corrected) so future restarts and any
+hypothetical re-introduction of online learning would have a clean handoff.
+
+What's gone since pre45:
+- `rls.update()` calls during `_pi_tick_inner`
+- κ-gated λ (forgetting-factor inflation)
+- Maturity flags
+- P-aware step-cap helpers
+- Adaptive step-cap helpers
+- The `pi_rls_online_enabled` user-facing flag
+- Phase 4 dead Repairs about RLS-vs-batch disagreement
+
+What remains:
+- Coefficient storage, normalization, predict path
+- Persistence across restarts
+- Clamp-to-bounds with P-matrix zeroing on boundary hit (relevant when batch
+  writes a clamped value)
 
 ### Seed Coefficients and Blending
 
@@ -829,30 +1027,30 @@ setpoint boundaries. When integral and FF agree (both wanting more heat),
 confidence stays at 1.0 — the model direction is right and reducing it would
 worsen an undersized-HP situation.
 
-### Learning Gate: In-Deadband (IDB)
+### Observation Admission Gates: IDB and OODB
 
-When the system is settled inside the deadband (< 0.5°C error) for ≥ 4
-consecutive ticks with stable room temp and integral, it observes the HP
-setpoint that achieved the target temperature:
+The buffer admits observations through two gate types — same gates as the old
+online-learning era, but they now feed the **buffer** instead of an online RLS
+update.
+
+**In-Deadband (IDB):** When the system is settled inside the deadband (< 0.5°C
+error) for ≥ 4 consecutive ticks with stable room temp and integral, the
+controller admits one observation:
 
 ```python
 observed_offset = hp_setpoint - desired_c   # what the plant actually saw
-rls.update(features, observed_offset)       # standard RLS update
+buffer.append(features, observed_offset)    # batch will pick this up at 07:00 / 19:00
 ```
 
 This is a direct input-output observation at the operating point (Ljung,
 *System Identification* §7.4). One observation per settled window prevents
-over-learning from steady state.
+over-representation of steady state in the buffer.
 
-### Learning Gate: Out-of-Deadband (OODB)
-
-Zones with miscalibrated FF models may rarely reach the deadband, creating a
-vicious cycle: bad model → room above target → can't learn → model stays bad.
-
-OODB learning breaks this cycle by allowing observations at thermal equilibrium
-outside the deadband. At equilibrium, `hp_setpoint - current_c` tells the RLS
-"what offset maintains room temp at current conditions." This is valid at any
-operating point, with bias growing as ~(K_loss/K_hp) × |error|.
+**Out-of-Deadband (OODB):** Zones with miscalibrated FF models may rarely
+reach the deadband. OODB admission breaks the loop: at thermal equilibrium
+outside the deadband, `hp_setpoint - current_c` tells the model
+"what offset maintains room temp at current conditions." Valid at any operating
+point, with bias growing as ~(K_loss/K_hp) × |error|.
 
 Guards:
 - Room temperature must be genuinely stable (|dT/dt| < 0.015°C/min)
@@ -860,13 +1058,19 @@ Guards:
 - HP setpoint must not be clamped (censored data excluded)
 - Distance-proportional settling: 8 + 4×|error°C| minimum ticks
 
-### Batch WLS (Offline Analysis)
+The pre49 buffer-and-unlock observability work surfaces *why* an observation
+was rejected: each tick now carries an `ObservationContext` (admitted/rejected,
+which gate, raw values), debug bundles dump live buffer state, and
+unlock-evaluation records show full-model gates per feature.
 
-**File:** `pi/batch_learning.py` (~1523 lines)
+### Batch WLS (Sole Estimator)
+
+**File:** `pi/batch_learning.py` (~2493 lines)
 
 Twice daily (07:00 and 19:00 local time), a weighted least squares analysis
-runs on the accumulated observation buffer. This catches systematic model
-errors that the real-time learning gates might miss:
+runs on the accumulated observation buffer. **Since pre45, this is the
+only thing that updates β.** Catching model errors and adapting to drift
+is its job; the online tick path can no longer drift on its own.
 
 - **Raw-readings storage:** Observations store *what the house experienced*
   (raw sensor readings keyed by entity_id) rather than pre-computed feature
@@ -904,9 +1108,18 @@ errors that the real-time learning gates might miss:
   The full model's std_err, held_features, and per-feature VIF determine whether
   each frozen feature is identifiable. VIF is computed inside WLS from the
   eligible-only regression data.
-- **κ-gated lambda:** When the condition number κ > 30, the online RLS forgetting
-  factor λ is pushed toward 1.0 to slow adaptation under multicollinearity.
-  Linear blend: κ=30 → no change, κ≥100 → λ=1.0.
+- **κ severe-multicollinearity gate:** When κ > 100, the batch refuses to write
+  its recommendation — the data geometry can't reliably separate features at
+  that point. This replaces the old κ-gated λ adaptation, which is gone with
+  online RLS.
+- **`rejection_reason` classification (pre50):** Observations rejected at the
+  controller-side WLS gate now carry a structured rejection reason
+  (`hp_no_output`, `clamped`, `non_equilibrium`, etc.) instead of `None`.
+  Surfaces in debug bundles and Repairs.
+- **`head_offset` reset target (pre50):** The `learning_reset` service accepts
+  `head_offset` as a target, clearing the boundary estimator's cal-band defaults
+  for cases where the room-sensor-vs-HP-internal offset has changed (sensor
+  swap, HP head replacement, model_input change).
 
 Each observation records a `wall_hour` (0-23) for time-of-day analysis and
 an `outdoor_temp_c` for grey-box energy balance fitting.
@@ -954,12 +1167,48 @@ Each can:
 See [docs/disturbance_inputs.md](docs/disturbance_inputs.md) for configuration
 examples.
 
+### Boundary Estimator (`pi/boundary_estimator.py`)
+
+A long-standing pathology: the room-temperature sensor and the HP's internal
+sensor disagree by 1–2°C in practice (different mounting, different sensor
+parts). When the controller sets `hp_setpoint = current_c + 0.5`, it doesn't
+actually know whether the HP's compressor is on or off — the HP is comparing
+the setpoint against *its* sensor, not ours.
+
+Pre50 introduced a three-layer Bayesian boundary estimator that learns the
+HP-on/off transition point in `(hp_setpoint - current_c)` space:
+
+**Layer 1 — Split-model RSS sweep (every 12h batch):** For each candidate
+breakpoint, fit a piecewise model where below the boundary the rate
+includes a `k_c × hp_offset` term, above it doesn't. Score = RSS_null − RSS_split:
+how much the piecewise model beats envelope-only fitting. The best breakpoint
+is where adding `hp_offset` stops helping. No pre-identification of HP-off
+data needed — works at any offset from the first batch.
+
+**Layer 2 — Setpoint-change response (per-tick, opportunistic):** When the
+HP setpoint changes, the room rate response (or non-response) reveals
+whether the HP was affected. Each setpoint change is exogenous (the previous
+tick's PI decision), making it a high-quality datum that works at any offset.
+
+**Layer 3 — Active probe (`pi/regime_probe.py`, see Lesson 9):** When the
+estimator stalls, briefly forces the HP to minimum setpoint to directly
+observe whether the room rate changes. Highest-weight evidence
+(literature: PWARX regime-switching, Adams & MacKay 2007 changepoint
+detection).
+
+**Bayesian fusion:** Each layer updates a Gaussian posterior `N(μ, σ²)` on
+the boundary location. `cal_min`/`cal_max` (the buffer's HP-on/off cal band)
+are derived as `μ ± k×σ`. The estimator escalates from passive (Layer 1) to
+active (Layer 3) if the stall counter trips. Reset-target `head_offset` in
+the `learning_reset` service clears this state.
+
 ### Exercise
-Imagine outdoor is 0°C and desired is 20°C. The RLS model predicts
-ff_offset = 3.0. The integral is at -2.0 (ki=0.15, so ki×I = -0.3).
-Confidence is 1.0 (integral agrees with FF direction). What is the raw
-setpoint? What HP setpoint does the AC get? If the room is at 20.0°C
-(in deadband), does the IDB learning gate open?
+Imagine outdoor is 0°C and desired is 20°C. The FF model (β cached on the
+RLS object, last written by batch WLS) predicts `ff_offset = 3.0`. The
+integral is at -2.0 (ki=0.15, so ki×I = -0.3). Confidence is 1.0 (integral
+agrees with FF direction). What is the raw setpoint? What HP setpoint does
+the AC get? If the room is at 20.0°C (in deadband), is an observation
+admitted to the buffer? Trace which `ObservationContext` reason it carries.
 
 ---
 
@@ -1047,53 +1296,97 @@ to know where to start integrating.
 
 ---
 
-## Lesson 9: Grey-Box Observer and Auto-Perturbation
+## Lesson 9: Grey-Box Observer, Auto-Perturbation, and the Regime Probe
 
-Two subsystems that work alongside the batch WLS to improve model quality
+Three subsystems that work alongside the batch WLS to improve model quality
 using fundamentally different approaches.
 
-### Grey-Box 1R1C Energy Balance Observer (`pi/greybox_observer.py`)
+### Grey-Box Energy Balance Observer (`pi/greybox_observer.py` ~1322 lines)
+
+> **Architectural status (May 2026):** This is in active redesign on the
+> `greybox-redesign` branch. The previous bench validation pass (Phase 4 lite)
+> found 0/119 gates passing per season on real-CSV data. The β-bridge to WLS
+> is **default off** in production. Don't trust grey-box-derived coefficients
+> downstream until the bench gates clear.
 
 **Key insight:** The static WLS batch can only use equilibrium observations
 where the HP is running. The grey-box observer uses *all* data including
-HP-off periods, which directly inform the building's thermal characteristics.
+HP-off periods, which directly inform the building's thermal characteristics
+through derivative data.
 
-The 1R1C energy balance model in rate-coefficient form (Bacher & Madsen, 2011):
+#### 1R1C model (Bacher & Madsen, 2011)
 
 ```
-dT_air/dt = ua_c × (T_out - T_air) + k_c × hp_offset + α_c × solar
+dT_air/dt = c₀ + ua_c × (T_out - T_air) + k_c × hp_offset + α_c × solar
 ```
 
-where `ua_c = UA/C`, `k_c = K_hp/C`, `α_c = α_solar/C`. These rate
-coefficients are directly identifiable from derivative data without the
-scaling ambiguity of the original parameterization.
+where `ua_c = UA/C`, `k_c = K_hp/C`, `α_c = α_solar/C`. `c₀` absorbs unmodeled
+internal gains and measurement bias. Rate coefficients are directly identifiable
+from derivative data without the scaling ambiguity of the original parameterization.
 
-**Steady-state bridge:** Setting dT/dt = 0 and solving for hp_offset maps
-rate coefficients to WLS-compatible β:
+#### 2R2C upgrade (#47, mid-April 2026)
+
+The 2R2C model adds a wall mass node with its own time constant:
+
+```
+dT_air/dt  = c₀ + ua_c×(T_out - T_air) + k_w×(T_wall - T_air) + k_c×hp + α_c×solar
+dT_wall/dt = k_w/mass_ratio × (T_air - T_wall) + (envelope coupling)
+```
+
+Two free parameters: `k_w` (air↔wall coupling rate) and `mass_ratio`
+(`C_wall / C_air`). The 2R2C version uses scipy `least_squares` with sensible
+bounds and (briefly) Bayesian priors on (`mass_ratio`, `k_w`) — those priors
+were dropped 2026-05-06 once the redesign showed the rail-pinning was
+diagnostic of data limitation, not bound miscalibration (Reynders 2014).
+
+#### The redesign (May 2026, current branch)
+
+After the 2R2C verdict on real data was negative, the team rebuilt the fit:
+
+- **Stage A**: hard-fix wall parameters (`k_w`, `mass_ratio`) at lit-typical
+  values; estimate only the air-mode rate coefficients (`c₀`, `ua_c`, `k_c`,
+  `α_c`). This is the "robust" fit used as the day-to-day estimate.
+- **Stage B**: forward-simulate the 2R2C state-space model over the *full*
+  trajectory (sim-error PEM, Ljung), using HP setpoint as feedback rather
+  than as exogenous input. Estimate wall-mode parameters from
+  perturbation regimes only (where excitation is rich enough).
+- **Cadence-adaptive RMS gate**: tightens with sensor-update rate so
+  whiteness checks aren't fooled by autocorrelation at sub-τ sampling.
+- **Tau widening**: `GATE_MAX_TAU_SLOW` widened to lit-typical residential
+  max after empirical evidence that some zones have slower wall modes than
+  the prior bound allowed.
+
+Output: a `GreyboxResult` with `ua_c`, `k_c`, `α_c`, `k_w`, `mass_ratio`,
+their stds, and gate pass/fail flags. Logged via `log_greybox_result()` and
+captured in the `BatchLearningSnapshot`.
+
+#### Steady-state β bridge
+
+When the gates pass, the β bridge maps rate coefficients to WLS-compatible β
+by solving `dT/dt = 0`:
 
 ```
 β₁ = -ua_c/k_c   (outdoor delta coefficient)
 β₂ = -α_c/k_c    (solar coefficient)
 ```
 
-Standard errors are propagated via the delta method on the ratio.
+Standard errors propagated via the delta method on the ratio. Inverse-variance
+fusion blends grey-box β with WLS β, giving two independent measurement
+sources — equilibrium-WLS and dynamic-PEM. The fusion path is gated until the
+redesign clears its bench tests.
 
-**Inverse-variance fusion:** The grey-box β estimates are fused with WLS β
-using inverse-variance weighting (configurable toggle). This gives the
-model two independent measurement sources — one from equilibrium
-observations (WLS) and one from dynamic trajectory data (grey-box).
+#### Cross-validation
 
-**Cross-validation:** After fitting, the grey-box τ_eff (= 1/ua_c) is
-compared against τ_slow from plant ID. Agreement builds confidence;
-disagreement flags model issues. Results are logged and available in
-diagnostics.
+After fitting, grey-box `τ_eff = 1/ua_c` is compared against `τ_slow` from
+plant ID. Agreement builds confidence; disagreement flags model issues.
+Visible in diagnostics and the `BatchLearningSnapshot`.
 
-Requires `scipy` (optional dependency, gracefully degrades if unavailable).
-Runs alongside the WLS batch on the same 12h schedule.
+Requires `scipy` (now a hard dependency in `manifest.json` since it's central
+to the 2R2C fit). Runs alongside the WLS batch on the same 12h schedule.
 
-### Auto-Perturbation (`pi/auto_perturbation.py`)
+### Auto-Perturbation (`pi/auto_perturbation.py` ~427 lines)
 
-**Problem:** Plant identification (Layers 1-2) needs HP setpoint step changes
+**Problem:** Plant identification (Layers 1–2) needs HP setpoint step changes
 to observe step responses. In well-tuned systems, setpoint changes are rare
 — the system is too stable for its own identification needs.
 
@@ -1107,14 +1400,24 @@ IDLE ──(steady 10 min)──> STEP_ACTIVE ──(hold ≥60 min + steady)─
 RESTORE ──(steady 10 min)──> IDLE
 ```
 
+**Cadence-adaptive steady-state threshold (current branch):** The "system is
+steady" check (`room_rate < 0.015 °C/min`) was below the noise floor at
+60-second sampling with σ=0.1°C, meaning auto-perturb couldn't fire under
+production conditions. The threshold now scales with sensor cadence.
+
 **Convergence gating:** Perturbs frequently when plant ID has low confidence,
 backs off as confidence grows, stops entirely above 90% confidence.
 
 **Stall detection:** After 5 cycles without confidence improvement, transitions
 to STALLED state and raises an HA Repair suggesting the relay test (Layer 3).
 
+**Research mode (pre48, Path A0):** A user-facing flag
+(`pi_auto_perturb_research_mode`, default off) lets an operator opt into
+forced perturbation cycles for research purposes — bypasses the convergence
+governor while keeping all safety guards.
+
 **Safety guards:**
-- Only activates during configured time window (e.g., 10:00-16:00)
+- Only activates during configured time window (e.g., 10:00–16:00)
 - Aborts if HP saturates, supplemental activates, or learning is suppressed
 - `perturb_now` service for manual triggering (60 min timeout)
 - Counters persist across HA restarts
@@ -1123,17 +1426,199 @@ to STALLED state and raises an HA Repair suggesting the relay test (Layer 3).
 estimation), Liu & Gao 2012 (bidirectional step tests), Bouchié et al. 2022
 (ISABELE binary heating signals).
 
+### Regime Probe (`pi/regime_probe.py` ~556 lines)
+
+A separate active-probing subsystem dedicated to **boundary detection**, not
+parameter identification. When the boundary estimator (Lesson 7) stalls or
+needs high-confidence evidence, the regime probe forces the HP setpoint to
+its minimum (≥3°C below current room temp, guaranteeing the compressor is
+off regardless of sensor offset) and watches the room rate change.
+
+State machine: `IDLE → BASELINE → PROBE_ACTIVE → COMPLETE`. Baselines for
+≥3 min before probing, probes for ≥8 min (gives 55% of the rate change to
+materialize on a typical air time constant). Cooldown 30 min between probes.
+
+The result feeds back into the boundary estimator as Layer 3 evidence, with
+the highest weight (5×) of any evidence source.
+
+**Literature:** PWARX regime-switching models, Cragg (1971) hurdle models,
+dead-zone nonlinearity identification.
+
 ### Exercise
-Consider a zone where the RLS model has good feedforward but plant ID
-confidence is only 40%. Auto-perturbation injects +1°C. Trace: how does
-the perturbation offset interact with the PI setpoint calculation in
-`_pi_tick_inner()`? What happens to the P and I terms during the
-perturbation? When does the step response provider decide to end its
-observation?
+Consider a zone where the FF model has good β but plant ID confidence is
+only 40%. Auto-perturbation injects +1°C. Trace: how does the perturbation
+offset interact with the PI setpoint calculation in `_pi_tick_inner()`?
+What happens to the P and I terms during the perturbation? When does the
+step response provider decide to end its observation?
 
 ---
 
-## Lesson 10: The Fujitsu Vendor Handler
+## Lesson 10: Tick-First Snapshot Architecture
+
+**Files:** `pi/snapshot.py` (~1576 lines), `pi/coordinator.py` (~98 lines),
+`pi/event_log.py` (~218 lines), `pi/export_bundle.py` (~361 lines)
+
+This lesson didn't exist in the early-2026 curriculum because the architecture
+hadn't landed yet. As of pre46 (Stages 0–11), every consumer of PI state —
+sensors, binary sensors, diagnostics, the persistent event log, the debug
+bundle — reads from a single typed contract instead of reaching into controller
+internals.
+
+### Why It Was Built
+
+Pre-pre46, every diagnostic surface called a different controller method
+(`get_full_diagnostics()`, `get_buffer_state()`, ad-hoc attribute reads).
+Adding a new field meant adding it to multiple places. Sensors triggered
+update via `async_dispatcher_send(SIGNAL_PI_UPDATE)`; the binary sensor
+listened on `SIGNAL_FF_SUPPRESS_UPDATE`. There was no single "what was the
+state at tick T" object — debug bundles couldn't reproducibly capture a
+window of behavior.
+
+The fix: build the typed snapshot once per tick, cache it on the controller,
+and have everyone read from it.
+
+### The Contract: `TickOutput`
+
+```python
+@dataclass(frozen=True, slots=True)
+class TickOutput:
+    SCHEMA_VERSION: ClassVar[int] = 1
+
+    # Timing + framing
+    ts_mono: float
+    ts_wall: float
+    zone_label: str
+
+    # Live state
+    enabled: bool
+    paused: bool
+    desired_temp: float | None
+    hp_setpoint: float | None
+    integral: float
+    ff_offset: float
+    ff_confidence: float
+    outdoor_temp: float | None
+
+    # Subsystem snapshots
+    rls_model: RLSModelSnapshot | None
+    batch_learning: BatchLearningSnapshot | None
+    ff_contributions: FFContributionsSnapshot | None
+    observation_buffer: ObservationBufferSnapshot | None
+    multicollinearity: MulticollinearityStats | None
+    health: HealthSnapshot | None
+    learning: LearningSnapshot | None
+    greybox: GreyboxSnapshot | None
+    learning_suppression: LearningSuppressionSnapshot | None
+    overtemp_regime: bool
+    regime_probe: dict | None
+    observation_context: ObservationContext | None
+    # ... and more
+```
+
+`TickOutput.to_dict()` produces output matching the legacy `get_full_diagnostics()`
+shape so existing consumers don't break. New top-level fields are additive.
+
+### `DiagnosticsBundle` and `OfflineBundle`
+
+`DiagnosticsBundle` is the dataclass version of `get_full_diagnostics()`'s
+output — used for the HA Diagnostics download. `OfflineBundle` packages
+multi-tick history for offline analysis.
+
+### `TasmotaIRHVACCoordinator`
+
+```python
+class TasmotaIRHVACCoordinator(DataUpdateCoordinator[TickOutput]):
+    ...
+```
+
+A standard HA `DataUpdateCoordinator` typed on `TickOutput`. After every PI
+tick, the controller calls `coordinator.async_set_updated_data(last_tick)`.
+Subscribers (sensors, binary sensors, the event log writer) wake up and read
+from `coordinator.data`.
+
+The legacy `SIGNAL_PI_UPDATE` and `SIGNAL_FF_SUPPRESS_UPDATE` dispatcher
+signals were **deleted** in Stage 7d. Sensors and binary sensors now inherit
+from `CoordinatorEntity[TasmotaIRHVACCoordinator]` and call
+`self.coordinator.data` to read state. Removing the dispatcher path eliminated
+a class of "the sensor never updated" bugs caused by signal subscription
+timing.
+
+### Persistent Event Log (`pi/event_log.py`)
+
+When `set_event_log_enabled` is true, `EventLogWriter` appends every
+`TickOutput.to_dict()` to a daily JSONL file:
+
+```
+<config>/tasmota_irhvac/log/<zone>_<YYYY-MM-DD>.jsonl
+```
+
+Daily rotation; previous-day files gzip on rollover. Disk pressure ~3 GB/year
+compressed for 4 zones at 1-min ticks (typical setup). Default off because it
+is genuine disk pressure on small HA boxes.
+
+`TickEvent` is a typed dataclass for the *boundary* events that aren't
+per-tick state: `BATCH_RUN`, `ANOMALY_DETECTED`, `MODE_CHANGE`,
+`SETPOINT_CHANGE_USER`, `MATURITY_GATE`, `LEARNING_SUPPRESSION_CHANGE`,
+`AUTO_PERTURB_STATE`, `BOUNDARY_UPDATE`, `CONTROLLER_RELOAD`. Events have
+typed payloads (e.g., `BatchRunPayload`, `BoundaryUpdatePayload`) with
+schema version on the wrapper.
+
+The `CONTROLLER_RELOAD` event was added pre47 specifically so a debug
+bundle could locate reset boundaries — without it, you couldn't tell why
+the integral suddenly jumped to zero in the middle of a window.
+
+### Debug Bundle (`pi/export_bundle.py`)
+
+The `export_debug_bundle` service packages a window of tick log + (optional)
+HA Recorder history into:
+
+```
+<config>/tasmota_irhvac/bundles/<timestamp>_<zone>/
+  ├── tick_log.jsonl       # filtered TickOutput entries
+  ├── event_log.jsonl      # TickEvent entries
+  ├── ha_history.jsonl     # HA Recorder state changes (when requested)
+  ├── observation_buffers.jsonl  # live buffer dumps (pre49)
+  ├── manifest.json        # version, zone, window, profile filter
+  └── README.md            # how to interpret the bundle
+```
+
+The service requires the persistent event log to have been running for at
+least the requested window — it's a no-op otherwise. Profile filters (`profile`
+parameter) trim the bundle to specific subsystems for faster iteration during
+debugging.
+
+### Power-User Toggle: `set_debug_capture`
+
+Adds the full RLS P matrix off-diagonals (~200 floats per snapshot) to
+diagnostics dumps. Useful for analyzing covariance structure during
+multicollinearity investigations. Default off; persists across restarts;
+not exposed in the config flow.
+
+### Why This Matters for Reading the Code
+
+When you trace a sensor value, you no longer follow it back to a controller
+attribute through dispatcher signals. The path is always:
+
+```
+controller._pi_tick_inner()
+  → _build_tick_output()   (constructs TickOutput from current state)
+  → coordinator.async_set_updated_data(last_tick)
+  → sensor reads coordinator.data.<field>
+```
+
+This makes the "what was the state at time T" question answerable from
+disk (with event log enabled) instead of requiring a live capture.
+
+### Exercise
+Run `set_event_log_enabled enabled=true`, wait an hour, then run
+`export_debug_bundle window_days=0`. Open the resulting `tick_log.jsonl`
+and trace one tick: find the matching `TickOutput` entry, then look at the
+contemporaneous `event_log.jsonl` for any boundary events. Verify the
+`ts_mono` ordering matches.
+
+---
+
+## Lesson 11: The Fujitsu Vendor Handler
 
 **File:** `vendors/fujitsu.py` (~393 lines)
 
@@ -1224,9 +1709,9 @@ then switches to Eco before Boost's 20-minute timer expires? Trace the code path
 
 ---
 
-## Lesson 11: Config Flow and Options
+## Lesson 12: Config Flow and Options
 
-**File:** `config_flow.py` (~1481 lines)
+**File:** `config_flow.py` (~1501 lines)
 
 This file handles the UI for setting up and modifying the integration. It's the
 longest file after `climate.py`, but much of it is form definitions.
@@ -1295,7 +1780,7 @@ well-formed? (Trick question — trace it and see.)
 
 ---
 
-## Lesson 12: Buttons, Sensors, and IR Actions
+## Lesson 13: Buttons, Sensors, Repairs, and IR Actions
 
 ### Buttons (`button.py`)
 
@@ -1408,15 +1893,23 @@ gate entity or using the `suppress_learning` entity proactively.
 shows whether feedforward learning is currently suppressed, with attributes listing
 active entity suppressors and manual suppress status.
 
-All sensors update via HA's **dispatcher** mechanism:
+All sensors update via the **coordinator** (since pre46, Stage 7c/7d). The
+legacy `SIGNAL_PI_UPDATE` and `SIGNAL_FF_SUPPRESS_UPDATE` dispatcher signals
+were deleted:
 
 ```python
-# In climate (sender):
-async_dispatcher_send(self.hass, SIGNAL_PI_UPDATE.format(entry_id))
+# All sensors / binary sensors:
+class TasmotaIRHVACSensor(CoordinatorEntity[TasmotaIRHVACCoordinator], SensorEntity):
+    @property
+    def native_value(self):
+        return self.coordinator.data.<field>  # TickOutput is the source of truth
 
-# In sensor (receiver):
-async_dispatcher_connect(hass, SIGNAL_PI_UPDATE.format(entry_id), self._update)
+# In controller after each tick:
+self._coordinator.async_set_updated_data(self.last_tick)
 ```
+
+This eliminated a class of "the sensor never refreshed" bugs caused by
+dispatcher subscription timing during entity setup.
 
 ### IR Actions Framework
 
@@ -1448,7 +1941,7 @@ after timeout → send exit IR code when deactivated.
 
 ---
 
-## Lesson 13: State Restoration and Resilience
+## Lesson 14: State Restoration and Resilience
 
 ### RestoreEntity + ExtraStoredData
 
@@ -1470,14 +1963,20 @@ controller needs across restarts:
 | Category | Fields |
 |----------|--------|
 | Core PI | `pi_integral`, `desired_temp`, `hp_setpoint` |
-| RLS models | Full heat/cool model state (coefficients, covariance, obs count) |
+| Subsystem gates | `_control_active`, `_pi_ff_enabled`, `_pi_batch_wls_enabled`, `_pi_plant_id_enabled` |
+| RLS models | Full heat/cool model state (coefficients, covariance, obs count) — predict-only since pre45 |
 | Observation buffer | Diversity-aware buffer with leverage scores + raw readings |
 | Batch learning | Last batch result, drift correction direction history, grey-box result |
 | Plant ID | Full `PlantEstimate` (K, θ, τ_fast, τ_slow with provenance) |
-| Auto-perturbation | Cycle counters, stall counter, direction, confidence snapshot |
+| Auto-perturbation | Cycle counters, stall counter, direction, confidence snapshot, research-mode flag |
+| **Boundary estimator** | Bayesian posterior `(μ, σ)`, layer evidence history, stall counter |
+| **Regime probe** | Probe state, baseline rate, cooldown timer |
+| **Over-temp regime** | Active flag, hysteresis state |
+| Grey-box observer | Last `GreyboxResult` (rate coefficients, gate flags) |
 | Metrics | ITAE, CVH, convergence, setpoint changes, FF load fraction |
 | Config tracking | `ki_at_save`, `heat_seeds_at_learn`, `cool_seeds_at_learn` |
 | Model inputs | Lag filter states per input |
+| Learning slots | `learning_save` snapshot slots (max 3 named slots) |
 
 On restore, the controller handles configuration changes gracefully:
 - If Ki changed since save, integral is rescaled: `integral *= (ki_at_save / current_ki)`
@@ -1514,7 +2013,50 @@ topic. The integration marks the entity as unavailable when offline.
 
 ---
 
-## Lesson 14: End-to-End Walkthroughs
+## Lesson 15: Service Reference
+
+The integration registers 23 services. They split into three groups by audience.
+
+### Vendor passthrough (any user)
+
+| Service | Purpose |
+|---------|---------|
+| `set_econo`, `set_turbo`, `set_quiet`, `set_clean`, `set_beep`, `set_sleep`, `set_filters`, `set_light`, `set_swingv`, `set_swingh` | Toggle vendor-specific feature flags via IR |
+
+All of these accept `state_mode: StoreOnly | SendStore` (default `SendStore`).
+
+### PI tuning (power user)
+
+| Service | Purpose |
+|---------|---------|
+| `reset_ff_seeds` | Reset RLS coefficients to configured seeds (and clear observation count) |
+| `suppress_ff_learning` / `resume_ff_learning` | Manually gate the buffer admission paths |
+| `flush_observation_buffer` | Empty the diversity buffer (forces batch to relearn from scratch) |
+| `set_coefficient` | Manually set a specific β coefficient |
+| `freeze_coefficient` | Pin a β coefficient at its current value (frozen features survive batch updates) |
+| `perturb_now` | Force an auto-perturbation cycle (waits for steady state, 60-min timeout) |
+| `learning_reset` | Selectively reset subsystems: `seeds`, `buffers`, `integral`, `plant_id`, `greybox`, **`head_offset`** |
+| `learning_save` | Snapshot current learning state to a named slot (max 3 slots) |
+| `learning_restore` | Restore learning state from a named slot |
+| `set_subsystem` | Toggle a subsystem (`control`, `ff`, `batch_wls`, `plant_id`) at runtime, persisted |
+
+### Debugging (deep power user)
+
+| Service | Purpose |
+|---------|---------|
+| `set_debug_capture` | Toggle inclusion of full RLS P matrix in diagnostics dumps |
+| `set_event_log_enabled` | Toggle persistent JSONL tick log (~3 GB/year/4 zones compressed) |
+| `export_debug_bundle` | Package a window of tick log + HA history into a directory |
+
+The "observe-only mode" workflow is `set_subsystem subsystem=control enabled=false` —
+PI computes everything but never writes the HP setpoint. Useful for:
+- Validating a new build before letting it touch the hardware
+- Vacation mode (let the AC's built-in thermostat handle minimal heating)
+- Shadow-running across a software upgrade
+
+---
+
+## Lesson 16: End-to-End Walkthroughs
 
 ### Walkthrough 1: User Sets Temperature to 72°F
 
@@ -1589,25 +2131,55 @@ topic. The integration marks the entity as unavailable when offline.
 
 4. **Integral windup is real.** If you change PI gains, the existing integral
    is automatically rescaled on restart (via `ki_at_save` tracking). For immediate
-   issues, the `reset_ff_seeds` service resets RLS models and integral. The
-   `suppress_ff_learning` / `resume_ff_learning` services control learning gates.
+   issues, the `learning_reset` service with `targets: [integral]` clears just
+   the integral. `learning_reset targets: [seeds, buffers]` is the
+   "start from scratch" button.
 
-5. **Climate entity must exist before sensors/buttons.** The `__init__.py` forwards
+5. **Online RLS is gone (pre45).** Don't add `rls.update()` calls — the design
+   intent is "batch is the sole estimator". If you find yourself wanting online
+   adaptation, the buffer + batch path is where to extend. Old comments in code
+   may still reference "online RLS" to describe what the *partial-model* WLS
+   solve is matching.
+
+6. **Coordinator, not dispatcher.** Don't use `async_dispatcher_send` /
+   `async_dispatcher_connect` for PI state. `SIGNAL_PI_UPDATE` and
+   `SIGNAL_FF_SUPPRESS_UPDATE` were deleted. Sensors and binary sensors are
+   `CoordinatorEntity[TasmotaIRHVACCoordinator]`; new ones should follow that
+   pattern.
+
+7. **Climate entity must exist before sensors/buttons.** The `__init__.py` forwards
    platforms in order: climate first, then sensor, binary_sensor, and button. This
-   is because sensors reference the climate entity via `hass.data`.
+   is because sensors reference the climate entity (and its coordinator) via `hass.data`.
 
-6. **Config flow stores strings.** `SelectSelector` returns `"1.0"` not `1.0`.
+8. **Config flow stores strings.** `SelectSelector` returns `"1.0"` not `1.0`.
    All config parsing happens in `config_model.py` — a typed, frozen dataclass
    that applies defaults and casts in one place.
 
-7. **56-bit vs 128-bit Fujitsu commands.** Regular AC commands are 128-bit. Special
+9. **56-bit vs 128-bit Fujitsu commands.** Regular AC commands are 128-bit. Special
    commands (Boost, Eco, vane) are 56-bit. The vendor handler detects this via the
    `Bits` field in `IRDecode` to distinguish presets from normal state updates.
 
-8. **ExtraStoredData is the persistence mechanism.** PI state (integral, RLS models,
-   observation buffer, tau estimate) persists via `PIExtraStoredData`, not entity
-   attributes. Entity attributes still carry diagnostics for display, but
-   restoration reads from ExtraStoredData first.
+10. **ExtraStoredData is the persistence mechanism.** PI state (integral, RLS models,
+    observation buffer, plant estimate, boundary estimator, regime probe, grey-box
+    result) persists via `PIExtraStoredData`, not entity attributes. Entity
+    attributes still carry diagnostics for display, but restoration reads from
+    ExtraStoredData first.
+
+11. **Subsystem toggles persist.** If you `set_subsystem subsystem=control
+    enabled=false`, the controller stays in observe-only mode across restarts.
+    There is no "reset to factory defaults" toggle — re-enabling is explicit
+    via the same service. If a subsystem is unexpectedly off, check the entry
+    options and the last `set_subsystem` call.
+
+12. **Scipy is now a hard dependency.** `manifest.json` requires it (was optional
+    in early-2026). The 2R2C grey-box fit needs `scipy.optimize.least_squares` and
+    `scipy.linalg.expm`; degrading gracefully would mean disabling a load-bearing
+    subsystem.
+
+13. **Don't trust grey-box β downstream yet.** The 2R2C verdict on real data
+    was negative; the redesign is in flight on the `greybox-redesign` branch.
+    The β-bridge to WLS is default off. If you see grey-box numbers in
+    diagnostics, treat them as informational.
 
 ---
 
@@ -1629,17 +2201,31 @@ topic. The integration marks the entity as unavailable when offline.
 - [Practical PID tuning](https://controlguru.com/) — real-world tuning guidance
 
 ### Building Thermal Identification
-- Bacher & Madsen (2011) — "Identifying suitable models for the heat dynamics of buildings" — grey-box RC models, rate coefficient parameterization
+- Bacher & Madsen (2011) — "Identifying suitable models for the heat dynamics of buildings" — grey-box RC models, rate coefficient parameterization, forward selection
 - Madsen & Holst (1995) — "Estimation of continuous-time models for the heat dynamics of a building" — rate coefficients
+- Ljung (1999) — *System Identification: Theory for the User* — sim-error PEM (used in Stage B grey-box redesign), §16.4 cross-validation for model selection
 - Åström & Hägglund (1984) — Relay feedback autotuning — the foundation for Layer 3 relay test
-- Radecki & Hencey (2015) — Self-excitation for building thermal estimation — auto-perturbation literature basis
+- Radecki & Hencey (2015) — Self-excitation for building thermal estimation — auto-perturbation literature basis; "excitation rotates not increases observability" caveat
+- Reynders (2014) — Parameter rails at bounds = non-identifiability signal (informed Bayesian-prior retraction)
 - Bouchié et al. (2022) — ISABELE binary heating signals — bidirectional perturbation method
+- Annex 58 / Annex 71 (IEA EBC) — gold-standard whole-building thermal-parameter identification protocols
+
+### Regime Detection & Boundary Estimation
+- Thistlethwaite & Campbell (1960) — Regression discontinuity design (boundary estimator Layer 1)
+- Adams & MacKay (2007) — Bayesian online changepoint detection
+- Cragg (1971) — Hurdle models (dead-zone nonlinearity in regime probe)
+- PWARX (Piecewise Affine ARX) — regime-switching models for HP on/off detection
 
 ### Change Detection & Fault Diagnosis
 - Basseville & Nikiforov (1993) — *Detection of Abrupt Changes* — the definitive CUSUM reference
 - Huber (1981) — *Robust Statistics* — MAD estimator, breakdown points
 - Gustafsson (2000) — *Adaptive Filtering and Change Detection* — CUSUM on adaptive filter residuals
 - Katipamula & Brambley (2005) — "Methods for fault detection, diagnostics, and prognostics for building systems," *HVAC&R Research*
+
+### Verification & Validation
+- Roache (1998) — *Verification and Validation in Computational Science and Engineering* — GCI, Richardson extrapolation (used in bench Phase 3a/3b)
+- ASHRAE 140 / BESTEST — building energy simulation reference cases
+- BOPTEST — building optimization performance test framework
 
 ### This Project's History
 - Check `git log --oneline` for the evolution of features
@@ -1651,19 +2237,29 @@ topic. The integration marks the entity as unavailable when offline.
 
 | Day | Focus | Activities |
 |-----|-------|-----------|
-| 1 | Orientation | Read this doc. Skim all files. Run `git log --oneline -30` |
+| 1 | Orientation | Read this doc, especially the Architecture Evolution section. Skim all files. Run `git log --oneline -50` |
 | 2 | Base entity | Read `const.py` + `climate.py`. Trace `send_ir()` end to end |
 | 3 | MQTT | Use MQTT Explorer to watch real traffic. Match to code |
-| 4 | PI theory | Watch Brian Douglas videos. Read Wikipedia PID article |
-| 5 | PI code | Read `pi/pi_controller.py`. Trace `_pi_tick_inner()` with pen and paper |
-| 6 | Feedforward | Understand RLS model, learning gates, seeding. Read `pi/rls_model.py` |
-| 7 | Plant ID | Read `pi/plant_model.py`, `pi/plant_identifier.py`, then the providers |
-| 8 | Grey-box + Batch | Read `pi/greybox_observer.py`, `pi/batch_learning.py`. Understand β bridge + fusion |
-| 9 | Vendor layer | Read `vendors/fujitsu.py`. Understand preset lifecycle + registry |
-| 10 | Config flow | Read `config_flow.py`. Set up a test instance if possible |
-| 11 | Extras | Read `sensor.py`, `button.py`, `pi/auto_perturbation.py`. Understand dispatcher pattern |
-| 12 | Integration | Do the exercises. Modify something small. Run on real HA |
+| 4 | PI theory | Watch Brian Douglas videos. Read Wikipedia PID article. Internalize windup |
+| 5 | PI code | Read `pi/pi_controller.py`. Trace `_pi_tick_inner()` with pen and paper. Identify the five anti-windup defenses |
+| 6 | Feedforward | Read `pi/rls_model.py` (predict-only) and `pi/batch_learning.py`. Understand admission gates feed the buffer, not RLS |
+| 7 | Boundary | Read `pi/boundary_estimator.py` + `pi/regime_probe.py`. Understand the three layers of evidence |
+| 8 | Plant ID | Read `pi/plant_model.py`, `pi/plant_identifier.py`, then the providers |
+| 9 | Grey-box | Read `pi/greybox_observer.py`. Understand 1R1C, 2R2C, Stage A/B, why β-bridge is gated |
+| 10 | Tick contract | Read `pi/snapshot.py`, `pi/coordinator.py`, `pi/event_log.py`, `pi/export_bundle.py` |
+| 11 | Vendor layer | Read `vendors/fujitsu.py`. Understand preset lifecycle + registry |
+| 12 | Config flow | Read `config_flow.py`. Set up a test instance if possible |
+| 13 | Extras | Read `sensor.py`, `binary_sensor.py`, `button.py`, `pi/auto_perturbation.py`. Watch services in action |
+| 14 | Integration | Do the exercises. Enable the event log, generate a bundle. Modify something small. Run on real HA |
 
 ---
 
-*Updated April 2026 from the `architecture-rework` branch (pre41). ~16,000 lines of Python across 34 files, 1812 tests.*
+## Update History
+
+- **April 2026** — original curriculum at `architecture-rework` (pre41). ~16,000
+  lines across 34 files, 1812 tests.
+- **May 2026** — current revision at `greybox-redesign` (pre50). ~22,000 lines
+  across 38 files, 2382 tests. Major additions: tick-first snapshot architecture,
+  online RLS removal, subsystem gating, observe-only mode, persistent JSONL log,
+  debug bundle service, 2R2C grey-box (in redesign), boundary estimator, regime
+  probe, over-temperature regime gate, bumpless transfer.
