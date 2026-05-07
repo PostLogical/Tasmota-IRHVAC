@@ -5400,13 +5400,13 @@ class PIController:
             # is recorded as admitted=False with rejection_reason.
             if wls_result is not None:
                 wls_admitted = wls_result.admitted
-                wls_lev = wls_result.candidate_leverage
+                wls_score = wls_result.candidate_score
                 wls_evicted = wls_result.evicted_timestamp
-                wls_min_inc = wls_result.min_incumbent_leverage
+                wls_min_inc = wls_result.min_incumbent_score
                 wls_rej = wls_result.rejection_reason
             else:
                 wls_admitted = False
-                wls_lev = None
+                wls_score = None
                 wls_evicted = None
                 wls_min_inc = None
                 wls_rej = upstream_rej
@@ -5414,17 +5414,17 @@ class PIController:
                 admitted=wls_admitted,
                 clamped=obs_clamped,
                 clamped_reason=obs_clamped_reason or "",
-                leverage_score=wls_lev,
+                score=wls_score,
                 mode="heat" if is_heating else "cool",
                 raw_readings=dict(obs.raw_readings),
                 feature_vector=tuple(x) if x is not None else (),
                 evicted_timestamp=wls_evicted,
-                min_incumbent_leverage=wls_min_inc,
+                min_incumbent_score=wls_min_inc,
                 rejection_reason=wls_rej,
                 gb_admitted=gb_result.admitted,
-                gb_leverage_score=gb_result.candidate_leverage,
+                gb_score=gb_result.candidate_score,
                 gb_evicted_timestamp=gb_result.evicted_timestamp,
-                gb_min_incumbent_leverage=gb_result.min_incumbent_leverage,
+                gb_min_incumbent_score=gb_result.min_incumbent_score,
                 gb_rejection_reason=gb_result.rejection_reason,
             )
 

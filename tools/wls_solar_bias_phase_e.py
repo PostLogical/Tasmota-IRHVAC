@@ -47,23 +47,25 @@ def main() -> int:
 
         def add(self, obs: Observation) -> BufferAddResult:  # type: ignore[override]
             x = self._get_feature_vector(obs)
-            new_leverage = self._compute_leverage(x)
+            new_score = self._compute_leverage(x)
             if len(self._buffer) < self._max_size:
                 self._buffer.append(obs)
                 self._sherman_morrison_update(x)
                 return BufferAddResult(
                     admitted=True,
-                    candidate_leverage=new_leverage,
+                    candidate_score=new_score,
                     evicted_timestamp=None,
-                    min_incumbent_leverage=None,
+                    min_incumbent_score=None,
                     rejection_reason=None,
+                    policy_name="no_eviction",
                 )
             return BufferAddResult(
                 admitted=False,
-                candidate_leverage=new_leverage,
+                candidate_score=new_score,
                 evicted_timestamp=None,
-                min_incumbent_leverage=None,
+                min_incumbent_score=None,
                 rejection_reason="no_eviction_buffer_full",
+                policy_name="no_eviction",
             )
 
     captured: dict[str, Any] = {}

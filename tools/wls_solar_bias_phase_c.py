@@ -7,10 +7,10 @@ is actually doing.
 
 Captures per tick (via the bench history augmentation):
 - obs_admitted: was this tick's obs added to the WLS buffer?
-- obs_leverage: leverage score the candidate received
+- obs_score: policy score the candidate received (leverage under LeveragePolicy)
 - obs_evicted_ts: monotonic timestamp of any obs displaced by this admission
-- obs_min_incumbent_lev: min leverage of incumbents at decision time
-- obs_rejection_reason: "low_leverage" or None
+- obs_min_incumbent_score: min score of incumbents at decision time
+- obs_rejection_reason: e.g. "leverage_rejected" or None
 
 End-of-run: dumps the live buffer (solar value, ToD, outdoor_delta per obs).
 
@@ -89,7 +89,7 @@ def main() -> int:
     rejected = [h for h in attempts if not h["obs_admitted"]]
     evicted = [h for h in attempts if h.get("obs_evicted_ts") is not None]
     print(f"  admitted               : {len(admitted)} ({100 * len(admitted) / len(attempts):.1f}%)")
-    print(f"  rejected (low_leverage): {len(rejected)} ({100 * len(rejected) / len(attempts):.1f}%)")
+    print(f"  rejected (by policy)   : {len(rejected)} ({100 * len(rejected) / len(attempts):.1f}%)")
     print(f"  caused eviction        : {len(evicted)} ({100 * len(evicted) / len(attempts):.1f}%)")
 
     # ── ToD-binned analysis: admission/rejection by hour ──

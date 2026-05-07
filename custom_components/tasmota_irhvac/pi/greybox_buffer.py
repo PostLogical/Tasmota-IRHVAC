@@ -90,10 +90,11 @@ class GreyboxBuffer(DiversityAwareBuffer):
         if obs.outdoor_temp_c is None:
             return BufferAddResult(
                 admitted=False,
-                candidate_leverage=None,
+                candidate_score=None,
                 evicted_timestamp=None,
-                min_incumbent_leverage=None,
+                min_incumbent_score=None,
                 rejection_reason="no_outdoor_temp",
+                policy_name=self._policy.name,
             )
         return super().add(obs)
 

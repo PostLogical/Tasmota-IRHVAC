@@ -32,6 +32,7 @@ except ImportError:
     _minimize_scalar = None
     _SCIPY_AVAILABLE = False
 
+from .buffer_policies import BufferPolicy, LeveragePolicy
 from .model_input_manager import tod_features
 
 _LOGGER = logging.getLogger(__name__)
@@ -135,26 +136,31 @@ class BufferAddResult:
 
     Fields:
       admitted: True iff the observation is now in the buffer.
-      candidate_leverage: leverage score the candidate received during
-          the decision. None when the candidate was rejected before
-          leverage scoring (e.g. greybox `no_outdoor_temp`).
+      candidate_score: policy score the candidate received during the
+          decision (e.g. leverage under LeveragePolicy). None when the
+          candidate was rejected before scoring (e.g. greybox
+          `no_outdoor_temp`).
       evicted_timestamp: monotonic timestamp of the displaced incumbent
           when admission into a full buffer caused an eviction. None
           otherwise.
-      min_incumbent_leverage: leverage of the worst-scoring incumbent
+      min_incumbent_score: policy score of the worst-scoring incumbent
           at decision time, present only when the buffer was at capacity
           (so the candidate was actually compared). None when the buffer
-          had room or admission was rejected before leverage scoring.
+          had room or admission was rejected before scoring.
       rejection_reason: short string identifying why admission was
-          declined ("low_leverage", "no_outdoor_temp", ...). None when
-          `admitted` is True.
+          declined.  Policy-driven rejections use ``f"{policy_name}_rejected"``
+          (e.g. "leverage_rejected"); upstream filters use other literals
+          like "no_outdoor_temp".  None when `admitted` is True.
+      policy_name: name of the policy that made the decision (e.g.
+          "leverage"), for observability across mixed-policy runs.
     """
 
     admitted: bool
-    candidate_leverage: float | None
+    candidate_score: float | None
     evicted_timestamp: float | None
-    min_incumbent_leverage: float | None
+    min_incumbent_score: float | None
     rejection_reason: str | None
+    policy_name: str
 
 
 def build_feature_vector_from_raw(
@@ -559,25 +565,26 @@ def _detect_optimal_tau(
 
 
 class DiversityAwareBuffer:
-    """Leverage-scored observation buffer for long-term diverse data retention.
+    """Policy-driven observation buffer for long-term diverse data retention.
 
-    Instead of FIFO eviction, retains observations that maximize the
-    information content of the buffer (D-optimal design).  Each observation's
-    leverage score measures how much unique information it contributes:
+    Instead of FIFO eviction, retains observations selected by a
+    pluggable ``BufferPolicy``.  The default ``LeveragePolicy`` admits
+    observations that maximize ``det(X^T X)`` (D-optimal sequential design)
+    via the per-observation leverage ``x^T (X^T X + λI)^{-1} x``.  When
+    the buffer is full, a candidate displaces the lowest-scoring incumbent
+    iff the policy says so — naturally retaining rare operating conditions
+    (cold snaps, pellet stove events, door transitions) while shedding
+    redundant steady-state observations.
 
-        leverage(x) = x^T (X^T X + λI)^{-1} x
+    Feature vectors are built on the fly from raw readings + current
+    model config.  Scoring adapts when config changes — an observation
+    that was low-score under the old config may become high-score under
+    the new one (e.g., after adding a solar input, observations from
+    sunny days become more valuable).
 
-    When the buffer is full, a new observation replaces the stored observation
-    with the lowest leverage score, but only if the new observation has higher
-    leverage.  This naturally retains rare operating conditions (cold snaps,
-    pellet stove events, door transitions) while shedding redundant
-    steady-state observations.
-
-    Leverage scoring uses raw readings + current model config to build
-    feature vectors on the fly.  This means scoring adapts when config
-    changes — an observation that was low-leverage under the old config
-    may become high-leverage under the new one (e.g., after adding a
-    solar input, observations from sunny days become more valuable).
+    The buffer owns storage, info-matrix maintenance, and Sherman-Morrison
+    up/downdates; the policy only sees vectors and matrices for the
+    admit/evict decision.  See ``buffer_policies`` for available policies.
 
     References:
     - Chowdhary & Johnson, ACC 2011 — concurrent learning history stack
@@ -590,12 +597,14 @@ class DiversityAwareBuffer:
         max_size: int = DEFAULT_DIVERSITY_BUFFER_SIZE,
         feature_order: list[str] | None = None,
         model_inputs: list[dict[str, Any]] | None = None,
+        policy: BufferPolicy | None = None,
     ) -> None:
         self._buffer: list[Observation] = []
         self._max_size = max_size
         self._n_features = n_features
         self._feature_order: list[str] | None = feature_order
         self._model_inputs: list[dict[str, Any]] = model_inputs or []
+        self._policy: BufferPolicy = policy if policy is not None else LeveragePolicy()
         # (X^T X + λI)^{-1} — the inverse information matrix, n×n.
         # Initialized to (1/λ) * I (no data yet).
         n = n_features
@@ -698,13 +707,16 @@ class DiversityAwareBuffer:
         return removed
 
     def add(self, obs: Observation) -> BufferAddResult:
-        """Add an observation, using leverage-scored eviction when full.
+        """Add an observation, using the configured policy when full.
 
         Returns a `BufferAddResult` describing the decision so callers
         can populate observability snapshots without re-deriving state.
         """
         x = self._get_feature_vector(obs)
-        new_leverage = self._compute_leverage(x)
+        cand_score = self._policy.score_candidate(
+            x, self._info_inv, self._xtx_matrix, len(self._buffer),
+        )
+        policy_name = self._policy.name
 
         if len(self._buffer) < self._max_size:
             # Buffer not full — always accept.
@@ -712,36 +724,42 @@ class DiversityAwareBuffer:
             self._sherman_morrison_update(x)
             return BufferAddResult(
                 admitted=True,
-                candidate_leverage=new_leverage,
+                candidate_score=cand_score,
                 evicted_timestamp=None,
-                min_incumbent_leverage=None,
+                min_incumbent_score=None,
                 rejection_reason=None,
+                policy_name=policy_name,
             )
 
-        min_idx, min_lev = self._find_min_leverage_idx()
-        if new_leverage > min_lev:
+        feature_vectors = [self._get_feature_vector(o) for o in self._buffer]
+        evictee = self._policy.find_evictee(
+            self._buffer, feature_vectors, self._info_inv, self._xtx_matrix,
+        )
+        if self._policy.should_admit(cand_score, evictee.score):
             # Downdate the evicted observation, then update with new.
-            evicted_ts = self._buffer[min_idx].timestamp
-            old_x = self._get_feature_vector(self._buffer[min_idx])
+            evicted_ts = self._buffer[evictee.index].timestamp
+            old_x = feature_vectors[evictee.index]
             self._sherman_morrison_downdate(old_x)
-            self._buffer[min_idx] = obs
+            self._buffer[evictee.index] = obs
             self._sherman_morrison_update(x)
             return BufferAddResult(
                 admitted=True,
-                candidate_leverage=new_leverage,
+                candidate_score=cand_score,
                 evicted_timestamp=evicted_ts,
-                min_incumbent_leverage=min_lev,
+                min_incumbent_score=evictee.score,
                 rejection_reason=None,
+                policy_name=policy_name,
             )
 
         # New observation is less informative than everything in the
-        # buffer — discard it.
+        # buffer under this policy — discard it.
         return BufferAddResult(
             admitted=False,
-            candidate_leverage=new_leverage,
+            candidate_score=cand_score,
             evicted_timestamp=None,
-            min_incumbent_leverage=min_lev,
-            rejection_reason="low_leverage",
+            min_incumbent_score=evictee.score,
+            rejection_reason=f"{policy_name}_rejected",
+            policy_name=policy_name,
         )
 
     def _find_min_leverage_idx(self) -> tuple[int, float]:

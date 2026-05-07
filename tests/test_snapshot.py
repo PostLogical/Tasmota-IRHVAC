@@ -311,7 +311,7 @@ def test_lag_filter_snapshot_roundtrip():
 def test_observation_context_roundtrip():
     o = ObservationContext(
         admitted=True, clamped=False, clamped_reason="",
-        leverage_score=0.012, mode="heat",
+        score=0.012, mode="heat",
         raw_readings={"sensor.outdoor": 5.0, "sensor.solar": 200.0},
         feature_vector=(1.0, 12.5, 0.5, -0.85),
     )
@@ -324,17 +324,17 @@ def test_observation_context_roundtrip_with_buffer_decisions():
         admitted=True,
         clamped=False,
         clamped_reason="",
-        leverage_score=0.42,
+        score=0.42,
         mode="heat",
         raw_readings={"sensor.outdoor": 5.0},
         feature_vector=(1.0, 12.5),
         evicted_timestamp=12345.6,
-        min_incumbent_leverage=0.18,
+        min_incumbent_score=0.18,
         rejection_reason=None,
         gb_admitted=True,
-        gb_leverage_score=0.05,
+        gb_score=0.05,
         gb_evicted_timestamp=None,
-        gb_min_incumbent_leverage=None,
+        gb_min_incumbent_score=None,
         gb_rejection_reason=None,
     )
     assert ObservationContext.from_dict(o.to_dict()) == o
@@ -346,17 +346,17 @@ def test_observation_context_roundtrip_with_rejections():
         admitted=False,
         clamped=False,
         clamped_reason="",
-        leverage_score=0.10,
+        score=0.10,
         mode="cool",
         raw_readings={},
         feature_vector=(),
         evicted_timestamp=None,
-        min_incumbent_leverage=0.10,
-        rejection_reason="low_leverage",
+        min_incumbent_score=0.10,
+        rejection_reason="leverage_rejected",
         gb_admitted=False,
-        gb_leverage_score=None,
+        gb_score=None,
         gb_evicted_timestamp=None,
-        gb_min_incumbent_leverage=None,
+        gb_min_incumbent_score=None,
         gb_rejection_reason="no_outdoor_temp",
     )
     assert ObservationContext.from_dict(o.to_dict()) == o
@@ -378,22 +378,22 @@ def test_unlock_evaluation_record_roundtrip():
     assert UnlockEvaluationRecord.from_dict(rec.to_dict()) == rec
 
 
-def test_observation_context_legacy_dict_back_compat():
-    """`from_dict` accepts dicts written before the new fields existed.
+def test_observation_context_minimal_dict_optional_fields_none():
+    """`from_dict` accepts dicts with only required keys.
 
-    This covers persistent-log records written by pre48 and older
-    schema-version-1 ticks; missing keys default to None.
+    Optional fields (gb_*, evicted_timestamp, min_incumbent_score,
+    rejection_reason) default to None when absent.
     """
-    legacy = {
+    minimal = {
         "admitted": True,
         "clamped": False,
         "clamped_reason": "",
-        "leverage_score": None,
+        "score": None,
         "mode": "heat",
         "raw_readings": {"sensor.outdoor": 5.0},
         "feature_vector": [1.0, 12.5],
     }
-    o = ObservationContext.from_dict(legacy)
+    o = ObservationContext.from_dict(minimal)
     assert o.admitted is True
     assert o.evicted_timestamp is None
     assert o.gb_admitted is None
@@ -539,7 +539,7 @@ def test_tick_output_roundtrip_with_observation():
         _minimal_tick(),
         observation=ObservationContext(
             admitted=True, clamped=False, clamped_reason="",
-            leverage_score=0.012, mode="heat",
+            score=0.012, mode="heat",
             raw_readings={"sensor.outdoor": 5.0},
             feature_vector=(1.0, 12.5),
         ),

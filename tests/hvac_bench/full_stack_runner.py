@@ -904,9 +904,9 @@ def run_full_stack(
             "d_term": getattr(pi, "_pi_d_filtered", 0.0),
             "rls_obs_count": pi._rls_heat.observation_count,
             "obs_admitted": oc.admitted if oc is not None else None,
-            "obs_leverage": oc.leverage_score if oc is not None else None,
+            "obs_score": oc.score if oc is not None else None,
             "obs_evicted_ts": oc.evicted_timestamp if oc is not None else None,
-            "obs_min_incumbent_lev": oc.min_incumbent_leverage if oc is not None else None,
+            "obs_min_incumbent_score": oc.min_incumbent_score if oc is not None else None,
             "obs_rejection_reason": oc.rejection_reason if oc is not None else None,
             **{f"input_{mi.name}": input_values[mi.name]
                for mi in config.model_inputs},

@@ -882,9 +882,10 @@ class ObservationContext:
 
     `admitted` reflects actual buffer admission for the WLS heat/cool
     buffer (corrected from earlier semantics where it meant "we tried
-    to call add()"). `evicted_timestamp` and `min_incumbent_leverage`
+    to call add()"). `evicted_timestamp` and `min_incumbent_score`
     are populated when the WLS buffer was at capacity at decision time.
-    `rejection_reason` is set on rejection ("low_leverage" today).
+    `rejection_reason` is set on rejection (e.g. "leverage_rejected"
+    when the active policy declined; "no_outdoor_temp" upstream).
 
     `gb_*` fields mirror the same observability for the grey-box
     buffer, which has independent admission rules (admits HP-off
@@ -894,17 +895,17 @@ class ObservationContext:
     admitted: bool
     clamped: bool
     clamped_reason: str
-    leverage_score: float | None
+    score: float | None
     mode: str  # "heat" or "cool"
     raw_readings: dict[str, float]  # entity_id → value at this tick
     feature_vector: tuple[float, ...]  # x vector that fed RLS
     evicted_timestamp: float | None = None
-    min_incumbent_leverage: float | None = None
+    min_incumbent_score: float | None = None
     rejection_reason: str | None = None
     gb_admitted: bool | None = None
-    gb_leverage_score: float | None = None
+    gb_score: float | None = None
     gb_evicted_timestamp: float | None = None
-    gb_min_incumbent_leverage: float | None = None
+    gb_min_incumbent_score: float | None = None
     gb_rejection_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -912,17 +913,17 @@ class ObservationContext:
             "admitted": self.admitted,
             "clamped": self.clamped,
             "clamped_reason": self.clamped_reason,
-            "leverage_score": self.leverage_score,
+            "score": self.score,
             "mode": self.mode,
             "raw_readings": dict(self.raw_readings),
             "feature_vector": list(self.feature_vector),
             "evicted_timestamp": self.evicted_timestamp,
-            "min_incumbent_leverage": self.min_incumbent_leverage,
+            "min_incumbent_score": self.min_incumbent_score,
             "rejection_reason": self.rejection_reason,
             "gb_admitted": self.gb_admitted,
-            "gb_leverage_score": self.gb_leverage_score,
+            "gb_score": self.gb_score,
             "gb_evicted_timestamp": self.gb_evicted_timestamp,
-            "gb_min_incumbent_leverage": self.gb_min_incumbent_leverage,
+            "gb_min_incumbent_score": self.gb_min_incumbent_score,
             "gb_rejection_reason": self.gb_rejection_reason,
         }
 
@@ -932,17 +933,17 @@ class ObservationContext:
             admitted=data["admitted"],
             clamped=data["clamped"],
             clamped_reason=data["clamped_reason"],
-            leverage_score=data["leverage_score"],
+            score=data["score"],
             mode=data["mode"],
             raw_readings=dict(data["raw_readings"]),
             feature_vector=tuple(data["feature_vector"]),
             evicted_timestamp=data.get("evicted_timestamp"),
-            min_incumbent_leverage=data.get("min_incumbent_leverage"),
+            min_incumbent_score=data.get("min_incumbent_score"),
             rejection_reason=data.get("rejection_reason"),
             gb_admitted=data.get("gb_admitted"),
-            gb_leverage_score=data.get("gb_leverage_score"),
+            gb_score=data.get("gb_score"),
             gb_evicted_timestamp=data.get("gb_evicted_timestamp"),
-            gb_min_incumbent_leverage=data.get("gb_min_incumbent_leverage"),
+            gb_min_incumbent_score=data.get("gb_min_incumbent_score"),
             gb_rejection_reason=data.get("gb_rejection_reason"),
         )
 

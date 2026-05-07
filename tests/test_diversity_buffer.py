@@ -872,10 +872,11 @@ class TestAddReturnsDecision:
         # depending on test execution order.
         assert hasattr(r, "admitted")
         assert r.admitted is True
-        assert r.candidate_leverage is not None and r.candidate_leverage > 0
+        assert r.candidate_score is not None and r.candidate_score > 0
         assert r.evicted_timestamp is None
-        assert r.min_incumbent_leverage is None
+        assert r.min_incumbent_score is None
         assert r.rejection_reason is None
+        assert r.policy_name == "leverage"
 
     def test_add_into_partially_full_buffer_returns_admitted_no_eviction(self):
         buf = self._buf(max_size=5)
@@ -884,8 +885,9 @@ class TestAddReturnsDecision:
         r = buf.add(_make_obs(t=10.0, outdoor_delta=20.0, n_features=3))
         assert r.admitted is True
         assert r.evicted_timestamp is None
-        assert r.min_incumbent_leverage is None
+        assert r.min_incumbent_score is None
         assert r.rejection_reason is None
+        assert r.policy_name == "leverage"
 
     def test_add_into_full_buffer_with_higher_leverage_admits_and_reports_evicted(self):
         buf = self._buf(max_size=5)
@@ -902,10 +904,11 @@ class TestAddReturnsDecision:
         r = buf.add(_make_obs(t=100.0, outdoor_delta=30.0, n_features=3))
         assert r.admitted is True
         assert r.evicted_timestamp == evicted_ts
-        assert r.min_incumbent_leverage is not None
-        assert r.candidate_leverage is not None
-        assert r.candidate_leverage > r.min_incumbent_leverage
+        assert r.min_incumbent_score is not None
+        assert r.candidate_score is not None
+        assert r.candidate_score > r.min_incumbent_score
         assert r.rejection_reason is None
+        assert r.policy_name == "leverage"
 
     def test_add_into_full_buffer_with_lower_leverage_rejects_with_reason(self):
         buf = self._buf(max_size=5)
@@ -918,10 +921,11 @@ class TestAddReturnsDecision:
         r = buf.add(_make_obs(t=100.0, outdoor_delta=5.0, n_features=3))
         assert r.admitted is False
         assert r.evicted_timestamp is None
-        assert r.min_incumbent_leverage is not None
-        assert r.candidate_leverage is not None
-        assert r.candidate_leverage <= r.min_incumbent_leverage + 1e-9
-        assert r.rejection_reason == "low_leverage"
+        assert r.min_incumbent_score is not None
+        assert r.candidate_score is not None
+        assert r.candidate_score <= r.min_incumbent_score + 1e-9
+        assert r.rejection_reason == "leverage_rejected"
+        assert r.policy_name == "leverage"
         # Buffer size unchanged; original timestamps still present.
         assert len(buf._buffer) == 5
         timestamps = [o.timestamp for o in buf._buffer]

@@ -4203,18 +4203,18 @@ class TestHPNoOutput:
         ctx = pi._last_observation_context
         assert ctx is not None
         # WLS side: admitted into a buffer that's far from full → admitted=True,
-        # leverage_score now populated (was always None before this fix),
-        # no eviction, no min-incumbent comparison.
+        # score populated (under default LeveragePolicy), no eviction, no
+        # min-incumbent comparison.
         assert ctx.admitted is True
-        assert ctx.leverage_score is not None and ctx.leverage_score > 0
+        assert ctx.score is not None and ctx.score > 0
         assert ctx.evicted_timestamp is None
-        assert ctx.min_incumbent_leverage is None
+        assert ctx.min_incumbent_score is None
         assert ctx.rejection_reason is None
         # Greybox side: same observation accepted independently.
         assert ctx.gb_admitted is True
-        assert ctx.gb_leverage_score is not None and ctx.gb_leverage_score > 0
+        assert ctx.gb_score is not None and ctx.gb_score > 0
         assert ctx.gb_evicted_timestamp is None
-        assert ctx.gb_min_incumbent_leverage is None
+        assert ctx.gb_min_incumbent_score is None
         assert ctx.gb_rejection_reason is None
 
     @pytest.mark.asyncio
@@ -4236,16 +4236,16 @@ class TestHPNoOutput:
 
         ctx = pi._last_observation_context
         assert ctx is not None
-        # WLS skipped before reaching the buffer — clamped, no leverage.
+        # WLS skipped before reaching the buffer — clamped, no score.
         assert ctx.admitted is False
-        assert ctx.leverage_score is None
+        assert ctx.score is None
         assert ctx.evicted_timestamp is None
-        assert ctx.min_incumbent_leverage is None
+        assert ctx.min_incumbent_score is None
         # Reason matches the upstream gate: HP definitely off → clamped no_output.
         assert ctx.rejection_reason == "no_output"
         # Greybox still receives the obs (HP-off is informative for greybox).
         assert ctx.gb_admitted is True
-        assert ctx.gb_leverage_score is not None
+        assert ctx.gb_score is not None
 
     @pytest.mark.asyncio
     async def test_rejection_reason_overtemp_regime(self):
