@@ -620,8 +620,14 @@ class DiversityAwareBuffer:
             [reg_inv if i == j else 0.0 for j in range(n)]
             for i in range(n)
         ]
-        # Forward matrix X^T X + λI for condition number estimation.
-        self._xtx_matrix: list[list[float]] | None = None
+        # Forward matrix X^T X + λI, maintained incrementally alongside
+        # _info_inv via the Sherman-Morrison up/downdate paths.  Some
+        # policies (e.g. MinEigPolicy) need a fresh forward matrix each
+        # tick to compute eigenvalues without paying for a full recompute.
+        self._xtx_matrix: list[list[float]] = [
+            [INFO_MATRIX_REGULARIZATION if i == j else 0.0 for j in range(n)]
+            for i in range(n)
+        ]
         # Counter for incremental updates since last full recomputation.
         self._updates_since_recompute: int = 0
 
@@ -636,6 +642,10 @@ class DiversityAwareBuffer:
         reg_inv = 1.0 / INFO_MATRIX_REGULARIZATION
         self._info_inv = [
             [reg_inv if i == j else 0.0 for j in range(n)]
+            for i in range(n)
+        ]
+        self._xtx_matrix = [
+            [INFO_MATRIX_REGULARIZATION if i == j else 0.0 for j in range(n)]
             for i in range(n)
         ]
         self._updates_since_recompute = 0
@@ -922,6 +932,10 @@ class DiversityAwareBuffer:
         Returns an (n-1)×(n-1) correlation matrix for features 1..n-1,
         or None if the matrix cannot be computed.
         """
+        if len(self._buffer) == 0:
+            # No data → feature correlations are undefined, even though
+            # _xtx_matrix carries the λI regularization seed.
+            return None
         self._ensure_xtx_matrix()
         if self._xtx_matrix is None:
             return None
@@ -1110,6 +1124,9 @@ class DiversityAwareBuffer:
         """Rank-1 downdate of the inverse: (A + xx^T)^{-1} via Sherman-Morrison.
 
         (A + xx^T)^{-1} = A^{-1} - (A^{-1} x x^T A^{-1}) / (1 + x^T A^{-1} x)
+
+        Also maintains the forward matrix _xtx_matrix via the matching
+        rank-1 outer-product addition, keeping the two views consistent.
         """
         n = self._n_features
         # A^{-1} x
@@ -1122,12 +1139,19 @@ class DiversityAwareBuffer:
         for i in range(n):
             for j in range(n):
                 self._info_inv[i][j] -= inv_x[i] * inv_x[j] / denom
+        # Forward: _xtx_matrix += xx^T
+        for i in range(n):
+            for j in range(n):
+                self._xtx_matrix[i][j] += x[i] * x[j]
         self._updates_since_recompute += 1
 
     def _sherman_morrison_downdate(self, x: list[float]) -> None:
         """Rank-1 update for removing an observation: (A - xx^T)^{-1}.
 
         (A - xx^T)^{-1} = A^{-1} + (A^{-1} x x^T A^{-1}) / (1 - x^T A^{-1} x)
+
+        Also maintains the forward matrix _xtx_matrix via the matching
+        rank-1 outer-product subtraction.
         """
         n = self._n_features
         inv_x = [sum(self._info_inv[i][j] * x[j] for j in range(n)) for i in range(n)]
@@ -1139,6 +1163,10 @@ class DiversityAwareBuffer:
         for i in range(n):
             for j in range(n):
                 self._info_inv[i][j] += inv_x[i] * inv_x[j] / denom
+        # Forward: _xtx_matrix -= xx^T
+        for i in range(n):
+            for j in range(n):
+                self._xtx_matrix[i][j] -= x[i] * x[j]
         self._updates_since_recompute += 1
 
     @property
