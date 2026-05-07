@@ -297,6 +297,126 @@ class DOptimalPolicy(LeveragePolicy):
         )
 
 
+class AOptimalPolicy:
+    """A-optimal sequential admission — minimize ``trace((X^T X)⁻¹)``.
+
+    The trace of ``(X^T X)⁻¹`` equals the sum of variances of OLS
+    coefficient estimates, so A-optimality directly minimizes the
+    *average* parameter-estimation variance.  In contrast,
+    LeveragePolicy/DOptimalPolicy maximize ``det`` (geometric mean of
+    eigenvalues) and MinEigPolicy maximizes ``λ_min`` (worst-case
+    direction).  A-optimal trades worst-case protection for average-
+    case efficiency.
+
+    By Sherman-Morrison, the trace gain from admitting ``x`` is
+
+        trace(A⁻¹) − trace((A + xx^T)⁻¹)
+            = trace(A⁻¹ x x^T A⁻¹) / (1 + x^T A⁻¹ x)
+            = ‖A⁻¹ x‖² / (1 + ℓ(x))
+
+    The trace cost from removing incumbent ``xᵢ`` is
+
+        trace((A − xᵢxᵢ^T)⁻¹) − trace(A⁻¹) = ‖A⁻¹ xᵢ‖² / (1 − ℓᵢ)
+
+    Both depend only on individual incumbents, so A-optimal uses the
+    simple BufferPolicy interface (``score_candidate`` /
+    ``find_evictee`` / ``should_admit``) — no joint exchange.  Admit
+    iff candidate gain > evictee removal cost.
+
+    References:
+    - Atkinson, A. C. & Donev, A. N. (1992) — A-optimal design
+    - Pukelsheim, F. (1993), "Optimal Design of Experiments" — A vs. D
+      vs. E criteria comparison
+    """
+
+    name = "a_optimal"
+
+    def _trace_change(
+        self,
+        x: list[float],
+        info_inv: list[list[float]],
+        denom_sign: float,
+    ) -> float:
+        """``‖A⁻¹ x‖² / (1 + denom_sign · ℓ(x))``.
+
+        denom_sign = +1 for admission (gain), −1 for removal (cost).
+        Both use the same numerator and the same leverage ``ℓ(x)`` on
+        the current matrix; the sign flip captures whether we're adding
+        or subtracting the rank-1 update.
+
+        Returns ``inf`` when the denominator is ≤ 0: for removal this
+        flags the singular regime (``ℓ(x) ≥ 1``) where ``A − xx^T`` is
+        not positive semidefinite — removing such a point would
+        destroy the matrix's invertibility, so the cost is infinite.
+        Production buffers maintain ``ℓ < 1`` for buffered points via
+        regularization (Cook 1977), but defensive guarding keeps the
+        formula well-defined under degenerate hand-constructed inputs.
+        """
+        n = len(x)
+        Ainv_x = [
+            sum(info_inv[i][j] * x[j] for j in range(n))
+            for i in range(n)
+        ]
+        leverage = sum(x[i] * Ainv_x[i] for i in range(n))
+        denom = 1.0 + denom_sign * leverage
+        if denom <= 1e-15:
+            return float("inf")
+        numerator = sum(v * v for v in Ainv_x)
+        return numerator / denom
+
+    def score_candidate(
+        self,
+        x: list[float],
+        info_inv: list[list[float]],
+        xtx: list[list[float]] | None,
+        n_buffered: int,
+    ) -> float:
+        return self._trace_change(x, info_inv, denom_sign=+1.0)
+
+    def find_evictee(
+        self,
+        observations: list[Observation],
+        feature_vectors: list[list[float]],
+        info_inv: list[list[float]],
+        xtx: list[list[float]] | None,
+    ) -> EvicteeChoice:
+        m = len(feature_vectors)
+        if m == 0:
+            return EvicteeChoice(index=-1, score=float("inf"))
+
+        if _NUMPY_AVAILABLE and m > 50:
+            X = np.asarray(feature_vectors, dtype=np.float64)
+            Ainv = np.asarray(info_inv, dtype=np.float64)
+            Ainv_X = X @ Ainv  # (m, n)
+            leverages = np.einsum("ij,ij->i", X, Ainv_X)  # (m,)
+            row_norms_sq = np.einsum("ij,ij->i", Ainv_X, Ainv_X)  # ‖Ainv xᵢ‖²
+            denoms = 1.0 - leverages
+            with np.errstate(divide="ignore", invalid="ignore"):
+                costs = np.where(
+                    denoms > 1e-15,
+                    row_norms_sq / denoms,
+                    np.inf,
+                )
+            idx = int(np.argmin(costs))
+            return EvicteeChoice(index=idx, score=float(costs[idx]))
+
+        min_idx = 0
+        min_cost = self._trace_change(feature_vectors[0], info_inv, -1.0)
+        for i in range(1, m):
+            cost = self._trace_change(feature_vectors[i], info_inv, -1.0)
+            if cost < min_cost:
+                min_cost = cost
+                min_idx = i
+        return EvicteeChoice(index=min_idx, score=min_cost)
+
+    def should_admit(
+        self,
+        candidate_score: float,
+        evictee_score: float,
+    ) -> bool:
+        return candidate_score > evictee_score
+
+
 class MinEigPolicy:
     """Concurrent-learning admission via minimum-eigenvalue increase.
 

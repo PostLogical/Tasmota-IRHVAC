@@ -9,6 +9,7 @@ from custom_components.tasmota_irhvac.pi.batch_learning import (
     Observation,
 )
 from custom_components.tasmota_irhvac.pi.buffer_policies import (
+    AOptimalPolicy,
     DOptimalPolicy,
     EvicteeChoice,
     ExchangeChoice,
@@ -455,3 +456,131 @@ class TestDOptimalBufferIntegration:
         assert r.candidate_score is not None
         assert r.evicted_timestamp is None
         assert r.min_incumbent_score is None  # buffer wasn't full
+
+
+# ── AOptimalPolicy: trace-reduction contract ─────────────────────────
+
+
+class TestAOptimalPolicyScoring:
+    """Score formula: ``‖A⁻¹ x‖² / (1 + ℓ(x))`` — trace reduction from
+    admitting the candidate (Sherman-Morrison applied to ``trace((A +
+    xx^T)⁻¹)``).
+    """
+
+    def test_score_is_positive_for_nonzero_candidate(self):
+        """Any non-zero candidate reduces ``trace(A⁻¹)`` strictly."""
+        policy = AOptimalPolicy()
+        info_inv = [[2.0, 0.0], [0.0, 3.0]]  # diag → ‖A⁻¹ x‖² for [1, 1] = 4 + 9
+        x = [1.0, 1.0]
+        # Expected: ‖[2, 3]‖² / (1 + (1·2·1 + 1·3·1)) = 13 / 6 ≈ 2.1667
+        score = policy.score_candidate(x, info_inv, xtx=None, n_buffered=0)
+        assert score == pytest.approx(13.0 / 6.0, rel=1e-9)
+
+    def test_score_zero_for_zero_candidate(self):
+        policy = AOptimalPolicy()
+        info_inv = [[1.0, 0.0], [0.0, 1.0]]
+        score = policy.score_candidate([0.0, 0.0], info_inv, xtx=None, n_buffered=0)
+        assert score == 0.0
+
+    def test_score_higher_for_high_inverse_norm_direction(self):
+        """A candidate aligned with a large-variance (small-eigenvalue)
+        direction yields a larger trace reduction than one aligned with
+        an already-tight direction.
+        """
+        policy = AOptimalPolicy()
+        # info_inv = diag(0.1, 10) — so direction 0 has variance 0.1,
+        # direction 1 has variance 10 (poorly estimated).
+        info_inv = [[0.1, 0.0], [0.0, 10.0]]
+        score_tight = policy.score_candidate(
+            [1.0, 0.0], info_inv, xtx=None, n_buffered=0,
+        )
+        score_loose = policy.score_candidate(
+            [0.0, 1.0], info_inv, xtx=None, n_buffered=0,
+        )
+        # tight: 0.01 / 1.1 ≈ 0.0091
+        # loose: 100  / 11  ≈ 9.09 — reducing variance in the loose
+        # direction matters far more.
+        assert score_loose > 100 * score_tight
+
+    def test_should_admit_strict_inequality(self):
+        policy = AOptimalPolicy()
+        assert policy.should_admit(0.5, 0.4) is True
+        assert policy.should_admit(0.5, 0.5) is False
+        assert policy.should_admit(0.4, 0.5) is False
+
+
+class TestAOptimalPolicyFindEvictee:
+    """``argmin_i ‖A⁻¹ xᵢ‖² / (1 − ℓᵢ)`` — cheapest incumbent to remove."""
+
+    def test_empty_buffer_returns_sentinel(self):
+        policy = AOptimalPolicy()
+        choice = policy.find_evictee(
+            observations=[], feature_vectors=[],
+            info_inv=[[1.0, 0.0], [0.0, 1.0]], xtx=None,
+        )
+        assert choice.index == -1
+        assert choice.score == float("inf")
+
+    def test_picks_low_inverse_norm_incumbent_pure_python(self):
+        """Below the numpy threshold, the pure-Python loop selects the
+        incumbent with the smallest ``‖A⁻¹ xᵢ‖² / (1 − ℓᵢ)``.
+
+        Constructed with ``info_inv = diag(0.25, 0.25)`` so the example
+        feature vectors have leverage well below 1 (matches the
+        production invariant that buffered-point leverages ≤ 1).
+        """
+        policy = AOptimalPolicy()
+        info_inv = [[0.25, 0.0], [0.0, 0.25]]
+        feature_vectors = [
+            [1.0, 0.0],   # ‖Ainv·x‖² = 0.0625, ℓ = 0.25, cost = 0.0625/0.75 ≈ 0.0833 ← min
+            [1.5, 0.0],   # ‖Ainv·x‖² = 0.140625, ℓ = 0.5625, cost ≈ 0.3214
+            [0.0, 1.7],   # ‖Ainv·x‖² = 0.180625, ℓ = 0.7225, cost ≈ 0.6510
+        ]
+        observations = []
+        choice = policy.find_evictee(observations, feature_vectors, info_inv, None)
+        assert choice.index == 0
+        assert choice.score == pytest.approx(0.0625 / 0.75, rel=1e-9)
+
+    def test_singular_removal_yields_infinite_cost(self):
+        """An incumbent with ``ℓ ≥ 1`` (singular removal) gets cost =
+        inf, so it's never preferred for eviction.  Production buffers
+        maintain ``ℓ < 1`` via regularization, but the policy guards
+        against degenerate inputs defensively."""
+        policy = AOptimalPolicy()
+        info_inv = [[1.0, 0.0], [0.0, 1.0]]
+        feature_vectors = [
+            [1.0, 0.0],   # ℓ = 1, denom = 0, cost = inf
+            [0.5, 0.0],   # ℓ = 0.25, cost finite
+        ]
+        choice = policy.find_evictee([], feature_vectors, info_inv, None)
+        assert choice.index == 1
+        assert choice.score < float("inf")
+
+
+class TestAOptimalBufferIntegration:
+    def _buf(self, max_size: int) -> DiversityAwareBuffer:
+        return DiversityAwareBuffer(
+            n_features=3, max_size=max_size,
+            feature_order=TEST_FEATURE_ORDER,
+            model_inputs=TEST_MODEL_INPUTS,
+            policy=AOptimalPolicy(),
+        )
+
+    def test_buffer_reports_a_optimal_policy_name(self):
+        buf = self._buf(max_size=5)
+        r = buf.add(_make_obs(t=0.0, outdoor=5.0))
+        assert r.policy_name == "a_optimal"
+
+    def test_full_buffer_decision_carries_score_metadata(self):
+        """End-to-end smoke: full buffer + AOptimal supplies scores and,
+        on rejection, the literal ``a_optimal_rejected``."""
+        buf = self._buf(max_size=3)
+        buf.add(_make_obs(t=0.0, outdoor=5.0, solar=1.0))
+        buf.add(_make_obs(t=1.0, outdoor=-5.0, solar=2.0))
+        buf.add(_make_obs(t=2.0, outdoor=0.0, solar=10.0))
+        r = buf.add(_make_obs(t=3.0, outdoor=2.0, solar=5.0))
+        assert r.policy_name == "a_optimal"
+        assert r.candidate_score is not None
+        assert r.min_incumbent_score is not None
+        if not r.admitted:
+            assert r.rejection_reason == "a_optimal_rejected"
