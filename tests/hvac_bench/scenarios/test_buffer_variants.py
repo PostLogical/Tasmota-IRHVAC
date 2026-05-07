@@ -26,6 +26,10 @@ from custom_components.tasmota_irhvac.pi.batch_learning import (
     DiversityAwareBuffer,
     Observation,
 )
+from custom_components.tasmota_irhvac.pi.buffer_policies import (
+    LeveragePolicy,
+    SlidingWindowPolicy,
+)
 from tests.hvac_bench.adapters import TasmotaPIAdapter
 from tests.hvac_bench.full_stack_runner import (
     FullStackResult,
@@ -39,29 +43,12 @@ from tests.hvac_bench.scenarios.test_seasonal_convergence import (
 )
 
 
-# ── FIFO buffer subclass ─────────────────────────────────────────────────
-
-
-class FIFOBuffer(DiversityAwareBuffer):
-    """Same interface as DiversityAwareBuffer, but evicts oldest obs.
-
-    The "regular buffer" — no leverage scoring, no clever retention.
-    When full, the oldest observation falls out as a new one comes in.
-    Info matrix is maintained via Sherman-Morrison downdate/update so
-    WLS still operates over the current buffer contents.
-    """
-
-    def add(self, obs: Observation) -> None:
-        x = self._get_feature_vector(obs)
-        if len(self._buffer) < self._max_size:
-            self._buffer.append(obs)
-            self._sherman_morrison_update(x)
-        else:
-            old_x = self._get_feature_vector(self._buffer[0])
-            self._sherman_morrison_downdate(old_x)
-            self._buffer.pop(0)
-            self._buffer.append(obs)
-            self._sherman_morrison_update(x)
+# ── Diagnostic buffer subclass ───────────────────────────────────────────
+#
+# FIFO behavior is now provided by ``policy=SlidingWindowPolicy()`` — see
+# ``_replace_buffers`` below.  The historical ``FIFOBuffer`` ad-hoc subclass
+# was removed; the policy form lets the bench compare FIFO against other
+# policies through a uniform interface.
 
 
 class NoEvictionBuffer(DiversityAwareBuffer):
@@ -95,7 +82,13 @@ class NoEvictionBuffer(DiversityAwareBuffer):
 
 
 def _replace_buffers(pi, *, max_size: int, policy: str) -> None:
-    """Swap heat/cool buffers on a freshly-built PI for the given variant."""
+    """Swap heat/cool buffers on a freshly-built PI for the given variant.
+
+    Maps the legacy variant string to a concrete ``BufferPolicy``
+    instance (or a diagnostic subclass) so the bench can compare
+    leverage / FIFO / no-eviction through the same DiversityAwareBuffer
+    pathway.
+    """
     n = pi._observation_buffer_heat._n_features
     feature_order = pi._observation_buffer_heat._feature_order
     model_inputs = pi._observation_buffer_heat._model_inputs
@@ -104,14 +97,15 @@ def _replace_buffers(pi, *, max_size: int, policy: str) -> None:
         feature_order=feature_order, model_inputs=model_inputs,
     )
     if policy == "fifo":
-        heat_buf = FIFOBuffer(**common_kwargs)
-        cool_buf = FIFOBuffer(**common_kwargs)
+        heat_buf = DiversityAwareBuffer(**common_kwargs, policy=SlidingWindowPolicy())
+        cool_buf = DiversityAwareBuffer(**common_kwargs, policy=SlidingWindowPolicy())
     elif policy == "no_eviction":
         heat_buf = NoEvictionBuffer(**common_kwargs)
         cool_buf = NoEvictionBuffer(**common_kwargs)
     else:
-        heat_buf = DiversityAwareBuffer(**common_kwargs)
-        cool_buf = DiversityAwareBuffer(**common_kwargs)
+        # "leverage" or any unrecognized name — production default.
+        heat_buf = DiversityAwareBuffer(**common_kwargs, policy=LeveragePolicy())
+        cool_buf = DiversityAwareBuffer(**common_kwargs, policy=LeveragePolicy())
     pi._observation_buffer_heat = heat_buf
     pi._observation_buffer_cool = cool_buf
 

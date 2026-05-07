@@ -15,6 +15,7 @@ from custom_components.tasmota_irhvac.pi.buffer_policies import (
     ExchangeChoice,
     LeveragePolicy,
     MinEigPolicy,
+    SlidingWindowPolicy,
 )
 
 
@@ -584,3 +585,78 @@ class TestAOptimalBufferIntegration:
         assert r.min_incumbent_score is not None
         if not r.admitted:
             assert r.rejection_reason == "a_optimal_rejected"
+
+
+# ── SlidingWindowPolicy: FIFO recency contract ───────────────────────
+
+
+class TestSlidingWindowPolicy:
+    """Plain FIFO admission — newest in, oldest out, always admit."""
+
+    def test_find_evictee_returns_oldest_timestamp(self):
+        policy = SlidingWindowPolicy()
+        obs1 = _make_obs(t=10.0)
+        obs2 = _make_obs(t=5.0)   # oldest
+        obs3 = _make_obs(t=20.0)
+        feature_vectors = [[1.0, 0.0], [1.0, 0.0], [1.0, 0.0]]
+        choice = policy.find_evictee(
+            observations=[obs1, obs2, obs3],
+            feature_vectors=feature_vectors,
+            info_inv=[[1.0, 0.0], [0.0, 1.0]],
+            xtx=None,
+        )
+        assert choice.index == 1
+        assert choice.score == 5.0
+
+    def test_find_evictee_empty_buffer_returns_sentinel(self):
+        policy = SlidingWindowPolicy()
+        choice = policy.find_evictee(
+            observations=[], feature_vectors=[],
+            info_inv=[], xtx=None,
+        )
+        assert choice.index == -1
+
+    def test_should_admit_always_true(self):
+        """FIFO never rejects when full."""
+        policy = SlidingWindowPolicy()
+        # Comparator is unconditional; cand/evict scores irrelevant.
+        assert policy.should_admit(0.0, 0.0) is True
+        assert policy.should_admit(-100.0, 100.0) is True
+
+
+class TestSlidingWindowBufferIntegration:
+    def _buf(self, max_size: int) -> DiversityAwareBuffer:
+        return DiversityAwareBuffer(
+            n_features=3, max_size=max_size,
+            feature_order=TEST_FEATURE_ORDER,
+            model_inputs=TEST_MODEL_INPUTS,
+            policy=SlidingWindowPolicy(),
+        )
+
+    def test_full_buffer_evicts_oldest_admits_new(self):
+        """Newest in, oldest out — regardless of leverage."""
+        buf = self._buf(max_size=3)
+        buf.add(_make_obs(t=0.0, outdoor=5.0, solar=1.0))
+        buf.add(_make_obs(t=1.0, outdoor=-5.0, solar=2.0))
+        buf.add(_make_obs(t=2.0, outdoor=0.0, solar=10.0))
+        # Add a 4th — t=0.0 (the oldest) must be evicted regardless of
+        # whether the new obs is "informative" by leverage standards.
+        r = buf.add(_make_obs(t=3.0, outdoor=0.0, solar=0.0))
+        assert r.admitted is True
+        assert r.evicted_timestamp == 0.0
+        assert r.policy_name == "sliding_window"
+        timestamps = [o.timestamp for o in buf.get_all()]
+        assert 0.0 not in timestamps
+        assert 3.0 in timestamps
+
+    def test_redundant_candidate_still_admitted(self):
+        """A duplicate of an existing obs is admitted (FIFO is content-blind),
+        unlike LeveragePolicy/DOptimal which would reject."""
+        buf = self._buf(max_size=3)
+        buf.add(_make_obs(t=0.0, outdoor=5.0, solar=0.0))
+        buf.add(_make_obs(t=1.0, outdoor=5.0, solar=0.0))
+        buf.add(_make_obs(t=2.0, outdoor=5.0, solar=0.0))
+        # All identical content — newest still wins.
+        r = buf.add(_make_obs(t=3.0, outdoor=5.0, solar=0.0))
+        assert r.admitted is True
+        assert r.evicted_timestamp == 0.0

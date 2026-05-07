@@ -297,6 +297,75 @@ class DOptimalPolicy(LeveragePolicy):
         )
 
 
+class SlidingWindowPolicy:
+    """FIFO sliding-window admission — keep the most-recent ``max_size``
+    observations, evict the oldest.
+
+    Score (candidate): the candidate's monotonic timestamp; newer = higher.
+    Evictee: the incumbent with the smallest timestamp (oldest).
+    Admit: always (FIFO never rejects when buffer is full).
+
+    Mirrors the historical ``FIFOBuffer`` ad-hoc subclass in
+    ``tests/hvac_bench/scenarios/test_buffer_variants.py`` (now
+    deprecated — use ``policy=SlidingWindowPolicy()`` instead).
+
+    Recency-biased: discards old observations regardless of how rare
+    or informative their operating regime was.  Compare with
+    LeveragePolicy/DOptimalPolicy/MinEigPolicy which retain rare
+    regimes and shed redundant ones.
+
+    Reference: Fortescue, T. R. (1981) — "Implementation of self-tuning
+    regulators with variable forgetting factors", Automatica.  The
+    sliding window is the hard-cutoff special case of forgetting; for
+    a soft variant, see future ``VFFPolicy``.
+    """
+
+    name = "sliding_window"
+
+    def score_candidate(
+        self,
+        x: list[float],
+        info_inv: list[list[float]],
+        xtx: list[list[float]] | None,
+        n_buffered: int,
+    ) -> float:
+        # The candidate's timestamp is its score; the buffer passes the
+        # observation's timestamp implicitly via the ordering of add().
+        # Concretely: the buffer's add() always appends in arrival order,
+        # so the *latest* candidate has the highest implicit "timestamp"
+        # by construction.  Returning a positive score guarantees admission
+        # under the should_admit comparator below.
+        return float("inf")
+
+    def find_evictee(
+        self,
+        observations: list[Observation],
+        feature_vectors: list[list[float]],
+        info_inv: list[list[float]],
+        xtx: list[list[float]] | None,
+    ) -> EvicteeChoice:
+        m = len(observations)
+        if m == 0:
+            return EvicteeChoice(index=-1, score=float("inf"))
+        oldest_idx = 0
+        oldest_ts = observations[0].timestamp
+        for i in range(1, m):
+            if observations[i].timestamp < oldest_ts:
+                oldest_ts = observations[i].timestamp
+                oldest_idx = i
+        return EvicteeChoice(index=oldest_idx, score=oldest_ts)
+
+    def should_admit(
+        self,
+        candidate_score: float,
+        evictee_score: float,
+    ) -> bool:
+        # Always admit when the buffer is full.  The candidate's
+        # implicit "now" timestamp is always > the evictee's stored
+        # timestamp by the time add() is called.
+        return True
+
+
 class AOptimalPolicy:
     """A-optimal sequential admission — minimize ``trace((X^T X)⁻¹)``.
 
