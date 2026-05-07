@@ -576,10 +576,17 @@ def run_full_stack(
         for t in range(d.start_tick, d.start_tick + d.duration_ticks):
             disturbance_map.setdefault(t, []).append(d)
 
-    # True coefficients
+    # True coefficients in physics-space (signed β, matching what the
+    # RLS state stores internally).  ``profile.true_seed`` and
+    # ``ModelInputSpec.seed_heat`` are user-facing positives ("warms
+    # room"); the controller negates them on construction
+    # (pi_controller.py:463, 490) before seeding RLS, so the physical
+    # truth coefficient is ``-true_seed``.  ``mi.true_ff_coef`` is
+    # already in physics-space (signed; e.g. -2.0 for solar), so it
+    # passes through unchanged.
     true_coefs = config.true_coefs
     if true_coefs is None:
-        true_coefs = {"intercept": 0.0, "outdoor_delta": profile.true_seed}
+        true_coefs = {"intercept": 0.0, "outdoor_delta": -profile.true_seed}
         for mi in config.model_inputs:
             true_coefs[mi.name] = mi.true_ff_coef(profile.hp_gain)
 
