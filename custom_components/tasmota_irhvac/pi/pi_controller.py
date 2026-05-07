@@ -176,7 +176,7 @@ from .health_checks import (
     check_slope_drift,
 )
 from .performance_metrics import PerformanceMetrics
-from .auto_perturbation import AutoPerturbation
+from .auto_perturbation import AutoPerturbation, PerturbState
 from .boundary_estimator import BoundaryEstimator
 from .regime_probe import ProbeState, RegimeProbe
 from .smith_predictor import SmithPredictor
@@ -4556,6 +4556,9 @@ class PIController:
             clamped=True,
             clamped_reason="no_output",
             supplemental_active=False,
+            during_perturbation=self._auto_perturb.state in (
+                PerturbState.STEP_ACTIVE, PerturbState.RESTORE,
+            ),
         ))
 
         return False  # No IR command
@@ -4633,6 +4636,9 @@ class PIController:
             clamped=True,
             clamped_reason="observe_only",
             supplemental_active=False,
+            during_perturbation=self._auto_perturb.state in (
+                PerturbState.STEP_ACTIVE, PerturbState.RESTORE,
+            ),
         ))
 
         return False  # No IR command — HP runs its own thermostat
@@ -5345,6 +5351,9 @@ class PIController:
                 clamped_reason=obs_clamped_reason,
                 supplemental_active=obs_supplemental_active,
                 hp_contribution_uncertain=not hp_definitely_on,
+                during_perturbation=self._auto_perturb.state in (
+                    PerturbState.STEP_ACTIVE, PerturbState.RESTORE,
+                ),
             )
             # RLS observation buffer: only when we have a valid feature vector
             # (ff_enabled + outdoor temp available) and HP is clearly contributing.

@@ -798,6 +798,48 @@ def _fit_greybox_2r2c(
         except Exception:
             pass
 
+    # ── Stage B: perturbation-regime wall-mode fit ───────────────────
+    # Stage A (above) hard-fixed (k_w, mass_ratio) at lit values because
+    # operational closed-loop data doesn't excite the wall mode (Bacher-
+    # Madsen 2011, Marty-Stabat 2022, Reynders 2014). When perturbation
+    # data is available — auto-perturbation cycles, plant-test step, etc.
+    # — the wall mode IS excited and (k_w, mass_ratio) become identifiable
+    # (empirically validated 2026-05-06; project_greybox_redesign_evidence.md).
+    #
+    # Stage B re-fits ONLY (k_w, mass_ratio) on the perturbation subset
+    # with Stage A's free params (c0, ua_c, k_c, α_total) frozen. If
+    # Stage B succeeds, its wall params replace the Stage A hard-fix in
+    # the returned GreyboxResult; otherwise Stage A's fixed values stand.
+    perturb_eligible = [
+        (i, o) for i, o in enumerate(eligible) if o.during_perturbation
+    ]
+    n_perturb = len(perturb_eligible)
+    if n_perturb >= MIN_OBSERVATIONS_STAGE_B:
+        stage_b = _fit_stage_b_wall(
+            perturb_eligible_with_idx=perturb_eligible,
+            t_air=t_air, t_out=t_out, solar=solar,
+            hp_setpoint_arr=hp_setpoint_arr, dt_min=dt_min,
+            c0=c0, ua_c=ua_c, k_c=k_c, alpha_total=alpha_total,
+            has_solar=has_solar,
+        )
+        if stage_b is not None:
+            k_w_new = stage_b["k_w"]
+            mass_ratio_new = stage_b["mass_ratio"]
+            _LOGGER.info(
+                "Grey-box Stage B fit (n_perturb=%d): k_w %.5f→%.5f, "
+                "mass_ratio %.2f→%.2f",
+                n_perturb, k_w, k_w_new, mass_ratio, mass_ratio_new,
+            )
+            k_w = k_w_new
+            mass_ratio = mass_ratio_new
+            tau_fast, tau_slow = _natural_eigenvalues(ua_c, k_w, mass_ratio)
+            tau_eff = tau_slow
+    else:
+        _LOGGER.debug(
+            "Grey-box Stage B skipped (n_perturb=%d < %d threshold)",
+            n_perturb, MIN_OBSERVATIONS_STAGE_B,
+        )
+
     tau_agreement = None
     if plant_tau_slow is not None and plant_tau_slow > 0 and not math.isinf(tau_slow):
         tau_agreement = abs(tau_slow - plant_tau_slow) / plant_tau_slow * 100.0
@@ -824,6 +866,116 @@ def _fit_greybox_2r2c(
         tau_slow=tau_slow,
         dt_median_min=typical_dt if typical_dt > 0 else None,
     )
+
+
+# Minimum perturbation observations required to attempt Stage B wall fit.
+# At 60s ticks, one perturb cycle of ~60-90 min = 60-90 observations; we
+# want ≥1 cycle's worth across multiple cycles. 100 ≈ 1.5 cycles minimum.
+MIN_OBSERVATIONS_STAGE_B = 100
+
+
+def _fit_stage_b_wall(
+    *,
+    perturb_eligible_with_idx: list[tuple[int, Any]],
+    t_air: list[float],
+    t_out: list[float],
+    solar: list[float],
+    hp_setpoint_arr: list[float | None],
+    dt_min: list[float],
+    c0: float,
+    ua_c: float,
+    k_c: float,
+    alpha_total: float,
+    has_solar: bool,
+) -> dict | None:
+    """Stage B wall-mode fit on perturbation observations.
+
+    With Stage A's free params (c0, ua_c, k_c, α_total) frozen, fit ONLY
+    (k_w, mass_ratio) using the perturbation subset of observations.
+    Re-uses sim-error PEM residual machinery from Stage A.
+
+    Returns {"k_w": ..., "mass_ratio": ...} on success, None on failure.
+    """
+    if not SCIPY_AVAILABLE:
+        return None
+    import numpy as np
+
+    # Take the perturbation observations in order. Forward-simulate from
+    # the first perturbation observation; each tick's residual is
+    # predicted - observed. For non-contiguous indices we just use the
+    # observation timestamps to compute dt for that step (single-step
+    # propagation across gaps is approximate but acceptable since the
+    # wall mode time constant >> any reasonable inter-observation gap).
+    n_pe = len(perturb_eligible_with_idx)
+
+    alpha_air = alpha_total * SOLAR_AIR_FRACTION
+    alpha_wall = alpha_total * SOLAR_WALL_FRACTION
+
+    def residual_fn(params: list[float]) -> list[float]:
+        k_w, mass_ratio = params
+        a_wall_rate = k_w / mass_ratio
+
+        A_active = np.array([
+            [-(ua_c + k_c + k_w), k_w],
+            [a_wall_rate, -a_wall_rate],
+        ], dtype=float)
+        A_inactive = np.array([
+            [-(ua_c + k_w), k_w],
+            [a_wall_rate, -a_wall_rate],
+        ], dtype=float)
+
+        first_idx, _ = perturb_eligible_with_idx[0]
+        x = np.array([t_air[first_idx], t_air[first_idx]], dtype=float)
+        residuals = [0.0] * n_pe
+
+        for k, (i, _o) in enumerate(perturb_eligible_with_idx):
+            if k == 0:
+                # First-tick residual zero (state initialized at observation)
+                continue
+            prev_idx = perturb_eligible_with_idx[k - 1][0]
+            dt = (dt_min[i] if (i == prev_idx + 1) else
+                  sum(dt_min[prev_idx + 1: i + 1]))
+            if dt <= 0:
+                continue
+            sp_prev = hp_setpoint_arr[prev_idx]
+            t_a_prev = t_air[prev_idx]
+            active_prev = (sp_prev is not None) and (t_a_prev < sp_prev)
+            try:
+                A = A_active if active_prev else A_inactive
+                eA = _expm(A * dt)
+                psi = np.linalg.solve(A, eA - np.eye(2))
+            except Exception:
+                return [1e6] * n_pe
+            if active_prev:
+                b1 = (c0 + ua_c * t_out[prev_idx] + k_c * sp_prev
+                      + alpha_air * solar[prev_idx])
+            else:
+                b1 = c0 + ua_c * t_out[prev_idx] + alpha_air * solar[prev_idx]
+            b2 = alpha_wall * solar[prev_idx] / mass_ratio
+            b = np.array([b1, b2], dtype=float)
+            x = eA @ x + psi @ b
+            residuals[k] = float(x[0] - t_air[i])
+
+        return residuals
+
+    x0 = [K_W_FIXED, MASS_RATIO_FIXED]
+    lower = [K_W_BOUNDS[0], MASS_RATIO_BOUNDS[0]]
+    upper = [K_W_BOUNDS[1], MASS_RATIO_BOUNDS[1]]
+
+    try:
+        result = _least_squares(
+            residual_fn, x0,
+            bounds=(lower, upper),
+            method="trf",
+            loss="huber",
+            f_scale=0.1,  # °C state-error scale, like Stage A
+            max_nfev=200,
+        )
+    except Exception:
+        _LOGGER.exception("Grey-box Stage B (wall fit): least_squares failed")
+        return None
+
+    return {"k_w": float(result.x[0]), "mass_ratio": float(result.x[1])}
 
 
 def log_greybox_result(

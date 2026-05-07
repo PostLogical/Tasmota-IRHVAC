@@ -66,6 +66,11 @@ class Observation:
     clamped_reason: str = ""  # "", "no_output", "saturated_low", "saturated_high", "observe_only"
     supplemental_active: bool = False  # supplemental source tracking or assisting
     hp_contribution_uncertain: bool = False  # |hp_offset| within regime margin
+    # Auto-perturbation state at observation time. True when the auto-
+    # perturbation state machine has a non-zero setpoint offset applied
+    # (STEP_ACTIVE or RESTORE phases). Used by Stage B greybox fit to
+    # partition perturbation-regime observations from operational ones.
+    during_perturbation: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -82,6 +87,7 @@ class Observation:
             "cr": self.clamped_reason,
             "sa": self.supplemental_active,
             "hcu": self.hp_contribution_uncertain,
+            "dp": self.during_perturbation,
         }
 
     @classmethod
@@ -106,6 +112,7 @@ class Observation:
             clamped_reason=d.get("cr", ""),
             supplemental_active=d.get("sa", False),
             hp_contribution_uncertain=d.get("hcu", False),
+            during_perturbation=d.get("dp", False),
         )
 
 
