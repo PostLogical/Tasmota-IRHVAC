@@ -599,6 +599,13 @@ class DiversityAwareBuffer:
         model_inputs: list[dict[str, Any]] | None = None,
         policy: BufferPolicy | None = None,
     ) -> None:
+        if feature_order is not None and len(feature_order) != n_features:
+            raise ValueError(
+                f"feature_order length ({len(feature_order)}) must equal "
+                f"n_features ({n_features}); legacy code silently truncated "
+                f"feature vectors when these disagreed, hiding configuration "
+                f"errors."
+            )
         self._buffer: list[Observation] = []
         self._max_size = max_size
         self._n_features = n_features

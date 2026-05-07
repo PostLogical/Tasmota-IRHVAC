@@ -61,6 +61,18 @@ def _test_feature_order(n_extra: int) -> list[str]:
     return order
 
 
+# Hourly-spaced wall_time base — gives realistic ToD coverage so the
+# sin_hour / cos_hour columns sweep the unit circle, matching production
+# where buffer obs span hours/days rather than identical timestamps.
+import datetime as _dt
+_TEST_WALL_TIME_BASE = _dt.datetime(2026, 1, 15, 0, 0, 0).timestamp()
+
+
+def _spread_wall_time(i: int, step_seconds: float = 3600.0) -> float:
+    """Wall time for the i-th synthetic observation."""
+    return _TEST_WALL_TIME_BASE + i * step_seconds
+
+
 def _make_obs(
     features: list[float],
     sp: float | None,
@@ -259,8 +271,8 @@ class TestObservationHpSetpointNone:
 class TestVIFComputation:
     """Tests for DiversityAwareBuffer.compute_vif()."""
 
-    def _make_obs(self, features):
-        return _make_obs(features, sp=22.0, cur=20.0)
+    def _make_obs(self, features, wall_time=None):
+        return _make_obs(features, sp=22.0, cur=20.0, wall_time=wall_time)
 
     def test_vif_inf_before_recompute(self):
         """Returns all inf when xtx matrix hasn't been computed."""
@@ -269,36 +281,50 @@ class TestVIFComputation:
         assert all(math.isinf(v) for v in vif)
 
     def test_vif_well_conditioned(self):
-        """Independent features give VIF close to 1."""
+        """Independent features give VIF close to 1.
+
+        Uses the production-shape feature set including ToD; the
+        sin_hour / cos_hour columns should also sit at VIF ≲ 5 because
+        wall_time spreads across multiple diurnal cycles.
+        """
+        feature_order = _test_feature_order(1)
         buf = DiversityAwareBuffer(
-            n_features=3, max_size=200,
-            feature_order=_test_feature_order(1),
+            n_features=len(feature_order), max_size=200,
+            feature_order=feature_order,
             model_inputs=_test_model_inputs(1),
         )
         random.seed(42)
         for i in range(100):
             x1 = float(i % 10)
             x2 = random.uniform(-1, 1)  # Independent of x1
-            buf.add(self._make_obs([1.0, x1, x2]))
+            buf.add(self._make_obs(
+                [1.0, x1, x2], wall_time=_spread_wall_time(i),
+            ))
         buf.recompute_info_matrix()
         vif = buf.compute_vif()
         assert all(v < 5.0 for v in vif), f"VIF too high: {vif}"
 
     def test_vif_collinear_features(self):
         """Collinear features produce VIF > 10."""
+        feature_order = _test_feature_order(1)
         buf = DiversityAwareBuffer(
-            n_features=3, max_size=200,
-            feature_order=_test_feature_order(1),
+            n_features=len(feature_order), max_size=200,
+            feature_order=feature_order,
             model_inputs=_test_model_inputs(1),
         )
         for i in range(100):
             x1 = float(i % 10)
             x2 = x1 * 0.95 + 0.01 * (i % 3)  # Highly correlated
-            buf.add(self._make_obs([1.0, x1, x2]))
+            buf.add(self._make_obs(
+                [1.0, x1, x2], wall_time=_spread_wall_time(i),
+            ))
         buf.recompute_info_matrix()
         vif = buf.compute_vif()
-        # At least one feature should have VIF > 10
-        assert any(v > 10.0 for v in vif), f"Expected collinear VIF > 10: {vif}"
+        # At least one of the constructed-collinear features should
+        # produce VIF > 10 (outdoor_delta or input_0).
+        assert any(v > 10.0 for v in vif[1:3]), (
+            f"Expected collinear VIF > 10 for outdoor_delta or input_0, got {vif}"
+        )
 
 
 class TestFrozenFeaturesInWLS:
@@ -872,7 +898,10 @@ def _generate_batch_observations(
         true_offset = sum(b * f for b, f in zip(true_beta, features))
         sp = cur + true_offset + rng.gauss(0, noise_sigma)
 
-        obs_list.append(_make_obs(features, sp=sp, cur=cur, rate=rng.gauss(0, 0.005)))
+        obs_list.append(_make_obs(
+            features, sp=sp, cur=cur, rate=rng.gauss(0, 0.005),
+            wall_time=_spread_wall_time(i),
+        ))
 
     return obs_list
 
@@ -888,8 +917,10 @@ class TestScenarioWinterWellSeparated:
 
     def test_all_features_unlock(self):
         n_inputs = 2
-        n = 2 + n_inputs  # intercept + outdoor_delta + 2 inputs
-        true_beta = [0.5, 0.35, -3.5, -2.0]  # solar-like, stove-like
+        feature_order = _test_feature_order(n_inputs)
+        n = len(feature_order)  # intercept + outdoor + 2 inputs + sin_hour + cos_hour
+        # ToD coefficients are 0 in the synthetic truth (no real ToD signal).
+        true_beta = [0.5, 0.35, -3.5, -2.0, 0.0, 0.0]  # solar-like, stove-like
 
         # Generate winter data: wide outdoor range, independent inputs
         obs = _generate_batch_observations(
@@ -906,17 +937,17 @@ class TestScenarioWinterWellSeparated:
         current_beta = [0.0] * n
         result = weighted_least_squares(
             obs, n_features=n, current_beta=current_beta,
-            feature_order=_test_feature_order(n_inputs),
+            feature_order=feature_order,
             model_inputs=_test_model_inputs(n_inputs),
         )
         assert result is not None
-        compare_and_report(result, current_beta, ["intercept", "outdoor_delta", "solar", "stove"])
+        compare_and_report(result, current_beta, feature_order)
         compute_blended_update(result, prior_std=1.0, max_step=1.0)
 
         # Build a real buffer to check VIF
         buf = DiversityAwareBuffer(
             n_features=n, max_size=200,
-            feature_order=_test_feature_order(n_inputs),
+            feature_order=feature_order,
             model_inputs=_test_model_inputs(n_inputs),
         )
         for o in obs:
@@ -926,19 +957,30 @@ class TestScenarioWinterWellSeparated:
         vif = buf.compute_vif()
         kappa = buf.compute_condition_number()
 
-        # Model input features (2+) should be identifiable (VIF < 10)
-        # Intercept VIF is typically elevated and not gated.
-        for i in range(2, n):
-            assert vif[i] < 10.0, f"Feature {i} VIF={vif[i]} (should be < 10)"
+        # Model input features (indices 2, 3) should be identifiable (VIF < 10).
+        # Intercept VIF and ToD VIFs are not gated by the controller
+        # (sin_hour/cos_hour are unit-circle features whose VIF is dominated
+        # by their geometric coupling, not the modeled signal).
+        for i in (2, 3):
+            assert vif[i] < 10.0, f"Feature {feature_order[i]} VIF={vif[i]} (should be < 10)"
         assert kappa < 100.0, f"κ={kappa} should be < 100 for well-separated data"
 
-        # All features should have blend confidence and finite std_err
+        # Modeled features (intercept + outdoor + inputs) should have
+        # blend confidence and finite std_err.  ToD features (sin_hour,
+        # cos_hour) are partialled out via FWL augmented partialling and
+        # not fitted as standalone coefficients (batch_learning.py
+        # _ragged_partial_regression docstring) — so their blend_gain is
+        # 0 by design.
         assert len(result.blend_gains) == n, (
             f"blend_gains length {len(result.blend_gains)} != n_features {n}"
         )
-        for i in range(n):
-            assert result.blend_gains[i] > 0, f"Feature {i} has no blend confidence"
-            assert math.isfinite(result.beta_std_err[i]), f"Feature {i} std_err not finite"
+        for i in range(2 + n_inputs):
+            assert result.blend_gains[i] > 0, (
+                f"Feature {feature_order[i]} has no blend confidence"
+            )
+            assert math.isfinite(result.beta_std_err[i]), (
+                f"Feature {feature_order[i]} std_err not finite"
+            )
 
 
 class TestScenarioShoulderCollinear:
@@ -951,7 +993,8 @@ class TestScenarioShoulderCollinear:
 
     def test_solar_collinear_high_vif(self):
         n_inputs = 2
-        n = 2 + n_inputs
+        feature_order = _test_feature_order(n_inputs)
+        n = len(feature_order)
 
         # Shoulder season: narrow outdoor range, solar correlated with outdoor
         obs = _generate_batch_observations(
@@ -963,13 +1006,13 @@ class TestScenarioShoulderCollinear:
                 # "adjacent_zone" — correlated with outdoor
                 lambda i, rng: 0.9 * (i % 10) / 10 + rng.gauss(0, 0.02),
             ],
-            true_beta=[0.5, 0.3, -2.0, -1.0],
+            true_beta=[0.5, 0.3, -2.0, -1.0, 0.0, 0.0],  # ToD coeffs = 0
             noise_sigma=0.1,
         )
 
         buf = DiversityAwareBuffer(
             n_features=n, max_size=200,
-            feature_order=_test_feature_order(n_inputs),
+            feature_order=feature_order,
             model_inputs=_test_model_inputs(n_inputs),
         )
         for o in obs:
@@ -980,11 +1023,14 @@ class TestScenarioShoulderCollinear:
         vif = buf.compute_vif()
 
         # With narrow outdoor range + correlated features, expect elevated κ
-        # and at least one VIF > threshold
+        # and at least one of the *modeled* features (indices 2, 3) to show
+        # elevated VIF.  ToD VIFs are excluded — they reflect sin/cos
+        # geometric coupling, not the test's collinearity scenario.
         assert kappa > 10.0, f"κ={kappa} should be elevated for collinear data"
-        # At least one non-base feature should have elevated VIF
-        max_input_vif = max(vif[2:])
-        assert max_input_vif > 3.0, f"Expected elevated VIF for collinear inputs, got {vif}"
+        max_modeled_vif = max(vif[2], vif[3])
+        assert max_modeled_vif > 3.0, (
+            f"Expected elevated VIF for collinear modeled inputs, got {vif}"
+        )
 
 
 class TestScenarioSolarSaturation:
@@ -1049,7 +1095,8 @@ class TestScenarioProductionReplay:
         collinear (r≈0.95), producing elevated κ.
         """
         n_inputs = 2  # Two adjacent zones
-        n = 2 + n_inputs
+        feature_order = _test_feature_order(n_inputs)
+        n = len(feature_order)
 
         # Generate correlated zone data manually (lambdas can't share state)
         rng = random.Random(42)
@@ -1062,11 +1109,14 @@ class TestScenarioProductionReplay:
             zone1 = base_signal + rng.gauss(0, 0.1)  # r≈0.95 with zone2
             zone2 = base_signal + rng.gauss(0, 0.1)
             sp = cur + 0.5 + od * 0.35 + zone1 * (-0.5) + zone2 * (-0.5) + rng.gauss(0, 0.1)
-            obs.append(_make_obs([1.0, od, zone1, zone2], sp=sp, cur=cur))
+            obs.append(_make_obs(
+                [1.0, od, zone1, zone2], sp=sp, cur=cur,
+                wall_time=_spread_wall_time(i),
+            ))
 
         buf = DiversityAwareBuffer(
             n_features=n, max_size=200,
-            feature_order=_test_feature_order(n_inputs),
+            feature_order=feature_order,
             model_inputs=_test_model_inputs(n_inputs, roles=["adjacent_zone", "adjacent_zone"]),
         )
         for o in obs:
@@ -1078,7 +1128,7 @@ class TestScenarioProductionReplay:
 
         # High correlation between zones should give elevated κ and VIF
         assert kappa > 15.0, f"κ={kappa} should be elevated for correlated zones"
-        # At least one zone should have VIF > 5 (moderate collinearity)
+        # At least one zone should have VIF > 3 (moderate collinearity)
         max_zone_vif = max(vif[2], vif[3])
         assert max_zone_vif > 3.0, f"Expected elevated VIF for correlated zones, got {vif}"
 

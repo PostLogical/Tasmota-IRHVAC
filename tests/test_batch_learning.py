@@ -34,6 +34,17 @@ from custom_components.tasmota_irhvac.pi.batch_learning import (
 # Synthetic entity IDs for test model inputs.
 _TEST_ENTITIES = [f"sensor.test_input_{i}" for i in range(10)]
 
+# Hourly-spaced wall_time base — gives 50 obs ~2 full diurnal cycles so
+# sin_hour / cos_hour columns sweep the unit circle with realistic
+# variation (matches production where buffer obs span days, not seconds).
+import datetime as _dt
+_TEST_WALL_TIME_BASE = _dt.datetime(2026, 1, 15, 0, 0, 0).timestamp()
+
+
+def _spread_wall_time(i: int, step_seconds: float = 3600.0) -> float:
+    """Wall time for the i-th synthetic observation."""
+    return _TEST_WALL_TIME_BASE + i * step_seconds
+
 
 def _make_test_obs(
     features: list[float],
@@ -1279,9 +1290,11 @@ class TestFilterInactive:
 
 
 class TestConditionNumber:
-    def _make_obs(self, features, sp=22.0, cur=20.0, clamped=False, clamped_reason=""):
+    def _make_obs(self, features, sp=22.0, cur=20.0, clamped=False,
+                  clamped_reason="", wall_time=None):
         return _make_test_obs(features, sp=sp, cur=cur,
-                              clamped=clamped, clamped_reason=clamped_reason)
+                              clamped=clamped, clamped_reason=clamped_reason,
+                              wall_time=wall_time)
 
     def test_condition_number_single_feature(self):
         """With intercept + 1 feature, κ is trivially 1.0.
@@ -1300,19 +1313,25 @@ class TestConditionNumber:
     def test_condition_number_well_conditioned(self):
         """Diverse, uncorrelated features produce low κ (Belsley: reliable).
 
-        Two non-intercept features with independent variation.
-        κ computed on features only (intercept excluded per Belsley 1980).
+        Two non-intercept features with independent variation, plus the
+        production-shape ToD pair (sin_hour, cos_hour) traversing a full
+        diurnal cycle.  κ computed on features only (intercept excluded
+        per Belsley 1980).
         """
+        feature_order = _test_feature_order(1)
         buf = DiversityAwareBuffer(
-            n_features=3, max_size=100,
-            feature_order=_test_feature_order(1),
+            n_features=len(feature_order), max_size=100,
+            feature_order=feature_order,
             model_inputs=_test_model_inputs(1),
         )
         for i in range(50):
             outdoor_delta = float(i % 10)  # 0-9°C spread
             # Independent model input with different pattern
             model_input = float((i * 7) % 10) * 0.5
-            buf.add(self._make_obs([1.0, outdoor_delta, model_input]))
+            buf.add(self._make_obs(
+                [1.0, outdoor_delta, model_input],
+                wall_time=_spread_wall_time(i),
+            ))
         buf.recompute_info_matrix()
         cond = buf.compute_condition_number()
         assert cond < 20.0
@@ -1326,16 +1345,20 @@ class TestConditionNumber:
         κ excludes the intercept (Belsley 1980), so this measures
         pure feature-to-feature collinearity.
         """
+        feature_order = _test_feature_order(1)
         buf = DiversityAwareBuffer(
-            n_features=3, max_size=100,
-            feature_order=_test_feature_order(1),
+            n_features=len(feature_order), max_size=100,
+            feature_order=feature_order,
             model_inputs=_test_model_inputs(1),
         )
         for i in range(50):
             x1 = float(i % 10)
             # x2 tracks x1 closely but not perfectly (r ≈ 0.9)
             x2 = x1 * 0.8 + (i % 3) * 0.5
-            buf.add(self._make_obs([1.0, x1, x2]))
+            buf.add(self._make_obs(
+                [1.0, x1, x2],
+                wall_time=_spread_wall_time(i),
+            ))
         buf.recompute_info_matrix()
         cond = buf.compute_condition_number()
         assert cond > 5.0  # Meaningful collinearity from feature correlation
@@ -1346,16 +1369,20 @@ class TestConditionNumber:
         Two features that are nearly linearly dependent — coefficients
         are numerically unstable.
         """
+        feature_order = _test_feature_order(1)
         buf = DiversityAwareBuffer(
-            n_features=3, max_size=100,
-            feature_order=_test_feature_order(1),
+            n_features=len(feature_order), max_size=100,
+            feature_order=feature_order,
             model_inputs=_test_model_inputs(1),
         )
         for i in range(50):
             x1 = float(i % 10)
             # x2 nearly identical to x1 (tiny noise)
             x2 = x1 + (i % 10) * 0.001
-            buf.add(self._make_obs([1.0, x1, x2]))
+            buf.add(self._make_obs(
+                [1.0, x1, x2],
+                wall_time=_spread_wall_time(i),
+            ))
         buf.recompute_info_matrix()
         cond = buf.compute_condition_number()
         assert cond > 50.0  # Severe collinearity between features
@@ -1367,51 +1394,82 @@ class TestConditionNumber:
 
     def test_pairwise_correlations_detects_correlated(self):
         """Detects highly correlated features."""
+        feature_order = _test_feature_order(1)
         buf = DiversityAwareBuffer(
-            n_features=3, max_size=100,
-            feature_order=_test_feature_order(1),
+            n_features=len(feature_order), max_size=100,
+            feature_order=feature_order,
             model_inputs=_test_model_inputs(1),
         )
         for i in range(30):
             outdoor_delta = float(i)
             solar = outdoor_delta * 0.5 + 1.0  # perfectly correlated
-            buf.add(self._make_obs([1.0, outdoor_delta, solar]))
-        pairs = buf.get_pairwise_correlations(["intercept", "outdoor_delta", "solar"])
-        assert len(pairs) == 1
-        name_a, name_b, r = pairs[0]
-        assert name_a == "outdoor_delta"
-        assert name_b == "solar"
+            buf.add(self._make_obs(
+                [1.0, outdoor_delta, solar],
+                wall_time=_spread_wall_time(i),
+            ))
+        pairs = buf.get_pairwise_correlations(feature_order)
+        # Filter to the (outdoor_delta, solar) pair we constructed.
+        od_solar = [
+            (a, b, r) for a, b, r in pairs
+            if {a, b} == {"outdoor_delta", "input_0"}
+        ]
+        assert len(od_solar) == 1
+        _, _, r = od_solar[0]
         assert abs(r) > 0.99
 
     def test_pairwise_correlations_independent_features(self):
         """Independent features produce no correlated pairs."""
+        feature_order = _test_feature_order(1)
         buf = DiversityAwareBuffer(
-            n_features=3, max_size=100,
-            feature_order=_test_feature_order(1),
+            n_features=len(feature_order), max_size=100,
+            feature_order=feature_order,
             model_inputs=_test_model_inputs(1),
         )
         for i in range(30):
             outdoor_delta = float(i % 10)
             pellet = float((i + 5) % 3)  # uncorrelated pattern
-            buf.add(self._make_obs([1.0, outdoor_delta, pellet]))
-        pairs = buf.get_pairwise_correlations(["intercept", "outdoor_delta", "pellet"])
-        assert len(pairs) == 0
+            buf.add(self._make_obs(
+                [1.0, outdoor_delta, pellet],
+                wall_time=_spread_wall_time(i),
+            ))
+        pairs = buf.get_pairwise_correlations(feature_order)
+        # Restricted to the modeled pair — ToD-vs-ToD over a sweep is
+        # geometrically near-orthogonal but not the test's subject.
+        modeled = [
+            (a, b, r) for a, b, r in pairs
+            if {a, b} == {"outdoor_delta", "input_0"}
+        ]
+        assert modeled == []
 
     def test_pairwise_correlations_skips_clamped(self):
         """Correlation computed only from unclamped observations."""
+        feature_order = _test_feature_order(1)
         buf = DiversityAwareBuffer(
-            n_features=3, max_size=100,
-            feature_order=_test_feature_order(1),
+            n_features=len(feature_order), max_size=100,
+            feature_order=feature_order,
             model_inputs=_test_model_inputs(1),
         )
         # All unclamped obs are independent
         for i in range(25):
-            buf.add(self._make_obs([1.0, float(i % 10), float((i + 5) % 3)]))
+            buf.add(self._make_obs(
+                [1.0, float(i % 10), float((i + 5) % 3)],
+                wall_time=_spread_wall_time(i),
+            ))
         # Clamped obs are perfectly correlated but should be ignored
         for i in range(25):
-            buf.add(self._make_obs([1.0, float(i), float(i)], clamped=True))
-        pairs = buf.get_pairwise_correlations(["intercept", "a", "b"])
-        assert len(pairs) == 0
+            buf.add(self._make_obs(
+                [1.0, float(i), float(i)], clamped=True,
+                wall_time=_spread_wall_time(25 + i),
+            ))
+        pairs = buf.get_pairwise_correlations(feature_order)
+        # The constructed (outdoor_delta, input_0) pair is uncorrelated
+        # in the unclamped subset.  Unrelated pairs may still appear
+        # (e.g. ToD-vs-data) but the test's subject is the clamped pair.
+        modeled = [
+            (a, b, r) for a, b, r in pairs
+            if {a, b} == {"outdoor_delta", "input_0"}
+        ]
+        assert modeled == []
 
 
 # ── Residual Time-of-Day Analysis ─────────────────────────────────────
@@ -1662,13 +1720,17 @@ class TestBatchLearningCoverageGaps:
         orig = bl._NUMPY_AVAILABLE
         try:
             bl._NUMPY_AVAILABLE = False
+            feature_order = _test_feature_order(2)
             buf = DiversityAwareBuffer(
-                n_features=4, max_size=100,
-                feature_order=_test_feature_order(2),
+                n_features=len(feature_order), max_size=100,
+                feature_order=feature_order,
                 model_inputs=_test_model_inputs(2),
             )
             for i in range(30):
-                buf.add(self._make_obs([1.0, float(i % 10), float(i), float(i * 2)], sp=22.0, cur=20.0))
+                buf.add(self._make_obs(
+                    [1.0, float(i % 10), float(i), float(i * 2)],
+                    sp=22.0, cur=20.0, wall_hour=i % 24,
+                ))
             with _patch.object(DiversityAwareBuffer, '_eigenvalues_symmetric', return_value=None):
                 kappa = buf.compute_condition_number()
             assert kappa == float('inf')
@@ -1682,13 +1744,17 @@ class TestBatchLearningCoverageGaps:
         orig = bl._NUMPY_AVAILABLE
         try:
             bl._NUMPY_AVAILABLE = False
+            feature_order = _test_feature_order(2)
             buf = DiversityAwareBuffer(
-                n_features=4, max_size=100,
-                feature_order=_test_feature_order(2),
+                n_features=len(feature_order), max_size=100,
+                feature_order=feature_order,
                 model_inputs=_test_model_inputs(2),
             )
             for i in range(30):
-                buf.add(self._make_obs([1.0, float(i % 10), float(i), float(i * 2)], sp=22.0, cur=20.0))
+                buf.add(self._make_obs(
+                    [1.0, float(i % 10), float(i), float(i * 2)],
+                    sp=22.0, cur=20.0, wall_hour=i % 24,
+                ))
             with _patch.object(DiversityAwareBuffer, '_eigenvalues_symmetric', return_value=[10.0, 0.0]):
                 kappa = buf.compute_condition_number()
             assert kappa == float('inf')
@@ -1700,13 +1766,17 @@ class TestBatchLearningCoverageGaps:
     def test_vif_singular_corr(self):
         """VIF returns all inf when correlation matrix inversion fails (line 548)."""
         from unittest.mock import patch as _patch
+        feature_order = _test_feature_order(2)
         buf = DiversityAwareBuffer(
-            n_features=4, max_size=100,
-            feature_order=_test_feature_order(2),
+            n_features=len(feature_order), max_size=100,
+            feature_order=feature_order,
             model_inputs=_test_model_inputs(2),
         )
         for i in range(30):
-            buf.add(self._make_obs([1.0, float(i % 10), float(i), float(i * 2)], sp=22.0, cur=20.0))
+            buf.add(self._make_obs(
+                [1.0, float(i % 10), float(i), float(i * 2)],
+                sp=22.0, cur=20.0, wall_hour=i % 24,
+            ))
         with _patch.object(DiversityAwareBuffer, '_invert_matrix', return_value=None):
             vif = buf.compute_vif()
         assert all(v == float('inf') for v in vif)  # all inf including intercept
@@ -1715,9 +1785,10 @@ class TestBatchLearningCoverageGaps:
 
     def test_pairwise_correlations_all_clamped(self):
         """get_pairwise_correlations returns [] when < 20 unclamped obs."""
+        feature_order = _test_feature_order(2)
         buf = DiversityAwareBuffer(
-            n_features=4, max_size=100,
-            feature_order=_test_feature_order(2),
+            n_features=len(feature_order), max_size=100,
+            feature_order=feature_order,
             model_inputs=_test_model_inputs(2),
         )
         # Add 25 observations, but all clamped
@@ -1725,29 +1796,31 @@ class TestBatchLearningCoverageGaps:
             buf.add(self._make_obs(
                 [1.0, float(i), float(i % 3), float(i % 4)],
                 sp=22.0, cur=20.0, clamped=True, clamped_reason="no_output",
+                wall_hour=i % 24,
             ))
-        result = buf.get_pairwise_correlations(["intercept", "od", "a", "b"])
+        result = buf.get_pairwise_correlations(feature_order)
         assert result == []
 
     # ── Line 600: zero-variance column in pairwise correlation ──
 
     def test_pairwise_correlations_zero_variance(self):
         """Pairs with zero-variance column are skipped (denom < 1e-12)."""
+        feature_order = _test_feature_order(2)
         buf = DiversityAwareBuffer(
-            n_features=4, max_size=100,
-            feature_order=_test_feature_order(2),
+            n_features=len(feature_order), max_size=100,
+            feature_order=feature_order,
             model_inputs=_test_model_inputs(2),
         )
         for i in range(25):
-            # Feature 2 is constant → zero variance
+            # input_0 is constant → zero variance
             buf.add(self._make_obs(
                 [1.0, float(i % 10), 5.0, float(i)],
-                sp=22.0, cur=20.0,
+                sp=22.0, cur=20.0, wall_hour=i % 24,
             ))
-        result = buf.get_pairwise_correlations(["intercept", "od", "const", "var"])
-        # Pairs involving "const" should be absent (zero variance)
+        result = buf.get_pairwise_correlations(feature_order)
+        # Pairs involving "input_0" (zero-variance) should be absent.
         for name_a, name_b, r in result:
-            assert "const" not in (name_a, name_b)
+            assert "input_0" not in (name_a, name_b)
 
     # ── Lines 734-783: non-numpy eigenvalue fallback ──
 
@@ -1757,14 +1830,17 @@ class TestBatchLearningCoverageGaps:
         orig = bl._NUMPY_AVAILABLE
         try:
             bl._NUMPY_AVAILABLE = False
+            feature_order = _test_feature_order(1)
             buf = DiversityAwareBuffer(
-                n_features=3, max_size=100,
-                feature_order=_test_feature_order(1),
+                n_features=len(feature_order), max_size=100,
+                feature_order=feature_order,
                 model_inputs=_test_model_inputs(1),
             )
             for i in range(30):
-                buf.add(self._make_obs([1.0, float(i % 10), float(i % 7)], sp=22.0, cur=20.0))
-            # Should exercise n=2 direct formula path (2×2 corr matrix)
+                buf.add(self._make_obs(
+                    [1.0, float(i % 10), float(i % 7)],
+                    sp=22.0, cur=20.0, wall_hour=i % 24,
+                ))
             kappa = buf.compute_condition_number()
             assert kappa >= 1.0
         finally:
@@ -1776,15 +1852,16 @@ class TestBatchLearningCoverageGaps:
         orig = bl._NUMPY_AVAILABLE
         try:
             bl._NUMPY_AVAILABLE = False
+            feature_order = _test_feature_order(3)
             buf = DiversityAwareBuffer(
-                n_features=5, max_size=100,
-                feature_order=_test_feature_order(3),
+                n_features=len(feature_order), max_size=100,
+                feature_order=feature_order,
                 model_inputs=_test_model_inputs(3),
             )
             for i in range(40):
                 buf.add(self._make_obs(
                     [1.0, float(i % 10), float(i % 5), float(i % 3), float(i % 7)],
-                    sp=22.0, cur=20.0,
+                    sp=22.0, cur=20.0, wall_hour=i % 24,
                 ))
             kappa = buf.compute_condition_number()
             assert kappa >= 1.0
@@ -2098,13 +2175,17 @@ class TestBatchLearningCoverageGaps:
         """eigvalsh LinAlgError → returns None (lines 734-735)."""
         import numpy as np
         from unittest.mock import patch as _patch
+        feature_order = _test_feature_order(1)
         buf = DiversityAwareBuffer(
-            n_features=3, max_size=100,
-            feature_order=_test_feature_order(1),
+            n_features=len(feature_order), max_size=100,
+            feature_order=feature_order,
             model_inputs=_test_model_inputs(1),
         )
         for i in range(30):
-            buf.add(self._make_obs([1.0, float(i % 10), float(i % 7)], sp=22.0, cur=20.0))
+            buf.add(self._make_obs(
+                [1.0, float(i % 10), float(i % 7)],
+                sp=22.0, cur=20.0, wall_hour=i % 24,
+            ))
         with _patch.object(np.linalg, 'eigvalsh', side_effect=np.linalg.LinAlgError("test")):
             kappa = buf.compute_condition_number()
         assert kappa == float('inf')

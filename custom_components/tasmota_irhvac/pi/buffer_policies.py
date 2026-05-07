@@ -90,10 +90,7 @@ class LeveragePolicy:
         xtx: list[list[float]] | None,
         n_buffered: int,
     ) -> float:
-        # Use the info matrix's dimension as authoritative — feature
-        # vectors longer than n_features are truncated (matches the
-        # historical _compute_leverage behavior).
-        n = len(info_inv)
+        n = len(x)
         inv_x = [
             sum(info_inv[i][j] * x[j] for j in range(n))
             for i in range(n)
@@ -111,14 +108,8 @@ class LeveragePolicy:
         if m == 0:
             return EvicteeChoice(index=-1, score=float("inf"))
 
-        n = len(info_inv)
         if _NUMPY_AVAILABLE and m > 50:
-            # Slice each feature vector to ``n`` columns to match the
-            # info matrix dimension (silent truncation, as in the legacy
-            # implementation).
-            X = np.array(
-                [fv[:n] for fv in feature_vectors], dtype=np.float64,
-            )
+            X = np.array(feature_vectors, dtype=np.float64)
             inv = np.array(info_inv, dtype=np.float64)
             scores = np.einsum("ij,jk,ik->i", X, inv, X)
             idx = int(np.argmin(scores))
