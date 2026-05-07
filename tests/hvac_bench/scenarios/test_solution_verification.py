@@ -108,7 +108,7 @@ def _combined_bound(report: RichardsonReport) -> float:
 # ── Locked-score regression ───────────────────────────────────────────────
 
 
-@pytest.mark.slow
+@pytest.mark.study
 @pytest.mark.parametrize("scenario_name", sorted(RICHARDSON_SCORES.keys()))
 @pytest.mark.parametrize("controller_name", sorted({
     c for s in RICHARDSON_SCORES.values() for c in s
@@ -166,7 +166,7 @@ def test_solution_verification_within_tolerance(scenario_name, controller_name):
 # ── Shape invariants ──────────────────────────────────────────────────────
 
 
-@pytest.mark.slow
+@pytest.mark.study
 @pytest.mark.parametrize("invariant_name", sorted(CONVERGENCE_INVARIANTS.keys()))
 def test_convergence_shape_invariants(invariant_name):
     """Per-rule asymptotic-regime invariants on specific (scenario × controller × KPI).
@@ -197,7 +197,7 @@ def test_convergence_shape_invariants(invariant_name):
 # ── Sanity check: error bands are non-negative ────────────────────────────
 
 
-@pytest.mark.slow
+@pytest.mark.study
 def test_richardson_reports_have_finite_bands():
     """All RichardsonReport bands are finite and non-negative.
 
