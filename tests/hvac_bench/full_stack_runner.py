@@ -1205,6 +1205,137 @@ def _get_coef_state(pi, model_inputs, true_coefs):
     return current, errors
 
 
+# ── Post-fill identification quality ─────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class PostFillId:
+    """Trajectory-level identification metrics after the buffer fills.
+
+    The intent is to distinguish "lands close once" from "stays close
+    or improves" — a policy that gets β near truth at fill_day and
+    drifts away by end-of-run shouldn't pass.
+
+    Fields:
+      coef:       coefficient name.
+      truth:      lit-grounded true value (for synth scenarios).
+      fill_day:   day of run at which buffer first reached capacity;
+                  None if it never filled (sets all metrics to NaN).
+      bias:       mean(β[fill_day:] − truth) — equilibrium offset.
+      std:        std(β[fill_day:]) — post-fill variability.
+      drift_per_day: OLS slope of β over [fill_day, end] in 1/day —
+                  sign indicates direction of trend.
+      converges:  |bias| < bias_tol AND std < std_tol.
+      improves:   |β_end − truth| < |β_fill − truth| (strictly closer
+                  to truth at the end than at the fill point).
+    """
+
+    coef: str
+    truth: float
+    fill_day: int | None
+    bias: float
+    std: float
+    drift_per_day: float
+    converges: bool
+    improves: bool
+
+
+def summarize_post_fill(
+    result: "FullStackResult",
+    bias_tols: dict[str, float],
+    std_tols: dict[str, float],
+    *,
+    batch_interval_hours: float = 12.0,
+) -> dict[str, PostFillId]:
+    """Reduce ``coef_trajectory`` post-buffer-fill into per-coef metrics.
+
+    Walks ``result.daily_buffer_utilization`` to find the first day
+    that crossed 100% capacity; everything after that day is the
+    "post-fill" trajectory we score against ``bias_tols`` /
+    ``std_tols`` (typically lit-grounded — see Belsley 1980 for
+    multicollinearity bands and the seasonal convergence test for
+    coefficient-truth tolerances already in use).
+
+    Args:
+        result: FullStackResult with populated coef_trajectory and
+                daily_buffer_utilization.
+        bias_tols: per-coef threshold for ``|mean(β_post − truth)|``.
+        std_tols:  per-coef threshold for ``std(β_post)``.
+        batch_interval_hours: cadence of batch snapshots in
+                ``coef_trajectory``; defaults to 12h.  Used to convert
+                trajectory indices to day units when computing drift.
+
+    Returns:
+        Mapping ``coef_name → PostFillId``.  One entry per coefficient
+        with a known truth value in ``result.true_coefs``.
+    """
+    out: dict[str, PostFillId] = {}
+    truths = result.true_coefs
+    if not truths:
+        return out
+
+    fill_day = next(
+        (i for i, u in enumerate(result.daily_buffer_utilization) if u >= 0.999),
+        None,
+    )
+    batches_per_day = 24.0 / batch_interval_hours
+
+    for coef, truth in truths.items():
+        bias_tol = bias_tols.get(coef, float("inf"))
+        std_tol = std_tols.get(coef, float("inf"))
+
+        if fill_day is None or not result.coef_trajectory:
+            out[coef] = PostFillId(
+                coef=coef, truth=truth, fill_day=None,
+                bias=float("nan"), std=float("nan"),
+                drift_per_day=float("nan"),
+                converges=False, improves=False,
+            )
+            continue
+
+        fill_idx = min(int(fill_day * batches_per_day),
+                       len(result.coef_trajectory) - 1)
+        post = result.coef_trajectory[fill_idx:]
+        values = [snap.get(coef, float("nan")) for snap in post]
+        # Skip entries where the snapshot didn't carry this coef.
+        values = [v for v in values if not (isinstance(v, float) and v != v)]
+        if len(values) < 2:
+            out[coef] = PostFillId(
+                coef=coef, truth=truth, fill_day=fill_day,
+                bias=float("nan"), std=float("nan"),
+                drift_per_day=float("nan"),
+                converges=False, improves=False,
+            )
+            continue
+
+        m = sum(values) / len(values)
+        bias = m - truth
+        var = sum((v - m) ** 2 for v in values) / max(1, len(values) - 1)
+        std = math.sqrt(var)
+
+        # OLS slope of β over post-fill segment, in 1/day.
+        n = len(values)
+        idx_days = [j / batches_per_day for j in range(n)]
+        x_mean = sum(idx_days) / n
+        y_mean = m
+        num = sum((idx_days[j] - x_mean) * (values[j] - y_mean) for j in range(n))
+        den = sum((idx_days[j] - x_mean) ** 2 for j in range(n))
+        drift = num / den if den > 1e-12 else 0.0
+
+        beta_at_fill = values[0]
+        beta_at_end = values[-1]
+        improves = abs(beta_at_end - truth) < abs(beta_at_fill - truth)
+
+        converges = abs(bias) < bias_tol and std < std_tol
+
+        out[coef] = PostFillId(
+            coef=coef, truth=truth, fill_day=fill_day,
+            bias=bias, std=std, drift_per_day=drift,
+            converges=converges, improves=improves,
+        )
+    return out
+
+
 def _count_rapid_sp_changes(history: list[dict], tick_min: float,
                             window_min: float = 30.0) -> int:
     """Count setpoint reversals within `window_min` minutes of each other.
