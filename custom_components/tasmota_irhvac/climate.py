@@ -165,6 +165,7 @@ from .const import (
     DEFAULT_PI_KI,
     DEFAULT_PI_KP,
     DEFAULT_PI_TICK_FALLBACK,
+    MIN_PI_KI,
     DEFAULT_PI_SETPOINT_WEIGHT,
     DEFAULT_MIN_TEMP,
     DEFAULT_MQTT_DELAY,
@@ -301,7 +302,9 @@ PLATFORM_SCHEMA = CLIMATE_PLATFORM_SCHEMA.extend(
         ),
         vol.Optional(CONF_PI_ENABLED, default=DEFAULT_PI_ENABLED): cv.boolean,
         vol.Optional(CONF_PI_KP, default=DEFAULT_PI_KP): vol.Coerce(float),
-        vol.Optional(CONF_PI_KI, default=DEFAULT_PI_KI): vol.Coerce(float),
+        vol.Optional(CONF_PI_KI, default=DEFAULT_PI_KI): vol.All(
+            vol.Coerce(float), vol.Range(min=MIN_PI_KI),
+        ),
         vol.Optional(CONF_PI_TICK_FALLBACK, default=DEFAULT_PI_TICK_FALLBACK): vol.Coerce(int),
         vol.Optional(CONF_PI_DEADBAND, default=DEFAULT_PI_DEADBAND): vol.Coerce(float),
         vol.Optional(CONF_OUTDOOR_TEMP_SENSOR): cv.entity_id,
@@ -799,8 +802,10 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             self._controller = pi
             self._pi: PIController | None = pi
             # Coordinator is paired with the controller and used by all
-            # companion sensors (Stage 7+). Created here so the entity
-            # can publish ticks to it from `async_write_ha_state`.
+            # companion sensors (Stage 7+). The controller publishes ticks
+            # via fire_dispatcher() at PI-tick boundaries (decoupled from
+            # async_write_ha_state — climate-entity state writes and PI
+            # tick publication are independent concerns).
             self.coordinator = TasmotaIRHVACCoordinator(
                 hass, pi, name=f"tasmota_irhvac_{cfg.name}",
             )
@@ -950,6 +955,10 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                 self._deferred_tick_unsub = async_call_later(
                     self.hass, 5, _deferred_initial_tick
                 )
+            # Initial publish — drains the pending CONTROLLER_RELOAD payload
+            # staged in PI's async_added_to_hass so bundle readers can locate
+            # the state-reset boundary before the first deferred tick.
+            self._controller.fire_dispatcher()
 
     async def _subscribe_topics(self) -> list[CALLBACK_TYPE]:
         """(Re)Subscribe to topics."""
@@ -1332,11 +1341,6 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         self._controller.async_will_remove_from_hass()
         for unsubscribe in self._unsubscribes:
             unsubscribe()
-
-    def async_write_ha_state(self) -> None:  # type: ignore[misc]
-        """Write state and fire PI dispatcher signal for companion sensors."""
-        super().async_write_ha_state()
-        self._controller.fire_dispatcher()
 
     @property
     def extra_restore_state_data(self) -> ExtraStoredData | None:

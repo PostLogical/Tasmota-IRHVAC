@@ -2524,7 +2524,7 @@ class TestKiChangedIntegralScaling:
 
     def test_ki_changed_scales_integral(self):
         """Integral rescaled when ki differs from ki_at_save."""
-        config = make_pi_config({"pi_ki": 0.002})
+        config = make_pi_config({"pi_ki": 0.10})
         entity = FakePIEntity(config)
         pi = entity._pi
 
@@ -2532,16 +2532,16 @@ class TestKiChangedIntegralScaling:
             pi_integral=10.0,
             desired_temp=22.0,
             hp_setpoint=23.0,
-            ki_at_save=0.001,  # Was half of current ki
+            ki_at_save=0.05,  # Was half of current ki
         )
         pi.restore_extra_stored_data(data)
 
-        # scale = old_ki / new_ki = 0.001 / 0.002 = 0.5
+        # scale = old_ki / new_ki = 0.05 / 0.10 = 0.5
         assert pi._pi_integral == pytest.approx(5.0)
 
     def test_ki_unchanged_no_scaling(self):
         """Integral not rescaled when ki is the same."""
-        config = make_pi_config({"pi_ki": 0.001})
+        config = make_pi_config({"pi_ki": 0.05})
         entity = FakePIEntity(config)
         pi = entity._pi
 
@@ -2549,15 +2549,21 @@ class TestKiChangedIntegralScaling:
             pi_integral=10.0,
             desired_temp=22.0,
             hp_setpoint=23.0,
-            ki_at_save=0.001,
+            ki_at_save=0.05,
         )
         pi.restore_extra_stored_data(data)
 
         assert pi._pi_integral == pytest.approx(10.0)
 
     def test_ki_at_save_zero_no_scaling(self):
-        """Integral not rescaled when ki_at_save is zero (legacy data)."""
-        config = make_pi_config({"pi_ki": 0.001})
+        """Integral not rescaled when ki_at_save is zero (legacy data).
+
+        The ``data.ki_at_save > 0`` guard at the rescale site stays for
+        legacy persisted data: snapshots written before the ki>=MIN_PI_KI
+        invariant landed could have ki_at_save=0, and we treat that as
+        "unknown / don't rescale" rather than dividing by zero.
+        """
+        config = make_pi_config({"pi_ki": 0.05})
         entity = FakePIEntity(config)
         pi = entity._pi
 
@@ -2570,6 +2576,70 @@ class TestKiChangedIntegralScaling:
         pi.restore_extra_stored_data(data)
 
         assert pi._pi_integral == pytest.approx(10.0)
+
+
+class TestKiInvariant:
+    """Tests for the ki>=MIN_PI_KI invariant — schema floor + constructor clamp.
+
+    ki=0 (P-only) breaks anti-windup, FF correction, q-feedback, and
+    bumpless transfer by design.  The supported "no PI" path is
+    pi_enabled=False, not ki=0.  These tests pin both layers of
+    enforcement: schema rejection of new configs, and constructor clamp
+    for legacy entries persisted under older schemas.
+    """
+
+    def test_constructor_clamps_legacy_ki_zero_to_default(self, caplog):
+        """ki=0 from legacy options is clamped to DEFAULT_PI_KI with a warning."""
+        from custom_components.tasmota_irhvac.const import DEFAULT_PI_KI
+        config = make_pi_config({"pi_ki": 0.0})
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        assert pi._pi_ki_config == DEFAULT_PI_KI
+        assert any(
+            "below minimum" in r.message.lower()
+            or "below minimum" in str(r.args).lower()
+            for r in caplog.records
+        )
+
+    def test_constructor_clamps_legacy_ki_below_min_to_default(self, caplog):
+        """ki below MIN_PI_KI is clamped to DEFAULT_PI_KI with a warning."""
+        from custom_components.tasmota_irhvac.const import DEFAULT_PI_KI, MIN_PI_KI
+        below = MIN_PI_KI / 2.0
+        config = make_pi_config({"pi_ki": below})
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        assert pi._pi_ki_config == DEFAULT_PI_KI
+        assert any(
+            "below minimum" in r.message.lower()
+            or "below minimum" in str(r.args).lower()
+            for r in caplog.records
+        )
+
+    def test_constructor_passes_through_ki_at_minimum(self):
+        """ki at exactly MIN_PI_KI passes through unchanged."""
+        from custom_components.tasmota_irhvac.const import MIN_PI_KI
+        config = make_pi_config({"pi_ki": MIN_PI_KI})
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        assert pi._pi_ki_config == MIN_PI_KI
+
+    def test_options_schema_rejects_ki_zero(self):
+        """The options-flow schema rejects ki=0 (NumberSelector min=MIN_PI_KI)."""
+        import voluptuous as vol
+        from custom_components.tasmota_irhvac.config_flow import (
+            OPTIONS_PI_GAINS_SCHEMA,
+        )
+        with pytest.raises(vol.Invalid):
+            OPTIONS_PI_GAINS_SCHEMA({"pi_ki": 0.0})
+
+    def test_platform_schema_rejects_ki_zero(self):
+        """The YAML platform schema rejects ki=0 (Range(min=MIN_PI_KI))."""
+        import voluptuous as vol
+        from custom_components.tasmota_irhvac.climate import PLATFORM_SCHEMA
+        config = make_pi_config({"pi_ki": 0.0})
+        config["platform"] = "tasmota_irhvac"
+        with pytest.raises(vol.Invalid):
+            PLATFORM_SCHEMA(config)
 
 
 # ── Supplemental Integration (bumpless transfer applies hold timer reset) ────
@@ -5043,42 +5113,6 @@ class TestBatchWLSApply:
         assert pi._pi_integral != integral_before, (
             "Integral did not change — bumpless path was a no-op"
         )
-
-    @pytest.mark.asyncio
-    async def test_bumpless_transfer_no_op_when_ki_zero(self):
-        """With Ki=0, integral contributes nothing to output and bumpless
-        adjustment must not divide by zero or alter integral state.
-        """
-        import time as time_mod
-        from custom_components.tasmota_irhvac.pi.batch_learning import Observation
-
-        config = make_pi_config()
-        entity = FakePIEntity(config)
-        pi = entity._pi
-        pi._pi_ki = 0.0
-        entity._attr_hvac_mode = HVACMode.HEAT
-        pi._desired_temp = 21.0
-        pi._inputs.outdoor_temp = -5.0
-        pi._pi_integral = 5.0
-        pi._rls_heat.observation_count = 100
-
-        now = time_mod.monotonic()
-        for i in range(40):
-            pi._observation_buffer_heat.add(Observation(
-                timestamp=now + i * 900,
-                wall_time=1713650000.0 + i * 900,
-                hp_setpoint=22.0,
-                current_c=21.0 + (i % 3) * 0.1,
-                desired_c=21.0,
-                outdoor_temp_c=-5.0 + (i % 3) * 0.5 + float(i % 5 - 2),
-                room_rate=0.001,
-                raw_readings={},
-                clamped=False,
-            ))
-
-        integral_before = pi._pi_integral
-        pi._run_batch_analysis()
-        assert pi._pi_integral == integral_before
 
     @pytest.mark.asyncio
     async def test_bumpless_transfer_no_op_when_no_recommend_update(self):

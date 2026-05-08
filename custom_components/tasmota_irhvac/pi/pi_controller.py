@@ -107,6 +107,7 @@ from ..const import (
     DEFAULT_PI_KI,
     DEFAULT_PI_KP,
     DEFAULT_PI_PLANT_ID_ENABLED,
+    MIN_PI_KI,
     DEFAULT_PI_TICK_FALLBACK,
     DEFAULT_PI_RESPONSE_LAG,
     DEFAULT_PI_SETPOINT_HOLD,
@@ -259,7 +260,20 @@ class PIController:
         # PID controller config
         self._pi_enabled: bool = config.get(CONF_PI_ENABLED, DEFAULT_PI_ENABLED)
         self._pi_kp_config: float = config.get(CONF_PI_KP, DEFAULT_PI_KP)
-        self._pi_ki_config: float = config.get(CONF_PI_KI, DEFAULT_PI_KI)
+        # Schema enforces ki >= MIN_PI_KI for new configs; this clamp catches
+        # legacy entries persisted under older schemas where ki=0 was allowed.
+        # ki=0 (P-only) breaks anti-windup, FF correction, and bumpless transfer
+        # by design; surface the override loudly and fall back to the default.
+        ki_raw = config.get(CONF_PI_KI, DEFAULT_PI_KI)
+        if ki_raw < MIN_PI_KI:
+            _LOGGER.warning(
+                "%spi_ki=%s below minimum %s — using default %s. "
+                "Re-tune in options. (P-only is not supported; toggle "
+                "pi_enabled to disable PI control entirely.)",
+                self._log_prefix, ki_raw, MIN_PI_KI, DEFAULT_PI_KI,
+            )
+            ki_raw = DEFAULT_PI_KI
+        self._pi_ki_config: float = ki_raw
         self._pi_kd: float = config.get(CONF_PI_KD, DEFAULT_PI_KD)
         self._pi_kd_filter_n: float = config.get(CONF_PI_KD_FILTER_N, DEFAULT_PI_KD_FILTER_N)
         self._sensor_filter_tau: float = config.get(
@@ -1204,8 +1218,7 @@ class PIController:
             ff_eff_old: float = 0.0
             desired_c_now = self.desired_temp_celsius
             if (
-                self._pi_ki > 0
-                and self._pi_ff_enabled
+                self._pi_ff_enabled
                 and self._inputs.outdoor_temp is not None
                 and desired_c_now is not None
             ):
@@ -1871,7 +1884,7 @@ class PIController:
                 self._apply_gain_update(gains)
                 # Re-scale integral for the restored ki (overrides the earlier
                 # scaling which used the seed-derived ki, not the restored ki)
-                if old_ki > 0 and old_ki != self._pi_ki:
+                if old_ki != self._pi_ki:
                     rescale = old_ki / self._pi_ki
                     self._pi_integral *= rescale
                     _LOGGER.debug(
@@ -1926,7 +1939,10 @@ class PIController:
             )
         self._auto_perturb.abort("user_setpoint_change")
         self._plant_id.cancel_observation()
-        # Bumpless transfer (Åström & Hägglund): keep output continuous
+        # Bumpless transfer (Åström-Hägglund §3.5): the proportional term in
+        # a 2-DOF PI with setpoint weighting b is kp·(b·r − y); a setpoint
+        # jump Δr causes Δu_P = kp·b·Δr.  Cancel that with ΔI such that
+        # ki·ΔI = −Δu_P  →  ΔI = (kp·b/ki)·(r_old − r_new).
         if old_desired is not None:  # pragma: no branch — old_desired None only on first ever tick before persistence
             old_c = TemperatureConverter.convert(
                 old_desired, e.temperature_unit, UnitOfTemperature.CELSIUS,
@@ -1940,8 +1956,9 @@ class PIController:
                 if self._smith is not None:
                     self._smith._initialized = False
             else:
-                # Adjust integral to keep output continuous
-                self._pi_integral += self._pi_kp * (1 - self._pi_setpoint_weight) * (old_c - new_c)
+                self._pi_integral += (
+                    self._pi_kp * self._pi_setpoint_weight / self._pi_ki
+                ) * (old_c - new_c)
         if e._attr_hvac_mode != HVACMode.OFF:
             e.power_mode = STATE_ON
         return await self._pi_tick()
@@ -1966,7 +1983,7 @@ class PIController:
         old_desired = self._desired_temp
         self._desired_temp = desired_in_entity_unit
         self._hp_setpoint = reported_temp_ir_unit
-        # Bumpless transfer: adjust integral to keep output continuous
+        # Bumpless transfer (P-cancel — see set_temperature for derivation).
         if old_desired != desired_in_entity_unit:
             old_c = TemperatureConverter.convert(
                 old_desired, e.temperature_unit, UnitOfTemperature.CELSIUS,
@@ -1977,7 +1994,9 @@ class PIController:
             if abs(old_c - new_c) > 2.0:
                 self._pi_integral = 0.0
             else:
-                self._pi_integral += self._pi_kp * (1 - self._pi_setpoint_weight) * (old_c - new_c)
+                self._pi_integral += (
+                    self._pi_kp * self._pi_setpoint_weight / self._pi_ki
+                ) * (old_c - new_c)
         return await self._pi_tick()
 
     async def pi_tick(self, now: datetime | None = None) -> bool:
@@ -4247,7 +4266,7 @@ class PIController:
             self._pi_paused = False
         old_ki = self._pi_ki
         self._recompute_imc_gains()
-        if old_ki > 0 and self._pi_ki > 0 and old_ki != self._pi_ki:
+        if old_ki != self._pi_ki:
             self._pi_integral *= old_ki / self._pi_ki
 
     async def async_learning_reset(
@@ -4602,7 +4621,13 @@ class PIController:
         return False
 
     async def _pi_tick(self, now: datetime | None = None) -> bool:
-        """PI + feedforward controller tick. Returns True if send needed."""
+        """PI + feedforward controller tick. Returns True if send needed.
+
+        Publishes exactly one TickOutput at the end of the tick body —
+        the contract is "one PI tick = one publication." Re-entrant
+        calls (already-running guard) and disabled-PI early returns do
+        not publish, since neither produced new state.
+        """
         if not self._pi_enabled:
             return False
         if self._pi_tick_running:
@@ -4617,6 +4642,7 @@ class PIController:
             if self._pi_timer_callback:
                 self._pi_timer_unsub = async_call_later(
                     self._hass, self._pi_tick_fallback, self._pi_timer_callback)
+            self.fire_dispatcher()
             return result
         finally:
             self._pi_tick_running = False
@@ -5300,10 +5326,7 @@ class PIController:
                 # pre-disturbance stable bias with the current FF state.
                 # Without this, preserved I + drifted FF can produce small
                 # steady-state error post-exit until P+I corrects.
-                if (
-                    self._stable_combined_bias_ema is not None
-                    and self._pi_ki != 0
-                ):
+                if self._stable_combined_bias_ema is not None:
                     new_integral = (
                         self._stable_combined_bias_ema - self._ff_offset
                     ) / self._pi_ki
@@ -5448,7 +5471,7 @@ class PIController:
         # produces the clamped output.  Skipped when conditional integration
         # already froze the integrator — the two mechanisms serve the same
         # purpose and the freeze is the tighter constraint.
-        if clamped_setpoint != raw_setpoint and self._pi_ki != 0 and not skip_integration:
+        if clamped_setpoint != raw_setpoint and not skip_integration:
             if raw_setpoint > clamped_setpoint and self._pi_integral > 0:
                 max_i = (clamped_setpoint - desired_c - p_term - self._ff_offset) / self._pi_ki
                 self._pi_integral = min(self._pi_integral, max_i)
@@ -5464,7 +5487,7 @@ class PIController:
         # steady-state correction and q-feedback nudges are negligible
         # against it.  With FF converged the integral is near zero and
         # q-feedback is the dominant force at the quantization boundary.
-        if self._pi_ff_enabled and in_deadband and self._pi_ki != 0:
+        if self._pi_ff_enabled and in_deadband:
             q_error = float(self._hp_setpoint) - clamped_setpoint
             if self._q_feedback_lower < abs(q_error) <= 0.5:
                 self._pi_integral += (q_error / self._pi_ki) * self._q_feedback_gain

@@ -162,6 +162,7 @@ from .const import (
     DEFAULT_PI_KD_FILTER_N,
     DEFAULT_PI_IMC_LAMBDA,
     DEFAULT_PI_KI,
+    MIN_PI_KI,
     DEFAULT_PI_KP,
     DEFAULT_PI_TICK_FALLBACK,
     DEFAULT_PI_RESPONSE_LAG,
@@ -415,7 +416,7 @@ OPTIONS_PI_GAINS_SCHEMA = vol.Schema(
             NumberSelectorConfig(min=0, max=20, step=0.1, mode=NumberSelectorMode.BOX)
         ),
         vol.Optional(CONF_PI_KI, default=DEFAULT_PI_KI): NumberSelector(
-            NumberSelectorConfig(min=0, max=5, step=0.01, mode=NumberSelectorMode.BOX)
+            NumberSelectorConfig(min=MIN_PI_KI, max=5, step=0.01, mode=NumberSelectorMode.BOX)
         ),
         vol.Optional(CONF_PI_KD, default=DEFAULT_PI_KD): NumberSelector(
             NumberSelectorConfig(min=0, max=10, step=0.1, mode=NumberSelectorMode.BOX)

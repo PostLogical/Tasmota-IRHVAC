@@ -41,9 +41,10 @@ async def test_setpoint_change_emits_event(hass, setup_pi_integration):
     pi._desired_temp = 21.0
     pi.fire_dispatcher()
 
-    # User changes setpoint
+    # User changes setpoint — set_temperature runs _pi_tick which fires
+    # the dispatcher itself; no extra fire_dispatcher needed (would just
+    # overwrite last_tick with an empty events tuple).
     await pi.set_temperature(temperature=22.5)
-    pi.fire_dispatcher()
 
     events = _events_of_kind(pi.last_tick, TickEventKind.SETPOINT_CHANGE_USER)
     assert events, "Expected SETPOINT_CHANGE_USER event after set_temperature"
