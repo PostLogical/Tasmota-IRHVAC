@@ -6447,6 +6447,51 @@ class TestBranchCoverageBackfill:
         assert pi.plant.tau_fast.value == 20.0  # seed preserved
         assert pi.plant.tau_slow.value == 60.0
 
+    def test_pi_controller_evaluate_unlocks_skipped_when_no_frozen_set(self):
+        """When no features are frozen, ``_run_batch_analysis`` skips
+        the unlock evaluation entirely (line 1274 False branch)."""
+        from unittest.mock import patch as _patch
+        from custom_components.tasmota_irhvac.pi.batch_learning import BatchResult
+        from tests.test_pi_controller import FakePIEntity
+        entity = FakePIEntity(make_pi_config())
+        pi = entity._pi
+        # Unfreeze every coefficient so frozen_set is empty.
+        for i in range(pi._rls_heat.n):
+            pi._rls_heat.frozen[i] = False
+
+        # Stub a batch result; we just need _run_batch_analysis to reach
+        # the post-WLS branch where frozen_set is checked.
+        result = BatchResult(
+            n_total=40, n_eligible=40,
+            beta_batch=[0.0] * pi._rls_heat.n,
+            beta_current=[0.0] * pi._rls_heat.n,
+            residual_rms=0.01, max_coeff_change_pct=0.0,
+            recommend_update=False,
+            beta_std_err=[0.5] * pi._rls_heat.n,
+        )
+        # Provide enough observations to bypass the early-bail at
+        # _run_batch_analysis() (the inner WLS will be mocked out).
+        from custom_components.tasmota_irhvac.pi.batch_learning import Observation
+        import time as time_mod
+        now = time_mod.monotonic()
+        for i in range(40):
+            pi._observation_buffer_heat.add(Observation(
+                timestamp=now + i * 900, wall_time=1713650000.0 + i * 900,
+                hp_setpoint=22.0, current_c=21.0, desired_c=21.0,
+                outdoor_temp_c=21.0 + (i % 5 - 2),
+                room_rate=0.001, raw_readings={}, clamped=False,
+            ))
+        with _patch(
+            "custom_components.tasmota_irhvac.pi.pi_controller."
+            "weighted_least_squares",
+            return_value=result,
+        ):
+            pi._run_batch_analysis()
+        # No new unlock records should have been recorded since
+        # _evaluate_feature_unlocks was skipped.
+        # (Records would otherwise be a non-empty list.)
+        assert pi._last_unlock_evaluation == []
+
     def test_plant_identifier_apply_greybox_with_zero_current_skips_ratio(self):
         """When current.value == 0, the ratio guard (392) is skipped —
         the new estimate is accepted without a ratio sanity check."""
