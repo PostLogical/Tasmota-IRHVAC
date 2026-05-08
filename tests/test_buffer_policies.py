@@ -110,18 +110,24 @@ class TestLeveragePolicyFindEvictee:
 
 
 class TestBufferPolicyInjection:
-    def test_default_policy_is_leverage(self):
-        """Buffer constructed without a policy uses LeveragePolicy."""
+    def test_default_policy_is_slev(self):
+        """Buffer constructed without a policy uses SlevPolicy(alpha=0.0).
+
+        Default switched from leverage on 2026-05-07 after the leverage-
+        curation β_solar bias finding (`project_bench_solar_fidelity.md`).
+        Uniform-random retention is the bench-validated unbiased baseline;
+        leverage stays available for explicit selection.
+        """
         buf = DiversityAwareBuffer(
             n_features=3, max_size=5,
             feature_order=TEST_FEATURE_ORDER,
             model_inputs=TEST_MODEL_INPUTS,
         )
         r = buf.add(_make_obs(t=0.0))
-        assert r.policy_name == "leverage"
+        assert r.policy_name == "slev"
 
-    def test_explicit_leverage_policy_matches_default(self):
-        """Passing a LeveragePolicy() explicitly is equivalent to default."""
+    def test_explicit_leverage_policy_overrides_default(self):
+        """Passing a LeveragePolicy() explicitly opts out of the slev default."""
         buf_default = DiversityAwareBuffer(
             n_features=3, max_size=5,
             feature_order=TEST_FEATURE_ORDER,
@@ -133,12 +139,10 @@ class TestBufferPolicyInjection:
             model_inputs=TEST_MODEL_INPUTS,
             policy=LeveragePolicy(),
         )
-        # Same admission decision on identical input.
         r_def = buf_default.add(_make_obs(t=0.0, outdoor=5.0))
         r_exp = buf_explicit.add(_make_obs(t=0.0, outdoor=5.0))
-        assert r_def.admitted == r_exp.admitted
-        assert r_def.candidate_score == pytest.approx(r_exp.candidate_score)
-        assert r_def.policy_name == r_exp.policy_name == "leverage"
+        assert r_def.policy_name == "slev"
+        assert r_exp.policy_name == "leverage"
 
 
 # ── EvicteeChoice value type ─────────────────────────────────────────

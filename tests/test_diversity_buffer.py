@@ -16,10 +16,29 @@ import pytest
 
 from custom_components.tasmota_irhvac.pi.batch_learning import (
     BufferAddResult,
-    DiversityAwareBuffer,
+    DiversityAwareBuffer as _DiversityAwareBuffer,
     Observation,
     weighted_least_squares,
 )
+from custom_components.tasmota_irhvac.pi.buffer_policies import LeveragePolicy
+
+
+def DiversityAwareBuffer(*args, **kwargs):
+    """Test-local wrapper that pins ``policy=LeveragePolicy()`` by default.
+
+    The production default switched from leverage to ``SlevPolicy(alpha=0.0)``
+    after the 2026-05-07 finding that leverage curation biases β_solar; the
+    26 diversity scenarios in this file were authored to characterize
+    leverage-policy behavior specifically (rare-regime retention, high-score
+    eviction, coverage maintenance).  Pinning the policy here keeps the test
+    intent intact without sprinkling ``policy=LeveragePolicy()`` across 22
+    construction sites.
+    """
+    kwargs.setdefault("policy", LeveragePolicy())
+    return _DiversityAwareBuffer(*args, **kwargs)
+
+
+DiversityAwareBuffer.from_list = _DiversityAwareBuffer.from_list  # type: ignore[attr-defined]
 
 
 import time as _time

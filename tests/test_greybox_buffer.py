@@ -11,9 +11,28 @@ from custom_components.tasmota_irhvac.pi.batch_learning import (
 )
 from custom_components.tasmota_irhvac.pi.greybox_buffer import (
     DEFAULT_GREYBOX_BUFFER_SIZE,
-    GreyboxBuffer,
+    GreyboxBuffer as _GreyboxBuffer,
     _GREYBOX_N_FEATURES,
 )
+from custom_components.tasmota_irhvac.pi.buffer_policies import LeveragePolicy
+
+
+def GreyboxBuffer(*args, **kwargs):
+    """Test-local wrapper that pins ``policy=LeveragePolicy()`` by default.
+
+    The production default switched to ``SlevPolicy(alpha=0.0)`` on 2026-05-07
+    after the leverage-curation β_solar bias finding.  These tests were
+    authored to characterize leverage-policy retention behavior on the
+    grey-box feature space (full annual range, HP-off observations, equal-
+    score admission contract).  Pinning the policy here keeps the test
+    intent intact without sprinkling ``policy=LeveragePolicy()`` at every
+    construction site.
+    """
+    kwargs.setdefault("policy", LeveragePolicy())
+    return _GreyboxBuffer(*args, **kwargs)
+
+
+GreyboxBuffer.from_list = _GreyboxBuffer.from_list  # type: ignore[attr-defined]
 
 
 def _make_obs(

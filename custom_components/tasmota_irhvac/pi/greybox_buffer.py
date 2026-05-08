@@ -1,8 +1,9 @@
 """Observation buffer for grey-box 1R1C identification.
 
-Subclass of DiversityAwareBuffer with a different feature vector and
-admission policy.  Uses the same D-optimal leverage scoring to retain
-diverse observations across the full operating range.
+Subclass of DiversityAwareBuffer with a different feature vector.
+Inherits the base class's default ``BufferPolicy`` (``SlevPolicy(alpha=0.0)``
+post-2026-05-07); pass ``policy=`` explicitly to opt into leverage or any
+other policy.
 
 Key differences from the WLS DiversityAwareBuffer:
 - Feature vector: [outdoor_delta, hp_offset, solar, room_rate] — the
@@ -23,7 +24,7 @@ from typing import Any, TYPE_CHECKING
 from .batch_learning import BufferAddResult, DiversityAwareBuffer, Observation
 
 if TYPE_CHECKING:
-    pass
+    from .buffer_policies import BufferPolicy
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -62,12 +63,14 @@ class GreyboxBuffer(DiversityAwareBuffer):
         self,
         max_size: int = DEFAULT_GREYBOX_BUFFER_SIZE,
         solar_entity: str | None = None,
+        policy: "BufferPolicy | None" = None,
     ) -> None:
         super().__init__(
             n_features=_GREYBOX_N_FEATURES,
             max_size=max_size,
             feature_order=_GREYBOX_FEATURE_ORDER,
             model_inputs=[],
+            policy=policy,
         )
         self._solar_entity = solar_entity
 
@@ -127,12 +130,13 @@ class GreyboxBuffer(DiversityAwareBuffer):
         data: list[dict[str, Any]],
         max_size: int = DEFAULT_GREYBOX_BUFFER_SIZE,
         solar_entity: str | None = None,
+        policy: "BufferPolicy | None" = None,
     ) -> "GreyboxBuffer":
         """Deserialize from stored dicts, recomputing the info matrix.
 
         Corrupt or unreadable entries are silently skipped.
         """
-        buf = cls(max_size=max_size, solar_entity=solar_entity)
+        buf = cls(max_size=max_size, solar_entity=solar_entity, policy=policy)
         observations: list[Observation] = []
         for d in data:
             try:

@@ -32,7 +32,7 @@ except ImportError:
     _minimize_scalar = None
     _SCIPY_AVAILABLE = False
 
-from .buffer_policies import BufferPolicy, LeveragePolicy
+from .buffer_policies import BufferPolicy, LeveragePolicy, SlevPolicy
 from .model_input_manager import tod_features
 
 _LOGGER = logging.getLogger(__name__)
@@ -568,13 +568,13 @@ class DiversityAwareBuffer:
     """Policy-driven observation buffer for long-term diverse data retention.
 
     Instead of FIFO eviction, retains observations selected by a
-    pluggable ``BufferPolicy``.  The default ``LeveragePolicy`` admits
-    observations that maximize ``det(X^T X)`` (D-optimal sequential design)
-    via the per-observation leverage ``x^T (X^T X + λI)^{-1} x``.  When
-    the buffer is full, a candidate displaces the lowest-scoring incumbent
-    iff the policy says so — naturally retaining rare operating conditions
-    (cold snaps, pellet stove events, door transitions) while shedding
-    redundant steady-state observations.
+    pluggable ``BufferPolicy``.  The default ``SlevPolicy(alpha=0.0)``
+    performs uniform-random retention — the bench-validated unbiased
+    baseline.  Other policies (``LeveragePolicy``, ``DOptimalPolicy``,
+    ``MinEigPolicy``, ``AOptimalPolicy``, ``SlidingWindowPolicy``) can be
+    selected explicitly; they trade unbiasedness for rare-regime retention
+    or recency.  When the buffer is full, a candidate displaces an
+    incumbent iff the policy says so.
 
     Feature vectors are built on the fly from raw readings + current
     model config.  Scoring adapts when config changes — an observation
@@ -611,7 +611,13 @@ class DiversityAwareBuffer:
         self._n_features = n_features
         self._feature_order: list[str] | None = feature_order
         self._model_inputs: list[dict[str, Any]] = model_inputs or []
-        self._policy: BufferPolicy = policy if policy is not None else LeveragePolicy()
+        # Default: SlevPolicy(alpha=0.0) — uniform-random eviction.  Replaces
+        # historical LeveragePolicy default after the 2026-05-07 finding that
+        # deterministic top-N leverage selection biases β_solar by 35–40% on
+        # real-CSV corpora (`project_bench_solar_fidelity.md`).  Uniform random
+        # is the bench-validated unbiased baseline; LeveragePolicy stays
+        # available for explicit selection.
+        self._policy: BufferPolicy = policy if policy is not None else SlevPolicy(alpha=0.0)
         # (X^T X + λI)^{-1} — the inverse information matrix, n×n.
         # Initialized to (1/λ) * I (no data yet).
         n = n_features
