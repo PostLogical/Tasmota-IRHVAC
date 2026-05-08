@@ -404,3 +404,50 @@ def test_writer_reader_roundtrip_preserves_events(tmp_path: Path):
     assert len(recovered.events) == 1
     assert recovered.events[0].kind == TickEventKind.MODE_CHANGE
     assert recovered.events[0].payload.to_mode == "heat"
+
+
+def test_buffer_reset_payload_roundtrip(tmp_path: Path):
+    """BUFFER_RESET payload survives serialization through the event log.
+
+    Each field (buffer, reason, before_count) is reconstructed losslessly
+    so debug-bundle readers can attribute later state discontinuities.
+    """
+    import dataclasses
+
+    from custom_components.tasmota_irhvac.pi.snapshot import BufferResetPayload
+
+    hass = _stub_hass_with_sync_executor()
+    writer = EventLogWriter(hass, tmp_path, "test")
+
+    tick = dataclasses.replace(
+        _basic_tick("living_room"),
+        events=(
+            TickEvent(
+                kind=TickEventKind.BUFFER_RESET,
+                payload=BufferResetPayload(
+                    buffer="wls_heat",
+                    reason="schema_migration",
+                    before_count=731,
+                ),
+            ),
+            TickEvent(
+                kind=TickEventKind.BUFFER_RESET,
+                payload=BufferResetPayload(
+                    buffer="greybox", reason="manual", before_count=None,
+                ),
+            ),
+        ),
+    )
+    writer.append(tick)
+
+    reader = EventLogReader(tmp_path, "test")
+    [recovered] = list(reader.iter_ticks())
+    assert len(recovered.events) == 2
+    p1 = recovered.events[0].payload
+    assert isinstance(p1, BufferResetPayload)
+    assert p1.buffer == "wls_heat"
+    assert p1.reason == "schema_migration"
+    assert p1.before_count == 731
+    p2 = recovered.events[1].payload
+    assert p2.buffer == "greybox"
+    assert p2.before_count is None

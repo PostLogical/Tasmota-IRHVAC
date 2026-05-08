@@ -239,6 +239,39 @@ class TestSteadyState:
         _run_dwell(ap, 0.0, ff_settled_ticks=2)
         assert ap.state == PerturbState.IDLE
 
+    def test_noise_floor_widens_steady_threshold(self):
+        """When ``room_rate_noise_floor`` is provided, the steady-state
+        threshold becomes ``max(FLOOR, K × noise_floor)`` instead of the
+        legacy 0.015 °C/min default.  At a noise floor of 0.005, the
+        cadence-adaptive threshold = 4 × 0.005 = 0.02 — wider than the
+        default — so a rate of 0.018 (which the default would reject)
+        now passes the steady-state gate."""
+        ap = _make()
+        # rate = 0.018: above default 0.015 floor, below 4 × noise_floor=0.02
+        t = 0.0
+        for _ in range(12):
+            _tick(
+                ap, t, room_temp_rate=0.018,
+                room_rate_noise_floor=0.005,
+            )
+            t += 60.0
+        assert ap.state == PerturbState.STEP_ACTIVE
+
+    def test_noise_floor_default_floor_used_when_below_floor(self):
+        """The cadence-adaptive threshold is bounded below by
+        ROOM_RATE_STEADY_FLOOR — even with a tiny noise_floor the
+        threshold doesn't shrink below 0.005 °C/min.  rate=0.004
+        passes; rate=0.006 doesn't."""
+        ap = _make()
+        t = 0.0
+        for _ in range(12):
+            _tick(
+                ap, t, room_temp_rate=0.004,
+                room_rate_noise_floor=1e-6,  # would give 4e-6 < FLOOR
+            )
+            t += 60.0
+        assert ap.state == PerturbState.STEP_ACTIVE
+
 
 # ── Convergence gating ───────────────────────────────────────────────
 

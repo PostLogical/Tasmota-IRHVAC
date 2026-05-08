@@ -949,3 +949,98 @@ class TestAddReturnsDecision:
         assert len(buf._buffer) == 5
         timestamps = [o.timestamp for o in buf._buffer]
         assert 100.0 not in timestamps
+
+
+class TestDiversityBufferDefensivePaths:
+    """Edge cases that previously had only ad-hoc coverage."""
+
+    def test_feature_order_length_mismatch_raises(self):
+        """``feature_order`` length must equal ``n_features`` — otherwise
+        the buffer would silently produce wrong-shape feature vectors and
+        corrupt the leverage scoring.  Validated at construction time."""
+        with pytest.raises(ValueError, match="feature_order length"):
+            DiversityAwareBuffer(
+                n_features=3, max_size=10,
+                feature_order=["intercept", "outdoor_delta"],  # length 2 ≠ 3
+                model_inputs=[],
+            )
+
+    def test_ensure_xtx_matrix_recomputes_when_cleared(self):
+        """``_ensure_xtx_matrix`` recomputes when ``_xtx_matrix`` was
+        externally set to None despite a populated buffer.  Defensive
+        path covering external mutation (e.g. migration code paths)
+        — without it, downstream callers that read ``_xtx_matrix``
+        directly would see stale state.
+        """
+        buf = DiversityAwareBuffer(
+            n_features=3, max_size=20,
+            feature_order=TEST_FEATURE_ORDER[:3],
+            model_inputs=TEST_MODEL_INPUTS[:1],
+        )
+        for i in range(5):
+            buf.add(_make_obs(t=float(i), outdoor_delta=5.0 + i))
+        # Force the deferred-recompute precondition.
+        buf._xtx_matrix = None  # type: ignore[assignment]
+        buf._ensure_xtx_matrix()
+        assert buf._xtx_matrix is not None
+        # Sanity: at least one diagonal entry should be > regularization
+        # (data has been folded back into the matrix).
+        assert buf._xtx_matrix[0][0] > 0.0
+
+    def test_corr_matrix_returns_none_when_xtx_not_recovered(self, monkeypatch):
+        """If recompute_info_matrix can't restore xtx (e.g. a hypothetical
+        future failure mode), ``_corr_matrix_no_intercept`` returns None
+        rather than dereferencing a None matrix."""
+        from custom_components.tasmota_irhvac.pi import batch_learning as bl
+
+        buf = DiversityAwareBuffer(
+            n_features=3, max_size=20,
+            feature_order=TEST_FEATURE_ORDER[:3],
+            model_inputs=TEST_MODEL_INPUTS[:1],
+        )
+        for i in range(5):
+            buf.add(_make_obs(t=float(i), outdoor_delta=5.0 + i))
+        # Force the matrix to None and stub recompute to keep it None.
+        buf._xtx_matrix = None  # type: ignore[assignment]
+        monkeypatch.setattr(buf, "recompute_info_matrix", lambda: None)
+        result = buf._corr_matrix_no_intercept()
+        assert result is None
+
+    def test_d_optimal_admit_path_swaps_evictee_via_buffer(self):
+        """End-to-end DiversityAwareBuffer admit-via-attempt_exchange.
+
+        Three incumbents spanning outdoor_delta but with solar=0 leave
+        the solar axis empty.  A candidate with non-zero solar strictly
+        improves D-optimality, so attempt_exchange returns
+        ``decision.admit=True``.  This exercises the Sherman-Morrison
+        swap branch in DiversityAwareBuffer.add()
+        (downdate(old) → replace → update(new)).
+        """
+        from custom_components.tasmota_irhvac.pi.buffer_policies import DOptimalPolicy
+
+        # Use the file-level _SOLAR_ENTITY id so _make_obs(solar=...) actually
+        # populates the same raw_readings key the buffer's model_input reads.
+        feature_order = ["intercept", "outdoor_delta", "solar"]
+        model_inputs = [{
+            "name": "solar", "entity_id": _SOLAR_ENTITY,
+            "lag_tau": 0.0, "delta_from_room": False,
+        }]
+        buf = DiversityAwareBuffer(
+            n_features=3, max_size=3,
+            feature_order=feature_order, model_inputs=model_inputs,
+            policy=DOptimalPolicy(),
+        )
+        # Three obs spanning outdoor_delta but with solar=0 (rank-2 design).
+        buf.add(_make_obs(t=0.0, outdoor_delta=-10.0, solar=0.0, n_features=3))
+        buf.add(_make_obs(t=1.0, outdoor_delta=5.0, solar=0.0, n_features=3))
+        buf.add(_make_obs(t=2.0, outdoor_delta=20.0, solar=0.0, n_features=3))
+        assert len(buf) == 3
+        # Candidate with non-zero solar fills the previously-unexplored
+        # axis → swap admit fires.
+        r = buf.add(_make_obs(t=100.0, outdoor_delta=5.0, solar=5.0, n_features=3))
+        assert r.admitted is True
+        assert r.policy_name == "d_optimal"
+        assert r.evicted_timestamp is not None
+        assert r.candidate_score is not None
+        assert r.min_incumbent_score is not None
+        assert len(buf) == 3  # capacity preserved

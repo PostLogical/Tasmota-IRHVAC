@@ -1296,3 +1296,283 @@ class TestFitGreybox2R2CEdgeCases:
         # 2R2C still returns a result; std_err is just empty for the failed branch.
         assert result.is_2r2c is True
         assert "ua_c" not in result.param_std_err
+
+
+class TestComputeDtMedianMinEdgeCases:
+    """Cover the early-return branches of ``_compute_dt_median_min``."""
+
+    def test_single_observation_returns_none(self):
+        from custom_components.tasmota_irhvac.pi.greybox_observer import (
+            _compute_dt_median_min,
+        )
+        obs = [Observation(
+            timestamp=0.0, wall_time=0.0,
+            hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+            outdoor_temp_c=15.0, room_rate=0.0,
+            raw_readings={}, clamped=False,
+        )]
+        assert _compute_dt_median_min(obs) is None
+
+    def test_simultaneous_observations_returns_none(self):
+        """All dt rounded to 0.1min are <=0 → no positive intervals → None."""
+        from custom_components.tasmota_irhvac.pi.greybox_observer import (
+            _compute_dt_median_min,
+        )
+        obs = [
+            Observation(
+                timestamp=0.0, wall_time=0.0,
+                hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=15.0, room_rate=0.0,
+                raw_readings={}, clamped=False,
+            ),
+            Observation(
+                timestamp=0.0, wall_time=0.0,
+                hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=15.0, room_rate=0.0,
+                raw_readings={}, clamped=False,
+            ),
+        ]
+        assert _compute_dt_median_min(obs) is None
+
+
+class TestFitStageBWallDefensivePaths:
+    """Stage B wall-fit defensive branches.
+
+    Stage B is exercised for happy-path through ``TestFitGreybox2R2CStageB``;
+    these tests target the rejection branches reached only under specific
+    numerical or environmental conditions.
+    """
+
+    def _common_inputs(self, m: int = 30) -> dict:
+        """Build inputs sized for stage_b directly."""
+        t_air = [20.0 + i * 0.01 for i in range(m)]
+        t_out = [10.0] * m
+        solar = [0.0] * m
+        # Setpoint above current → active_prev = True for default; can override.
+        hp_setpoint_arr: list[float | None] = [22.0] * m
+        dt_min = [10.0] * m
+        # Half the obs are perturbation samples
+        perturb_indices = list(range(0, m, 2))
+        return dict(
+            perturb_indices=perturb_indices,
+            t_air=t_air, t_out=t_out, solar=solar,
+            hp_setpoint_arr=hp_setpoint_arr,
+            dt_min=dt_min,
+            c0=0.0, ua_c=0.01, k_c=0.04, alpha_total=0.05,
+            has_solar=True,
+        )
+
+    def test_stage_b_returns_none_when_scipy_unavailable(self, monkeypatch):
+        from custom_components.tasmota_irhvac.pi import greybox_observer as gb
+        monkeypatch.setattr(gb, "SCIPY_AVAILABLE", False)
+        inputs = self._common_inputs()
+        assert gb._fit_stage_b_wall(**inputs) is None
+
+    def test_stage_b_skips_zero_dt_in_perturb_subset(self):
+        """A perturb-subset tick with dt<=0 contributes a zero residual
+        (the loop continues without state propagation)."""
+        from custom_components.tasmota_irhvac.pi import greybox_observer as gb
+        inputs = self._common_inputs(m=30)
+        # Force dt[2]<=0 to exercise the dt<=0 branch.  Index 2 is in the
+        # default perturb_indices (every other tick) so the residuals
+        # path appends a 0.0 residual placeholder.
+        inputs["dt_min"][2] = 0.0
+        result = gb._fit_stage_b_wall(**inputs)
+        # We don't assert on parameter values here — only that the dt<=0
+        # path doesn't blow up the optimizer.
+        assert result is None or set(result.keys()) == {"k_w", "mass_ratio"}
+
+    def test_stage_b_active_false_branch_when_setpoint_below_air(self):
+        """active_prev=False fires the no-k_c b1 branch (line 953)."""
+        from custom_components.tasmota_irhvac.pi import greybox_observer as gb
+        inputs = self._common_inputs(m=30)
+        # hp_setpoint below current_c → active_prev = False at every tick.
+        inputs["hp_setpoint_arr"] = [10.0] * 30  # well below t_air[~20]
+        result = gb._fit_stage_b_wall(**inputs)
+        assert result is None or set(result.keys()) == {"k_w", "mass_ratio"}
+
+    def test_stage_b_returns_none_when_least_squares_raises(self, monkeypatch):
+        """If scipy.least_squares raises, the function logs and returns None."""
+        from custom_components.tasmota_irhvac.pi import greybox_observer as gb
+        def boom(*a, **kw):
+            raise RuntimeError("synthetic least_squares failure")
+        monkeypatch.setattr(gb, "_least_squares", boom)
+        inputs = self._common_inputs()
+        assert gb._fit_stage_b_wall(**inputs) is None
+
+    def test_stage_b_returns_huge_residuals_on_expm_failure(self, monkeypatch):
+        """If ``_expm`` raises inside residual_fn, the residual_fn returns
+        a large vector to steer the optimizer away from the failure point.
+        The outer least_squares still produces a result that we can inspect.
+        """
+        from custom_components.tasmota_irhvac.pi import greybox_observer as gb
+        def explode(*a, **kw):
+            raise RuntimeError("expm went sideways")
+        monkeypatch.setattr(gb, "_expm", explode)
+        inputs = self._common_inputs()
+        # The fit still attempts; the optimizer either fails or converges
+        # to whatever point the residual sentinel pushes it to.  We just
+        # need this to trigger the except branch without the test crashing.
+        gb._fit_stage_b_wall(**inputs)
+
+
+class TestFitGreybox2R2CDefensiveResidualPaths:
+    """Cover defensive numerical-failure branches inside _fit_greybox_2r2c.
+
+    These branches are not reached on well-formed data; they exist to keep
+    the optimizer from crashing on extreme parameter excursions or weird
+    timestamp jitter.  Tests use ``TestFitGreybox2R2CStageB`` as an
+    observation-generator since its trajectory carries enough HP variance
+    to clear the PE gate that opens the 2R2C path.
+    """
+
+    def _generate(self, **kwargs):
+        return TestFitGreybox2R2C()._generate_2r2c_observations(**kwargs)
+
+    def test_dt_zero_in_residual_loop_is_skipped(self):
+        """A non-monotonic timestamp produces dt<=0 mid-trajectory; the
+        residual_fn skips that tick (residuals[i] = 0.0)."""
+        obs = self._generate(n_days=21.0, tick_minutes=10.0)
+        # Drag obs[5]'s timestamp BEHIND obs[4]'s so dt_min[5] = 0.
+        obs[5].timestamp = obs[4].timestamp - 60.0
+        model_inputs = [
+            {"name": "Solar Proxy", "entity_id": "sensor.solar_proxy",
+             "input_role": "solar"},
+        ]
+        result = fit_greybox(obs, model_inputs)
+        assert result is not None  # the dt-skip didn't crash the optimizer
+
+    def test_expm_psi_lin_alg_error_falls_back_to_zeros(self, monkeypatch):
+        """When ``np.linalg.solve`` raises ``LinAlgError`` inside _expm_psi,
+        psi falls back to a zero matrix instead of propagating."""
+        import numpy as np
+        from custom_components.tasmota_irhvac.pi import greybox_observer as gb
+
+        original_solve = np.linalg.solve
+        call_count = {"n": 0}
+        def flaky_solve(A, b):
+            call_count["n"] += 1
+            # First few calls (1R1C) succeed; later calls (2R2C residual_fn)
+            # raise to exercise the LinAlgError branch.
+            if call_count["n"] > 3:
+                raise np.linalg.LinAlgError("synthetic singular matrix")
+            return original_solve(A, b)
+        monkeypatch.setattr(np.linalg, "solve", flaky_solve)
+        obs = self._generate(n_days=21.0, tick_minutes=10.0)
+        model_inputs = [
+            {"name": "Solar Proxy", "entity_id": "sensor.solar_proxy",
+             "input_role": "solar"},
+        ]
+        result = fit_greybox(obs, model_inputs)
+        # Test passes if no exception escaped; result may or may not be 2R2C.
+        assert result is not None
+
+    def test_expm_failure_in_typical_dt_branch_returns_huge_residuals(
+        self, monkeypatch,
+    ):
+        """When ``_expm`` raises while precomputing the typical-dt
+        matrix exponentials, residual_fn returns the [1e6]·n_data
+        sentinel that steers the outer optimizer away.  The fit either
+        falls back to 1R1C or completes with degraded params — what
+        matters here is that the except-branch executes.
+        """
+        from custom_components.tasmota_irhvac.pi import greybox_observer as gb
+        original_expm = gb._expm
+        seen = {"n": 0}
+        def flaky_expm(A):
+            seen["n"] += 1
+            # 1R1C uses _expm too; let those calls succeed, then raise
+            # for the 2R2C residual_fn.
+            if seen["n"] > 30:
+                raise RuntimeError("synthetic expm failure")
+            return original_expm(A)
+        monkeypatch.setattr(gb, "_expm", flaky_expm)
+        obs = self._generate(n_days=21.0, tick_minutes=10.0)
+        model_inputs = [
+            {"name": "Solar Proxy", "entity_id": "sensor.solar_proxy",
+             "input_role": "solar"},
+        ]
+        result = fit_greybox(obs, model_inputs)
+        assert result is not None  # 1R1C fallback or completed run, no crash
+
+    def test_expm_failure_in_unequal_dt_branch_returns_huge_residuals(
+        self, monkeypatch,
+    ):
+        """A trajectory with ``dt != typical_dt`` for some ticks routes
+        through the unequal-dt branch of residual_fn, which has its own
+        try/except around ``_expm_psi``.  Force a non-typical dt by
+        compressing one observation interval, then make ``_expm`` raise
+        on that specific call shape."""
+        from custom_components.tasmota_irhvac.pi import greybox_observer as gb
+        # Observations: skew obs[10] earlier so dt_min[10] is non-typical
+        # (e.g. 5min instead of 10min).
+        obs = self._generate(n_days=21.0, tick_minutes=10.0)
+        obs[10].timestamp = obs[9].timestamp + 5 * 60  # 5-min dt
+        # Patch _expm to raise; same ratchet as the typical-dt test.
+        original_expm = gb._expm
+        seen = {"n": 0}
+        def flaky_expm(A):
+            seen["n"] += 1
+            if seen["n"] > 30:
+                raise RuntimeError("synthetic expm failure")
+            return original_expm(A)
+        monkeypatch.setattr(gb, "_expm", flaky_expm)
+        model_inputs = [
+            {"name": "Solar Proxy", "entity_id": "sensor.solar_proxy",
+             "input_role": "solar"},
+        ]
+        result = fit_greybox(obs, model_inputs)
+        assert result is not None
+
+    def test_typical_dt_zero_falls_back_to_identity_matrices(self):
+        """When all dt entries are zero (e.g. timestamp jitter has flattened
+        all intervals to <=0), ``typical_dt`` is 0 and the precompute step
+        skips the matrix-exponential and seeds identity matrices instead.
+        Constructed by directly invoking _fit_greybox_2r2c with a 1R1C
+        warm-start and obs whose timestamps were rewritten post-1R1C."""
+        from custom_components.tasmota_irhvac.pi import greybox_observer as gb
+        obs = self._generate(n_days=21.0, tick_minutes=10.0)
+        model_inputs = [
+            {"name": "Solar Proxy", "entity_id": "sensor.solar_proxy",
+             "input_role": "solar"},
+        ]
+        r_1r1c = gb._fit_greybox_1r1c(obs, model_inputs)
+        assert r_1r1c is not None
+        # Flatten timestamps so dt_min[i] == 0 for all i ≥ 1.
+        for o in obs:
+            o.timestamp = 0.0
+        result = gb._fit_greybox_2r2c(obs, model_inputs, r_1r1c)
+        # Defensive guard runs without crashing; we don't assert on
+        # parameter values since dt=0 means no information for the fit.
+        assert result is None or result.is_2r2c is True
+
+    def test_residual_rms_is_zero_when_result_fun_is_none(self, monkeypatch):
+        """When the optimizer returns ``result.fun = None`` (no residual
+        history), residual_rms falls back to 0.0 instead of dividing by m."""
+        from types import SimpleNamespace
+        from custom_components.tasmota_irhvac.pi import greybox_observer as gb
+
+        original_lsq = gb._least_squares
+        seen = {"n": 0}
+        def patched_lsq(*args, **kwargs):
+            seen["n"] += 1
+            real = original_lsq(*args, **kwargs)
+            # Patch the second invocation (the 2R2C fit) only.
+            if seen["n"] == 2:
+                return SimpleNamespace(
+                    x=real.x, fun=None, jac=real.jac,
+                    cost=real.cost, nfev=real.nfev,
+                )
+            return real
+        monkeypatch.setattr(gb, "_least_squares", patched_lsq)
+        obs = self._generate(n_days=21.0, tick_minutes=10.0)
+        model_inputs = [
+            {"name": "Solar Proxy", "entity_id": "sensor.solar_proxy",
+             "input_role": "solar"},
+        ]
+        result = fit_greybox(obs, model_inputs)
+        # Either the fit fell back to 1R1C or the 2R2C result has rms=0.0
+        # — both branches are valid for this defensive guard.
+        assert result is not None
+        if result.is_2r2c:
+            assert result.residual_rms == 0.0

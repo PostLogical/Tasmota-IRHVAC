@@ -785,3 +785,147 @@ class TestSlevBufferIntegration:
         r_s = buf_slev.add(_make_obs(t=100.0, outdoor=30.0, solar=0.0))
         r_l = buf_lev.add(_make_obs(t=100.0, outdoor=30.0, solar=0.0))
         assert r_s.admitted == r_l.admitted
+
+
+# ── Coverage backfill ────────────────────────────────────────────────
+#
+# The remaining gaps in buffer_policies coverage are paths gated on
+# either ``not _NUMPY_AVAILABLE`` (pure-Python fallbacks) or
+# ``_NUMPY_AVAILABLE and m > 50`` (numpy fast-paths used at production
+# buffer scale, but not by the small-buffer fixtures elsewhere in this
+# file).  These tests close those gaps without depending on a 50+
+# observation buffer for every case.
+
+
+class TestPolicyPurePythonFallbacks:
+    """Cover the ``not _NUMPY_AVAILABLE`` branches in each policy.
+
+    Patches the module-level ``_NUMPY_AVAILABLE`` flag so the same code
+    can be exercised on a system where numpy is installed (CI / dev).
+    The pure-Python paths are the deployment fallback for HA installs
+    that don't ship numpy with the integration's runtime — they need
+    to stay correct.
+    """
+
+    def test_d_optimal_attempt_exchange_pure_python_path(self, monkeypatch):
+        from custom_components.tasmota_irhvac.pi import buffer_policies as bp
+        monkeypatch.setattr(bp, "_NUMPY_AVAILABLE", False)
+
+        policy = DOptimalPolicy()
+        info_inv = [[1.0 / 3.0, 0.0], [0.0, 1.0]]
+        feature_vectors = [
+            [1.0, 0.0],
+            [1.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+        ]
+        candidate = [0.0, 1.0]
+        decision = policy.attempt_exchange(
+            candidate, observations=[],
+            feature_vectors=feature_vectors,
+            info_inv=info_inv, xtx=None,
+        )
+        assert decision is not None
+        # Pure-Python branch should produce the same ratio shape as numpy:
+        # a [1,0] incumbent gets evicted, candidate score == 1.0.
+        assert decision.evictee_index in (0, 1, 2)
+        assert decision.candidate_score == pytest.approx(1.0, rel=1e-9)
+
+    def test_d_optimal_attempt_exchange_empty_buffer_returns_none(self):
+        """Empty-buffer guard in ``attempt_exchange``: returns None and
+        defers to the buffer's unconditional admission path."""
+        policy = DOptimalPolicy()
+        decision = policy.attempt_exchange(
+            candidate=[1.0, 0.0],
+            observations=[],
+            feature_vectors=[],
+            info_inv=[[1.0, 0.0], [0.0, 1.0]],
+            xtx=None,
+        )
+        assert decision is None
+
+    def test_a_optimal_find_evictee_numpy_path_m_over_50(self):
+        """A-optimal: with m > 50 the numpy einsum path runs.  Build a
+        56-row buffer of well-spread feature vectors and verify the
+        cheapest-to-remove incumbent is selected with finite cost.
+        """
+        policy = AOptimalPolicy()
+        # Build 56 well-spread 2D vectors (dominantly varied along axis 0).
+        feature_vectors = [[float(i), 1.0 + (i % 3) * 0.1] for i in range(56)]
+        # Approximate A^-1 = (X^T X + λI)^-1; we don't need exact, just non-degenerate.
+        # Build XtX → invert via a small numpy assist; pure regularization.
+        import numpy as np
+        X = np.asarray(feature_vectors)
+        XtX = X.T @ X + 1e-3 * np.eye(2)
+        Ainv = np.linalg.inv(XtX).tolist()
+
+        choice = policy.find_evictee(
+            observations=[], feature_vectors=feature_vectors,
+            info_inv=Ainv, xtx=None,
+        )
+        assert 0 <= choice.index < 56
+        assert choice.score < float("inf")
+
+    def test_min_eig_min_eig_pure_python_fallback(self, monkeypatch):
+        from custom_components.tasmota_irhvac.pi import buffer_policies as bp
+        monkeypatch.setattr(bp, "_NUMPY_AVAILABLE", False)
+
+        policy = MinEigPolicy()
+        # Symmetric PSD matrix; pure-Python fallback delegates to
+        # DiversityAwareBuffer._eigenvalues_symmetric, which we let run.
+        M = [[2.0, 0.5], [0.5, 1.5]]
+        eig = policy._min_eig(M)
+        assert eig > 0  # smallest eigenvalue of a PD matrix is positive
+
+    def test_min_eig_min_eig_returns_nan_when_eigensolver_fails(
+        self, monkeypatch,
+    ):
+        """When ``_eigenvalues_symmetric`` returns None, ``_min_eig``
+        propagates NaN — defensive path covering the n×n eigendecomp
+        failure mode in pure-Python deployments."""
+        import math
+        from custom_components.tasmota_irhvac.pi import buffer_policies as bp
+        from custom_components.tasmota_irhvac.pi import batch_learning as bl
+        monkeypatch.setattr(bp, "_NUMPY_AVAILABLE", False)
+        monkeypatch.setattr(
+            bl.DiversityAwareBuffer, "_eigenvalues_symmetric",
+            staticmethod(lambda M, n: None),
+        )
+        result = MinEigPolicy()._min_eig([[1.0, 0.0], [0.0, 1.0]])
+        assert math.isnan(result)
+
+    def test_min_eig_find_evictee_pure_python_path(self, monkeypatch):
+        from custom_components.tasmota_irhvac.pi import buffer_policies as bp
+        monkeypatch.setattr(bp, "_NUMPY_AVAILABLE", False)
+
+        policy = MinEigPolicy()
+        feature_vectors = [
+            [1.0, 0.0],
+            [1.0, 0.0],  # redundant — cheapest to remove
+            [0.0, 1.0],
+        ]
+        # Build XtX = sum x_i x_iT.
+        xtx = [[2.0, 0.0], [0.0, 1.0]]
+        choice = policy.find_evictee(
+            observations=[], feature_vectors=feature_vectors,
+            info_inv=[], xtx=xtx,
+        )
+        # Removing one of the redundant [1,0]s costs the least.
+        assert choice.index in (0, 1)
+        assert choice.score < float("inf")
+
+    def test_slev_find_evictee_numpy_path_m_over_50(self):
+        """SLEV find_evictee: m > 50 triggers the numpy fast-path."""
+        policy = SlevPolicy(alpha=0.5, seed=123)
+        # 60-element buffer; non-trivial leverage spread.
+        feature_vectors = [[1.0, float(i % 7)] for i in range(60)]
+        import numpy as np
+        X = np.asarray(feature_vectors)
+        XtX = X.T @ X + 1e-3 * np.eye(2)
+        Ainv = np.linalg.inv(XtX).tolist()
+        choice = policy.find_evictee(
+            observations=[], feature_vectors=feature_vectors,
+            info_inv=Ainv, xtx=None,
+        )
+        assert 0 <= choice.index < 60
+        assert choice.score >= 0.0
