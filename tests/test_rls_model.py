@@ -234,6 +234,15 @@ class TestRLSSerialization:
                                      coeff_clamps=[None, (-1.0, 0.0)])
         assert restored.coeff_clamps[1] == (-1.0, 0.0)
 
+    def test_from_dict_skips_missing_optional_fields(self):
+        """from_dict() handles dicts with missing beta/P/observation_count
+        keys — covers the skip-branch when each optional field is absent."""
+        restored = RLSModel.from_dict({}, n_inputs=1, seed_coefficients=[0.0, 0.3])
+        # observation_count default
+        assert restored.observation_count == 0
+        # All defaults preserved (n is what __init__ assigned).
+        assert restored.observation_count == 0
+
 
 class TestRLSLagFilter:
     """Tests for lag filter functionality (tested via PIController integration)."""

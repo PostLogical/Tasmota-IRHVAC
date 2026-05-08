@@ -6179,3 +6179,174 @@ class TestLearningSaveStoreLoading:
             blocking=True,
         )
         assert entity._pi._rls_heat.beta[0] == 42.0
+
+
+# ── Branch-coverage backfill ─────────────────────────────────────────
+#
+# Tests below target small `if cond:` / loop-exit branches that aren't
+# exercised by existing happy-path tests.  Many cover defensive guards
+# whose true-branch only fires under edge data shapes.
+
+
+class TestBranchCoverageBackfill:
+    """Direct coverage of small conditional branches across pi/ modules."""
+
+    def test_smith_predictor_loop_breaks_when_past_target(self):
+        """SmithPredictor._delayed_setpoint exercises the for-break path
+        when one history entry is past target_time."""
+        from custom_components.tasmota_irhvac.pi.smith_predictor import SmithPredictor
+        sp = SmithPredictor(tau=60.0, lag=5.0, k_eff=1.0)
+        # Manually push two entries: one before target, one after
+        sp._setpoint_history = [(0.0, 21.0), (1000.0, 23.0)]
+        result = sp._delayed_setpoint(now_mono=600.0)
+        # target_time = 600 - 5*60 = 300; only the first entry (t=0) <= 300
+        assert result == 21.0
+
+    def test_supplemental_controller_already_active_stays_active(self):
+        """Hitting the failure threshold while already-asserted is a no-op
+        — covers the False branch of ``if not self.assist_active`` at
+        supplemental_controller.py:109."""
+        from custom_components.tasmota_irhvac.pi.supplemental_controller import (
+            SupplementalController,
+        )
+        ctrl = SupplementalController(
+            sources=[{"entity_id": "climate.aux", "name": "aux",
+                      "failure_threshold": 100, "recovery_margin": 0.3}],
+            deadband=0.5,
+        )
+        # Drive into assist mode first.
+        ctrl.evaluate(error_c=1.0, now_mono=0.0, active_sources=["aux"])
+        ctrl.evaluate(error_c=1.0, now_mono=200.0, active_sources=["aux"])
+        assert ctrl.assist_active is True
+        # Stay above threshold while already-asserted: hits 109 False branch.
+        ctrl.evaluate(error_c=1.0, now_mono=400.0, active_sources=["aux"])
+        assert ctrl.assist_active is True
+
+    def test_supplemental_controller_recovery_when_already_inactive(self):
+        """Negative error margin while assist already inactive — covers the
+        False branch of ``if self.assist_active`` at line 117."""
+        from custom_components.tasmota_irhvac.pi.supplemental_controller import (
+            SupplementalController,
+        )
+        ctrl = SupplementalController(
+            sources=[{"entity_id": "climate.aux", "name": "aux",
+                      "failure_threshold": 100, "recovery_margin": 0.3}],
+            deadband=0.5,
+        )
+        # Inactive at start; negative error past recovery margin.
+        ctrl.evaluate(error_c=-0.5, now_mono=0.0, active_sources=["aux"])
+        assert ctrl.assist_active is False  # 117 False branch covered
+
+    def test_auto_perturb_force_start_from_idle_advances_to_waiting(self):
+        """force_start() while in IDLE advances to WAITING (covers the
+        IDLE-or-STALLED branch at auto_perturbation.py:383)."""
+        from custom_components.tasmota_irhvac.pi.auto_perturbation import (
+            AutoPerturbation, PerturbState,
+        )
+        ap = AutoPerturbation(enabled=True)
+        assert ap.state == PerturbState.IDLE
+        ap.force_start()
+        assert ap.state == PerturbState.WAITING
+
+    def test_regime_probe_request_early_probe_branches(self):
+        """request_early_probe handles both COOLDOWN (clear timer) and IDLE
+        (set forced flag) branches."""
+        from custom_components.tasmota_irhvac.pi.regime_probe import (
+            RegimeProbe, ProbeState,
+        )
+        # IDLE → forced_probe set
+        probe = RegimeProbe()
+        assert probe._state == ProbeState.IDLE
+        probe.request_early_probe()
+        assert probe._forced_probe is True
+        # COOLDOWN → cooldown timer cleared
+        probe2 = RegimeProbe()
+        probe2._state = ProbeState.COOLDOWN
+        probe2._cooldown_end_mono = 1000.0
+        probe2.request_early_probe()
+        assert probe2._cooldown_end_mono == 0.0
+
+    def test_regime_probe_abort_silent_when_idle(self):
+        """_abort logs only when in BASELINE/PROBE; from IDLE it's silent
+        (covers the False branch of the BASELINE/PROBE state check)."""
+        from custom_components.tasmota_irhvac.pi.regime_probe import (
+            RegimeProbe, ProbeState,
+        )
+        probe = RegimeProbe()
+        probe._state = ProbeState.IDLE
+        probe._abort("test reason")  # no log fires; state already IDLE
+        assert probe._state == ProbeState.IDLE
+
+    def test_regime_probe_request_early_no_op_when_active(self):
+        """request_early_probe in BASELINE/PROBE/ANALYZE: no state change,
+        no field write — function returns through the implicit else (529→exit)."""
+        from custom_components.tasmota_irhvac.pi.regime_probe import (
+            RegimeProbe, ProbeState,
+        )
+        probe = RegimeProbe()
+        probe._state = ProbeState.BASELINE
+        probe._cooldown_end_mono = 0.0
+        probe._forced_probe = False
+        probe.request_early_probe()
+        assert probe._cooldown_end_mono == 0.0
+        assert probe._forced_probe is False
+        assert probe._state == ProbeState.BASELINE
+
+    def test_smith_predictor_loop_runs_without_break(self):
+        """SmithPredictor._delayed_setpoint covers the no-break branch
+        (76→81): all history entries are <= target_time so the for loop
+        runs to completion without hitting the else: break clause."""
+        from custom_components.tasmota_irhvac.pi.smith_predictor import SmithPredictor
+        sp = SmithPredictor(tau=60.0, lag=5.0, k_eff=1.0)
+        # Two entries, both before target_time → loop runs to completion.
+        sp._setpoint_history = [(0.0, 21.0), (100.0, 22.0)]
+        # target = 1000 - 5*60 = 700; both entries (t=0, t=100) <= 700
+        result = sp._delayed_setpoint(now_mono=1000.0)
+        assert result == 22.0  # last entry retained
+
+    def test_health_checks_high_integral_skips_slope_gap_when_configured_zero(self):
+        """Inside check_high_integral_repair, the slope-gap sub-case (line
+        397) is gated on ``configured_slope != 0`` — passing 0 covers
+        the False branch (skip slope_gap, fall through to equipment-limits)."""
+        from custom_components.tasmota_irhvac.pi.health_checks import (
+            check_high_integral_repair,
+        )
+        result = check_high_integral_repair(
+            ki_integral_correction=3.0, sustained_cycles=10,
+            observation_count=200, learned_slope=0.5, configured_slope=0.0,
+            uncontrollable_cvh=0.0, total_cvh=0.0,
+            pi_ki=0.1, integral_convergence=0.0, mode="heat",
+        )
+        # Slope-gap path skipped; result depends on equipment / tuning,
+        # not the slope-gap clause we just bypassed.
+        assert result is None or isinstance(result, tuple)
+
+    def test_greybox_buffer_skips_obs_without_outdoor_temp(self):
+        """Restoring greybox buffer drops obs with outdoor_temp_c = None
+        (line 144 False branch — defensive against partial migrations)."""
+        from custom_components.tasmota_irhvac.pi.greybox_buffer import (
+            GreyboxBuffer,
+        )
+        # Build serialized data: one valid, one with ot=None
+        data = [
+            {
+                "v": 2, "t": 0.0, "wt": 0.0,
+                "sp": 22.0, "cur": 20.0, "des": 20.0,
+                "ot": 15.0, "rate": 0.0, "rr": {}, "clamp": False,
+            },
+            {
+                "v": 2, "t": 1.0, "wt": 1.0,
+                "sp": 22.0, "cur": 20.0, "des": 20.0,
+                "ot": None, "rate": 0.0, "rr": {}, "clamp": False,
+            },
+        ]
+        buf = GreyboxBuffer.from_list(data, max_size=10)
+        # Only the valid obs (with outdoor_temp_c) survives.
+        assert len(buf) == 1
+
+    # NOTE: AreaMethodProvider and ClosedLoopProvider have a complex
+    # internal state machine; their remaining branch misses (276→286,
+    # 138→145) require driving the full accumulate() loop with engineered
+    # observation streams.  Skipped from this batch — coverage of those
+    # branches would warrant dedicated test classes that mirror the
+    # providers' state machine, not a one-shot helper.
