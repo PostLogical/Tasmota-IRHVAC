@@ -15,6 +15,7 @@ from custom_components.tasmota_irhvac.pi.buffer_policies import (
     ExchangeChoice,
     LeveragePolicy,
     MinEigPolicy,
+    SlevPolicy,
     SlidingWindowPolicy,
 )
 
@@ -660,3 +661,123 @@ class TestSlidingWindowBufferIntegration:
         r = buf.add(_make_obs(t=3.0, outdoor=5.0, solar=0.0))
         assert r.admitted is True
         assert r.evicted_timestamp == 0.0
+
+
+# ── SlevPolicy: probabilistic admission contract ─────────────────────
+
+
+class TestSlevPolicyContract:
+    """Unit-level contract: SLEV scoring degenerates to LeveragePolicy at
+    α=1, and to uniform-noise scoring at α=0.
+    """
+
+    def test_alpha_must_be_in_unit_interval(self):
+        with pytest.raises(ValueError):
+            SlevPolicy(alpha=-0.1)
+        with pytest.raises(ValueError):
+            SlevPolicy(alpha=1.5)
+
+    def test_alpha_one_score_equals_leverage(self):
+        """At α=1, score_candidate matches LeveragePolicy score."""
+        slev = SlevPolicy(alpha=1.0, seed=42)
+        lev = LeveragePolicy()
+        info_inv = [[2.0, 0.5], [0.5, 3.0]]
+        x = [1.0, 2.0]
+        s_slev = slev.score_candidate(x, info_inv, xtx=None, n_buffered=0)
+        s_lev = lev.score_candidate(x, info_inv, xtx=None, n_buffered=0)
+        assert s_slev == pytest.approx(s_lev, rel=1e-9)
+
+    def test_alpha_zero_score_uses_only_noise(self):
+        """At α=0, the score is purely noise (independent of leverage)."""
+        slev = SlevPolicy(alpha=0.0, seed=42)
+        info_inv = [[2.0, 0.5], [0.5, 3.0]]
+        # Two different x vectors, same call with different RNG draws
+        s1 = slev.score_candidate([1.0, 2.0], info_inv, xtx=None, n_buffered=0)
+        s2 = slev.score_candidate([5.0, 7.0], info_inv, xtx=None, n_buffered=0)
+        # Both depend only on noise; they should differ (different noise draws)
+        # but neither has any leverage component.  The exact values depend on
+        # RNG; we just verify they're non-negative and not equal.
+        assert s1 >= 0
+        assert s2 >= 0
+        assert s1 != s2  # different RNG draws
+
+    def test_should_admit_strict_inequality(self):
+        slev = SlevPolicy(alpha=0.5, seed=42)
+        assert slev.should_admit(0.5, 0.4) is True
+        assert slev.should_admit(0.5, 0.5) is False
+        assert slev.should_admit(0.4, 0.5) is False
+
+    def test_find_evictee_empty_buffer_returns_sentinel(self):
+        slev = SlevPolicy(alpha=0.5, seed=42)
+        choice = slev.find_evictee(
+            observations=[], feature_vectors=[],
+            info_inv=[[1.0, 0.0], [0.0, 1.0]], xtx=None,
+        )
+        assert choice.index == -1
+
+
+class TestSlevBufferIntegration:
+    def _buf(self, max_size: int, alpha: float, seed: int = 42) -> DiversityAwareBuffer:
+        return DiversityAwareBuffer(
+            n_features=3, max_size=max_size,
+            feature_order=TEST_FEATURE_ORDER,
+            model_inputs=TEST_MODEL_INPUTS,
+            policy=SlevPolicy(alpha=alpha, seed=seed),
+        )
+
+    def test_buffer_reports_slev_policy_name(self):
+        buf = self._buf(max_size=5, alpha=0.5)
+        r = buf.add(_make_obs(t=0.0, outdoor=5.0))
+        assert r.policy_name == "slev"
+
+    def test_alpha_zero_eviction_is_random(self):
+        """At α=0, eviction is determined by ephemeral noise — admit
+        decisions should be approximately uniform over candidates regardless
+        of leverage.
+
+        Smoke test: with α=0 and a full buffer, repeated identical-leverage
+        admissions should sometimes succeed (random eviction picks SOME
+        incumbent each time).
+        """
+        buf = self._buf(max_size=5, alpha=0.0)
+        for i in range(5):
+            buf.add(_make_obs(t=float(i), outdoor=5.0, solar=0.0))
+        # Now at capacity; try to admit duplicates and count admissions.
+        n_admitted = 0
+        for i in range(20):
+            r = buf.add(_make_obs(t=10.0 + i, outdoor=5.0, solar=0.0))
+            if r.admitted:
+                n_admitted += 1
+        # With α=0 (random), some fraction should be admitted (>0% probability).
+        # Far weaker than LeveragePolicy which would reject all duplicates
+        # since their leverage equals incumbents'.
+        assert n_admitted > 0, (
+            f"Expected some random-admit events at α=0; got {n_admitted}/20"
+        )
+
+    def test_alpha_one_behaves_like_leverage_policy(self):
+        """At α=1, SlevPolicy admission decisions match LeveragePolicy
+        on the same input sequence (for the score_candidate path).
+        """
+        # Note: find_evictee at α=1 still uses noise=0 contribution, so should
+        # match LeveragePolicy exactly.
+        buf_slev = DiversityAwareBuffer(
+            n_features=3, max_size=4,
+            feature_order=TEST_FEATURE_ORDER,
+            model_inputs=TEST_MODEL_INPUTS,
+            policy=SlevPolicy(alpha=1.0, seed=42),
+        )
+        buf_lev = DiversityAwareBuffer(
+            n_features=3, max_size=4,
+            feature_order=TEST_FEATURE_ORDER,
+            model_inputs=TEST_MODEL_INPUTS,
+            policy=LeveragePolicy(),
+        )
+        # Fill both buffers identically.
+        for i in range(4):
+            buf_slev.add(_make_obs(t=float(i), outdoor=5.0 + i, solar=0.0))
+            buf_lev.add(_make_obs(t=float(i), outdoor=5.0 + i, solar=0.0))
+        # Try a high-leverage candidate; both should accept.
+        r_s = buf_slev.add(_make_obs(t=100.0, outdoor=30.0, solar=0.0))
+        r_l = buf_lev.add(_make_obs(t=100.0, outdoor=30.0, solar=0.0))
+        assert r_s.admitted == r_l.admitted
