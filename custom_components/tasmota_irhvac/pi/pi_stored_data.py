@@ -79,6 +79,21 @@ class PIExtraStoredData(ExtraStoredData):
     # async_added_to_hass to compute prior_run_age_s for the CONTROLLER_RELOAD
     # event. Empty string on legacy stored data (pre-introduction).
     saved_at_wallclock: str = ""
+    # CUSUM anomaly-detection state.  Persisted so a controller restart
+    # doesn't erase accumulated drift evidence (cusum_pos / cusum_neg
+    # would otherwise restart from 0, masking on-going anomalies for the
+    # MIN_RESIDUALS_FOR_DETECTION ramp-up) or the cooldown timer (otherwise
+    # a re-init within the 30-min cooldown re-emits the same anomaly).
+    # ``cusum_cooldown_until_epoch`` is the absolute wall-clock epoch the
+    # cooldown ends.  0.0 means no cooldown active.  Float (not ISO) keeps
+    # save/restore symmetric for the naive datetimes used by the detector.
+    cusum_pos: float = 0.0
+    cusum_neg: float = 0.0
+    cusum_cooldown_until_epoch: float = 0.0
+    # Rolling residual window for MAD scale estimate.  Persisted so
+    # MIN_RESIDUALS_FOR_DETECTION ramp-up doesn't blank detection for
+    # 10 ticks after every restart.
+    cusum_residual_history: list[float] = dataclasses.field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize to JSON-compatible dict."""
@@ -134,6 +149,10 @@ class PIExtraStoredData(ExtraStoredData):
             "debug_capture_full_p": self.debug_capture_full_p,
             "pi_event_log_enabled": self.pi_event_log_enabled,
             "saved_at_wallclock": self.saved_at_wallclock,
+            "cusum_pos": self.cusum_pos,
+            "cusum_neg": self.cusum_neg,
+            "cusum_cooldown_until_epoch": self.cusum_cooldown_until_epoch,
+            "cusum_residual_history": self.cusum_residual_history,
         }
 
     @classmethod
@@ -203,6 +222,14 @@ class PIExtraStoredData(ExtraStoredData):
                 debug_capture_full_p=bool(restored.get("debug_capture_full_p", False)),
                 pi_event_log_enabled=bool(restored.get("pi_event_log_enabled", False)),
                 saved_at_wallclock=str(restored.get("saved_at_wallclock", "")),
+                cusum_pos=float(restored.get("cusum_pos", 0.0)),
+                cusum_neg=float(restored.get("cusum_neg", 0.0)),
+                cusum_cooldown_until_epoch=float(
+                    restored.get("cusum_cooldown_until_epoch", 0.0),
+                ),
+                cusum_residual_history=[
+                    float(r) for r in restored.get("cusum_residual_history", [])
+                ],
             )
         except (KeyError, ValueError, TypeError, AttributeError):
             return None

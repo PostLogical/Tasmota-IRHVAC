@@ -610,3 +610,132 @@ class TestAnomalyEventDataclass:
             peak_cusum=11.0, mode="cool",
         )
         assert heat_event.mode != cool_event.mode
+
+
+class TestCusumPersistence:
+    """CUSUM accumulator + cooldown survive a controller restart.
+
+    Without persistence, every restart erased the accumulated drift
+    evidence (cusum_pos / cusum_neg → 0) and forgot the cooldown timer.
+    The 2026-05-08 BR bundle showed 105 controller_reload events over
+    10 days — frequent state loss in practice.
+    """
+
+    @pytest.mark.asyncio
+    async def test_cusum_state_round_trips_through_persistence(
+        self, hass, setup_pi_integration,
+    ):
+        from custom_components.tasmota_irhvac.pi.pi_stored_data import (
+            PIExtraStoredData,
+        )
+        from .conftest import get_climate_entity
+
+        entry = await setup_pi_integration()
+        pi = get_climate_entity(hass, entry)._pi
+
+        # Set non-default CUSUM state.
+        pi._cusum_pos = 7.5
+        pi._cusum_neg = 0.3
+        cooldown = datetime(2026, 5, 9, 12, 0, 0)
+        pi._cusum_cooldown_until = cooldown
+        # Pre-fill some residual history.
+        pi._residual_history.clear()
+        pi._residual_history.extend([0.05, -0.03, 0.10, -0.08, 0.02])
+
+        # Round-trip through PIExtraStoredData.
+        saved = pi.get_extra_stored_data()
+        assert isinstance(saved, PIExtraStoredData)
+        assert saved.cusum_pos == pytest.approx(7.5)
+        assert saved.cusum_neg == pytest.approx(0.3)
+        assert saved.cusum_cooldown_until_epoch == pytest.approx(
+            cooldown.timestamp(),
+        )
+        assert saved.cusum_residual_history == [0.05, -0.03, 0.10, -0.08, 0.02]
+
+        # Wipe live state, then restore.
+        pi._cusum_pos = 0.0
+        pi._cusum_neg = 0.0
+        pi._cusum_cooldown_until = None
+        pi._residual_history.clear()
+        pi.restore_extra_stored_data(saved)
+        assert pi._cusum_pos == pytest.approx(7.5)
+        assert pi._cusum_neg == pytest.approx(0.3)
+        assert pi._cusum_cooldown_until == cooldown
+        assert list(pi._residual_history) == [0.05, -0.03, 0.10, -0.08, 0.02]
+
+    @pytest.mark.asyncio
+    async def test_no_cooldown_round_trips_as_none(
+        self, hass, setup_pi_integration,
+    ):
+        """When no cooldown is active, restore must produce ``None`` —
+        not a datetime that compares poorly to ``datetime.now()``."""
+        from .conftest import get_climate_entity
+
+        entry = await setup_pi_integration()
+        pi = get_climate_entity(hass, entry)._pi
+        pi._cusum_cooldown_until = None
+        saved = pi.get_extra_stored_data()
+        assert saved.cusum_cooldown_until_epoch == 0.0
+        # Set live to a sentinel value, then restore — should clear to None.
+        pi._cusum_cooldown_until = datetime(2099, 1, 1)
+        pi.restore_extra_stored_data(saved)
+        assert pi._cusum_cooldown_until is None
+
+    @pytest.mark.asyncio
+    async def test_cooldown_honored_after_restart(
+        self, hass, setup_pi_integration,
+    ):
+        """Round-trip a live cooldown, then verify a new residual feed
+        within the window does NOT trigger a fresh alarm.
+
+        Direct repro of the production failure mode that motivated the
+        persistence fix: BR's 14-anomaly cluster was driven by event
+        re-emission (fixed via _pending_events lifecycle) but the
+        underlying detector still resets accumulators on every restart;
+        without persistence, post-restart re-detection of the same
+        on-going anomaly is the lurking second bug.
+        """
+        from .conftest import get_climate_entity
+
+        entry = await setup_pi_integration()
+        pi = get_climate_entity(hass, entry)._pi
+
+        sigma = 0.15
+        # Pre-fill history so MAD is calibrated post-restore.
+        history = [random.gauss(0, sigma) for _ in range(60)]
+        pi._residual_history.clear()
+        pi._residual_history.extend(history)
+
+        # Simulate prior alarm: cooldown active 30 min from "now".
+        base = datetime(2026, 5, 9, 12, 0, 0)
+        pi._cusum_cooldown_until = base + timedelta(minutes=30)
+        pi._cusum_pos = 0.0
+        pi._cusum_neg = 0.0
+        pi._anomaly_events.clear()
+
+        # Save → restore (simulates an HA restart within the cooldown).
+        saved = pi.get_extra_stored_data()
+        pi._cusum_cooldown_until = None  # would-be-erased on naive restart
+        pi._cusum_pos = 0.0
+        pi._cusum_neg = 0.0
+        pi.restore_extra_stored_data(saved)
+
+        # Feed a 5σ excursion at "now = base + 5 min" — within cooldown.
+        for i in range(15):
+            now = base + timedelta(seconds=i * 60)
+            pi._update_cusum(
+                -5.0 * sigma, 1000.0 + i * 60.0,
+                is_heating=True, _now=now,
+            )
+        # Cooldown still active → no new alarm.
+        assert pi._anomaly_events == []
+        # Once we cross the cooldown boundary, detection resumes.
+        for i in range(20):
+            now = base + timedelta(minutes=31, seconds=i * 60)
+            pi._update_cusum(
+                -5.0 * sigma, 5000.0 + i * 60.0,
+                is_heating=True, _now=now,
+            )
+        assert len(pi._anomaly_events) >= 1, (
+            "post-cooldown detection must resume"
+        )

@@ -307,12 +307,15 @@ async def test_controller_reload_emits_once_on_first_tick(
 ):
     """async_added_to_hass stages CONTROLLER_RELOAD; it lands on the first
     published tick and is consumed (not re-emitted on later ticks).
+
+    Setup itself triggers the first publish, so the event lands on
+    ``pi.last_tick`` immediately after ``setup_pi_integration`` and is
+    consumed there — no follow-up fire_dispatcher should re-publish it.
     """
     entry = await setup_pi_integration({"pi_tau_estimate": 60})
     pi = get_climate_entity(hass, entry)._controller
 
-    # First fire_dispatcher after async_added_to_hass should carry the event.
-    pi.fire_dispatcher()
+    # The first publish during setup carries the CONTROLLER_RELOAD event.
     first = _events_of_kind(pi.last_tick, TickEventKind.CONTROLLER_RELOAD)
     assert len(first) == 1, "CONTROLLER_RELOAD should fire on first published tick"
     payload = first[0].payload
@@ -324,9 +327,8 @@ async def test_controller_reload_emits_once_on_first_tick(
     # Reason is one of the documented strings.
     assert payload.reason in {"ha_start", "integration_reload"}
 
-    # A pi_tick clears the per-tick event accumulator. After that, no
-    # CONTROLLER_RELOAD should appear on subsequent ticks.
-    await pi.pi_tick()
+    # A subsequent publish must NOT re-emit the CONTROLLER_RELOAD —
+    # it was consumed on the first publish.
     pi.fire_dispatcher()
     second = _events_of_kind(pi.last_tick, TickEventKind.CONTROLLER_RELOAD)
     assert second == [], "CONTROLLER_RELOAD must be one-shot per init"
@@ -383,16 +385,62 @@ async def test_buffer_reset_mode_scoped_skips_other_mode(
 
 
 @pytest.mark.asyncio
-async def test_pending_events_cleared_each_tick(hass, setup_pi_integration):
-    """pi_tick clears the pending-events buffer at the start of each tick."""
+async def test_event_published_only_once_across_multiple_dispatches(
+    hass, setup_pi_integration,
+):
+    """Regression for the 2026-05-08 bundle finding: a single anomaly
+    appeared in 14 separate TickOutputs because HA called
+    ``async_write_ha_state`` multiple times within one logical tick and
+    each call re-published the same `_pending_events` list.
+
+    After the fix, an event emitted once and published via two
+    consecutive ``fire_dispatcher`` calls appears on the FIRST
+    published tick only.
+    """
+    entry = await setup_pi_integration({"pi_tau_estimate": 60})
+    pi = get_climate_entity(hass, entry)._controller
+    # Drain init events.
+    pi.fire_dispatcher()
+    pi._pending_events.clear()
+
+    pi._emit_event(
+        TickEventKind.MODE_CHANGE,
+        ModeChangePayload(from_mode="off", to_mode="heat"),
+    )
+    # Three fire_dispatcher calls in a row (HA-style state-write storm).
+    pi.fire_dispatcher()
+    first_events = [
+        e for e in pi.last_tick.events
+        if e.kind == TickEventKind.MODE_CHANGE
+    ]
+    pi.fire_dispatcher()
+    second_events = [
+        e for e in pi.last_tick.events
+        if e.kind == TickEventKind.MODE_CHANGE
+    ]
+    pi.fire_dispatcher()
+    third_events = [
+        e for e in pi.last_tick.events
+        if e.kind == TickEventKind.MODE_CHANGE
+    ]
+    assert len(first_events) == 1, "event must publish on the first dispatch"
+    assert second_events == [], "event must not re-publish on the second"
+    assert third_events == [], "event must not re-publish on the third"
+
+
+@pytest.mark.asyncio
+async def test_pending_events_consumed_on_publish(hass, setup_pi_integration):
+    """Events are consumed (cleared) when packaged into a TickOutput by
+    ``fire_dispatcher`` / ``_build_tick_output``.  An event manually
+    emitted is present in the next published tick and is gone from
+    ``_pending_events`` afterward — preventing the same event from
+    re-publishing on subsequent ticks until the next ``pi_tick()``.
+    """
     entry = await setup_pi_integration({"pi_tau_estimate": 60})
     pi = get_climate_entity(hass, entry)._controller
 
-    # Drain any pre-staged init events (e.g. CONTROLLER_RELOAD) so this
-    # test exercises only the manual-emit clearing semantics.
-    await pi.pi_tick()
+    # Drain any pre-staged init events.  fire_dispatcher consumes them.
     pi.fire_dispatcher()
-    await pi.pi_tick()
     pi._pending_events.clear()
 
     pi._emit_event(
@@ -401,9 +449,20 @@ async def test_pending_events_cleared_each_tick(hass, setup_pi_integration):
     )
     assert len(pi._pending_events) == 1
 
-    # pi_tick is what runs at tick boundary; clearing happens there.
-    await pi.pi_tick()
-    assert pi._pending_events == [] or all(
-        e.kind != TickEventKind.MODE_CHANGE or e.payload.to_mode != "heat"
-        for e in pi._pending_events
-    ), "pi_tick should clear pre-existing events"
+    # fire_dispatcher publishes the tick AND consumes pending events.
+    pi.fire_dispatcher()
+    events = _events_of_kind(pi.last_tick, TickEventKind.MODE_CHANGE)
+    assert any(e.payload.to_mode == "heat" for e in events), (
+        "MODE_CHANGE should appear on this published tick"
+    )
+    assert pi._pending_events == [], (
+        "fire_dispatcher consumes pending events on publish"
+    )
+
+    # A subsequent fire_dispatcher with no new emissions should NOT
+    # re-publish the previously-consumed event.
+    pi.fire_dispatcher()
+    second = _events_of_kind(pi.last_tick, TickEventKind.MODE_CHANGE)
+    assert all(
+        e.payload.to_mode != "heat" for e in second
+    ), "consumed events must not re-appear on the next publish"

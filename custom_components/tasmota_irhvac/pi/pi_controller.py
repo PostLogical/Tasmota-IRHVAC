@@ -1607,6 +1607,14 @@ class PIController:
             debug_capture_full_p=self._debug_capture_full_p,
             pi_event_log_enabled=self._pi_event_log_enabled,
             saved_at_wallclock=datetime.now(timezone.utc).isoformat(),
+            cusum_pos=self._cusum_pos,
+            cusum_neg=self._cusum_neg,
+            cusum_cooldown_until_epoch=(
+                self._cusum_cooldown_until.timestamp()
+                if self._cusum_cooldown_until is not None
+                else 0.0
+            ),
+            cusum_residual_history=list(self._residual_history),
         )
 
     def restore_extra_stored_data(self, data: PIExtraStoredData) -> None:
@@ -1793,6 +1801,26 @@ class PIController:
         # Restore power-user debug capture toggle
         self._debug_capture_full_p = data.debug_capture_full_p
         self._pi_event_log_enabled = data.pi_event_log_enabled
+        # Restore CUSUM anomaly-detection state.  Without this, every
+        # restart resets the accumulators (delaying detection) and
+        # forgets the cooldown timer (allowing the same anomaly to
+        # re-emit if a restart lands within the 30-min window).  Cooldown
+        # epoch=0 means none active; otherwise convert epoch back to a
+        # naive datetime to match the comparison semantics in
+        # ``_update_cusum`` (which uses ``datetime.now()``).
+        self._cusum_pos = data.cusum_pos
+        self._cusum_neg = data.cusum_neg
+        if data.cusum_cooldown_until_epoch > 0.0:
+            self._cusum_cooldown_until = datetime.fromtimestamp(
+                data.cusum_cooldown_until_epoch,
+            )
+        else:
+            self._cusum_cooldown_until = None
+        # Restore residual history so MAD has a warm scale immediately
+        # rather than blanking detection for the first 10 post-restart ticks.
+        if data.cusum_residual_history:
+            self._residual_history.clear()
+            self._residual_history.extend(data.cusum_residual_history)
         # Restore lag filter states
         if data.lag_filter_states:
             self._inputs.restore_lag_states(data.lag_filter_states)
@@ -1953,11 +1981,15 @@ class PIController:
         return await self._pi_tick()
 
     async def pi_tick(self, now: datetime | None = None) -> bool:
-        """Run PI tick. Returns True if send needed. Public API for climate.py."""
-        # Clear per-tick event accumulator at the start of each tick.
-        # Anything emitted during this tick will package into the
-        # TickOutput.events tuple at fire_dispatcher time.
-        self._pending_events = []
+        """Run PI tick. Returns True if send needed. Public API for climate.py.
+
+        Pending-event lifecycle: events accumulate via ``_emit_event`` and
+        are consumed (packaged + cleared) inside ``_build_tick_output``,
+        not here.  The older "clear at start of tick" pattern allowed the
+        same event to appear in every TickOutput between two ticks because
+        HA can call ``async_write_ha_state`` (→ ``fire_dispatcher`` →
+        ``_build_tick_output``) several times per logical tick.
+        """
         return await self._pi_tick(now)
 
     async def sensor_changed(self, was_none: bool) -> bool:
@@ -3846,7 +3878,7 @@ class PIController:
 
         # Top-level live state + assembly
         zone_label = getattr(self._entity, "entity_id", "") or ""
-        return TickOutput(
+        tick_output = TickOutput(
             ts_mono=time_mod.monotonic(),
             ts_wall=time.time(),
             zone_label=zone_label,
@@ -3898,6 +3930,17 @@ class PIController:
             overtemp_regime=self._overtemp_regime,
             stable_combined_bias_ema=self._stable_combined_bias_ema,
         )
+        # Consume pending events: each event is published on exactly one
+        # TickOutput.  HA may call ``async_write_ha_state`` (which calls
+        # ``fire_dispatcher`` → here) multiple times within one logical
+        # tick — clearing on consumption prevents the same event from
+        # appearing in every tick output until the next ``pi_tick()``.
+        # The earlier "clear at start of tick" semantics were too coarse:
+        # any setpoint change / sensor change between ticks would
+        # republish the previous tick's events.
+        self._pending_events = []
+        return tick_output
+        return tick_output
 
     def _build_health_snapshot_with_grace_advance(self) -> HealthSnapshot:
         """Internal: combine grace-period advance + pure snapshot build.
@@ -5362,6 +5405,16 @@ class PIController:
         # 15-min ticks). Scaled by dt_factor for variable sample intervals.
         # Weaker than α=0.999 to avoid draining integral correction needed by
         # slow-τ houses (well-insulated). Sim-validated across 3 profiles.
+        #
+        # NOTE: this leak runs unconditionally — including during overtemp
+        # regime / saturated-rail / HP-inactive periods when the additive
+        # ``+= avg_error`` term above is suppressed via ``skip_integration``.
+        # The "freeze" semantics are partial-by-design: stop *adding* to the
+        # integrator on inputs that aren't actuating, but keep draining stale
+        # accumulated state so it doesn't carry indefinitely across long
+        # rail-saturated periods.  Per-tick magnitude at integral=10 is
+        # ~6.7e-5, so production rounding (3 dp on the snapshot) makes this
+        # appear as occasional 0.001 jumps in debug bundles — by design.
         self._pi_integral *= 0.9999 ** dt_factor
 
         self._pi_last_error = error
