@@ -31,6 +31,7 @@ from custom_components.tasmota_irhvac.pi.buffer_policies import (
     DOptimalPolicy,
     LeveragePolicy,
     MinEigPolicy,
+    SlevPolicy,
     SlidingWindowPolicy,
 )
 from tests.hvac_bench.adapters import TasmotaPIAdapter
@@ -52,6 +53,54 @@ from tests.hvac_bench.scenarios.test_seasonal_convergence import (
 # ``_replace_buffers`` below.  The historical ``FIFOBuffer`` ad-hoc subclass
 # was removed; the policy form lets the bench compare FIFO against other
 # policies through a uniform interface.
+
+
+class HourlyDecimationBuffer(DiversityAwareBuffer):
+    """Admit one of every N observations (decimation).  FIFO when full.
+
+    With N=12 and the buffer seeing ~3 add() calls per wall-clock hour (after
+    the controller's eligibility filter at 24% pass-through on 5-min ticks),
+    this gives roughly 1 admission per ~4 hours of wall time.  Buffer fills
+    in ~80-90 days.  The intent is to test whether spaced-out sampling
+    avoids the leverage-class extreme-clustering pathology.
+    """
+
+    def __init__(self, *args, decimation: int = 12, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._decimation = decimation
+        self._call_count = 0
+
+    def add(self, obs: Observation) -> BufferAddResult:  # type: ignore[override]
+        self._call_count += 1
+        if self._call_count % self._decimation != 0:
+            return BufferAddResult(
+                admitted=False, candidate_score=None,
+                evicted_timestamp=None, min_incumbent_score=None,
+                rejection_reason="hourly_decimation_skip",
+                policy_name="hourly_decimation",
+            )
+        x = self._get_feature_vector(obs)
+        if len(self._buffer) < self._max_size:
+            self._buffer.append(obs)
+            self._sherman_morrison_update(x)
+            return BufferAddResult(
+                admitted=True, candidate_score=None,
+                evicted_timestamp=None, min_incumbent_score=None,
+                rejection_reason=None, policy_name="hourly_decimation",
+            )
+        # FIFO eviction when full.
+        old_x = self._get_feature_vector(self._buffer[0])
+        evicted_ts = self._buffer[0].timestamp
+        self._sherman_morrison_downdate(old_x)
+        self._buffer.pop(0)
+        self._buffer.append(obs)
+        self._sherman_morrison_update(x)
+        return BufferAddResult(
+            admitted=True, candidate_score=None,
+            evicted_timestamp=evicted_ts,
+            min_incumbent_score=None,
+            rejection_reason=None, policy_name="hourly_decimation",
+        )
 
 
 class NoEvictionBuffer(DiversityAwareBuffer):
@@ -99,18 +148,27 @@ def _replace_buffers(pi, *, max_size: int, policy: str) -> None:
         n_features=n, max_size=max_size,
         feature_order=feature_order, model_inputs=model_inputs,
     )
+    # Lambdas (zero-arg) so each policy gets a fresh instance per buffer
+    # (heat + cool need separate RNG state for SlevPolicy).
     policy_factories = {
-        "leverage":   LeveragePolicy,
-        "min_eig":    MinEigPolicy,
-        "d_optimal":  DOptimalPolicy,
-        "a_optimal":  AOptimalPolicy,
-        "fifo":       SlidingWindowPolicy,
+        "leverage":   lambda: LeveragePolicy(),
+        "min_eig":    lambda: MinEigPolicy(),
+        "d_optimal":  lambda: DOptimalPolicy(),
+        "a_optimal":  lambda: AOptimalPolicy(),
+        "fifo":       lambda: SlidingWindowPolicy(),
+        "slev_0.0":   lambda: SlevPolicy(alpha=0.0, seed=42),
+        "slev_0.3":   lambda: SlevPolicy(alpha=0.3, seed=42),
+        "slev_0.5":   lambda: SlevPolicy(alpha=0.5, seed=42),
+        "slev_1.0":   lambda: SlevPolicy(alpha=1.0, seed=42),
     }
     if policy == "no_eviction":
         heat_buf = NoEvictionBuffer(**common_kwargs)
         cool_buf = NoEvictionBuffer(**common_kwargs)
+    elif policy == "hourly_decimation":
+        heat_buf = HourlyDecimationBuffer(**common_kwargs, decimation=12)
+        cool_buf = HourlyDecimationBuffer(**common_kwargs, decimation=12)
     else:
-        factory = policy_factories.get(policy, LeveragePolicy)
+        factory = policy_factories.get(policy, lambda: LeveragePolicy())
         heat_buf = DiversityAwareBuffer(**common_kwargs, policy=factory())
         cool_buf = DiversityAwareBuffer(**common_kwargs, policy=factory())
     pi._observation_buffer_heat = heat_buf
@@ -138,6 +196,15 @@ VARIANTS: list[tuple[str, int, str]] = [
     ("no-eviction-2000",      2000, "no_eviction"),
     ("leverage-1000",         1000, "leverage"),
     ("leverage-4000",         4000, "leverage"),
+    # SLEV (Ma-Mahoney-Yu 2015): probabilistic admission, α-mix between
+    # leverage and uniform.  Offline single-season test (spring 90d)
+    # showed every α in [0,1] recovers β_solar within 0.08 of truth;
+    # cross-season behavior is the question this bench answers.
+    ("slev_0.0-2000",         2000, "slev_0.0"),
+    ("slev_0.3-2000",         2000, "slev_0.3"),
+    ("slev_0.5-2000",         2000, "slev_0.5"),
+    ("slev_1.0-2000",         2000, "slev_1.0"),
+    ("hourly_decim-2000",     2000, "hourly_decimation"),
 ]
 
 
