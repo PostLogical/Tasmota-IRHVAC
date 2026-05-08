@@ -219,13 +219,21 @@ class TestSyntheticExcitationPOC:
 # ── Tier 1.3b — Bundle excitation realism check ─────────────────────────
 
 
-@pytest.mark.slow
+@pytest.mark.design
+@pytest.mark.study
 @pytest.mark.skipif(not BUNDLE_AVAILABLE, reason="Condenser A bundle not present")
 class TestBundleExcitationRealism:
     """Same literature truth, but bundle's recorded outdoor/setpoint/solar
     drive the synthetic kernel. Tests whether the bundle's actual
     excitation pattern is sufficient for the methodology — independent of
-    the bundle's own room_temp values (which are replaced)."""
+    the bundle's own room_temp values (which are replaced).
+
+    Marked ``design + study`` (not ``slow``): both tests are recording-only.
+    ``test_canonical_classification_recorded`` only asserts ``classification
+    in {good, close, poor}`` (any value passes); ``test_records_beta_solar_sweep``
+    is documented as having no real assertion. The discrimination signal vs
+    1.3a (TestSyntheticExcitationPOC) lives in the printed verdict tables,
+    not in regression assertions. Opt in via ``--run-studies``."""
 
     @pytest.fixture(scope="class")
     def real_train_telemetry(self):

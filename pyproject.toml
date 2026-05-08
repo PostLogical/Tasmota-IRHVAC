@@ -1,8 +1,24 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# --dist loadfile: keeps tests in the same file on the same xdist worker so
-# module-scoped fixtures (e.g. seasonal_results, full_stack runs) compute once
-# per file instead of once per worker that picks up a test from that file.
+# --ignore=tests/hvac_bench: bench is opt-in (slow). Run with explicit path:
+#   .venv/bin/pytest tests/hvac_bench/ -m "not slow and not design" -n auto
+#     → default tier (~3:19 on 12 cores)
+#   .venv/bin/pytest tests/hvac_bench/ -m "slow and not design" -n auto
+#     → regression tier (~minutes)
+#   .venv/bin/pytest tests/hvac_bench/ -m design -n auto
+#     → design verdicts (long; @study deselected unless --run-studies)
+#   .venv/bin/pytest tests/hvac_bench/ -m design --run-studies -n auto
+#     → full design + study sweep (intrinsically slow per-cell sims)
+#
+# --dist=loadfile: keeps tests from the same file on the same xdist worker so
+# module-scoped fixtures (seasonal_results, capacity_runs, _multi_year_result,
+# variant_results, …) compute once per file instead of once per worker that
+# picks up a test from that file. Trade-off: heavy files become a serial
+# bottleneck within their worker (effective parallelism ≈ # of files with
+# meaningful work, ~3 cores on the default tier as of 2026-05-08). Override
+# for design-tier sweeps where each parametrized cell is independent and
+# inter-cell fanout matters more than fixture amortization:
+#   --override-ini='addopts=--dist=load'   (or --dist=worksteal)
 addopts = "--ignore=tests/hvac_bench --dist=loadfile"
 asyncio_mode = "auto"
 log_format = "%(asctime)s %(levelname)-8s %(name)s: %(message)s"
