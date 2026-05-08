@@ -6497,8 +6497,14 @@ class TestPIControllerCoverageGaps:
         finally:
             pi._features = original
 
-    def test_restore_detected_lag_tau(self):
-        """Restoring data with detected_lag_tau applies the best confirmed value (lines 1630-1643)."""
+    def test_restore_detected_lag_tau_held_when_beta_frozen(self):
+        """Restoring detected_lag_tau is gated on β being unfrozen for the
+        originating mode.  Model inputs are frozen_at_init by default, so a
+        fresh restore should NOT push the detected τ onto the EMA filter —
+        applying a free-β τ to a held-β filter is a joint-identifiability
+        mismatch (Almon 1965 / Box-Jenkins distributed lags).  The smoothed
+        estimate still gets restored for tracking; only the apply is gated.
+        """
         from custom_components.tasmota_irhvac.pi.pi_stored_data import PIExtraStoredData
         config = make_pi_config({
             "pi_model_inputs": [{
@@ -6510,7 +6516,6 @@ class TestPIControllerCoverageGaps:
         })
         entity = FakePIEntity(config)
         pi = entity._pi
-        # Build a stored-data snapshot with detected_lag_tau confirmed for heat
         data = PIExtraStoredData(
             pi_integral=0.0,
             desired_temp=21.0,
@@ -6520,7 +6525,38 @@ class TestPIControllerCoverageGaps:
             detected_lag_tau_counts={"solar:heat": 5, "solar:cool": 2},
         )
         pi.restore_extra_stored_data(data)
-        # heat had 5 confirmations vs cool 2 → heat tau wins
+        # solar β is frozen_at_init → lag_tau key not added (or stays at default)
+        assert pi._model_inputs[0].get("lag_tau", 0) in (0, 0.0)
+        # But the smoothed estimate is restored for observability
+        assert pi._detected_lag_tau == {"solar:heat": 1800.0, "solar:cool": 900.0}
+
+    def test_restore_detected_lag_tau_applied_when_beta_unfrozen(self):
+        """When β is unfrozen for the originating mode, restored τ applies
+        as before.  Mirrors the old test's positive case to keep coverage
+        on the apply path."""
+        from custom_components.tasmota_irhvac.pi.pi_stored_data import PIExtraStoredData
+        config = make_pi_config({
+            "pi_model_inputs": [{
+                "entity_id": "sensor.solar",
+                "name": "solar",
+                "seed_heat": 0.0,
+                "seed_cool": 0.0,
+            }],
+        })
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        # Unfreeze the model_input feature (index 2: intercept, outdoor_delta, solar)
+        # in heat — this is the mode that will win on confirmations below.
+        pi._rls_heat.frozen[2] = False
+        data = PIExtraStoredData(
+            pi_integral=0.0,
+            desired_temp=21.0,
+            hp_setpoint=22.0,
+            tau_estimate=60.0,
+            detected_lag_tau={"solar:heat": 1800.0, "solar:cool": 900.0},
+            detected_lag_tau_counts={"solar:heat": 5, "solar:cool": 2},
+        )
+        pi.restore_extra_stored_data(data)
         assert pi._model_inputs[0]["lag_tau"] == 1800.0
 
     def test_coeff_role_returns_other_when_model_inputs_out_of_sync(self):
@@ -6732,6 +6768,11 @@ class TestPIControllerCoverageGaps:
         entity._attr_hvac_mode = HVACMode.HEAT
         pi._desired_temp = 21.0
         pi._hp_setpoint = 21.0
+        # Apply gate now requires β to be unfrozen for that feature/mode —
+        # unfreeze solar (index 2: intercept, outdoor_delta, solar) so the
+        # apply path fires.  Without this the smoothed estimate still
+        # advances but lag_tau stays at the user-configured value.
+        pi._rls_heat.frozen[2] = False
         # Pre-set: solar at 1800s smoothed, count=1 (one prior detection).
         # New batch detects another tau within 30% → count=2 → apply.
         pi._detected_lag_tau["solar:heat"] = 1800.0

@@ -374,6 +374,8 @@ class LagTauDiagnostic:
     n_eff: int
     accepted: bool
     reject_reason: str
+    search_max_used: float = 0.0
+    boundary_hit: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -386,6 +388,8 @@ class LagTauDiagnostic:
             "n_eff": self.n_eff,
             "accepted": self.accepted,
             "reject_reason": self.reject_reason,
+            "search_max_used": self.search_max_used,
+            "boundary_hit": self.boundary_hit,
         }
 
     @classmethod
@@ -400,6 +404,8 @@ class LagTauDiagnostic:
             n_eff=data["n_eff"],
             accepted=data["accepted"],
             reject_reason=data["reject_reason"],
+            search_max_used=data.get("search_max_used", 0.0),
+            boundary_hit=data.get("boundary_hit", False),
         )
 
 
@@ -960,6 +966,7 @@ class TickEventKind(StrEnum):
     AUTO_PERTURB_STATE = "auto_perturb_state"
     BOUNDARY_UPDATE = "boundary_update"
     CONTROLLER_RELOAD = "controller_reload"
+    BUFFER_RESET = "buffer_reset"
 
 
 # Per-kind payload dataclasses. Each is frozen+slotted; `to_dict()` keeps
@@ -1196,6 +1203,47 @@ class ControllerReloadPayload:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class BufferResetPayload:
+    """Emitted when an observation buffer is cleared.
+
+    Surfaces buffer wipes (manual service call, schema migration,
+    model_inputs change, rls reset cascading, etc.) that previously
+    only left a `state-discontinuity` shape in the data with no
+    explicit signal. Bundle readers rely on this to distinguish
+    "buffer policy / curation worked as expected" from "we erased
+    history and the next batch fits a tiny cohort."
+
+    Fields:
+      buffer: which buffer was cleared. "wls_heat" | "wls_cool" |
+          "greybox" | "all_wls" (heat+cool together).
+      reason: why the clear happened. "service_call" |
+          "schema_migration" | "model_inputs_changed" |
+          "rls_reset_cascade" | "manual" | "other".
+      before_count: buffer size immediately before the clear, or None
+          if not measured at the call site.
+    """
+
+    buffer: str
+    reason: str
+    before_count: int | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "buffer": self.buffer,
+            "reason": self.reason,
+            "before_count": self.before_count,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> BufferResetPayload:
+        return cls(
+            buffer=data["buffer"],
+            reason=data["reason"],
+            before_count=data.get("before_count"),
+        )
+
+
 # Tagged-union of payload types. New kinds: add to TickEventKind, define
 # their payload dataclass, and append the type to this union and to the
 # `_PAYLOAD_BY_KIND` dispatch in `TickEvent.from_dict`.
@@ -1209,6 +1257,7 @@ TickEventPayload = (
     | AutoPerturbStatePayload
     | BoundaryUpdatePayload
     | ControllerReloadPayload
+    | BufferResetPayload
 )
 
 
@@ -1222,6 +1271,7 @@ _PAYLOAD_BY_KIND: dict[TickEventKind, type[TickEventPayload]] = {
     TickEventKind.AUTO_PERTURB_STATE: AutoPerturbStatePayload,
     TickEventKind.BOUNDARY_UPDATE: BoundaryUpdatePayload,
     TickEventKind.CONTROLLER_RELOAD: ControllerReloadPayload,
+    TickEventKind.BUFFER_RESET: BufferResetPayload,
 }
 
 

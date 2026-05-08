@@ -15,6 +15,7 @@ from homeassistant.components.climate.const import HVACMode
 from custom_components.tasmota_irhvac.pi.snapshot import (
     AnomalyDetectedPayload,
     BatchRunPayload,
+    BufferResetPayload,
     ControllerReloadPayload,
     LearningSuppressionChangePayload,
     ModeChangePayload,
@@ -329,6 +330,56 @@ async def test_controller_reload_emits_once_on_first_tick(
     pi.fire_dispatcher()
     second = _events_of_kind(pi.last_tick, TickEventKind.CONTROLLER_RELOAD)
     assert second == [], "CONTROLLER_RELOAD must be one-shot per init"
+
+
+@pytest.mark.asyncio
+async def test_buffer_reset_emits_event_for_each_buffer(
+    hass, setup_pi_integration,
+):
+    """flush_observation_buffer emits one BUFFER_RESET per buffer cleared.
+
+    Bundle readers rely on this to attribute later state discontinuities
+    (small batch n_total, rls.observation_count = 0) to the wipe rather
+    than to a controller anomaly.  One event per buffer (heat WLS, cool
+    WLS, greybox) so each clear is independently traceable.
+    """
+    entry = await setup_pi_integration({"pi_tau_estimate": 60})
+    pi = get_climate_entity(hass, entry)._controller
+    pi.fire_dispatcher()
+    pi._pending_events.clear()
+
+    pi.flush_observation_buffer(reason="schema_migration")
+    pi.fire_dispatcher()
+
+    events = _events_of_kind(pi.last_tick, TickEventKind.BUFFER_RESET)
+    # Three buffers: wls_heat + wls_cool + greybox
+    buffers = {e.payload.buffer for e in events}
+    assert buffers == {"wls_heat", "wls_cool", "greybox"}
+    for e in events:
+        assert isinstance(e.payload, BufferResetPayload)
+        assert e.payload.reason == "schema_migration"
+        assert e.payload.before_count is not None
+
+
+@pytest.mark.asyncio
+async def test_buffer_reset_mode_scoped_skips_other_mode(
+    hass, setup_pi_integration,
+):
+    """Single-mode flush only emits the events for that mode's WLS buffer
+    plus greybox (which is not mode-scoped)."""
+    entry = await setup_pi_integration({"pi_tau_estimate": 60})
+    pi = get_climate_entity(hass, entry)._controller
+    pi.fire_dispatcher()
+    pi._pending_events.clear()
+
+    pi.flush_observation_buffer(mode="heat", reason="manual")
+    pi.fire_dispatcher()
+
+    events = _events_of_kind(pi.last_tick, TickEventKind.BUFFER_RESET)
+    buffers = {e.payload.buffer for e in events}
+    assert "wls_heat" in buffers
+    assert "wls_cool" not in buffers
+    assert "greybox" in buffers
 
 
 @pytest.mark.asyncio

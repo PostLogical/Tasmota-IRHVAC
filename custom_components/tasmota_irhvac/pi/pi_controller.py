@@ -135,6 +135,7 @@ from .snapshot import (
     BatchLearningSnapshot,
     BatchRunPayload,
     BoundaryUpdatePayload,
+    BufferResetPayload,
     ControllerConfig,
     ControllerReloadPayload,
     CorrelatedPair,
@@ -987,19 +988,13 @@ class PIController:
             )
             return
 
-        # Full model: all features estimated — for unlock evaluation only.
-        # Coefficients are discarded; only std_err, held_features, and the
-        # buffer VIF are used to decide if frozen features are identifiable.
-        full_result: BatchResult | None = None
-        if frozen_set:
-            full_result = weighted_least_squares(
-                observations, n_features=rls.n, current_beta=current_phys,
-                room_rate_threshold=0.02, min_observations=20,
-                feature_order=self._feature_order,
-                model_inputs=self._inputs.model_inputs,
-                # No frozen_features → estimates everything
-                detect_lag=False,  # tau already detected by primary result
-            )
+        # Per-feature unlock evaluation runs partial regressions inside
+        # `_evaluate_feature_unlocks` (Bacher-Madsen 2011 forward-selection
+        # pattern: add one frozen feature at a time to the active set,
+        # evaluate identifiability there).  This replaces an earlier
+        # all-features joint full-model fit which became rank-deficient
+        # under small N — std_err = inf for every feature, blocking all
+        # unlocks.
 
         coeff_names = self._features.names
 
@@ -1272,11 +1267,14 @@ class PIController:
             )
 
         # ── Per-feature confidence gating ──
-        # Evaluate unlock conditions using the full-model result (all features
-        # estimated).  The full result's std_err, held_features, and VIF tell
-        # us whether each frozen feature is identifiable from current data.
-        if full_result is not None:
-            self._evaluate_feature_unlocks(full_result, rls, is_heating)
+        # For each frozen feature, run a partial regression with that
+        # one feature added to the active set and read its std_err / VIF
+        # from that smaller fit.  Avoids the rank-deficiency trap of a
+        # single full-model joint regression.
+        if frozen_set:
+            self._evaluate_feature_unlocks(
+                observations, current_phys, rls, is_heating,
+            )
 
         self._last_batch_result = result
         self._last_batch_timestamp = time.monotonic()
@@ -1302,11 +1300,23 @@ class PIController:
         # heat and cool — different observation mixes, equilibrium points,
         # and solar interaction directions.  The online path uses the tau
         # from the currently active mode.
+        #
+        # Additionally: do NOT push the detected τ onto ``m_input["lag_tau"]``
+        # while the corresponding β is frozen for this mode.  The detection
+        # is run with β free (`y ~ [1, od, sin, cos, EMA(input, τ)]`), so
+        # the τ minimising RSS at a free β is paired with whatever β the
+        # data implies — not the held seed the FF predictor will actually
+        # multiply by.  Applying the free-β τ to a held-β filter is a
+        # joint-identifiability mismatch (Almon 1965 / Box-Jenkins:
+        # distributed-lag parameters are jointly identified, not staged).
+        # Tracking still runs — debug bundles surface "what would the τ
+        # be if we trusted it" via ``self._detected_lag_tau`` — but the
+        # filter keeps the user-configured value until β unfreezes.
         _TAU_SMOOTH_ALPHA = 0.3
         _TAU_CONFIRM_COUNT = 2  # detections needed before applying
         mode_tag = "heat" if is_heating else "cool"
         if result.detected_tau:
-            for m_input in self._model_inputs:
+            for j, m_input in enumerate(self._model_inputs):
                 name = m_input.get("name", m_input.get("entity_id", ""))
                 if name not in result.detected_tau:
                     continue
@@ -1333,13 +1343,29 @@ class PIController:
                     count = 1
                 self._detected_lag_tau_count[key] = count
 
-                if count >= _TAU_CONFIRM_COUNT:
+                # β-frozen gate: feature index in the RLS model is
+                # j + 2 (intercept + outdoor_delta come first).
+                coeff_idx = j + 2
+                beta_frozen = (
+                    coeff_idx < rls.n and rls.frozen[coeff_idx]
+                )
+
+                if count >= _TAU_CONFIRM_COUNT and not beta_frozen:
                     m_input["lag_tau"] = tau_smoothed
                     _LOGGER.info(
                         "%sAuto lag-tau applied: %s [%s] → %.0fs (%.0f min), "
                         "%d consistent detections",
                         self._log_prefix, name, mode_tag,
                         tau_smoothed, tau_smoothed / 60, count,
+                    )
+                elif beta_frozen:
+                    _LOGGER.info(
+                        "%sAuto lag-tau held: %s [%s] → %.0fs (%.0f min), "
+                        "%d detections — β still frozen, keeping user-configured "
+                        "lag_tau=%.0fs",
+                        self._log_prefix, name, mode_tag,
+                        tau_smoothed, tau_smoothed / 60, count,
+                        float(m_input.get("lag_tau", 0.0)),
                     )
                 else:
                     _LOGGER.info(
@@ -1773,22 +1799,35 @@ class PIController:
         # Restore detected lag-tau (keyed by "name:mode") and apply the
         # best confirmed tau for each input.  On restore we don't know
         # the current mode yet, so apply whichever mode has more
-        # confirmations (the more-exercised estimate).
+        # confirmations (the more-exercised estimate).  Same β-frozen
+        # gate as the live batch path: only apply if the originating
+        # mode's β for that feature is unfrozen — applying a free-β τ
+        # to a held-β filter is a joint-identifiability mismatch.
         if data.detected_lag_tau:
             self._detected_lag_tau = dict(data.detected_lag_tau)
             self._detected_lag_tau_count = dict(data.detected_lag_tau_counts)
-            for m_input in self._model_inputs:
+            for j, m_input in enumerate(self._model_inputs):
                 name = m_input.get("name", m_input.get("entity_id", ""))
                 best_tau: float | None = None
                 best_count = 0
+                best_mode: str | None = None
                 for mode_tag in ("heat", "cool"):
                     key = f"{name}:{mode_tag}"
                     cnt = self._detected_lag_tau_count.get(key, 0)
                     if cnt >= 2 and cnt > best_count and key in self._detected_lag_tau:
                         best_tau = self._detected_lag_tau[key]
                         best_count = cnt
-                if best_tau is not None:
-                    m_input["lag_tau"] = best_tau
+                        best_mode = mode_tag
+                if best_tau is not None and best_mode is not None:
+                    coeff_idx = j + 2
+                    rls_for_mode = (
+                        self._rls_heat if best_mode == "heat" else self._rls_cool
+                    )
+                    if (
+                        coeff_idx < rls_for_mode.n
+                        and not rls_for_mode.frozen[coeff_idx]
+                    ):
+                        m_input["lag_tau"] = best_tau
         # Restore plant estimate and recompute IMC gains
         if self._plant_id.enabled:
             restore_data = data.plant_identifier_state or {}
@@ -2092,30 +2131,34 @@ class PIController:
 
     def _evaluate_feature_unlocks(
         self,
-        full_result: BatchResult,
+        observations: list[Observation],
+        current_phys: list[float],
         rls: RLSModel,
         is_heating: bool,
     ) -> None:
-        """Evaluate per-feature unlock conditions using the full-model result.
+        """Evaluate per-feature unlock conditions via partial regressions.
 
-        Args:
-            full_result: BatchResult from WLS with ALL features estimated
-                (no frozen_features held).  Coefficients are discarded —
-                only std_err, held_features, and VIF are used as evidence
-                for whether each frozen feature is identifiable.
+        For each currently-frozen feature i, fits a smaller regression
+        that holds every other frozen feature but adds i to the active
+        set, then reads i's std_err and VIF from that fit.  This is the
+        Bacher-Madsen 2011 forward-selection pattern (likelihood-ratio
+        test against the simpler model) — each candidate-for-unlock is
+        evaluated against the model where that one feature is the only
+        addition, not against an all-features joint regression that
+        becomes rank-deficient under small N.
 
         Each frozen coefficient independently unfreezes when ALL of:
-        1. Feature not in full_result.held_features (sufficient variance)
-        2. full_result.beta_std_err[i] is finite (feature estimable)
-        3. Per-feature VIF < 10 (Belsley 1980)
+        1. Feature not held in its partial regression (sufficient variance)
+        2. ``beta_std_err[i]`` finite there (feature estimable)
+        3. Per-feature ``feature_vif[i] < 10`` (Belsley 1980)
         4. For adjacent_zone inputs: additionally κ < 100
         Auto-gating skips features with a manual override (not None).
 
-        Writes one `UnlockEvaluationRecord` per evaluated frozen
-        coefficient into `self._last_unlock_evaluation` so the next
-        snapshot surfaces *why* each frozen feature stayed held — a
-        feature with `gate_failed="vif"` and `full_model_vif=14.3` is
-        unambiguously diagnosed.
+        Writes one ``UnlockEvaluationRecord`` per evaluated frozen
+        coefficient into ``self._last_unlock_evaluation``.  The
+        ``full_model_*`` field names are kept for snapshot wire-format
+        stability — they now report the *partial-model* values, which
+        is the strictly-better signal under collinearity.
         """
         n = rls.n
         coeff_names = self._coeff_names()
@@ -2125,37 +2168,63 @@ class PIController:
         )
         mode = "heat" if is_heating else "cool"
 
-        # VIF from the full-model regression (eligible-only data)
-        vif = full_result.feature_vif
-
-        # Compute κ once for adjacent_zone gate
         kappa = self._cached_kappa
-
+        current_frozen = {i for i in range(n) if rls.frozen[i]}
         records: list[UnlockEvaluationRecord] = []
 
-        for i in range(n):
-            if not rls.frozen[i]:
-                continue  # Already unfrozen
+        for i in current_frozen:
             if i < len(manual_override) and manual_override[i] is not None:
                 continue  # Manual override — auto-gating doesn't touch
 
             name = coeff_names[i] if i < len(coeff_names) else f"β{i}"
             is_adjacent = self._coeff_role(i) == "adjacent_zone"
+            kappa_at_decision: float | None = kappa if is_adjacent else None
 
-            # Capture the values inputs to each gate. Inf std_err is
-            # serialized as None for downstream JSON-friendliness.
-            in_held = i in full_result.held_features
+            # Partial regression: keep every currently-frozen feature
+            # held EXCEPT i, so i is added to the active set with the
+            # same already-active features the production fit uses.
+            partial_frozen = current_frozen - {i}
+            partial = weighted_least_squares(
+                observations, n_features=n, current_beta=current_phys,
+                room_rate_threshold=0.02, min_observations=20,
+                feature_order=self._feature_order,
+                model_inputs=self._inputs.model_inputs,
+                frozen_features=partial_frozen,
+                detect_lag=False,  # tau already detected by primary result
+            )
+
+            if partial is None:
+                # Insufficient eligible observations even for the
+                # smaller fit — record the gate failure and move on.
+                _LOGGER.debug(
+                    "%sFeature unlock: %s[%d] — insufficient data for partial fit",
+                    self._log_prefix, name, i,
+                )
+                records.append(UnlockEvaluationRecord(
+                    feature_name=name, coefficient_index=i,
+                    gate_failed="insufficient_data", unfrozen=False,
+                    in_full_model_held=False,
+                    full_model_std_err=None, full_model_vif=None,
+                    is_adjacent_zone=is_adjacent,
+                    kappa_at_decision=kappa_at_decision,
+                ))
+                continue
+
+            in_held = i in partial.held_features
             se_raw = (
-                full_result.beta_std_err[i]
-                if i < len(full_result.beta_std_err)
+                partial.beta_std_err[i]
+                if i < len(partial.beta_std_err)
                 else float("inf")
             )
             se: float | None = se_raw if math.isfinite(se_raw) else None
-            vif_raw = vif[i] if i < len(vif) else float("inf")
+            vif_raw = (
+                partial.feature_vif[i]
+                if i < len(partial.feature_vif)
+                else float("inf")
+            )
             feat_vif: float | None = vif_raw if math.isfinite(vif_raw) else None
-            kappa_at_decision: float | None = kappa if is_adjacent else None
 
-            # 1. Not held in full model (sufficient variance in data)
+            # 1. Not held in partial model (sufficient variance in data)
             if in_held:
                 _LOGGER.debug(
                     "%sFeature unlock: %s[%d] — held (insufficient variance)",
@@ -2171,7 +2240,7 @@ class PIController:
                 ))
                 continue
 
-            # 2. Finite std_err in full model (feature is estimable)
+            # 2. Finite std_err in partial model (feature is estimable)
             if not math.isfinite(se_raw):
                 _LOGGER.debug(
                     "%sFeature unlock: %s[%d] — infinite std_err",
@@ -2222,7 +2291,7 @@ class PIController:
             # All conditions met — unfreeze
             self.set_frozen(mode, i, frozen=False, manual=False)
             _LOGGER.info(
-                "%sFeature unlock: %s[%d] unfrozen (σ=%.4f, VIF=%.1f)",
+                "%sFeature unlock: %s[%d] unfrozen (σ=%.4f, VIF=%.1f, partial fit)",
                 self._log_prefix, name, i, se_raw, vif_raw,
             )
             records.append(UnlockEvaluationRecord(
@@ -2490,12 +2559,28 @@ class PIController:
         scale = rls.feature_scales[index]
         return (clamp[0] / scale, clamp[1] / scale)
 
-    def _flush_buffers(self, mode: str | None = None) -> None:
-        """Clear observation buffer(s) and batch learning state (no greybox)."""
+    def _flush_buffers(
+        self, mode: str | None = None, *, reason: str = "other",
+    ) -> None:
+        """Clear observation buffer(s) and batch learning state (no greybox).
+
+        Emits a `BUFFER_RESET` TickEvent per buffer touched so debug
+        bundles can distinguish "policy curated" from "history erased".
+        """
         if mode in (None, "heat"):
+            before = len(self._observation_buffer_heat)
             self._observation_buffer_heat.clear()
+            self._emit_event(
+                TickEventKind.BUFFER_RESET,
+                BufferResetPayload(buffer="wls_heat", reason=reason, before_count=before),
+            )
         if mode in (None, "cool"):
+            before = len(self._observation_buffer_cool)
             self._observation_buffer_cool.clear()
+            self._emit_event(
+                TickEventKind.BUFFER_RESET,
+                BufferResetPayload(buffer="wls_cool", reason=reason, before_count=before),
+            )
         self._last_batch_result = None
         self._last_batch_timestamp = None
         self._last_batch_wallclock = ""
@@ -2504,16 +2589,27 @@ class PIController:
         self._tuning_alert_counters = {}
         self._tuning_alert_snapshots = {}
 
-    def _flush_greybox(self) -> None:
-        """Clear greybox buffer, results, and bridge."""
+    def _flush_greybox(self, *, reason: str = "other") -> None:
+        """Clear greybox buffer, results, and bridge.
+
+        Emits a `BUFFER_RESET` TickEvent so bundles can correlate
+        greybox state discontinuities with the event log.
+        """
+        before = len(self._greybox_buffer)
         self._greybox_has_been_good = False
         self._greybox_buffer.clear()
         self._greybox_buffer_cache = []
         self._last_greybox_result = None
         self._last_greybox_bridge = None
         self._last_greybox_timestamp_iso = None
+        self._emit_event(
+            TickEventKind.BUFFER_RESET,
+            BufferResetPayload(buffer="greybox", reason=reason, before_count=before),
+        )
 
-    def flush_observation_buffer(self, mode: str | None = None) -> None:
+    def flush_observation_buffer(
+        self, mode: str | None = None, *, reason: str = "service_call",
+    ) -> None:
         """Clear observation buffer(s) and reset batch learning state.
 
         Nuclear option for major renovation or equipment change.
@@ -2522,11 +2618,17 @@ class PIController:
             mode: "heat", "cool", or None (both).  When flushing a single
                   mode, drift correction history and batch result are also
                   cleared because they reference the now-invalid data.
+            reason: why the wipe is happening.  Recorded on the emitted
+                  `BUFFER_RESET` event so debug bundles can attribute later
+                  state discontinuities back to a known cause.
         """
-        self._flush_buffers(mode)
-        self._flush_greybox()
+        self._flush_buffers(mode, reason=reason)
+        self._flush_greybox(reason=reason)
         label = mode or "heat+cool"
-        _LOGGER.info("Observation buffer (%s) flushed — batch learning will restart from scratch", label)
+        _LOGGER.info(
+            "Observation buffer (%s) flushed — batch learning will restart from scratch (reason=%s)",
+            label, reason,
+        )
 
     def _check_tuning_health(self, *, from_batch: bool = False) -> list[tuple[str, str, str, dict[str, str], bool, bool, dict[str, Any] | None]]:
         """Evaluate tuning health and return issues for HA Repairs.
@@ -3619,6 +3721,8 @@ class PIController:
                         n_eff=d.n_eff,
                         accepted=d.accepted,
                         reject_reason=d.reject_reason,
+                        search_max_used=round(d.search_max_used, 1),
+                        boundary_hit=d.boundary_hit,
                     )
                     for name, d in br.detected_tau_diagnostics.items()
                 },
@@ -4083,7 +4187,7 @@ class PIController:
 
     async def async_flush_observation_buffer(self, mode: str | None = None) -> None:
         """Clear observation buffer(s) and reset batch learning state (service handler)."""
-        self.flush_observation_buffer(mode=mode)
+        self.flush_observation_buffer(mode=mode, reason="service_call")
 
     def _reset_plant_id(self) -> None:
         """Abort active plant test, cancel observations, reset estimate to seeds.
@@ -4117,13 +4221,13 @@ class PIController:
         if "seeds" in targets:
             self._reset_seeds(mode)
         if "buffers" in targets:
-            self._flush_buffers(mode)
+            self._flush_buffers(mode, reason="service_call")
         if "integral" in targets:
             self._pi_integral = 0.0
         if "plant_id" in targets:
             self._reset_plant_id()
         if "greybox" in targets:
-            self._flush_greybox()
+            self._flush_greybox(reason="service_call")
         if "head_offset" in targets:
             self._reset_head_offset()
         _LOGGER.info(

@@ -235,9 +235,27 @@ def build_feature_vector_from_raw(
 # Golden-section ratio for pure-Python bracket search.
 _PHI = (math.sqrt(5) - 1) / 2  # ≈ 0.618
 
-# Bounds for tau search in seconds: 0 (no lag) to 8 hours.
+# Bounds for tau search in seconds: 0 (no lag) to 8 hours (default).
 _TAU_SEARCH_MIN = 0.0
 _TAU_SEARCH_MAX = 28800.0
+
+# Per-role upper rails for the tau search (seconds).  Physical reasoning:
+# an EMA with τ filters out signal frequencies above 1/τ, so a search rail
+# matched to the input's plausible thermal timescale prevents the optimizer
+# from running off into the diurnal band where solar lives (τ ≥ 12h ≈ half
+# the diurnal period collapses EMA(solar) to a near-DC signal — see the
+# Forssell-Ljung 1999 / Raue 2009 practical-non-identifiability argument).
+#
+# Inputs with no role match fall back to ``_TAU_SEARCH_MAX``.
+_TAU_SEARCH_MAX_BY_ROLE: dict[str, float] = {
+    "solar": 21600.0,         # 6h — well below 12h diurnal half-period
+    "heat_source": 3600.0,    # 1h — convective response of radiators / stoves
+    "adjacent_zone": 43200.0, # 12h — party-wall conduction timescale
+}
+
+# Optimum lands within this fraction of either rail → flag as
+# practically non-identifiable (Raue 2009 profile-likelihood).
+_TAU_BOUNDARY_FRACTION = 0.05
 
 # Minimum detectable tau (seconds).  Lags shorter than observation
 # spacing (~15 min) are indistinguishable from noise — snap to 0.
@@ -288,7 +306,18 @@ class LagTauDiagnostic:
     """True iff BIC passed AND τ_opt ≥ floor. Mirrors ``tau > 0``."""
 
     reject_reason: str
-    """"" if accepted, else one of {"bic_failed", "below_floor"}."""
+    """"" if accepted, else one of {"bic_failed", "below_floor", "boundary_hit"}."""
+
+    search_max_used: float = 0.0
+    """Upper rail of the τ search (seconds).  Per-role when configured,
+    falls back to the global ``_TAU_SEARCH_MAX``.  Surfaced so debug
+    bundles can tell which rail a ``boundary_hit`` rejection bumped against."""
+
+    boundary_hit: bool = False
+    """True when ``tau_opt_raw`` lands within ``_TAU_BOUNDARY_FRACTION`` of
+    the upper search rail.  By Raue 2009 profile-likelihood semantics this
+    is practical non-identifiability: the optimizer has no preference for
+    stopping inside the search range, so the value is not informative."""
 
 
 def _apply_retrospective_ema(
@@ -356,6 +385,7 @@ def _detect_optimal_tau(
     delta_from_room: bool = False,
     base_X: list[list[float]] | None = None,
     tod_cols: list[tuple[float, float]] | None = None,
+    input_role: str | None = None,
 ) -> LagTauDiagnostic | None:
     """Find the optimal EMA tau for a model input via joint regression sweep.
 
@@ -457,13 +487,22 @@ def _detect_optimal_tau(
                 rss += weights[i] * (y_values[i] - pred) ** 2
             return rss
 
+    # Per-role upper rail for the τ search.  Inputs whose role has a
+    # tighter physical timescale (e.g. solar bounded by room thermal
+    # mass) get a tighter rail than the global default — reduces the
+    # chance of the optimum running off into a band where the EMA
+    # smooths the signal it's supposed to identify.
+    search_max = _TAU_SEARCH_MAX_BY_ROLE.get(
+        input_role or "", _TAU_SEARCH_MAX,
+    )
+
     # Compute RSS at tau=0 (raw) for comparison
     rss_raw = _compute_rss(0.0)
 
     if _SCIPY_AVAILABLE and _minimize_scalar is not None:
         result = _minimize_scalar(
             _compute_rss,
-            bounds=(_TAU_SEARCH_MIN, _TAU_SEARCH_MAX),
+            bounds=(_TAU_SEARCH_MIN, search_max),
             method="bounded",
             options={"xatol": 60.0},  # 1-minute precision
         )
@@ -471,7 +510,7 @@ def _detect_optimal_tau(
         rss_opt = float(result.fun)
     else:
         # Pure-Python golden-section search
-        a, b = _TAU_SEARCH_MIN, _TAU_SEARCH_MAX
+        a, b = _TAU_SEARCH_MIN, search_max
         c = b - _PHI * (b - a)
         d = a + _PHI * (b - a)
         fc = _compute_rss(c)
@@ -539,13 +578,25 @@ def _detect_optimal_tau(
     beta_f = _solve_symmetric(XtWX_f, XtWy_f, p)
     beta_input = beta_f[4] if beta_f else 0.0
 
-    # Apply acceptance gates: BIC first, then sub-floor snap.
+    # Boundary-hit detection: τ_opt within ε of the upper rail is the
+    # Raue 2009 practical-non-identifiability signal — the optimizer has
+    # no interior preference, so the reported value is the rail itself,
+    # not an estimate.  See module-level rationale on _TAU_SEARCH_MAX_BY_ROLE.
+    boundary_hit = (
+        search_max > 0
+        and (search_max - tau_opt) / search_max < _TAU_BOUNDARY_FRACTION
+    )
+
+    # Apply acceptance gates: BIC first, then sub-floor snap, then
+    # boundary-hit (only after BIC and floor pass — a bic_failed rail-hit
+    # is more usefully reported as bic_failed).
     if bic_gain < bic_threshold:
         return LagTauDiagnostic(
             tau=0.0, tau_opt_raw=tau_opt,
             bic_gain=bic_gain, bic_threshold=bic_threshold,
             r2_improvement=r2_improvement, beta_at_tau=beta_input,
             n_eff=n_eff, accepted=False, reject_reason="bic_failed",
+            search_max_used=search_max, boundary_hit=boundary_hit,
         )
 
     if tau_opt < _TAU_MIN_MEANINGFUL:
@@ -554,6 +605,16 @@ def _detect_optimal_tau(
             bic_gain=bic_gain, bic_threshold=bic_threshold,
             r2_improvement=r2_improvement, beta_at_tau=beta_input,
             n_eff=n_eff, accepted=False, reject_reason="below_floor",
+            search_max_used=search_max, boundary_hit=boundary_hit,
+        )
+
+    if boundary_hit:
+        return LagTauDiagnostic(
+            tau=0.0, tau_opt_raw=tau_opt,
+            bic_gain=bic_gain, bic_threshold=bic_threshold,
+            r2_improvement=r2_improvement, beta_at_tau=beta_input,
+            n_eff=n_eff, accepted=False, reject_reason="boundary_hit",
+            search_max_used=search_max, boundary_hit=True,
         )
 
     return LagTauDiagnostic(
@@ -561,6 +622,7 @@ def _detect_optimal_tau(
         bic_gain=bic_gain, bic_threshold=bic_threshold,
         r2_improvement=r2_improvement, beta_at_tau=beta_input,
         n_eff=n_eff, accepted=True, reject_reason="",
+        search_max_used=search_max, boundary_hit=False,
     )
 
 
@@ -1794,6 +1856,7 @@ def weighted_least_squares(
                 delta_from_room=dfr,
                 base_X=X_base,
                 tod_cols=_tod_cols,
+                input_role=m_input.get("input_role"),
             )
 
             if tau_result is not None:

@@ -3205,6 +3205,138 @@ class TestBatchLearningDefensivePaths:
         assert result.accepted is True
         assert result.reject_reason == ""
 
+    def test_detect_optimal_tau_flags_boundary_hit_at_upper_rail(self):
+        """τ_opt within ε of the upper search rail → reject as boundary_hit.
+
+        Raue 2009 practical-non-identifiability: when the profile likelihood
+        keeps decreasing toward the rail, the optimum sits at the boundary
+        and the value isn't informative.  We pin τ_opt at the rail via a
+        mocked minimizer to exercise the new gate.
+        """
+        import datetime as _dt
+        from unittest.mock import patch as _patch, MagicMock
+        import custom_components.tasmota_irhvac.pi.batch_learning as bl
+        obs = []
+        for i in range(60):
+            wt = _dt.datetime(2026, 4, 20, i % 24, (i % 4) * 15, 0).timestamp()
+            obs.append(Observation(
+                timestamp=float(i * 900), wall_time=wt,
+                hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=15.0,
+                room_rate=float(i % 7) * 0.001,
+                raw_readings={"sensor.s": 0.5 + (i % 5) * 0.1},
+                clamped=False,
+            ))
+        y = [o.room_rate for o in obs]
+        w = [1.0] * len(obs)
+        base_X = [[1.0, float(i % 3)] for i in range(len(obs))]
+        from custom_components.tasmota_irhvac.pi.model_input_manager import (
+            tod_features,
+        )
+        tod_cols = [tod_features(o.wall_time) for o in obs]
+        # Pin τ_opt at the global rail (8h) and force BIC-acceptable RSS so
+        # only the boundary-hit gate can reject.
+        rail = bl._TAU_SEARCH_MAX
+        fake_result = MagicMock(x=rail * 0.999, fun=1e-10)
+        original_ema = bl._apply_retrospective_ema
+        def fake_ema(observations, entity_id, tau):
+            if tau < 1.0:
+                return original_ema(observations, entity_id, tau)
+            return [o.room_rate * 1000.0 for o in observations]
+        with _patch.object(bl, "_minimize_scalar") as mock_min, \
+             _patch.object(bl, "_apply_retrospective_ema", side_effect=fake_ema):
+            mock_min.return_value = fake_result
+            result = bl._detect_optimal_tau(
+                obs, y, w, entity_id="sensor.s",
+                base_X=base_X, tod_cols=tod_cols,
+            )
+        assert result is not None
+        assert result.tau == 0.0  # not applied
+        assert result.accepted is False
+        assert result.reject_reason == "boundary_hit"
+        assert result.boundary_hit is True
+        assert result.search_max_used == rail
+        # Diagnostic preserves the rail-hit value so debug bundles can see
+        # *which* rail it bumped.
+        assert result.tau_opt_raw == pytest.approx(rail * 0.999)
+
+    def test_detect_optimal_tau_uses_per_role_search_max_solar(self):
+        """`input_role="solar"` shrinks the search ceiling to 6h.
+
+        An EMA with τ ≥ 12h smooths out the diurnal cycle solar lives in
+        (Forssell-Ljung 1999 closed-loop bandwidth argument) — the global
+        8h rail is too generous for solar.  The per-role 6h rail keeps
+        the search inside the physically meaningful band.
+        """
+        import datetime as _dt
+        from unittest.mock import patch as _patch, MagicMock
+        import custom_components.tasmota_irhvac.pi.batch_learning as bl
+        obs = []
+        for i in range(40):
+            wt = _dt.datetime(2026, 4, 20, i % 24, 0, 0).timestamp()
+            obs.append(Observation(
+                timestamp=float(i * 900), wall_time=wt,
+                hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=15.0,
+                room_rate=float(i % 5) * 0.001,
+                raw_readings={"sensor.solar": 0.5},
+                clamped=False,
+            ))
+        y = [o.room_rate for o in obs]
+        w = [1.0] * len(obs)
+        base_X = [[1.0, 0.0] for _ in obs]
+        from custom_components.tasmota_irhvac.pi.model_input_manager import (
+            tod_features,
+        )
+        tod_cols = [tod_features(o.wall_time) for o in obs]
+        captured_bounds: list[tuple[float, float]] = []
+        def capture_bounds(_func, bounds, method, options):
+            captured_bounds.append(bounds)
+            return MagicMock(x=1500.0, fun=1.0)
+        with _patch.object(bl, "_minimize_scalar", side_effect=capture_bounds):
+            bl._detect_optimal_tau(
+                obs, y, w, entity_id="sensor.solar",
+                base_X=base_X, tod_cols=tod_cols,
+                input_role="solar",
+            )
+        assert captured_bounds[0][1] == bl._TAU_SEARCH_MAX_BY_ROLE["solar"]
+        assert captured_bounds[0][1] < bl._TAU_SEARCH_MAX
+
+    def test_detect_optimal_tau_search_max_falls_back_to_global(self):
+        """Unknown / missing input_role falls back to the global 8h rail."""
+        import datetime as _dt
+        from unittest.mock import patch as _patch, MagicMock
+        import custom_components.tasmota_irhvac.pi.batch_learning as bl
+        obs = []
+        for i in range(40):
+            wt = _dt.datetime(2026, 4, 20, i % 24, 0, 0).timestamp()
+            obs.append(Observation(
+                timestamp=float(i * 900), wall_time=wt,
+                hp_setpoint=22.0, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=15.0,
+                room_rate=float(i % 5) * 0.001,
+                raw_readings={"sensor.s": 0.5},
+                clamped=False,
+            ))
+        y = [o.room_rate for o in obs]
+        w = [1.0] * len(obs)
+        base_X = [[1.0, 0.0] for _ in obs]
+        from custom_components.tasmota_irhvac.pi.model_input_manager import (
+            tod_features,
+        )
+        tod_cols = [tod_features(o.wall_time) for o in obs]
+        captured_bounds: list[tuple[float, float]] = []
+        def capture_bounds(_func, bounds, method, options):
+            captured_bounds.append(bounds)
+            return MagicMock(x=1500.0, fun=1.0)
+        with _patch.object(bl, "_minimize_scalar", side_effect=capture_bounds):
+            bl._detect_optimal_tau(
+                obs, y, w, entity_id="sensor.s",
+                base_X=base_X, tod_cols=tod_cols,
+                input_role=None,
+            )
+        assert captured_bounds[0][1] == bl._TAU_SEARCH_MAX
+
     def test_analyze_residuals_handles_none_args_defensively(self):
         """analyze_residuals_by_hour returns empty when feature_order/model_inputs is None."""
         from custom_components.tasmota_irhvac.pi.batch_learning import (

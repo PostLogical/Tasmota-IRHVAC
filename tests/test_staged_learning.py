@@ -522,20 +522,38 @@ class TestMigrationFromPre40:
 
 
 class TestEvaluateFeatureUnlocks:
-    """Tests for _evaluate_feature_unlocks() logic."""
+    """Tests for _evaluate_feature_unlocks() logic.
+
+    The unlock evaluation now runs a per-feature partial regression
+    (Bacher-Madsen 2011 forward selection) for each frozen feature.
+    Tests mock ``weighted_least_squares`` to return crafted BatchResults
+    so each gate condition can be exercised in isolation.
+    """
 
     def _make_entity_with_inputs(self, n=2, roles=None):
         config = _make_config_with_inputs(n_inputs=n, roles=roles)
         entity = FakePIEntity(config)
         return entity
 
-    def _make_full_result(self, n, std_err=None, held=None, vif=None):
-        """Create a full-model BatchResult for unlock evaluation.
+    def _make_partial_result(self, n, std_err=None, held=None, vif=None):
+        """Build a partial-regression BatchResult sized to ``n`` features.
 
-        This represents the result from WLS with ALL features estimated
-        (no frozen_features).  std_err, held_features, and feature_vif
-        are the unlock evidence.
+        Used as the return value of the patched ``weighted_least_squares``
+        inside ``_evaluate_feature_unlocks``.  Length-n arrays let the
+        unlock loop read each feature's own gate values without hitting
+        an out-of-range fallback.
         """
+        # Pad arrays to length n with permissive defaults so other
+        # frozen features (e.g. sin/cos at indices 3, 4) don't trip
+        # gates accidentally during this test's evaluation pass.
+        full_se = [0.1] * n
+        if std_err is not None:
+            for i, v in enumerate(std_err):
+                full_se[i] = v
+        full_vif = [1.0] * n
+        if vif is not None:
+            for i, v in enumerate(vif):
+                full_vif[i] = v
         return BatchResult(
             n_total=100,
             n_eligible=80,
@@ -544,139 +562,149 @@ class TestEvaluateFeatureUnlocks:
             residual_rms=0.5,
             max_coeff_change_pct=5.0,
             recommend_update=True,
-            held_features=held or set(),
-            beta_std_err=std_err or [0.1] * n,
+            held_features=set(held) if held else set(),
+            beta_std_err=full_se,
             beta_blended=[0.0] * n,
             blend_gains=[0.5] * n,
             plant_snapshot={},
-            feature_vif=vif or [1.0] * n,
+            feature_vif=full_vif,
         )
 
+    def _eval(self, pi, result):
+        """Run _evaluate_feature_unlocks with the partial regression mocked."""
+        from unittest.mock import patch as _patch
+        with _patch(
+            "custom_components.tasmota_irhvac.pi.pi_controller."
+            "weighted_least_squares",
+            return_value=result,
+        ):
+            pi._evaluate_feature_unlocks(
+                observations=[], current_phys=[0.0] * pi._rls_heat.n,
+                rls=pi._rls_heat, is_heating=True,
+            )
+
     def test_unlock_with_good_conditions(self):
-        """Feature unlocks when full-model shows it's identifiable."""
+        """Feature unlocks when partial regression shows it's identifiable."""
         entity = self._make_entity_with_inputs(n=1)
         pi = entity._pi
-        rls = pi._rls_heat
-        n = rls.n
-        assert rls.frozen[2]
+        n = pi._rls_heat.n
+        assert pi._rls_heat.frozen[2]
 
-        result = self._make_full_result(n, std_err=[0.1, 0.05, 0.08], vif=[1.0, 1.5, 2.0])
+        result = self._make_partial_result(n, std_err=[0.1, 0.05, 0.08], vif=[1.0, 1.5, 2.0])
         pi._cached_kappa = 15.0
+        self._eval(pi, result)
+        assert not pi._rls_heat.frozen[2], "Feature should have been unlocked"
 
-        pi._evaluate_feature_unlocks(result, rls, is_heating=True)
-        assert not rls.frozen[2], "Feature should have been unlocked"
-
-    def test_no_unlock_when_held_in_full_model(self):
-        """Feature stays frozen when held in full-model (insufficient variance)."""
+    def test_no_unlock_when_held_in_partial_model(self):
+        """Feature stays frozen when held in partial regression."""
         entity = self._make_entity_with_inputs(n=1)
         pi = entity._pi
-        rls = pi._rls_heat
-        n = rls.n
-
-        result = self._make_full_result(n, held={2}, vif=[1.0, 1.5, 2.0])
+        n = pi._rls_heat.n
+        result = self._make_partial_result(n, held={2}, vif=[1.0, 1.5, 2.0])
         pi._cached_kappa = 15.0
-
-        pi._evaluate_feature_unlocks(result, rls, is_heating=True)
-        assert rls.frozen[2], "Feature should remain frozen (held in full model)"
+        self._eval(pi, result)
+        assert pi._rls_heat.frozen[2], "Feature should remain frozen (held in partial model)"
 
     def test_no_unlock_when_infinite_stderr(self):
-        """Feature stays frozen when full-model std_err is infinite."""
+        """Feature stays frozen when partial-model std_err is infinite."""
         entity = self._make_entity_with_inputs(n=1)
         pi = entity._pi
-        rls = pi._rls_heat
-        n = rls.n
-
-        result = self._make_full_result(n, std_err=[0.1, 0.05, float("inf")], vif=[1.0, 1.5, 2.0])
+        n = pi._rls_heat.n
+        result = self._make_partial_result(
+            n, std_err=[0.1, 0.05, float("inf")], vif=[1.0, 1.5, 2.0],
+        )
         pi._cached_kappa = 15.0
-
-        pi._evaluate_feature_unlocks(result, rls, is_heating=True)
-        assert rls.frozen[2], "Feature should remain frozen (infinite std_err)"
+        self._eval(pi, result)
+        assert pi._rls_heat.frozen[2], "Feature should remain frozen (infinite std_err)"
 
     def test_no_unlock_when_high_vif(self):
         """Feature stays frozen when VIF >= 10."""
         entity = self._make_entity_with_inputs(n=1)
         pi = entity._pi
-        rls = pi._rls_heat
-        n = rls.n
-
-        result = self._make_full_result(n, std_err=[0.1, 0.05, 0.08], vif=[1.0, 1.5, 15.0])
+        n = pi._rls_heat.n
+        result = self._make_partial_result(n, std_err=[0.1, 0.05, 0.08], vif=[1.0, 1.5, 15.0])
         pi._cached_kappa = 15.0
-
-        pi._evaluate_feature_unlocks(result, rls, is_heating=True)
-        assert rls.frozen[2], "Feature should remain frozen (VIF >= 10)"
+        self._eval(pi, result)
+        assert pi._rls_heat.frozen[2], "Feature should remain frozen (VIF >= 10)"
 
     def test_adjacent_zone_gated_by_kappa(self):
         """Adjacent zone feature stays frozen when κ >= 100."""
         entity = self._make_entity_with_inputs(n=1, roles=["adjacent_zone"])
         pi = entity._pi
-        rls = pi._rls_heat
-        n = rls.n
-
-        result = self._make_full_result(n, std_err=[0.1, 0.05, 0.08], vif=[1.0, 1.5, 2.0])
+        n = pi._rls_heat.n
+        result = self._make_partial_result(n, std_err=[0.1, 0.05, 0.08], vif=[1.0, 1.5, 2.0])
         pi._cached_kappa = 150.0
-
-        pi._evaluate_feature_unlocks(result, rls, is_heating=True)
-        assert rls.frozen[2], "Adjacent zone should remain frozen (κ >= 100)"
+        self._eval(pi, result)
+        assert pi._rls_heat.frozen[2], "Adjacent zone should remain frozen (κ >= 100)"
 
     def test_adjacent_zone_unlocks_when_kappa_low(self):
         """Adjacent zone feature unlocks when κ < 100."""
         entity = self._make_entity_with_inputs(n=1, roles=["adjacent_zone"])
         pi = entity._pi
-        rls = pi._rls_heat
-        n = rls.n
-
-        result = self._make_full_result(n, std_err=[0.1, 0.05, 0.08], vif=[1.0, 1.5, 2.0])
+        n = pi._rls_heat.n
+        result = self._make_partial_result(n, std_err=[0.1, 0.05, 0.08], vif=[1.0, 1.5, 2.0])
         pi._cached_kappa = 25.0
-
-        pi._evaluate_feature_unlocks(result, rls, is_heating=True)
-        assert not rls.frozen[2], "Adjacent zone should unlock (κ < 100)"
+        self._eval(pi, result)
+        assert not pi._rls_heat.frozen[2], "Adjacent zone should unlock (κ < 100)"
 
     def test_manual_override_skipped(self):
         """Auto-gating skips features with any manual override."""
         entity = self._make_entity_with_inputs(n=1)
         pi = entity._pi
-        rls = pi._rls_heat
-        n = rls.n
+        n = pi._rls_heat.n
+        pi._manual_override_heat[2] = False
+        pi._rls_heat.frozen[2] = True
 
-        pi._manual_override_heat[2] = False  # Force frozen
-        rls.frozen[2] = True
-
-        result = self._make_full_result(n, std_err=[0.1, 0.05, 0.08], vif=[1.0, 1.5, 2.0])
+        result = self._make_partial_result(n, std_err=[0.1, 0.05, 0.08], vif=[1.0, 1.5, 2.0])
         pi._cached_kappa = 15.0
-
-        pi._evaluate_feature_unlocks(result, rls, is_heating=True)
-        assert rls.frozen[2], "Should remain frozen (manual override skips evaluation)"
+        self._eval(pi, result)
+        assert pi._rls_heat.frozen[2], "Should remain frozen (manual override skips evaluation)"
 
     def test_already_unfrozen_not_reevaluated(self):
         """Features that are already unfrozen are skipped."""
         entity = self._make_entity_with_inputs(n=1)
         pi = entity._pi
-        rls = pi._rls_heat
-        n = rls.n
-        rls.frozen[2] = False
+        n = pi._rls_heat.n
+        pi._rls_heat.frozen[2] = False
 
-        result = self._make_full_result(n, std_err=[0.1, 0.05, float("inf")], vif=[1.0, 1.5, 2.0])
+        result = self._make_partial_result(
+            n, std_err=[0.1, 0.05, float("inf")], vif=[1.0, 1.5, 2.0],
+        )
         pi._cached_kappa = 15.0
+        self._eval(pi, result)
+        assert not pi._rls_heat.frozen[2], "Already unfrozen should stay unfrozen"
 
-        pi._evaluate_feature_unlocks(result, rls, is_heating=True)
-        assert not rls.frozen[2], "Already unfrozen should stay unfrozen"
-
-    def test_records_capture_all_passed_unfrozen(self):
-        """Successful unlock records gate_failed=None, unfrozen=True with full-model values."""
+    def test_partial_fit_returns_none_records_insufficient_data(self):
+        """When the partial regression can't fit (e.g. <20 eligible obs)
+        the feature is recorded as gated by ``insufficient_data`` rather
+        than silently skipped."""
+        from unittest.mock import patch as _patch
         entity = self._make_entity_with_inputs(n=1)
         pi = entity._pi
-        rls = pi._rls_heat
-        n = rls.n
-        result = self._make_full_result(n, std_err=[0.1, 0.05, 0.08], vif=[1.0, 1.5, 2.0])
         pi._cached_kappa = 15.0
+        with _patch(
+            "custom_components.tasmota_irhvac.pi.pi_controller."
+            "weighted_least_squares",
+            return_value=None,
+        ):
+            pi._evaluate_feature_unlocks(
+                observations=[], current_phys=[0.0] * pi._rls_heat.n,
+                rls=pi._rls_heat, is_heating=True,
+            )
+        rec = next(r for r in pi._last_unlock_evaluation if r.coefficient_index == 2)
+        assert rec.gate_failed == "insufficient_data"
+        assert rec.unfrozen is False
 
-        pi._evaluate_feature_unlocks(result, rls, is_heating=True)
+    def test_records_capture_all_passed_unfrozen(self):
+        """Successful unlock records gate_failed=None, unfrozen=True with partial-fit values."""
+        entity = self._make_entity_with_inputs(n=1)
+        pi = entity._pi
+        n = pi._rls_heat.n
+        result = self._make_partial_result(n, std_err=[0.1, 0.05, 0.08], vif=[1.0, 1.5, 2.0])
+        pi._cached_kappa = 15.0
+        self._eval(pi, result)
 
-        records = pi._last_unlock_evaluation
-        # 1 model input + 2 ToD = 3 frozen at start; sin/cos lack entity_id
-        # so they end up `held` in the full_result (unset in this stub).
-        # Locate the model_input record (coefficient_index=2).
-        rec = next(r for r in records if r.coefficient_index == 2)
+        rec = next(r for r in pi._last_unlock_evaluation if r.coefficient_index == 2)
         assert rec.gate_failed is None
         assert rec.unfrozen is True
         assert rec.full_model_std_err == 0.08
@@ -687,12 +715,11 @@ class TestEvaluateFeatureUnlocks:
         """Held-feature failure surfaces gate_failed='held' with in_full_model_held=True."""
         entity = self._make_entity_with_inputs(n=1)
         pi = entity._pi
-        rls = pi._rls_heat
-        n = rls.n
-        result = self._make_full_result(n, held={2}, vif=[1.0, 1.5, 2.0])
+        n = pi._rls_heat.n
+        result = self._make_partial_result(n, held={2}, vif=[1.0, 1.5, 2.0])
         pi._cached_kappa = 15.0
+        self._eval(pi, result)
 
-        pi._evaluate_feature_unlocks(result, rls, is_heating=True)
         rec = next(r for r in pi._last_unlock_evaluation if r.coefficient_index == 2)
         assert rec.gate_failed == "held"
         assert rec.unfrozen is False
@@ -702,28 +729,28 @@ class TestEvaluateFeatureUnlocks:
         """VIF≥10 surfaces gate_failed='vif' with the offending VIF preserved."""
         entity = self._make_entity_with_inputs(n=1)
         pi = entity._pi
-        rls = pi._rls_heat
-        n = rls.n
-        result = self._make_full_result(n, std_err=[0.1, 0.05, 0.08], vif=[1.0, 1.5, 14.3])
+        n = pi._rls_heat.n
+        result = self._make_partial_result(n, std_err=[0.1, 0.05, 0.08], vif=[1.0, 1.5, 14.3])
         pi._cached_kappa = 15.0
+        self._eval(pi, result)
 
-        pi._evaluate_feature_unlocks(result, rls, is_heating=True)
         rec = next(r for r in pi._last_unlock_evaluation if r.coefficient_index == 2)
         assert rec.gate_failed == "vif"
         assert rec.unfrozen is False
         assert rec.full_model_vif == 14.3
-        assert rec.full_model_std_err == 0.08  # std_err passed; only VIF failed
+        assert rec.full_model_std_err == 0.08
 
     def test_records_capture_std_err_gate_failure(self):
         """Infinite std_err surfaces gate_failed='std_err' with std_err=None."""
         entity = self._make_entity_with_inputs(n=1)
         pi = entity._pi
-        rls = pi._rls_heat
-        n = rls.n
-        result = self._make_full_result(n, std_err=[0.1, 0.05, float("inf")], vif=[1.0, 1.5, 2.0])
+        n = pi._rls_heat.n
+        result = self._make_partial_result(
+            n, std_err=[0.1, 0.05, float("inf")], vif=[1.0, 1.5, 2.0],
+        )
         pi._cached_kappa = 15.0
+        self._eval(pi, result)
 
-        pi._evaluate_feature_unlocks(result, rls, is_heating=True)
         rec = next(r for r in pi._last_unlock_evaluation if r.coefficient_index == 2)
         assert rec.gate_failed == "std_err"
         assert rec.unfrozen is False
@@ -733,12 +760,11 @@ class TestEvaluateFeatureUnlocks:
         """Adjacent_zone with κ≥100 surfaces gate_failed='kappa'."""
         entity = self._make_entity_with_inputs(n=1, roles=["adjacent_zone"])
         pi = entity._pi
-        rls = pi._rls_heat
-        n = rls.n
-        result = self._make_full_result(n, std_err=[0.1, 0.05, 0.08], vif=[1.0, 1.5, 2.0])
+        n = pi._rls_heat.n
+        result = self._make_partial_result(n, std_err=[0.1, 0.05, 0.08], vif=[1.0, 1.5, 2.0])
         pi._cached_kappa = 150.0
+        self._eval(pi, result)
 
-        pi._evaluate_feature_unlocks(result, rls, is_heating=True)
         rec = next(r for r in pi._last_unlock_evaluation if r.coefficient_index == 2)
         assert rec.gate_failed == "kappa"
         assert rec.unfrozen is False
