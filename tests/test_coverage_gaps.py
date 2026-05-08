@@ -6429,3 +6429,49 @@ class TestBranchCoverageBackfill:
         assert mim.filtered[0] == 0.7
         # boiler stayed at default (0.0)
         assert mim.filtered[1] == 0.0
+
+    def test_plant_identifier_restore_with_invalid_plant_dict_keeps_seeds(self):
+        """from_dict returns None on a malformed plant_estimate, so the
+        ``if restored is not None`` branch (561) takes the False path
+        and the seeded plant survives intact."""
+        from custom_components.tasmota_irhvac.pi.plant_identifier import (
+            PlantIdentifier,
+        )
+        pi = PlantIdentifier(
+            tau_fast_seed=20.0, tau_slow_seed=60.0,
+            response_lag=15.0, imc_lambda=0.0, enabled=True,
+        )
+        # Valid-shaped dict but with malformed inner structure → from_dict
+        # raises KeyError internally and returns None.
+        pi.restore({"plant_estimate": {"unexpected": "shape"}})
+        assert pi.plant.tau_fast.value == 20.0  # seed preserved
+        assert pi.plant.tau_slow.value == 60.0
+
+    def test_plant_identifier_apply_greybox_with_zero_current_skips_ratio(self):
+        """When current.value == 0, the ratio guard (392) is skipped —
+        the new estimate is accepted without a ratio sanity check."""
+        from custom_components.tasmota_irhvac.pi.plant_identifier import (
+            PlantIdentifier,
+        )
+        from custom_components.tasmota_irhvac.pi.plant_model import (
+            ParameterEstimate,
+        )
+        import dataclasses
+        pi = PlantIdentifier(
+            tau_fast_seed=20.0, tau_slow_seed=60.0,
+            response_lag=15.0, imc_lambda=0.0, enabled=True,
+        )
+        # Force current tau_slow.value to zero with overridable source.
+        zero_tau = ParameterEstimate(
+            value=0.0, confidence=0.0, source="seed", observations=0,
+        )
+        pi._plant = dataclasses.replace(pi._plant, tau_slow=zero_tau)
+        result = pi._apply_greybox_update(
+            field_name="tau_slow", new_value=120.0,
+            cv=0.1,  # → confidence ≈ 0.8
+            overridable={"seed"},
+            label="τ_slow",
+        )
+        # 0 > 0 is False → ratio block skipped, estimate accepted.
+        assert result is True
+        assert pi.plant.tau_slow.value == 120.0
