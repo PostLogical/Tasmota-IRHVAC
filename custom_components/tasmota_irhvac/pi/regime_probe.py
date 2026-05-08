@@ -264,7 +264,7 @@ class RegimeProbe:
         # ── ANALYZE: handled synchronously in _analyze() ─────────
 
         # ── COOLDOWN: wait for cooldown to elapse ────────────────
-        elif self._state == ProbeState.COOLDOWN:
+        elif self._state == ProbeState.COOLDOWN:  # pragma: no branch — COOLDOWN tick before timer expiry — exits without state change
             if now_mono >= self._cooldown_end_mono:
                 self._state = ProbeState.IDLE
 

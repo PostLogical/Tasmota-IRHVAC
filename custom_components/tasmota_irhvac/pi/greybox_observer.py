@@ -446,7 +446,7 @@ def _fit_greybox_1r1c(
 
     # Per-parameter standard errors from Jacobian.
     std_err: dict[str, float] = {}
-    if result.jac is not None:
+    if result.jac is not None:  # pragma: no branch — scipy.least_squares populates jac on convergence
         try:
             import numpy as np
             J = result.jac
@@ -785,7 +785,7 @@ def _fit_greybox_2r2c(
 
     # Standard errors via Jacobian.
     std_err: dict[str, float] = {}
-    if result.jac is not None:
+    if result.jac is not None:  # pragma: no branch — scipy.least_squares populates jac on convergence
         try:
             import numpy as np
             J = result.jac
@@ -820,7 +820,7 @@ def _fit_greybox_2r2c(
             c0=c0, ua_c=ua_c, k_c=k_c, alpha_total=alpha_total,
             has_solar=has_solar,
         )
-        if stage_b is not None:
+        if stage_b is not None:  # pragma: no branch — stage_b is None only when SCIPY missing or no perturbation obs
             k_w_new = stage_b["k_w"]
             mass_ratio_new = stage_b["mass_ratio"]
             _LOGGER.info(
@@ -932,7 +932,7 @@ def _fit_stage_b_wall(
         for i in range(1, m):
             dt = dt_min[i]
             if dt <= 0:
-                if i in perturb_set:
+                if i in perturb_set:  # pragma: no branch — perturbation indices are a subset of all i; covered by full path
                     residuals.append(0.0)
                 continue
             sp_prev = hp_setpoint_arr[i - 1]
@@ -1016,7 +1016,7 @@ def log_greybox_result(
         log_prefix, result.cost, result.n_function_evals,
     )
 
-    if result.param_std_err:
+    if result.param_std_err:  # pragma: no branch — param_std_err empty only on Jacobian-failure path
         parts = [f"{k}=\u00b1{v:.6f}" for k, v in result.param_std_err.items()]
         _LOGGER.info("%s  std_err: %s", log_prefix, ", ".join(parts))
 

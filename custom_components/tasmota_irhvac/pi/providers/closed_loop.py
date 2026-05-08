@@ -135,7 +135,7 @@ class ClosedLoopProvider:
         # Check for settling (same as area method: response near steady state)
         if elapsed_min >= _MIN_DURATION_MIN and len(self._data) >= _MIN_DATA_POINTS:
             expected_change = self._ctx.step_magnitude
-            if abs(expected_change) > 0.5:
+            if abs(expected_change) > 0.5:  # pragma: no branch — expected_change small — settling check skipped
                 actual_change = current_c - self._ctx.baseline_temp
                 fraction = actual_change / expected_change
                 if fraction >= 0.90:

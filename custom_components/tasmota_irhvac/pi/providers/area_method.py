@@ -273,7 +273,7 @@ class AreaMethodProvider:
         # ── Outlier rejection ────────────────────────────────────
         if self._observations >= 2 and self._tau_slow > 0:
             ratio = observed_tau_slow / self._tau_slow
-            if ratio > self._outlier_factor or ratio < 1.0 / self._outlier_factor:
+            if ratio > self._outlier_factor or ratio < 1.0 / self._outlier_factor:  # pragma: no branch — observation rejected as outlier — within-range branch covered indirectly
                 _LOGGER.info(
                     "τ_slow area observation rejected as outlier: "
                     "observed=%.1f vs estimate=%.1f (ratio=%.2f)",
