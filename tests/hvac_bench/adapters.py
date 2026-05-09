@@ -213,16 +213,7 @@ class _FakeBenchEntity(_PITestEntityRoomTempMixin):
         from custom_components.tasmota_irhvac.pi.pi_controller import PIController
 
         self.hass = MagicMock()
-        # Don't override `hass.states.get` — bench's locked reference scores
-        # were calibrated with `MagicMock().states.get(...)` returning a
-        # MagicMock whose `state` attribute floats to 1.0 in
-        # `_inputs.read_values`, which had the side effect of overwriting
-        # adapter-set model input values per tick.  The bench's
-        # `controller.tick()` then re-sets them, so net behavior is
-        # adapter-driven; preserving this MagicMock chain keeps reference
-        # scores stable.  The production async_added_to_hass initial-state
-        # read never runs in bench (no HA entity lifecycle), so we don't
-        # need to short-circuit it here.
+        self.hass.states.get = MagicMock(return_value=None)
         self._pi_test_room_temp = 20.0  # mixin backing field
         self._attr_target_temperature = 20.0
         self._attr_hvac_mode = HVACMode.HEAT

@@ -135,12 +135,18 @@ REFERENCE_SCORES: dict[str, dict[str, dict[str, ScoreExpectation]]] = {
             "setpoint_changes": ScoreExpectation(238, 5),
         },
         "well_tuned_pi": {
-            "tdis_tot": ScoreExpectation(0.936, 0.10),
-            "ener_tot": ScoreExpectation(5.740, 0.05),
+            # Relocked 2026-05-08 after fixing the bench MagicMock leak that
+            # pinned every non-delta_from_room model input to 1.0 every tick.
+            # Solar now tracks the diurnal schedule (peak 0.8) instead of
+            # constant 1.0; FF compensation is time-varying rather than a
+            # constant offset, so comfort/setpoint-changes worsen vs. the
+            # phantom-bench baseline. Numbers are now physically meaningful.
+            "tdis_tot": ScoreExpectation(1.408, 0.10),
+            "ener_tot": ScoreExpectation(5.728, 0.05),
             "peak_kw": ScoreExpectation(0.212, 0.005),
-            "cold_time_h": ScoreExpectation(2.25, 0.5),
-            "warm_time_h": ScoreExpectation(2.25, 0.5),
-            "setpoint_changes": ScoreExpectation(25, 3),
+            "cold_time_h": ScoreExpectation(4.25, 0.5),
+            "warm_time_h": ScoreExpectation(4.5, 0.5),
+            "setpoint_changes": ScoreExpectation(36, 3),
         },
         "production_pi": {
             "tdis_tot": ScoreExpectation(0.932, 0.10),
