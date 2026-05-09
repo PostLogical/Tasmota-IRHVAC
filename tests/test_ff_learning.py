@@ -8,10 +8,10 @@ from homeassistant.const import STATE_ON, UnitOfTemperature
 
 from custom_components.tasmota_irhvac.pi.pi_controller import PIController, PIExtraStoredData
 
-from .conftest import make_pi_config
+from .conftest import _PITestEntityRoomTempMixin, make_pi_config
 
 
-class FakeLearningEntity:
+class FakeLearningEntity(_PITestEntityRoomTempMixin):
     """Minimal fake entity for learning tests."""
 
     _attr_hvac_modes = [HVACMode.HEAT, HVACMode.COOL, HVACMode.OFF]
@@ -20,8 +20,9 @@ class FakeLearningEntity:
 
     def __init__(self, config):
         self.hass = MagicMock()
+        self.hass.states.get = MagicMock(return_value=None)
         self._attr_hvac_mode = HVACMode.HEAT
-        self._attr_current_temperature = 22.0
+        self._pi_test_room_temp = 22.0  # mixin backing field
         self._attr_target_temperature = 22.0
         self._temp_sensor = "sensor.room_temp"
         self._min_temp = 16
@@ -35,6 +36,7 @@ class FakeLearningEntity:
         self.async_get_last_state = AsyncMock(return_value=None)
         self.async_get_last_extra_data = AsyncMock(return_value=None)
         self._pi = PIController(self, config)
+        self._sync_room_temp_to_pi()
 
     @property
     def temperature_unit(self):

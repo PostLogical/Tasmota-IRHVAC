@@ -6,10 +6,50 @@ from unittest.mock import AsyncMock, patch
 
 from homeassistant.const import UnitOfTemperature
 from homeassistant.core import HomeAssistant
+from homeassistant.util.unit_conversion import TemperatureConverter
 
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.tasmota_irhvac.const import DATA_KEY, DOMAIN
+
+
+class _PITestEntityRoomTempMixin:
+    """Mixin: sync `_attr_current_temperature` writes into PI's room-temp state.
+
+    Production wires the room-temp sensor via `pi._async_room_temp_changed`
+    listener; tests with a MagicMock hass don't have the listener firing, so
+    this mixin closes the gap — assigning to `_attr_current_temperature` also
+    populates `pi._room_temp_c` and clears `_room_sensor_unavailable`.
+
+    `FakePIEntity` classes mix this in.  After `self._pi = PIController(...)`
+    they call `self._sync_room_temp_to_pi()` to seed the initial value.
+    Subsequent `entity._attr_current_temperature = X` assignments in tests
+    flow through the property setter and stay in sync automatically.
+    """
+
+    @property
+    def _attr_current_temperature(self):
+        return getattr(self, "_pi_test_room_temp", None)
+
+    @_attr_current_temperature.setter
+    def _attr_current_temperature(self, value):
+        self._pi_test_room_temp = value
+        self._sync_room_temp_to_pi()
+
+    def _sync_room_temp_to_pi(self):
+        if not hasattr(self, "_pi") or self._pi is None:
+            return
+        value = getattr(self, "_pi_test_room_temp", None)
+        if value is None:
+            self._pi._room_temp_c = None
+            self._pi._room_sensor_unavailable = True
+            return
+        self._pi._room_temp_c = TemperatureConverter.convert(
+            value,
+            self._attr_temperature_unit,
+            UnitOfTemperature.CELSIUS,
+        )
+        self._pi._room_sensor_unavailable = False
 
 
 @pytest.fixture(autouse=True)

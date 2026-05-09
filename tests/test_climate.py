@@ -473,6 +473,44 @@ class TestSensorTracking:
         assert entity._attr_current_temperature == 23.0
 
     @pytest.mark.asyncio
+    async def test_temp_sensor_unavailable_preserves_ui_value(self, hass, setup_integration):
+        """Brief sensor unavailability must NOT null the UI attribute.
+
+        Production scenario: HA restarts → mqtt/Z2M briefly disconnects →
+        temp sensor flips to 'unavailable' for a few seconds.  The climate
+        entity card, recorder, and dependent automations should keep the
+        last-known value during the blip.  The PI controller has its own
+        independent freshness gate (via its own listener) for control safety.
+        """
+        hass.states.async_set(
+            "sensor.test_temp", "21.5",
+            {"unit_of_measurement": "°C"},
+        )
+        entry = await setup_integration({"temperature_sensor": "sensor.test_temp"})
+        entity = get_climate_entity(hass, entry)
+        assert entity._attr_current_temperature == 21.5
+
+        # Sensor goes unavailable (e.g., bridge reconnect)
+        hass.states.async_set("sensor.test_temp", "unavailable", {})
+        await hass.async_block_till_done()
+
+        # UI value retained for entity card / automations
+        assert entity._attr_current_temperature == 21.5
+
+        # Sensor goes unknown
+        hass.states.async_set("sensor.test_temp", "unknown", {})
+        await hass.async_block_till_done()
+        assert entity._attr_current_temperature == 21.5
+
+        # Sensor recovers — UI updates to new value
+        hass.states.async_set(
+            "sensor.test_temp", "22.0",
+            {"unit_of_measurement": "°C"},
+        )
+        await hass.async_block_till_done()
+        assert entity._attr_current_temperature == 22.0
+
+    @pytest.mark.asyncio
     async def test_humidity_sensor_updates(self, hass, setup_integration):
         """Humidity sensor state change should update current_humidity."""
         hass.states.async_set(

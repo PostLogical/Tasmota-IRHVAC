@@ -923,8 +923,11 @@ class TestPISensorRecovery:
         entity._attr_hvac_mode = HVACMode.HEAT
         pi._desired_temp = 22.0
 
-        # Simulate sensor going unavailable
-        entity._attr_current_temperature = None
+        # Simulate sensor going unavailable — controller-side state is what
+        # matters for the gate; climate.py keeps `_attr_current_temperature`
+        # stale during blips for HA UI continuity.
+        pi._room_temp_c = None
+        pi._room_sensor_unavailable = True
         await pi._check_sensor_recovery()
 
         assert pi._sensor_unavailable is True
@@ -939,6 +942,8 @@ class TestPISensorRecovery:
         entity._attr_hvac_mode = HVACMode.HEAT
         pi._desired_temp = 22.0
         entity._attr_current_temperature = 21.0  # Sensor is back
+        pi._room_temp_c = 21.0
+        pi._room_sensor_unavailable = False
 
         await pi._check_sensor_recovery()
 
@@ -1316,7 +1321,10 @@ class TestPISensorRecoveryFF:
         entity._attr_hvac_mode = HVACMode.HEAT
         pi._desired_temp = 22.0
         pi._inputs.outdoor_temp = 0.0
-        entity._attr_current_temperature = None
+        # Simulate sensor unavailable (controller-side; climate UI may keep
+        # stale value for blip tolerance).
+        pi._room_temp_c = None
+        pi._room_sensor_unavailable = True
         pi._sensor_recovery_pending = False
 
         # Call check_sensor_recovery with sensor still unavailable
@@ -1870,7 +1878,8 @@ class TestPICheckSensorRecoveryNonHeatCool:
 
         entity._attr_hvac_mode = HVACMode.OFF
         pi._desired_temp = 22.0
-        entity._attr_current_temperature = None
+        pi._room_temp_c = None
+        pi._room_sensor_unavailable = True
 
         await pi._check_sensor_recovery()
         # Should set sensor_unavailable but not compute FF
@@ -1884,7 +1893,8 @@ class TestPICheckSensorRecoveryNonHeatCool:
 
         entity._attr_hvac_mode = HVACMode.HEAT
         pi._desired_temp = None
-        entity._attr_current_temperature = None
+        pi._room_temp_c = None
+        pi._room_sensor_unavailable = True
 
         await pi._check_sensor_recovery()
         assert pi._sensor_unavailable is True

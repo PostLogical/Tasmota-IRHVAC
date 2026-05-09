@@ -1715,7 +1715,17 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
 
     @callback
     def _async_update_temp(self, state: State) -> None:
-        """Update thermostat with latest state from sensor."""
+        """Update thermostat UI with latest state from sensor.
+
+        Keeps the last-known value during unavailable/unknown transitions so
+        the entity card, recorder, and dependent automations don't flicker on
+        brief sensor blips (e.g., during HA restarts when the underlying Z2M
+        / mqtt bridge is reconnecting).  The PI controller does NOT read this
+        attribute for control decisions — it has its own listener that
+        enforces a freshness gate (see `pi_controller._async_room_temp_changed`).
+        """
+        if state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+            return
         try:
             self._attr_current_temperature = TemperatureConverter.convert(
                 float(state.state),

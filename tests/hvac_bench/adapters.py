@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 from homeassistant.components.climate.const import HVACMode
 from homeassistant.const import UnitOfTemperature
 
-from tests.conftest import make_pi_config
+from tests.conftest import _PITestEntityRoomTempMixin, make_pi_config
 
 
 class TasmotaPIAdapter:
@@ -206,14 +206,24 @@ class TextbookPIController:
 # ── Fake entity for adapter ──────────────────────────────────────────────
 
 
-class _FakeBenchEntity:
+class _FakeBenchEntity(_PITestEntityRoomTempMixin):
     """Minimal fake entity for PIController adapter."""
 
     def __init__(self, config, head_calibration_bounds=None):
         from custom_components.tasmota_irhvac.pi.pi_controller import PIController
 
         self.hass = MagicMock()
-        self._attr_current_temperature = 20.0
+        # Don't override `hass.states.get` — bench's locked reference scores
+        # were calibrated with `MagicMock().states.get(...)` returning a
+        # MagicMock whose `state` attribute floats to 1.0 in
+        # `_inputs.read_values`, which had the side effect of overwriting
+        # adapter-set model input values per tick.  The bench's
+        # `controller.tick()` then re-sets them, so net behavior is
+        # adapter-driven; preserving this MagicMock chain keeps reference
+        # scores stable.  The production async_added_to_hass initial-state
+        # read never runs in bench (no HA entity lifecycle), so we don't
+        # need to short-circuit it here.
+        self._pi_test_room_temp = 20.0  # mixin backing field
         self._attr_target_temperature = 20.0
         self._attr_hvac_mode = HVACMode.HEAT
         self._temp_sensor = "sensor.room_temp"
@@ -229,6 +239,7 @@ class _FakeBenchEntity:
         self._attr_max_temp = self._max_temp
 
         self._pi = PIController(self, config)
+        self._sync_room_temp_to_pi()
         self._pi._pi_enabled = True
         # Head calibration bounds: None = production defaults (±2.0°C),
         # explicit tuple overrides both heat and cool modes.

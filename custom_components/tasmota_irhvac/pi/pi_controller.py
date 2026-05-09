@@ -409,6 +409,14 @@ class PIController:
         self._sensor_unavailable: bool = False
         self._sensor_recovery_pending: bool = False
         self._recovery_check_needed: bool = False
+        # Controller-side room-temp tracking (independent of climate.py's
+        # `_attr_current_temperature`, which keeps a stale value during sensor
+        # blips for HA UI continuity). `_room_temp_c` is set from our own
+        # `_async_room_temp_changed` listener; reads must go through
+        # `_read_room_temp_celsius()` so the freshness flag is honored.
+        self._room_temp_c: float | None = None
+        self._room_sensor_unavailable: bool = False
+        self._room_temp_unsub: CALLBACK_TYPE | None = None
         self._pi_paused: bool = False
         self._pi_last_tick_time: float = 0.0
         self._pi_timer_unsub: CALLBACK_TYPE | None = None
@@ -893,6 +901,20 @@ class PIController:
                 track_ids,
                 self._async_model_input_changed,
             )
+        # Register room temp sensor — controller-side freshness tracking,
+        # independent of climate.py (which keeps a stale value during sensor
+        # blips for HA UI continuity).  Mirrors the outdoor-temp pattern.
+        temp_sensor_eid = getattr(e, "_temp_sensor", None)
+        if temp_sensor_eid:  # pragma: no branch — _temp_sensor is required in config; defensive against future schema relaxation
+            self._room_temp_unsub = async_track_state_change_event(
+                self._hass,
+                [temp_sensor_eid],
+                self._async_room_temp_changed,
+            )
+            initial_state = self._hass.states.get(temp_sensor_eid)
+            if initial_state is not None:
+                self._update_room_temp_from_state(initial_state)
+
         # Read initial model input values
         self._read_model_input_values()
 
@@ -930,6 +952,9 @@ class PIController:
         if self._batch_analysis_timer:
             self._batch_analysis_timer()
             self._batch_analysis_timer = None
+        if self._room_temp_unsub:
+            self._room_temp_unsub()
+            self._room_temp_unsub = None
 
     def schedule_batch_analysis(self) -> None:
         """Schedule batch WLS analysis at 07:00 and 19:00 local time.
@@ -3462,15 +3487,11 @@ class PIController:
         # Comfort check gated by the grace-period counter. `_health_comfort_skip`
         # is updated once per fire_dispatcher in `_advance_health_grace_period`;
         # this helper just reads it.
+        cur_c = self._read_room_temp_celsius()
         if self._health_comfort_skip == 0 and (
-            e._attr_current_temperature is not None
+            cur_c is not None
             and self._desired_temp is not None
         ):
-            cur_c = TemperatureConverter.convert(
-                e._attr_current_temperature,
-                e._attr_temperature_unit,
-                UnitOfTemperature.CELSIUS,
-            )
             desired_c = TemperatureConverter.convert(
                 self._desired_temp,
                 e._attr_temperature_unit,
@@ -3959,7 +3980,6 @@ class PIController:
         # republish the previous tick's events.
         self._pending_events = []
         return tick_output
-        return tick_output
 
     def _build_health_snapshot_with_grace_advance(self) -> HealthSnapshot:
         """Internal: combine grace-period advance + pure snapshot build.
@@ -4101,14 +4121,9 @@ class PIController:
             return False
 
         e = self._entity
-        if e._attr_current_temperature is None:
+        raw_c = self._read_room_temp_celsius()
+        if raw_c is None:
             return False
-
-        raw_c = TemperatureConverter.convert(
-            e._attr_current_temperature,
-            e.temperature_unit,
-            UnitOfTemperature.CELSIUS,
-        )
 
         # Default comfort bounds: current temp ± 2°C if not specified
         if comfort_min_c is None:  # pragma: no branch — comfort_min_c None when feature off — defensive
@@ -4552,6 +4567,71 @@ class PIController:
         """Handle model input entity state changes — refresh sensors via coordinator."""
         self.fire_dispatcher()
 
+    def _read_room_temp_celsius(self) -> float | None:
+        """Return room temp in °C if the sensor is fresh, else None.
+
+        Single source of truth for "room temp suitable for control decisions".
+        Climate.py's `_attr_current_temperature` keeps a stale value during
+        sensor blips for HA UI continuity; this helper is what the controller
+        uses instead so it never acts on stale data.
+        """
+        if self._room_sensor_unavailable:
+            return None
+        return self._room_temp_c
+
+    def _update_room_temp_from_state(self, state: State) -> None:
+        """Parse a HA State into `_room_temp_c` (°C) + freshness flag.
+
+        Sets `_room_sensor_unavailable=True` and `_room_temp_c=None` for
+        unavailable/unknown states.  Otherwise converts from the sensor's
+        reporting unit to Celsius and clears the flag.  An unparseable
+        numeric value preserves prior controller state (degenerate case).
+        """
+        if state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+            self._room_sensor_unavailable = True
+            self._room_temp_c = None
+            return
+        try:
+            raw = float(state.state)
+        except (TypeError, ValueError):
+            return
+        unit = state.attributes.get("unit_of_measurement", UnitOfTemperature.CELSIUS)
+        self._room_temp_c = TemperatureConverter.convert(
+            raw, unit, UnitOfTemperature.CELSIUS,
+        )
+        self._room_sensor_unavailable = False
+
+    @callback
+    def _async_room_temp_changed(self, event: Event[EventStateChangedData]) -> None:
+        """Handle room temp sensor state changes — controller-side freshness.
+
+        Climate.py's listener keeps `_attr_current_temperature` populated for
+        HA UI continuity (stale value preserved during blips).  This listener
+        is the controller's independent source of truth: it drops `_room_temp_c`
+        on unavailable transitions and clears the recovery / fallback flags
+        on real recovery so subsequent ticks resume normal control.
+        """
+        new_state = event.data.get("new_state")
+        if new_state is None:
+            return
+        was_unavailable = self._room_sensor_unavailable
+        self._update_room_temp_from_state(new_state)
+        if self._room_sensor_unavailable and not was_unavailable:
+            _LOGGER.warning(
+                "%sPI: room temp sensor unavailable — control gated until recovery",
+                self._log_prefix,
+            )
+        elif was_unavailable and not self._room_sensor_unavailable:
+            _LOGGER.info(
+                "%sPI: room temp sensor recovered (%.2f°C)",
+                self._log_prefix, self._room_temp_c,
+            )
+            # Clear pi-side recovery / fallback flags so the next normal tick
+            # resumes full PI control instead of staying in FF-only fallback.
+            self._sensor_recovery_pending = False
+            self._sensor_unavailable = False
+            self._recovery_check_needed = False
+
     async def _pi_async_sensor_changed(self, was_none: bool = False) -> bool:
         """Handle temp sensor update. Returns True if send needed."""
         if not self._pi_enabled:
@@ -4559,7 +4639,7 @@ class PIController:
         if was_none:
             # Verify the sensor actually has a numeric value — transitions from
             # None to 'unavailable' fire was_none=True but aren't real recoveries.
-            if self._entity._attr_current_temperature is None:
+            if self._read_room_temp_celsius() is None:
                 return False
             self._sensor_recovery_pending = False
             self._recovery_check_needed = False
@@ -4588,7 +4668,7 @@ class PIController:
         self._sensor_recovery_pending = False
         self._sensor_recovery_unsub = None
         e = self._entity
-        if e._attr_current_temperature is not None:
+        if self._read_room_temp_celsius() is not None:
             _LOGGER.info("%sPI: temp sensor recovered during grace period", self._log_prefix)
             return await self._pi_tick()
         self._sensor_unavailable = True
@@ -4667,7 +4747,8 @@ class PIController:
             self._smith._initialized = False
 
         # Need a valid temperature reading
-        if e._attr_current_temperature is None:
+        raw_c = self._read_room_temp_celsius()
+        if raw_c is None:
             return False
 
         now_mono = time.monotonic()
@@ -4676,13 +4757,6 @@ class PIController:
         else:
             dt_seconds = float(self._pi_tick_fallback)
         self._pi_last_tick_time = now_mono
-
-        # Convert to °C
-        raw_c = TemperatureConverter.convert(
-            e._attr_current_temperature,
-            e.temperature_unit,
-            UnitOfTemperature.CELSIUS,
-        )
 
         # Sensor filter (same as active path)
         if self._sensor_filter_tau > 0 and dt_seconds > 0:
@@ -4748,7 +4822,8 @@ class PIController:
         """
         e = self._entity
 
-        if e._attr_current_temperature is None:
+        raw_c = self._read_room_temp_celsius()
+        if raw_c is None:
             return False
 
         now_mono = time.monotonic()
@@ -4757,12 +4832,6 @@ class PIController:
         else:
             dt_seconds = float(self._pi_tick_fallback)
         self._pi_last_tick_time = now_mono
-
-        raw_c = TemperatureConverter.convert(
-            e._attr_current_temperature,
-            e.temperature_unit,
-            UnitOfTemperature.CELSIUS,
-        )
 
         # Sensor filter (keeps filter warm)
         if self._sensor_filter_tau > 0 and dt_seconds > 0:
@@ -4841,7 +4910,8 @@ class PIController:
             return self._observe_tick()
         if self._desired_temp is None or self._hp_setpoint is None:
             return False
-        if e._attr_current_temperature is None:
+        raw_c = self._read_room_temp_celsius()
+        if raw_c is None:
             if self._sensor_unavailable or self._sensor_recovery_pending:
                 return False
             _LOGGER.info("%sPI: temp sensor unavailable, requesting 60s recovery check", self._log_prefix)
@@ -4852,11 +4922,6 @@ class PIController:
         # Checked before _pi_paused because the test itself sets paused=True.
         if self._plant_id.plant_test_active:
             now_mono = time.monotonic()
-            raw_c = TemperatureConverter.convert(
-                e._attr_current_temperature,
-                e.temperature_unit,
-                UnitOfTemperature.CELSIUS,
-            )
             cmd = self._plant_id.tick_plant_test(now_mono, raw_c)
             if cmd.phase in ("complete", "aborted"):
                 self._pi_paused = False
@@ -4880,12 +4945,7 @@ class PIController:
         self._pi_last_tick_time = now_mono
         dt_factor = dt_seconds / float(self._pi_tick_fallback)
 
-        # Convert both to °C for PI math
-        raw_c = TemperatureConverter.convert(
-            e._attr_current_temperature,
-            e.temperature_unit,
-            UnitOfTemperature.CELSIUS,
-        )
+        # Convert desired to °C for PI math (raw_c already in °C from helper)
         desired_c = TemperatureConverter.convert(
             self._desired_temp,
             e.temperature_unit,

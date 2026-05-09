@@ -23,14 +23,14 @@ from custom_components.tasmota_irhvac.const import (
 )
 from custom_components.tasmota_irhvac.pi.pi_controller import PIController, PIExtraStoredData
 
-from .conftest import make_pi_config
+from .conftest import _PITestEntityRoomTempMixin, make_pi_config
 
 
 # ── PI Math Tests ─────────────────────────────────────────────────────
 # These test the PI math in isolation using a mock entity
 
 
-class FakePIEntity:
+class FakePIEntity(_PITestEntityRoomTempMixin):
     """Minimal fake entity to test PI math without HA infrastructure.
 
     Mirrors the real entity: _attr_temperature_unit = CELSIUS, all temps in °C.
@@ -57,8 +57,12 @@ class FakePIEntity:
     def __init__(self, config):
         # Simulate base class attributes — all temps in °C (entity unit)
         self.hass = MagicMock()
+        # Default the temp-sensor lookup to "no initial state" — production
+        # uses real HA state; the fake skips initial-state seeding so tests
+        # don't have to construct a synthetic State for it.
+        self.hass.states.get = MagicMock(return_value=None)
         self._attr_hvac_mode = HVACMode.HEAT
-        self._attr_current_temperature = 21.0  # °C
+        self._pi_test_room_temp = 21.0  # mixin backing field, °C
         self._attr_target_temperature = 22.0  # °C
         self._temp_sensor = "sensor.room_temp"
         self._min_temp = 16
@@ -73,8 +77,9 @@ class FakePIEntity:
         self.async_write_ha_state = MagicMock()
         self.async_get_last_state = AsyncMock(return_value=None)
 
-        # Initialize PI via composition
+        # Initialize PI via composition; mixin syncs UI temp into PI state.
         self._pi = PIController(self, config)
+        self._sync_room_temp_to_pi()
 
     @property
     def temperature_unit(self):
@@ -675,6 +680,198 @@ class TestSensorRecovery:
         # Should return immediately — no tick, no recovery timer
         assert pi_entity._pi._pi_integral == old_integral
         assert pi_entity._pi._sensor_recovery_pending is False
+
+
+class TestRoomSensorAvailability:
+    """Tests for the controller-side room-sensor freshness gate.
+
+    The controller subscribes to the temp sensor independently of the climate
+    entity.  Climate.py keeps the last-known value in `_attr_current_temperature`
+    for HA UI continuity (no flicker on brief blips), but the controller
+    enforces its own freshness gate for control decisions — `_room_temp_c` and
+    `_room_sensor_unavailable` are the source of truth, not the entity's UI
+    attribute.
+    """
+
+    def test_read_room_temp_returns_value_when_fresh(self, pi_entity):
+        pi_entity._pi._room_temp_c = 21.5
+        pi_entity._pi._room_sensor_unavailable = False
+        assert pi_entity._pi._read_room_temp_celsius() == pytest.approx(21.5)
+
+    def test_read_room_temp_returns_none_when_unavailable(self, pi_entity):
+        # Stale value lingers (matches climate.py UI), but flag wins
+        pi_entity._pi._room_temp_c = 21.5
+        pi_entity._pi._room_sensor_unavailable = True
+        assert pi_entity._pi._read_room_temp_celsius() is None
+
+    def test_read_room_temp_returns_none_before_first_reading(self, pi_entity):
+        pi_entity._pi._room_temp_c = None
+        pi_entity._pi._room_sensor_unavailable = False
+        assert pi_entity._pi._read_room_temp_celsius() is None
+
+    def test_listener_marks_unavailable_on_state_unavailable(self, pi_entity):
+        """STATE_UNAVAILABLE flips the flag and clears the value."""
+        pi_entity._pi._room_temp_c = 21.0
+        pi_entity._pi._room_sensor_unavailable = False
+
+        new_state = MagicMock(state=STATE_UNAVAILABLE,
+                              attributes={"unit_of_measurement": "°C"})
+        event = MagicMock()
+        event.data = {"new_state": new_state}
+        pi_entity._pi._async_room_temp_changed(event)
+
+        assert pi_entity._pi._room_sensor_unavailable is True
+        assert pi_entity._pi._room_temp_c is None
+
+    def test_listener_marks_unavailable_on_state_unknown(self, pi_entity):
+        """STATE_UNKNOWN is treated identically to STATE_UNAVAILABLE."""
+        pi_entity._pi._room_temp_c = 21.0
+        pi_entity._pi._room_sensor_unavailable = False
+
+        new_state = MagicMock(state=STATE_UNKNOWN,
+                              attributes={"unit_of_measurement": "°C"})
+        event = MagicMock()
+        event.data = {"new_state": new_state}
+        pi_entity._pi._async_room_temp_changed(event)
+
+        assert pi_entity._pi._room_sensor_unavailable is True
+        assert pi_entity._pi._room_temp_c is None
+
+    def test_listener_clears_flag_on_recovery(self, pi_entity):
+        """Valid value after unavailability clears the flag and stores °C."""
+        pi_entity._pi._room_sensor_unavailable = True
+        pi_entity._pi._room_temp_c = None
+
+        new_state = MagicMock(state="21.5",
+                              attributes={"unit_of_measurement": "°C"})
+        event = MagicMock()
+        event.data = {"new_state": new_state}
+        pi_entity._pi._async_room_temp_changed(event)
+
+        assert pi_entity._pi._room_sensor_unavailable is False
+        assert pi_entity._pi._room_temp_c == pytest.approx(21.5)
+
+    def test_listener_converts_fahrenheit_to_celsius(self, pi_entity):
+        """Listener stores °C regardless of sensor's reporting unit."""
+        new_state = MagicMock(state="70",  # 70°F = 21.11°C
+                              attributes={"unit_of_measurement": "°F"})
+        event = MagicMock()
+        event.data = {"new_state": new_state}
+        pi_entity._pi._async_room_temp_changed(event)
+
+        assert pi_entity._pi._room_temp_c == pytest.approx(21.111, abs=0.01)
+
+    def test_listener_handles_none_state(self, pi_entity):
+        """new_state=None (entity removed) leaves controller state unchanged."""
+        pi_entity._pi._room_temp_c = 21.0
+        pi_entity._pi._room_sensor_unavailable = False
+
+        event = MagicMock()
+        event.data = {"new_state": None}
+        pi_entity._pi._async_room_temp_changed(event)
+
+        assert pi_entity._pi._room_sensor_unavailable is False
+        assert pi_entity._pi._room_temp_c == 21.0
+
+    def test_listener_ignores_unparseable_value(self, pi_entity):
+        """A non-numeric state that's neither unavailable nor unknown is logged
+        but doesn't corrupt controller state — keeps prior value."""
+        pi_entity._pi._room_temp_c = 21.0
+        pi_entity._pi._room_sensor_unavailable = False
+
+        new_state = MagicMock(state="garbage",
+                              attributes={"unit_of_measurement": "°C"})
+        event = MagicMock()
+        event.data = {"new_state": new_state}
+        pi_entity._pi._async_room_temp_changed(event)
+
+        # Prior value preserved; flag unchanged
+        assert pi_entity._pi._room_temp_c == 21.0
+        assert pi_entity._pi._room_sensor_unavailable is False
+
+    @pytest.mark.asyncio
+    async def test_pi_tick_skips_when_controller_flag_set_even_if_attr_stale(self, pi_entity):
+        """The bug we found in production: climate's `_attr_current_temperature`
+        carries a stale value during a sensor blip (kept for HA UI continuity).
+        The controller must still gate on its own freshness flag and not act on
+        the stale UI value.
+        """
+        pi_entity._attr_current_temperature = 21.0  # stale UI value
+        pi_entity._pi._room_temp_c = None  # controller saw the unavailable
+        pi_entity._pi._room_sensor_unavailable = True
+        pi_entity._pi._desired_temp = 22.0
+        pi_entity._pi._hp_setpoint = 22.0
+
+        pre_setpoint = pi_entity._pi._hp_setpoint
+        send_needed = await pi_entity._pi._pi_tick()
+
+        # No control action — and recovery flow engaged
+        assert send_needed is False
+        assert pi_entity._pi._hp_setpoint == pre_setpoint
+        assert pi_entity._pi._sensor_recovery_pending is True
+
+    @pytest.mark.asyncio
+    async def test_pi_tick_runs_when_attr_none_but_controller_has_fresh_value(self, pi_entity):
+        """Inverse case: controller has a fresh reading from its own listener
+        even if the climate entity's `_attr_current_temperature` happens to be
+        None (e.g., test setup inconsistency).  Controller's state is the
+        source of truth — the tick should run.
+        """
+        pi_entity._attr_current_temperature = None  # climate UI hasn't caught up
+        pi_entity._pi._room_temp_c = 20.0  # controller has a fresh reading
+        pi_entity._pi._room_sensor_unavailable = False
+        pi_entity._pi._desired_temp = 22.0
+        pi_entity._pi._hp_setpoint = 22.0
+
+        await pi_entity._pi._pi_tick()
+
+        # Tick ran — error of 2°C should drive setpoint up
+        assert pi_entity._pi._hp_setpoint > 22.0
+        # Recovery flow NOT engaged
+        assert pi_entity._pi._sensor_recovery_pending is False
+
+    def test_listener_recovery_clears_pi_recovery_flags(self, pi_entity):
+        """When the listener observes recovery, it clears `_sensor_recovery_pending`
+        and `_sensor_unavailable` so the next tick resumes full PI control.
+
+        Without this, a brief blip during HA restart (which clears `_room_temp_c`
+        but leaves `_attr_current_temperature` stale per climate.py's UI policy)
+        would leave the FF-only fallback latched until the climate-side
+        was_none path fires — which it won't, because the UI value stayed
+        non-None throughout the blip.
+        """
+        # Simulate: blip happened, recovery scheduled, then sensor confirmed gone
+        pi_entity._pi._room_sensor_unavailable = True
+        pi_entity._pi._room_temp_c = None
+        pi_entity._pi._sensor_recovery_pending = True
+        pi_entity._pi._sensor_unavailable = True
+        pi_entity._pi._recovery_check_needed = True
+
+        # Sensor recovers
+        new_state = MagicMock(state="21.5",
+                              attributes={"unit_of_measurement": "°C"})
+        event = MagicMock()
+        event.data = {"new_state": new_state}
+        pi_entity._pi._async_room_temp_changed(event)
+
+        assert pi_entity._pi._room_sensor_unavailable is False
+        assert pi_entity._pi._sensor_recovery_pending is False
+        assert pi_entity._pi._sensor_unavailable is False
+        assert pi_entity._pi._recovery_check_needed is False
+
+    @pytest.mark.asyncio
+    async def test_passive_tick_skips_when_room_sensor_unavailable(self, pi_entity):
+        """passive_tick (HVAC OFF) also gates on controller-tracked freshness."""
+        pi_entity._attr_hvac_mode = HVACMode.OFF
+        pi_entity._attr_current_temperature = 21.0  # stale UI
+        pi_entity._pi._room_temp_c = None
+        pi_entity._pi._room_sensor_unavailable = True
+
+        history_before = list(pi_entity._pi._room_temp_history)
+        await pi_entity._pi._pi_tick()
+
+        # No new history entry — freshness gate fired before history append
+        assert pi_entity._pi._room_temp_history == history_before
 
 
 # ── Event-Driven and Time Normalization Tests ─────────────────────────

@@ -9,13 +9,13 @@ from homeassistant.core import State
 
 from custom_components.tasmota_irhvac.pi.pi_controller import PIController
 
-from .conftest import make_pi_config
+from .conftest import _PITestEntityRoomTempMixin, make_pi_config
 
 
 # ── Test Entity ──────────────────────────────────────────────────────
 
 
-class FakePIEntity:
+class FakePIEntity(_PITestEntityRoomTempMixin):
     """Minimal fake entity for disturbance testing."""
 
     _attr_hvac_modes = [HVACMode.HEAT, HVACMode.COOL, HVACMode.OFF]
@@ -26,7 +26,7 @@ class FakePIEntity:
         self.hass = MagicMock()
         self.hass.states.get.return_value = None
         self._attr_hvac_mode = HVACMode.HEAT
-        self._attr_current_temperature = 70.0
+        self._pi_test_room_temp = 70.0  # mixin backing field
         self._attr_target_temperature = 72.0
         self._temp_sensor = "sensor.room_temp"
         self._min_temp = 61
@@ -40,6 +40,7 @@ class FakePIEntity:
         self.async_get_last_state = AsyncMock(return_value=None)
         self.async_get_last_extra_data = AsyncMock(return_value=None)
         self._pi = PIController(self, config)
+        self._sync_room_temp_to_pi()
 
     @property
     def temperature_unit(self):
