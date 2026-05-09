@@ -247,6 +247,7 @@ class PIController:
         config: dict[str, Any],
         *,
         kappa_threshold: float = DEFAULT_KAPPA_THRESHOLD,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         """Initialize PI controller.
 
@@ -256,9 +257,19 @@ class PIController:
             kappa_threshold: Batch WLS condition-number ceiling above which
                 a recommendation is rejected. Bench-only test seam — production
                 should always use the default. Not a user-facing config key.
+            monotonic: Monotonic clock provider — defaults to ``time.monotonic``.
+                Bench injects ``lambda: adapter._sim_clock`` for sim-coherent
+                monotonic time. freezegun does NOT patch ``time.monotonic``
+                (only ``time.time`` and ``datetime.now``), so this is the
+                explicit injection seam. Tests that need to fix monotonic
+                should pass ``monotonic=`` at construction or override
+                ``pi._monotonic`` post-construction; do NOT use module-level
+                ``mock.patch("time.monotonic")`` — those patches don't reach
+                the controller's bound callable.
         """
         self._entity = entity
         self._kappa_threshold: float = float(kappa_threshold)
+        self._monotonic: Callable[[], float] = monotonic
         self._log_prefix: str = ""  # set in async_added when entity_id is known
 
         # Convert entity temp limits to °C for internal PI math
@@ -388,7 +399,7 @@ class PIController:
         # Sensor unavailability tracking for repairs.
         # Set when outdoor_temp transitions from valid to None (not on startup).
         self._outdoor_temp_unavailable_since: float | None = None
-        self._init_time: float = time.monotonic()
+        self._init_time: float = self._monotonic()
 
         # Learning suppression state (manual service + model input suppress_learning flags)
         self._manual_ff_suppress: bool = False
@@ -416,7 +427,11 @@ class PIController:
         self._pi_integral: float = 0.0
         self._ff_offset: float = 0.0
         self._pi_tick_running: bool = False
-        self._last_setpoint_change_time: float = 0.0
+        # `None` = no setpoint change has happened yet → hold check is bypassed.
+        # Distinct from 0.0 (which under monotonic-time would be the moment after
+        # boot, ambiguous). Reset to `None` by supplemental-override resets so
+        # the next change isn't held.
+        self._last_setpoint_change_time: float | None = None
         self._ff_settled_ticks: int = 0
         self._sensor_unavailable: bool = False
         self._sensor_recovery_pending: bool = False
@@ -1326,7 +1341,7 @@ class PIController:
             )
 
         self._last_batch_result = result
-        self._last_batch_timestamp = time.monotonic()
+        self._last_batch_timestamp = self._monotonic()
         self._last_batch_wallclock = dt_util.now().isoformat(timespec="seconds")
         self._metrics.batch_model_rms = result.residual_rms
 
@@ -1568,9 +1583,7 @@ class PIController:
         obs = self._active_buffer.get_all()
         if not obs:
             return None
-        import time as time_mod
-
-        now = time_mod.monotonic()
+        now = self._monotonic()
         oldest = min(o.timestamp for o in obs)
         return round((now - oldest) / 3600, 1)
 
@@ -3114,7 +3127,7 @@ class PIController:
         if self._inputs.outdoor_temp_sensor:
             STARTUP_GRACE = 300.0   # 5 minutes
             UNAVAIL_THRESHOLD = 1800.0  # 30 minutes
-            now_mono = time.monotonic()
+            now_mono = self._monotonic()
             past_startup = (now_mono - self._init_time) > STARTUP_GRACE
 
             outdoor_unavail = (
@@ -3674,7 +3687,6 @@ class PIController:
         # this tick's output, not the next.
         self._detect_and_emit_transitions()
 
-        import time as time_mod
         coeff_names = self._coeff_names()
 
         # Physical β for the FF contribution math below (coef × filtered =
@@ -3824,7 +3836,7 @@ class PIController:
             lev_max = round(max(scores), 6) if scores else None
             oldest_age: float | None = None
             if obs:
-                now = time_mod.monotonic()
+                now = self._monotonic()
                 oldest = min(o.timestamp for o in obs)
                 oldest_age = round((now - oldest) / 3600, 1)
             return ObservationBufferSnapshot(
@@ -3930,7 +3942,7 @@ class PIController:
         # Top-level live state + assembly
         zone_label = getattr(self._entity, "entity_id", "") or ""
         tick_output = TickOutput(
-            ts_mono=time_mod.monotonic(),
+            ts_mono=self._monotonic(),
             ts_wall=time.time(),
             zone_label=zone_label,
             enabled=True,
@@ -4402,7 +4414,7 @@ class PIController:
             pi_integral=self._pi_integral, hp_setpoint=self._hp_setpoint,
         )
         if result.should_reset_hold_timer:
-            self._last_setpoint_change_time = 0.0
+            self._last_setpoint_change_time = None
         return result.hp_should_send_ir
 
     def _deadband_integration_rate(self, abs_error: float) -> float:
@@ -4556,7 +4568,7 @@ class PIController:
         if new_state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
             if self._inputs.outdoor_temp is not None:  # pragma: no branch — outdoor_temp None when sensor unavailable — defensive
                 # Transition from valid → unavailable: start tracking
-                self._outdoor_temp_unavailable_since = time.monotonic()
+                self._outdoor_temp_unavailable_since = self._monotonic()
                 _LOGGER.warning(
                     "%sOutdoor temp sensor unavailable — FF frozen, learning paused",
                     self._log_prefix,
@@ -4566,7 +4578,7 @@ class PIController:
         unit = new_state.attributes.get("unit_of_measurement", UnitOfTemperature.CELSIUS)
         self._inputs.update_outdoor_temp(new_state.state, unit)
         if self._outdoor_temp_unavailable_since is not None:
-            duration = time.monotonic() - self._outdoor_temp_unavailable_since
+            duration = self._monotonic() - self._outdoor_temp_unavailable_since
             _LOGGER.info(
                 "%sOutdoor temp sensor recovered after %.0f s",
                 self._log_prefix, duration,
@@ -4662,13 +4674,13 @@ class PIController:
             # Guard against multiple sensors coming online simultaneously
             # (e.g., temp + humidity both fire was_none=True within milliseconds).
             # Allow recovery tick only if no tick ran in the last 2 seconds.
-            elapsed = time.monotonic() - self._pi_last_tick_time
+            elapsed = self._monotonic() - self._pi_last_tick_time
             if elapsed < 2.0:
                 _LOGGER.debug("PI: skipping recovery tick, another ran %.1fs ago", elapsed)
                 return False
             return await self._pi_tick()
 
-        elapsed = time.monotonic() - self._pi_last_tick_time
+        elapsed = self._monotonic() - self._pi_last_tick_time
         min_cooldown = 60.0  # seconds between sensor-driven ticks
         if elapsed >= min_cooldown:
             return await self._pi_tick()
@@ -4762,7 +4774,7 @@ class PIController:
         if raw_c is None:
             return False
 
-        now_mono = time.monotonic()
+        now_mono = self._monotonic()
         if self._pi_last_tick_time > 0:
             dt_seconds = min(now_mono - self._pi_last_tick_time, self._pi_tick_fallback * 2)
         else:
@@ -4837,7 +4849,7 @@ class PIController:
         if raw_c is None:
             return False
 
-        now_mono = time.monotonic()
+        now_mono = self._monotonic()
         if self._pi_last_tick_time > 0:
             dt_seconds = min(now_mono - self._pi_last_tick_time, self._pi_tick_fallback * 2)
         else:
@@ -4932,7 +4944,7 @@ class PIController:
         # Plant test (Layer 3): runs instead of normal PI when active.
         # Checked before _pi_paused because the test itself sets paused=True.
         if self._plant_id.plant_test_active:
-            now_mono = time.monotonic()
+            now_mono = self._monotonic()
             cmd = self._plant_id.tick_plant_test(now_mono, raw_c)
             if cmd.phase in ("complete", "aborted"):
                 self._pi_paused = False
@@ -4948,7 +4960,7 @@ class PIController:
             return False
 
         # Time since last tick (for time-normalized integral)
-        now_mono = time.monotonic()
+        now_mono = self._monotonic()
         if self._pi_last_tick_time > 0:
             dt_seconds = min(now_mono - self._pi_last_tick_time, self._pi_tick_fallback * 2)
         else:
@@ -5048,7 +5060,7 @@ class PIController:
                 self._apply_gain_update(tau_gain_update)
 
         # Evaluate supplemental heat source override (selector control)
-        now_mono = time.monotonic()
+        now_mono = self._monotonic()
         hp_should_send_ir = self._evaluate_supplemental_override(error, now_mono)
 
         # Smith predictor: compensate transport delay (Åström Ch. 7 §7.3,
@@ -5598,7 +5610,7 @@ class PIController:
             )
             obs_seconds_since_sp = (
                 now_mono - self._last_setpoint_change_time
-                if self._last_setpoint_change_time > 0 else 0.0
+                if self._last_setpoint_change_time is not None else 0.0
             )
             obs_supplemental_active = (
                 self._supplemental.tracking_mode or self._supplemental.assist_active
@@ -5686,7 +5698,13 @@ class PIController:
 
         # Midpoint-crossing hysteresis
         new_setpoint = self._hp_setpoint
-        if self._overtemp_regime:
+        if probe_result.force_min_setpoint:
+            # Regime probe is actively forcing HP to min to observe room
+            # rate without HP contribution. Probe wins over PI math; the
+            # hysteresis below would otherwise re-round `clamped_setpoint`
+            # (PI's normal output) and undo the probe's force.
+            new_setpoint = int(self._min_temp_c)
+        elif self._overtemp_regime:
             # Over-temp regime forces HP to the idle setpoint for the active
             # mode (heat: min, cool: max).  Overrides hysteresis because the
             # gate is acting on physical state, not the PI's commanded value.
@@ -5713,8 +5731,16 @@ class PIController:
             #
             # Bypass: error >1°C skips the hold (urgent demand).
             change = new_setpoint - self._hp_setpoint
-            time_since_last = now_mono - self._last_setpoint_change_time
-            can_change = time_since_last >= self._SETPOINT_HOLD_SECONDS
+            if self._last_setpoint_change_time is None:
+                # No prior change has happened — hold doesn't apply.
+                # Without this, a fresh-boot first tick where `now_mono` is
+                # small (<1200) would incorrectly hold the initial setpoint
+                # for ~20 minutes before allowing any change.
+                time_since_last = float("inf")
+                can_change = True
+            else:
+                time_since_last = now_mono - self._last_setpoint_change_time
+                can_change = time_since_last >= self._SETPOINT_HOLD_SECONDS
             if abs_error > 1.0:
                 can_change = True  # Large error = urgent demand, bypass hold
             if not can_change:

@@ -41,8 +41,16 @@ def _make_entity(*, mode: HVACMode = HVACMode.HEAT, outdoor_c: float = 5.0):
 
 async def _tick(pi, *, mono: float = 1000.0):
     pi._pi_last_tick_time = mono - 900.0
-    with patch("time.monotonic", return_value=mono):
-        await pi._pi_tick()
+    pi._monotonic = lambda: mono
+    # Activate setpoint hold so the manually-fixtured `hp_setpoint` isn't
+    # overwritten by PI's per-tick math during these state-machine tests.
+    # Tests that probe overtemp_regime / cal_midpoint hysteresis fix
+    # `hp_setpoint` to set up a specific delta-vs-cal_midpoint relationship;
+    # without an active hold, PI's normal output (large FF + integral) would
+    # rewrite the setpoint mid-tick and shift the delta away from the
+    # state-machine boundary the test is exercising.
+    pi._last_setpoint_change_time = mono - 1.0
+    await pi._pi_tick()
 
 
 # ── Latch behavior ───────────────────────────────────────────────────

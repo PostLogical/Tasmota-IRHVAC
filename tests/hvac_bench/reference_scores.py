@@ -68,31 +68,38 @@ REFERENCE_SCORES: dict[str, dict[str, dict[str, ScoreExpectation]]] = {
             "warm_time_h": ScoreExpectation(29.75, 0.5),
             "setpoint_changes": ScoreExpectation(232, 5),     # rails alternate every other tick
         },
-        # Relocked 2026-05-09 (#84 Stage B): sim-time wall clock + UTC ToD
-        # features. Previously the bench leaked real wall-clock into
-        # `time.time()` (observation buffer wall_time fields), so ToD features
-        # were stuck at the host's clock-time-of-test-run instead of advancing
-        # with sim hours — the FF model couldn't learn diurnal patterns.
-        # Under sim-coherent time, FF learns the diurnal cycle and control
-        # quality improves: lower `tdis_tot`, fewer setpoint changes.
+        # Relocked 2026-05-09 (#84 Stage C): replaced bench's global
+        # `time.monotonic = lambda` patch with PIController constructor-
+        # injected `monotonic=lambda: sim_clock` (production should never
+        # rely on global module-level patching). Stage B's prior numbers
+        # reflected two compounding bench bugs: (1) freezegun's epoch-style
+        # `time.monotonic()` value silently bypassed the setpoint-hold's
+        # `_last_setpoint_change_time = 0.0` initial-state edge case, and
+        # (2) the same epoch value made `dt_seconds = min(now_mono - last,
+        # 1800)` saturate at the cap on every tick, giving `dt_factor = 2`
+        # instead of 1 — i.e., the integrator updated 2× per tick. Both
+        # are fixed: hold check now uses `Optional[float]` with explicit
+        # None handling, and sim-clock-style monotonic resolves dt_factor
+        # to the correct 1.0. The new numbers reflect the controller's
+        # actual behavior at the configured tick rate.
         "well_tuned_pi": {
-            "tdis_tot": ScoreExpectation(0.084, 0.10),
-            "ener_tot": ScoreExpectation(6.007, 0.05),
-            "peak_kw": ScoreExpectation(0.214, 0.005),
-            "cold_time_h": ScoreExpectation(0.75, 0.5),
-            "warm_time_h": ScoreExpectation(1.00, 0.5),
-            "setpoint_changes": ScoreExpectation(17, 3),
+            "tdis_tot": ScoreExpectation(0.216, 0.10),
+            "ener_tot": ScoreExpectation(5.996, 0.05),
+            "peak_kw": ScoreExpectation(0.215, 0.005),
+            "cold_time_h": ScoreExpectation(2.25, 0.5),
+            "warm_time_h": ScoreExpectation(1.25, 0.5),
+            "setpoint_changes": ScoreExpectation(21, 3),
         },
         "production_pi": {
             # Production behaves like well-tuned over 3 days because batch
             # WLS κ-gate rejects coefficient updates during early learning
             # (κ severe). Differentiation is expected on longer horizons.
-            "tdis_tot": ScoreExpectation(0.083, 0.10),
-            "ener_tot": ScoreExpectation(6.008, 0.05),
-            "peak_kw": ScoreExpectation(0.214, 0.005),
-            "cold_time_h": ScoreExpectation(0.50, 0.5),
-            "warm_time_h": ScoreExpectation(1.00, 0.5),
-            "setpoint_changes": ScoreExpectation(17, 3),
+            "tdis_tot": ScoreExpectation(0.216, 0.10),
+            "ener_tot": ScoreExpectation(5.996, 0.05),
+            "peak_kw": ScoreExpectation(0.215, 0.005),
+            "cold_time_h": ScoreExpectation(2.25, 0.5),
+            "warm_time_h": ScoreExpectation(1.25, 0.5),
+            "setpoint_changes": ScoreExpectation(21, 3),
         },
     },
     # ── lr_cool_step ──────────────────────────────────────────────
@@ -107,20 +114,20 @@ REFERENCE_SCORES: dict[str, dict[str, dict[str, ScoreExpectation]]] = {
             "setpoint_changes": ScoreExpectation(175, 5),
         },
         "well_tuned_pi": {
-            "tdis_tot": ScoreExpectation(0.275, 0.10),
-            "ener_tot": ScoreExpectation(1.448, 0.03),
+            "tdis_tot": ScoreExpectation(0.297, 0.10),
+            "ener_tot": ScoreExpectation(1.450, 0.03),
             "peak_kw": ScoreExpectation(0.046, 0.003),
-            "cold_time_h": ScoreExpectation(1.75, 0.5),
+            "cold_time_h": ScoreExpectation(2.50, 0.5),
             "warm_time_h": ScoreExpectation(0.0, 0.25),
-            "setpoint_changes": ScoreExpectation(17, 3),
+            "setpoint_changes": ScoreExpectation(19, 3),
         },
         "production_pi": {
-            "tdis_tot": ScoreExpectation(0.479, 0.10),
-            "ener_tot": ScoreExpectation(1.449, 0.03),
+            "tdis_tot": ScoreExpectation(0.378, 0.10),
+            "ener_tot": ScoreExpectation(1.448, 0.03),
             "peak_kw": ScoreExpectation(0.046, 0.003),
-            "cold_time_h": ScoreExpectation(2.25, 0.5),
-            "warm_time_h": ScoreExpectation(0.5, 0.5),
-            "setpoint_changes": ScoreExpectation(18, 3),
+            "cold_time_h": ScoreExpectation(2.75, 0.5),
+            "warm_time_h": ScoreExpectation(1.0, 0.5),
+            "setpoint_changes": ScoreExpectation(20, 3),
         },
     },
     # ── lr_heat_with_solar ────────────────────────────────────────
@@ -135,24 +142,21 @@ REFERENCE_SCORES: dict[str, dict[str, dict[str, ScoreExpectation]]] = {
             "setpoint_changes": ScoreExpectation(238, 5),
         },
         "well_tuned_pi": {
-            # Relocked 2026-05-09 (#84 Stage B). Solar tracks the diurnal
-            # schedule (peak 0.8); FF compensation is time-varying. Sim-coherent
-            # time + UTC ToD features now let the FF model learn the diurnal
-            # cycle, improving comfort.
-            "tdis_tot": ScoreExpectation(0.335, 0.10),
-            "ener_tot": ScoreExpectation(5.732, 0.05),
-            "peak_kw": ScoreExpectation(0.213, 0.005),
-            "cold_time_h": ScoreExpectation(2.50, 0.5),
-            "warm_time_h": ScoreExpectation(2.00, 0.5),
-            "setpoint_changes": ScoreExpectation(31, 3),
+            # Relocked 2026-05-09 (#84 Stage C — see lr_heat_step block above).
+            "tdis_tot": ScoreExpectation(0.695, 0.10),
+            "ener_tot": ScoreExpectation(5.707, 0.05),
+            "peak_kw": ScoreExpectation(0.192, 0.005),
+            "cold_time_h": ScoreExpectation(4.00, 0.5),
+            "warm_time_h": ScoreExpectation(4.50, 0.5),
+            "setpoint_changes": ScoreExpectation(30, 3),
         },
         "production_pi": {
-            "tdis_tot": ScoreExpectation(0.017, 0.10),
-            "ener_tot": ScoreExpectation(5.706, 0.05),
-            "peak_kw": ScoreExpectation(0.190, 0.005),
-            "cold_time_h": ScoreExpectation(0.25, 0.5),
-            "warm_time_h": ScoreExpectation(0.75, 0.5),
-            "setpoint_changes": ScoreExpectation(20, 3),
+            "tdis_tot": ScoreExpectation(0.105, 0.10),
+            "ener_tot": ScoreExpectation(5.713, 0.05),
+            "peak_kw": ScoreExpectation(0.191, 0.005),
+            "cold_time_h": ScoreExpectation(1.50, 0.5),
+            "warm_time_h": ScoreExpectation(1.75, 0.5),
+            "setpoint_changes": ScoreExpectation(16, 3),
         },
     },
 }

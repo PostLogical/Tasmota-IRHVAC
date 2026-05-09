@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import math
 import random
-import time as _time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Callable
@@ -742,21 +741,14 @@ def run_full_stack(
             unit = "°C" if mi.delta_from_room else None
             adapter.mock_states.set(mi.entity_id, val, unit)
 
-        # Sim-time wall clock: freezegun patches `time.time()`, `datetime.now()`,
-        # and `dt_util.utcnow()` (HA core's canonical wrapper). Production code
-        # uses dt_util.utcnow() throughout — under freeze_time, those calls
-        # return sim-time, so CUSUM cooldown comparisons (`dt_util.utcnow() <
-        # cooldown_until`) expire naturally without bench-side bridging.
-        # `time.monotonic()` is NOT patched by freezegun — Stage C will replace
-        # the global `_time.monotonic = lambda...` patch with constructor DI.
+        # Sim-time wall clock via freezegun (patches `time.time()`,
+        # `datetime.now()`, and `dt_util.utcnow()`). Sim-time monotonic flows
+        # through PIController's constructor-injected `monotonic=lambda:
+        # adapter._sim_clock` (set inside TasmotaPIAdapter.__init__) — no global
+        # `time.monotonic` patching required.
         _sim_dt = _SIM_EPOCH + timedelta(seconds=adapter._sim_clock)
-        original_monotonic = _time.monotonic
-        _time.monotonic = lambda: adapter._sim_clock
-        try:
-            with freeze_time(_sim_dt):
-                adapter._loop.run_until_complete(pi._pi_tick())
-        finally:
-            _time.monotonic = original_monotonic
+        with freeze_time(_sim_dt):
+            adapter._loop.run_until_complete(pi._pi_tick())
 
         hp_setpoint = float(pi._hp_setpoint)
 

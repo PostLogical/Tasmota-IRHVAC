@@ -107,7 +107,8 @@ async def test_post_solar_integrator_preserved_with_gate():
     # Phase 1: sun up, room hot, settle a few ticks so latch sets and regime
     # engages.
     pi_interval_s = 900.0
-    mono = max(pi_interval_s, pi._last_setpoint_change_time + pi_interval_s)
+    last_change = pi._last_setpoint_change_time or 0.0
+    mono = max(pi_interval_s, last_change + pi_interval_s)
     integral_history: list[float] = []
     regime_history: list[bool] = []
     latch_history: list[bool] = []
@@ -118,8 +119,8 @@ async def test_post_solar_integrator_preserved_with_gate():
         nonlocal mono
         entity._attr_current_temperature = room_temp[0]
         pi._pi_last_tick_time = mono - pi_interval_s
-        with patch("time.monotonic", return_value=mono):
-            await pi._pi_tick()
+        pi._monotonic = lambda: mono
+        await pi._pi_tick()
         mono += pi_interval_s
         integral_history.append(pi._pi_integral)
         regime_history.append(pi._overtemp_regime)
@@ -192,14 +193,15 @@ async def test_bumpless_transfer_tightens_post_exit_bias():
     pi = entity._pi
     pi._desired_temp = desired_c
     pi_interval_s = 900.0
-    mono = max(pi_interval_s, pi._last_setpoint_change_time + pi_interval_s)
+    last_change = pi._last_setpoint_change_time or 0.0
+    mono = max(pi_interval_s, last_change + pi_interval_s)
 
     async def tick():
         nonlocal mono
         entity._attr_current_temperature = room_temp[0]
         pi._pi_last_tick_time = mono - pi_interval_s
-        with patch("time.monotonic", return_value=mono):
-            await pi._pi_tick()
+        pi._monotonic = lambda: mono
+        await pi._pi_tick()
         mono += pi_interval_s
 
     # Phase 1: stable warm-up at desired (no solar) — populates EMA

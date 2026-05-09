@@ -140,7 +140,8 @@ async def _run_sim(entity, room, duration_hours, desired_c,
     steps = int(duration_hours * 3600 / dt_room)
     pi_interval_steps = int(pi_interval / dt_room)
     trace = SimTrace()
-    mono_time = max(pi_interval, pi._last_setpoint_change_time + pi_interval)
+    last_change = pi._last_setpoint_change_time or 0.0
+    mono_time = max(pi_interval, last_change + pi_interval)
 
     for step in range(steps):
         t_sec = step * dt_room
@@ -161,8 +162,8 @@ async def _run_sim(entity, room, duration_hours, desired_c,
 
         if step % pi_interval_steps == 0 and step > 0:
             pi._pi_last_tick_time = mono_time - pi_interval
-            with patch("time.monotonic", return_value=mono_time):
-                await pi._pi_tick()
+            pi._monotonic = lambda v=mono_time: v
+            await pi._pi_tick()
             mono_time += pi_interval
 
         if step % pi_interval_steps == 0:

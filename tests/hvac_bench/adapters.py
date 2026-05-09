@@ -4,7 +4,6 @@ Wraps specific controller implementations to conform to HVACController protocol.
 """
 
 import asyncio
-import time
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
@@ -53,15 +52,23 @@ class TasmotaPIAdapter:
         tau_fast_seed = overrides.pop("tau_fast_seed", None)
         tau_slow_seed = overrides.pop("tau_slow_seed", None)
 
-        config = make_pi_config(overrides)
-        self._config = config
-        self._entity = _FakeBenchEntity(config,
-                                        head_calibration_bounds=head_calibration_bounds,
-                                        kappa_threshold=kappa_threshold)
-        self._pi = self._entity._pi
-        self._loop = asyncio.new_event_loop()
+        # Initialize sim clock first — the monotonic lambda passed to
+        # PIController closes over `self._sim_clock`, so the attribute must
+        # exist before construction. Per-tick advances of `_sim_clock` are
+        # then visible to the controller's monotonic-time elapsed calculations.
         self._sim_clock = 0.0
         self._mode = "heat"
+
+        config = make_pi_config(overrides)
+        self._config = config
+        self._entity = _FakeBenchEntity(
+            config,
+            head_calibration_bounds=head_calibration_bounds,
+            kappa_threshold=kappa_threshold,
+            monotonic=lambda: self._sim_clock,
+        )
+        self._pi = self._entity._pi
+        self._loop = asyncio.new_event_loop()
 
         if tau_fast_seed is not None or tau_slow_seed is not None:
             self._inject_plant_seeds(tau_fast_seed, tau_slow_seed)
@@ -121,20 +128,14 @@ class TasmotaPIAdapter:
                     unit = "°C" if m_input.get("delta_from_room") else None
                     self.mock_states.set(entity_id, model_inputs[name], unit)
 
-        # Set timing
+        # Set timing — pre-set to "previous tick's monotonic" so pi_tick's
+        # `dt_seconds = now_mono - _pi_last_tick_time` resolves to the
+        # configured tick interval rather than the fallback.
         self._pi._pi_last_tick_time = self._sim_clock - dt_seconds
 
-        # Sim-time wall clock + monotonic. freezegun patches `time.time` and
-        # `dt_util.utcnow()` consistently; `time.monotonic` is NOT freezegun-
-        # patched — Stage C will replace this global patch with constructor DI.
         sim_dt = _SIM_EPOCH + timedelta(seconds=self._sim_clock)
-        original = time.monotonic
-        time.monotonic = lambda: self._sim_clock
-        try:
-            with freeze_time(sim_dt):
-                self._loop.run_until_complete(self._pi._pi_tick())
-        finally:
-            time.monotonic = original
+        with freeze_time(sim_dt):
+            self._loop.run_until_complete(self._pi._pi_tick())
 
         return float(self._pi._hp_setpoint)
 
@@ -242,7 +243,8 @@ class _FakeBenchEntity(_PITestEntityRoomTempMixin):
     """Minimal fake entity for PIController adapter."""
 
     def __init__(self, config, head_calibration_bounds=None,
-                 *, kappa_threshold=DEFAULT_KAPPA_THRESHOLD):
+                 *, kappa_threshold=DEFAULT_KAPPA_THRESHOLD,
+                 monotonic=None):
         from custom_components.tasmota_irhvac.pi.pi_controller import PIController
 
         self.hass = MagicMock()
@@ -268,7 +270,10 @@ class _FakeBenchEntity(_PITestEntityRoomTempMixin):
         self._attr_min_temp = self._min_temp
         self._attr_max_temp = self._max_temp
 
-        self._pi = PIController(self, config, kappa_threshold=kappa_threshold)
+        pi_kwargs = {"kappa_threshold": kappa_threshold}
+        if monotonic is not None:
+            pi_kwargs["monotonic"] = monotonic
+        self._pi = PIController(self, config, **pi_kwargs)
         self._sync_room_temp_to_pi()
         self._pi._pi_enabled = True
         # Head calibration bounds: None = production defaults (±2.0°C),

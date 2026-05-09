@@ -1205,8 +1205,8 @@ class TestFullRateIntegrationRegression:
         t = tick_interval
         for _ in range(n_ticks):
             pi._pi_last_tick_time = t - tick_interval
-            with patch("time.monotonic", return_value=t):
-                asyncio.get_event_loop().run_until_complete(pi._pi_tick())
+            pi._monotonic = lambda v=t: v
+            asyncio.get_event_loop().run_until_complete(pi._pi_tick())
             integrals.append(pi._pi_integral)
             t += tick_interval
         return integrals
@@ -1243,8 +1243,8 @@ class TestFullRateIntegrationRegression:
             # Feed room temp to entity and tick
             entity._attr_current_temperature = room
             pi._pi_last_tick_time = t - tick_interval
-            with patch("time.monotonic", return_value=t):
-                asyncio.get_event_loop().run_until_complete(pi._pi_tick())
+            pi._monotonic = lambda v=t: v
+            asyncio.get_event_loop().run_until_complete(pi._pi_tick())
 
             trajectory.append((room, int(pi._hp_setpoint), pi._pi_integral))
             t += tick_interval
@@ -2868,7 +2868,7 @@ class TestSupplementalIntegration:
         result = pi._evaluate_supplemental_override(error_c=1.0, now_mono=2000.0)
 
         assert result is True
-        assert pi._last_setpoint_change_time == 0.0
+        assert pi._last_setpoint_change_time is None
 
 
 # ── Recovery Tick Dedup Guard (L969-970) ─────────────────────────────
@@ -3758,8 +3758,8 @@ class TestSensorFilter:
             t += 300.0  # 5-min intervals
             entity._attr_current_temperature = temp
             pi._pi_last_tick_time = t - 300.0
-            with patch("time.monotonic", return_value=t):
-                await pi._pi_tick()
+            pi._monotonic = lambda v=t: v
+            await pi._pi_tick()
             filtered_vals.append(pi._sensor_filtered)
 
         # Filter output should have less variance than input
@@ -3783,8 +3783,8 @@ class TestSensorFilter:
 
         entity._attr_current_temperature = 19.5
         pi._pi_last_tick_time = 900.0
-        with patch("time.monotonic", return_value=1800.0):
-            await pi._pi_tick()
+        pi._monotonic = lambda v=1800.0: v
+        await pi._pi_tick()
 
         # With no filter, _sensor_filtered stays None
         assert pi._sensor_filtered is None
@@ -3802,8 +3802,8 @@ class TestSensorFilter:
 
         entity._attr_current_temperature = 19.7
         pi._pi_last_tick_time = 0.0
-        with patch("time.monotonic", return_value=900.0):
-            await pi._pi_tick()
+        pi._monotonic = lambda v=900.0: v
+        await pi._pi_tick()
 
         assert pi._sensor_filtered == pytest.approx(19.7, abs=0.01)
 
@@ -3821,15 +3821,15 @@ class TestSensorFilter:
         # Initialize at 20.0
         entity._attr_current_temperature = 20.0
         pi._pi_last_tick_time = 0.0
-        with patch("time.monotonic", return_value=900.0):
-            await pi._pi_tick()
+        pi._monotonic = lambda v=900.0: v
+        await pi._pi_tick()
         assert pi._sensor_filtered == pytest.approx(20.0, abs=0.01)
 
         # Step to 21.0 — filter should move toward 21 but not reach it
         entity._attr_current_temperature = 21.0
         pi._pi_last_tick_time = 900.0
-        with patch("time.monotonic", return_value=1800.0):
-            await pi._pi_tick()
+        pi._monotonic = lambda v=1800.0: v
+        await pi._pi_tick()
         # After 900s with τ=120s: α = 1-exp(-900/120) ≈ 0.9994
         # So filtered ≈ 0.9994*21 + 0.0006*20 ≈ 20.999
         assert pi._sensor_filtered > 20.9
@@ -3848,8 +3848,8 @@ class TestSensorFilter:
 
         entity._attr_current_temperature = 20.5
         pi._pi_last_tick_time = 0.0
-        with patch("time.monotonic", return_value=900.0):
-            await pi._pi_tick()
+        pi._monotonic = lambda v=900.0: v
+        await pi._pi_tick()
 
         attrs = pi.get_extra_state_attributes()
         assert "sensor_filtered" in attrs
@@ -3883,8 +3883,8 @@ class TestOneSidedAntiWindup:
             # Room cools slowly — HP is truly off.
             pi_entity._attr_current_temperature = 24.0 - i * 0.02
             pi_entity._pi._pi_last_tick_time = float(i * 900)
-            with patch("time.monotonic", return_value=float((i + 1) * 900)):
-                await pi_entity._pi._pi_tick()
+            pi_entity._pi._monotonic = lambda v=float((i + 1) * 900): v
+            await pi_entity._pi._pi_tick()
 
         integral_after = pi_entity._pi._pi_integral
 
@@ -3904,8 +3904,8 @@ class TestOneSidedAntiWindup:
         pi_entity._pi._pi_integral = -10.0  # Pre-wound negative
         pi_entity._pi._pi_last_tick_time = 0.0
 
-        with patch("time.monotonic", return_value=900.0):
-            await pi_entity._pi._pi_tick()
+        pi_entity._pi._monotonic = lambda v=900.0: v
+        await pi_entity._pi._pi_tick()
         integral_after = pi_entity._pi._pi_integral
 
         # HP is active (setpoint > room) with positive error → integral grows
@@ -3947,8 +3947,8 @@ class TestOneSidedAntiWindup:
             # Room warms slowly — HP cooling is truly off.
             pi_entity._attr_current_temperature = 20.0 + i * 0.02
             pi_entity._pi._pi_last_tick_time = float(i * 900)
-            with patch("time.monotonic", return_value=float((i + 1) * 900)):
-                await pi_entity._pi._pi_tick()
+            pi_entity._pi._monotonic = lambda v=float((i + 1) * 900): v
+            await pi_entity._pi._pi_tick()
 
         integral_after = pi_entity._pi._pi_integral
 
@@ -4060,8 +4060,8 @@ class TestOneSidedAntiWindup:
         # Simulate ~3 hours of overshoot (12 ticks at 15min)
         for i in range(12):
             pi._pi_last_tick_time = float(i * 900)
-            with patch("time.monotonic", return_value=float((i + 1) * 900)):
-                await pi._pi_tick()
+            pi._monotonic = lambda v=float((i + 1) * 900): v
+            await pi._pi_tick()
 
         # HP should be at or near minimum (error drives it there quickly).
         assert pi._hp_setpoint <= 17, (
@@ -4095,8 +4095,8 @@ class TestConditionalIntegration:
         integral_phase1_start = pi._pi_integral
         for i in range(4):
             pi._pi_last_tick_time = float(i * 900)
-            with patch("time.monotonic", return_value=float((i + 1) * 900)):
-                await pi._pi_tick()
+            pi._monotonic = lambda v=float((i + 1) * 900): v
+            await pi._pi_tick()
         integral_phase1_end = pi._pi_integral
 
         assert integral_phase1_end > integral_phase1_start - 0.1, (
@@ -4112,8 +4112,8 @@ class TestConditionalIntegration:
         integral_phase2_start = pi._pi_integral
         for i in range(4, 8):
             pi._pi_last_tick_time = float(i * 900)
-            with patch("time.monotonic", return_value=float((i + 1) * 900)):
-                await pi._pi_tick()
+            pi._monotonic = lambda v=float((i + 1) * 900): v
+            await pi._pi_tick()
         integral_phase2_end = pi._pi_integral
 
         # HP above room temp → actively heating → integration resumes
@@ -4128,8 +4128,8 @@ class TestConditionalIntegration:
         integral_phase3_start = pi._pi_integral
         for i in range(8, 12):
             pi._pi_last_tick_time = float(i * 900)
-            with patch("time.monotonic", return_value=float((i + 1) * 900)):
-                await pi._pi_tick()
+            pi._monotonic = lambda v=float((i + 1) * 900): v
+            await pi._pi_tick()
         integral_phase3_end = pi._pi_integral
 
         assert integral_phase3_end > integral_phase3_start - 0.1, (
@@ -4147,8 +4147,8 @@ class TestConditionalIntegration:
         integral_phase4_start = pi._pi_integral
         for i in range(12, 16):
             pi._pi_last_tick_time = float(i * 900)
-            with patch("time.monotonic", return_value=float((i + 1) * 900)):
-                await pi._pi_tick()
+            pi._monotonic = lambda v=float((i + 1) * 900): v
+            await pi._pi_tick()
         integral_phase4_end = pi._pi_integral
 
         # HP setpoint (22) > room temp (19) → actively heating.
@@ -4251,8 +4251,8 @@ class TestHPNoOutput:
         integral_before = pi._pi_integral
         for i in range(4):
             pi._pi_last_tick_time = float(i * 900)
-            with patch("time.monotonic", return_value=float((i + 1) * 900)):
-                await pi._pi_tick()
+            pi._monotonic = lambda v=float((i + 1) * 900): v
+            await pi._pi_tick()
 
         assert abs(pi._pi_integral - integral_before) < 0.5, (
             f"Integral should be frozen when HP has no output, got {pi._pi_integral}"
@@ -4315,8 +4315,8 @@ class TestHPNoOutput:
         integral_before = pi._pi_integral
         for i in range(4):
             pi._pi_last_tick_time = float(i * 900)
-            with patch("time.monotonic", return_value=float((i + 1) * 900)):
-                await pi._pi_tick()
+            pi._monotonic = lambda v=float((i + 1) * 900): v
+            await pi._pi_tick()
 
         assert abs(pi._pi_integral - integral_before) < 0.5, (
             f"Integral should freeze when HP has no cooling output, got {pi._pi_integral}"
@@ -4363,8 +4363,8 @@ class TestHPNoOutput:
             # Room cools slowly — HP is truly off.
             entity._attr_current_temperature = 24.0 - i * 0.02
             pi._pi_last_tick_time = float(i * 900)
-            with patch("time.monotonic", return_value=float((i + 1) * 900)):
-                await pi._pi_tick()
+            pi._monotonic = lambda v=float((i + 1) * 900): v
+            await pi._pi_tick()
 
         # Integral should stay near its starting value (leaky decay is
         # 0.9999^48 ≈ 0.9952, so at most ~0.04 change from decay).
@@ -4618,8 +4618,8 @@ class TestHPNoOutput:
         # This is correct: the controller reduced the setpoint, HP turned off.
         for i in range(1, 4):
             pi._pi_last_tick_time = float(i * 900)
-            with patch("time.monotonic", return_value=float((i + 1) * 900)):
-                await pi._pi_tick()
+            pi._monotonic = lambda v=float((i + 1) * 900): v
+            await pi._pi_tick()
 
         # Integral went negative (correction applied), then froze
         assert pi._pi_integral < 0, (
@@ -4782,8 +4782,8 @@ class TestHeadCalibrationZoneModel:
 
         for i in range(5):
             pi._pi_last_tick_time = float(i * 60)
-            with patch("time.monotonic", return_value=float((i + 1) * 60)):
-                await pi._pi_tick()
+            pi._monotonic = lambda v=float((i + 1) * 60): v
+            await pi._pi_tick()
 
         assert pi._rls_heat.observation_count == rls_count_before, (
             "RLS should not learn in uncertain zone"
@@ -4893,16 +4893,16 @@ class TestHeadCalibrationZoneModel:
         # Accumulate some ticks.
         for i in range(5):
             pi._pi_last_tick_time = float(i * 60)
-            with patch("time.monotonic", return_value=float((i + 1) * 60)):
-                await pi._pi_tick()
+            pi._monotonic = lambda v=float((i + 1) * 60): v
+            await pi._pi_tick()
         assert pi._hp_no_output_ticks == 5
 
         # HP becomes active (setpoint above room).
         pi._hp_setpoint = 23
         entity._attr_current_temperature = 20.0
         pi._pi_last_tick_time = 5 * 60.0
-        with patch("time.monotonic", return_value=6 * 60.0):
-            await pi._pi_tick()
+        pi._monotonic = lambda v=6 * 60.0: v
+        await pi._pi_tick()
 
         assert pi._hp_no_output_ticks == 0, (
             "Tick counter should reset when HP is active"
@@ -4944,8 +4944,8 @@ class TestRegimeProbeIntegration:
         pi._regime_probe._probe_is_heating = True
         pi._regime_probe._probe_rates = []
 
-        with patch("time.monotonic", return_value=100.0):
-            await pi._pi_tick()
+        pi._monotonic = lambda v=100.0: v
+        await pi._pi_tick()
 
         # During PROBE, force_min_setpoint is True → HP at min
         assert pi._hp_setpoint == int(pi._min_temp_c), (
@@ -4976,8 +4976,8 @@ class TestRegimeProbeIntegration:
         pi._regime_probe._probe_rates = []
 
         integral_before = pi._pi_integral
-        with patch("time.monotonic", return_value=100.0):
-            await pi._pi_tick()
+        pi._monotonic = lambda v=100.0: v
+        await pi._pi_tick()
 
         # force_min_setpoint → hp_estimated_active=False → skip_integration
         assert pi._integration_frozen is True
@@ -5006,8 +5006,8 @@ class TestRegimeProbeIntegration:
         pi._regime_probe._probe_rates = []
 
         buf_before = len(pi._observation_buffer_heat)
-        with patch("time.monotonic", return_value=100.0):
-            await pi._pi_tick()
+        pi._monotonic = lambda v=100.0: v
+        await pi._pi_tick()
 
         assert len(pi._observation_buffer_heat) == buf_before, (
             "WLS buffer should not grow during probe (hp_observation_usable=False)"
@@ -5049,8 +5049,8 @@ class TestRegimeProbeIntegration:
         cal_max_before = pi._head_calibration_max_heat
 
         t = PROBE_MIN_DURATION_S + 1.0
-        with patch("time.monotonic", return_value=t):
-            await pi._pi_tick()
+        pi._monotonic = lambda v=t: v
+        await pi._pi_tick()
 
         # After ANALYZE → COOLDOWN, probe should have processed evidence
         assert pi._regime_probe.state == ProbeState.COOLDOWN
@@ -5086,8 +5086,8 @@ class TestRegimeProbeIntegration:
         pi._regime_probe._contribution_evidence_below = [-0.5] * (SHRINK_CONFIRMATIONS - 1)
 
         t = PROBE_MIN_DURATION_S + 1.0
-        with patch("time.monotonic", return_value=t):
-            await pi._pi_tick()
+        pi._monotonic = lambda v=t: v
+        await pi._pi_tick()
 
         assert pi._regime_probe.state == ProbeState.COOLDOWN
         # Cooling mode should update cool calibration, not heat
@@ -5362,8 +5362,8 @@ class TestControllableUncontrollableMetrics:
 
         for i in range(4):
             pi._pi_last_tick_time = float(i * 900)
-            with patch("time.monotonic", return_value=float((i + 1) * 900)):
-                await pi._pi_tick()
+            pi._monotonic = lambda v=float((i + 1) * 900): v
+            await pi._pi_tick()
 
         assert pi._metrics.uncontrollable_itae > 0, "Should accumulate uncontrollable ITAE"
         assert pi._metrics.controllable_itae == 0.0, "Should NOT accumulate controllable ITAE"
@@ -5394,8 +5394,8 @@ class TestControllableUncontrollableMetrics:
 
         for i in range(4):
             pi._pi_last_tick_time = float(i * 900)
-            with patch("time.monotonic", return_value=float((i + 1) * 900)):
-                await pi._pi_tick()
+            pi._monotonic = lambda v=float((i + 1) * 900): v
+            await pi._pi_tick()
 
         assert pi._metrics.controllable_itae > 0, "Should accumulate controllable ITAE"
         assert pi._metrics.uncontrollable_itae == 0.0, "Should NOT accumulate uncontrollable ITAE"
@@ -5417,8 +5417,8 @@ class TestControllableUncontrollableMetrics:
 
         for i in range(4):
             pi._pi_last_tick_time = float(i * 900)
-            with patch("time.monotonic", return_value=float((i + 1) * 900)):
-                await pi._pi_tick()
+            pi._monotonic = lambda v=float((i + 1) * 900): v
+            await pi._pi_tick()
 
         assert pi._metrics.uncontrollable_cvh > 0, "Should accumulate uncontrollable CVH"
         assert pi._metrics.controllable_cvh == 0.0, "Should NOT accumulate controllable CVH"
@@ -5448,8 +5448,8 @@ class TestControllableUncontrollableMetrics:
 
         for i in range(4):
             pi._pi_last_tick_time = float(i * 900)
-            with patch("time.monotonic", return_value=float((i + 1) * 900)):
-                await pi._pi_tick()
+            pi._monotonic = lambda v=float((i + 1) * 900): v
+            await pi._pi_tick()
 
         assert pi._metrics.controllable_cvh > 0, "Should accumulate controllable CVH"
         assert pi._metrics.uncontrollable_cvh == 0.0, "Should NOT accumulate uncontrollable CVH"
@@ -5475,16 +5475,16 @@ class TestControllableUncontrollableMetrics:
         pi._pi_integral = -50.0  # deep enough to stay clamped at min
         for i in range(3):
             pi._pi_last_tick_time = float(i * 900)
-            with patch("time.monotonic", return_value=float((i + 1) * 900)):
-                await pi._pi_tick()
+            pi._monotonic = lambda v=float((i + 1) * 900): v
+            await pi._pi_tick()
 
         # Phase 2: above min (controllable)
         pi._hp_setpoint = 22.0
         pi._pi_integral = -2.0
         for i in range(3, 6):
             pi._pi_last_tick_time = float(i * 900)
-            with patch("time.monotonic", return_value=float((i + 1) * 900)):
-                await pi._pi_tick()
+            pi._monotonic = lambda v=float((i + 1) * 900): v
+            await pi._pi_tick()
 
         total = pi._metrics.itae_accumulator
         split_sum = pi._metrics.controllable_itae + pi._metrics.uncontrollable_itae
@@ -5511,8 +5511,8 @@ class TestControllableUncontrollableMetrics:
 
         for i in range(4):
             pi._pi_last_tick_time = float(i * 900)
-            with patch("time.monotonic", return_value=float((i + 1) * 900)):
-                await pi._pi_tick()
+            pi._monotonic = lambda v=float((i + 1) * 900): v
+            await pi._pi_tick()
 
         assert pi._metrics.controllable_itae > 0, "HP helping cold room is controllable"
         assert pi._metrics.uncontrollable_itae == 0.0, "Not uncontrollable when HP helps"
@@ -5536,8 +5536,8 @@ class TestFFLoadFraction:
 
         for i in range(10):
             pi._pi_last_tick_time = float(i * 900)
-            with patch("time.monotonic", return_value=float((i + 1) * 900)):
-                await pi._pi_tick()
+            pi._monotonic = lambda v=float((i + 1) * 900): v
+            await pi._pi_tick()
 
         assert 0.0 <= pi._metrics.ff_load_fraction <= 1.0, (
             f"FF load fraction out of bounds: {pi._metrics.ff_load_fraction}"
