@@ -41,6 +41,7 @@ class FakeEntity:
 
     def __init__(self, config, hvac_mode=HVACMode.HEAT, room_temp=20.5):
         self.hass = MagicMock()
+        self.hass.states.get = MagicMock(return_value=None)
         self._attr_hvac_mode = hvac_mode
         self._attr_current_temperature = room_temp
         self._attr_target_temperature = 22.0

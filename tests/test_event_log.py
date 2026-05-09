@@ -45,6 +45,7 @@ def test_sanitize_preserves_alphanumeric_and_underscores():
 def _stub_hass_with_sync_executor() -> MagicMock:
     """Return a MagicMock hass whose async_add_executor_job runs jobs synchronously."""
     hass = MagicMock()
+    hass.states.get = MagicMock(return_value=None)
     # Sync executor — runs the function inline so test assertions can
     # inspect the file immediately.
     def run_sync(fn, *args):

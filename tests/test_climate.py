@@ -576,3 +576,69 @@ class TestSubscriptionCleanup:
         await hass.async_block_till_done()
 
         assert not called, "Sensor listener fired after async_will_remove_from_hass"
+
+
+class TestPIListenerWiring:
+    """Regression: PI controller's state-change listeners must be registered.
+
+    The PI controller registers its own listeners during `async_added_to_hass`
+    (separate from climate.py's listeners) for room temp, outdoor temp, and
+    model inputs.  Listener LOGIC is unit-tested via direct calls; these tests
+    verify the wire is actually connected by driving real `hass.states.async_set`
+    and asserting controller state updates.
+
+    Without these, a refactor that drops the registration call would silently
+    pass all unit tests while breaking the production behavior the listeners
+    exist to provide (controller-side sensor freshness, see `0c7cd40`).
+    """
+
+    @pytest.mark.asyncio
+    async def test_room_temp_listener_subscribed_after_setup(
+        self, hass, setup_pi_integration
+    ):
+        """Room-temp sensor blip → unavailable flag → recovery, end-to-end."""
+        entry = await setup_pi_integration()
+        pi = get_climate_entity(hass, entry)._pi
+
+        # Initial seed (21°C from fixture) must be picked up.
+        assert pi._room_sensor_unavailable is False
+        assert pi._room_temp_c == pytest.approx(21.0)
+
+        # Sensor goes unavailable → controller drops value + sets flag.
+        hass.states.async_set("sensor.room_temp", "unavailable", {})
+        await hass.async_block_till_done()
+        assert pi._room_sensor_unavailable is True
+        assert pi._room_temp_c is None
+
+        # Recovery → flag clears, value populates.
+        hass.states.async_set(
+            "sensor.room_temp", "21.5",
+            {"unit_of_measurement": "°C"},
+        )
+        await hass.async_block_till_done()
+        assert pi._room_sensor_unavailable is False
+        assert pi._room_temp_c == pytest.approx(21.5)
+
+    @pytest.mark.asyncio
+    async def test_outdoor_temp_listener_subscribed_after_setup(
+        self, hass, setup_pi_integration
+    ):
+        """Outdoor-temp sensor blip → None → recovery, end-to-end."""
+        entry = await setup_pi_integration()
+        pi = get_climate_entity(hass, entry)._pi
+
+        # Initial seed (5°C from fixture).
+        assert pi._inputs.outdoor_temp == pytest.approx(5.0)
+
+        # Sensor goes unavailable → outdoor_temp drops to None.
+        hass.states.async_set("sensor.outdoor_temp", "unavailable", {})
+        await hass.async_block_till_done()
+        assert pi._inputs.outdoor_temp is None
+
+        # Recovery → value populates.
+        hass.states.async_set(
+            "sensor.outdoor_temp", "6.5",
+            {"unit_of_measurement": "°C"},
+        )
+        await hass.async_block_till_done()
+        assert pi._inputs.outdoor_temp == pytest.approx(6.5)

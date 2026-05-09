@@ -4540,6 +4540,7 @@ class TestPIControllerRestoreGaps:
         entity = MagicMock()
         entity.entity_id = "climate.test"
         entity.hass = MagicMock()
+        entity.hass.states.get = MagicMock(return_value=None)
         entity._attr_hvac_mode = HVACMode.HEAT
         entity._attr_temperature_unit = UnitOfTemperature.CELSIUS
         entity._attr_current_temperature = 21.0
@@ -4579,6 +4580,7 @@ class TestPIControllerRestoreGaps:
         entity = MagicMock()
         entity.entity_id = "climate.test"
         entity.hass = MagicMock()
+        entity.hass.states.get = MagicMock(return_value=None)
         entity._attr_hvac_mode = HVACMode.HEAT
         entity._attr_temperature_unit = UnitOfTemperature.CELSIUS
         entity._attr_current_temperature = 21.0
@@ -4618,6 +4620,7 @@ class TestPIControllerRestoreGaps:
         entity = MagicMock()
         entity.entity_id = "climate.test"
         entity.hass = MagicMock()
+        entity.hass.states.get = MagicMock(return_value=None)
         entity._attr_hvac_mode = HVACMode.HEAT
         entity._attr_temperature_unit = UnitOfTemperature.CELSIUS
         entity._attr_current_temperature = 21.0

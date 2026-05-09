@@ -25,6 +25,7 @@ def _make_f_entity(config):
     from custom_components.tasmota_irhvac.pi.pi_controller import PIController
     entity = FakePIEntity.__new__(FakePIEntity)
     entity.hass = MagicMock()
+    entity.hass.states.get = MagicMock(return_value=None)
     entity._attr_hvac_mode = HVACMode.HEAT
     entity._attr_temperature_unit = UnitOfTemperature.FAHRENHEIT
     entity._ir_temp_unit = UnitOfTemperature.CELSIUS

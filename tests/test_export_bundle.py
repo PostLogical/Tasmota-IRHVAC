@@ -31,6 +31,7 @@ def _basic_tick(zone: str = "test") -> TickOutput:
 
 def _stub_hass_with_sync_executor() -> MagicMock:
     hass = MagicMock()
+    hass.states.get = MagicMock(return_value=None)
     def run_sync(fn, *args):
         return fn(*args)
     hass.async_add_executor_job = run_sync
@@ -354,6 +355,7 @@ def test_read_integration_version_reads_manifest(tmp_path: Path):
     )
 
     hass = MagicMock()
+    hass.states.get = MagicMock(return_value=None)
     hass.config.config_dir = str(tmp_path)
 
     assert _read_integration_version(hass) == "test-version"
@@ -364,6 +366,7 @@ def test_read_integration_version_falls_back_on_error(tmp_path: Path):
     from custom_components.tasmota_irhvac.pi.export_bundle import _read_integration_version
 
     hass = MagicMock()
+    hass.states.get = MagicMock(return_value=None)
     hass.config.config_dir = str(tmp_path / "nonexistent")
 
     assert _read_integration_version(hass) == "unknown"
