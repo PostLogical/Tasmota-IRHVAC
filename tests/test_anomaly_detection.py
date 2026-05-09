@@ -11,7 +11,7 @@ Tests cover:
 import math
 import random
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -116,7 +116,7 @@ def _feed_residuals(ctrl, residuals, sigma=0.15, start_mono=1000.0, tick_spacing
         ctrl._residual_history.append(random.gauss(0, sigma))
 
     mono = start_mono
-    base_time = datetime(2026, 1, 1)
+    base_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
     for i, r in enumerate(residuals):
         now = base_time + timedelta(seconds=i * tick_spacing)
         ctrl._update_cusum(r, mono, is_heating=True, _now=now)
@@ -201,7 +201,7 @@ class TestCusumDetectionLongTerm:
         # Feed noisy residuals with a small +0.3σ bias.
         # The noise keeps MAD ≈ σ, so z ≈ 0.3 < k=1.0 → no accumulation.
         mono = 1000.0
-        base = datetime(2026, 1, 1)
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
         for i in range(200):
             r = random.gauss(0.3 * sigma, sigma)
             ctrl._update_cusum(r, mono, is_heating=True, _now=base + timedelta(seconds=i*60))
@@ -251,7 +251,7 @@ class TestCusumFalsePositiveResistance:
             ctrl._residual_history.append(random.gauss(0, sigma))
 
         # +2σ for 2 ticks: z ≈ 2, accumulates (2-1)*2=2, well below h=10
-        base = datetime(2026, 1, 1)
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
         mono = 1000.0
         transient = [2.0 * sigma] * 2 + [0.0] * 10
         for i, r in enumerate(transient):
@@ -270,7 +270,7 @@ class TestCusumFalsePositiveResistance:
             ctrl._residual_history.append(random.gauss(0, sigma * 1.5))
         # Continue with elevated noise
         mono = 1000.0
-        base = datetime(2026, 1, 1)
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
         for i in range(500):
             r = random.gauss(0, sigma * 1.5)
             ctrl._update_cusum(r, mono, is_heating=True, _now=base + timedelta(seconds=i*60))
@@ -287,7 +287,7 @@ class TestCusumClampedAndCooldown:
         ctrl = _make_cusum_controller()
         sigma = 0.15
 
-        base = datetime(2026, 1, 1)
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
         # Set cooldown to 30 min from base
         ctrl._cusum_cooldown_until = base + timedelta(minutes=30)
 
@@ -312,7 +312,7 @@ class TestCusumClampedAndCooldown:
         ctrl = _make_cusum_controller()
         sigma = 0.15
 
-        base = datetime(2026, 1, 1)
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
         # Set cooldown to before base (already expired)
         ctrl._cusum_cooldown_until = base - timedelta(minutes=1)
 
@@ -336,7 +336,7 @@ class TestCusumDetectionLatency:
             ctrl._residual_history.append(random.gauss(0, sigma))
 
         mono = 1000.0
-        base = datetime(2026, 1, 1)
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
         for tick in range(1, 200):
             now = base + timedelta(seconds=tick * 60)
             ctrl._update_cusum(shift_sigma * sigma, mono, is_heating=True, _now=now)
@@ -376,7 +376,7 @@ class TestCusumDetectionLatency:
             ctrl._residual_history.append(random.gauss(0, sigma))
 
         mono = 1000.0
-        base = datetime(2026, 1, 1)
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
         for tick in range(200):
             r = random.gauss(0.5 * sigma, sigma)
             now = base + timedelta(seconds=tick * 60)
@@ -636,7 +636,7 @@ class TestCusumPersistence:
         # Set non-default CUSUM state.
         pi._cusum_pos = 7.5
         pi._cusum_neg = 0.3
-        cooldown = datetime(2026, 5, 9, 12, 0, 0)
+        cooldown = datetime(2026, 5, 9, 12, 0, 0, tzinfo=timezone.utc)
         pi._cusum_cooldown_until = cooldown
         # Pre-fill some residual history.
         pi._residual_history.clear()
@@ -677,7 +677,7 @@ class TestCusumPersistence:
         saved = pi.get_extra_stored_data()
         assert saved.cusum_cooldown_until_epoch == 0.0
         # Set live to a sentinel value, then restore — should clear to None.
-        pi._cusum_cooldown_until = datetime(2099, 1, 1)
+        pi._cusum_cooldown_until = datetime(2099, 1, 1, tzinfo=timezone.utc)
         pi.restore_extra_stored_data(saved)
         assert pi._cusum_cooldown_until is None
 
@@ -707,7 +707,7 @@ class TestCusumPersistence:
         pi._residual_history.extend(history)
 
         # Simulate prior alarm: cooldown active 30 min from "now".
-        base = datetime(2026, 5, 9, 12, 0, 0)
+        base = datetime(2026, 5, 9, 12, 0, 0, tzinfo=timezone.utc)
         pi._cusum_cooldown_until = base + timedelta(minutes=30)
         pi._cusum_pos = 0.0
         pi._cusum_neg = 0.0

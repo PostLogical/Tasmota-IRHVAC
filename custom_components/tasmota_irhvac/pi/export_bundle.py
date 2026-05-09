@@ -25,6 +25,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from homeassistant.util import dt as dt_util
+
 from .batch_learning import Observation
 from .event_log import EventLogReader, _sanitize_zone_label
 from .snapshot import TickEventKind, TickOutput
@@ -83,7 +85,7 @@ async def export_bundle(
     """
     end_date = date.today()
     start_date = end_date - timedelta(days=max(window_days, 0))
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = dt_util.now().strftime("%Y%m%d_%H%M%S")
     safe_zone = _sanitize_zone_label(zone_label)
     bundle_dir = (
         Path(hass.config.path("tasmota_irhvac/bundles"))
@@ -112,7 +114,7 @@ async def export_bundle(
         )
 
     manifest = {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": dt_util.utcnow().isoformat(),
         "zone_label": zone_label,
         "window_days": window_days,
         "window_start": start_date.isoformat(),

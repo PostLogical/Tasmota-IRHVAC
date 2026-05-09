@@ -1477,11 +1477,13 @@ class TestConditionNumber:
 
 class TestResidualsByHour:
     def _make_obs(self, features, sp, cur, wall_hour, des=20.0, rate=0.005, clamped=False, clamped_reason=""):
-        import datetime as _dt
-        # Create a wall_time that corresponds to the desired local hour.
-        # Use a fixed date so tests are deterministic. wall_hour=-1 → wall_time=0
+        from datetime import datetime, timezone
+        # Create a wall_time that corresponds to the desired UTC hour.
+        # Use a fixed date so tests are deterministic. wall_hour=-1 → wall_time=0.
+        # UTC chosen because analyze_residuals_by_hour bins by UTC hour, matching
+        # tod_features's UTC convention (see model_input_manager.tod_features).
         if wall_hour >= 0:
-            dt = _dt.datetime(2026, 4, 20, wall_hour, 30, 0)
+            dt = datetime(2026, 4, 20, wall_hour, 30, 0, tzinfo=timezone.utc)
             wt = dt.timestamp()
         else:
             wt = 0.0

@@ -24,6 +24,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable
 from unittest.mock import patch
 
+from freezegun import freeze_time
+
 from custom_components.tasmota_irhvac.const import DEFAULT_KAPPA_THRESHOLD
 
 from tests.hvac_bench.adapters import TasmotaPIAdapter
@@ -35,7 +37,7 @@ from tests.hvac_bench.thermal_model import ThermalModel2R2C
 
 TICK_MINUTES_DEFAULT = 15.0
 # Simulated wall-clock epoch: datetime corresponding to sim_clock=0.
-_SIM_EPOCH = datetime(2026, 1, 15, 0, 0, 0)
+_SIM_EPOCH = datetime(2026, 1, 15, 0, 0, 0, tzinfo=timezone.utc)
 TICKS_PER_HOUR = int(60 / TICK_MINUTES_DEFAULT)
 TICKS_PER_DAY = 24 * TICKS_PER_HOUR  # 96
 BATCH_INTERVAL_HOURS_DEFAULT = 12
@@ -740,36 +742,21 @@ def run_full_stack(
             unit = "°C" if mi.delta_from_room else None
             adapter.mock_states.set(mi.entity_id, val, unit)
 
-        # Mock time.monotonic and time.time to sim clock.  The PI
-        # controller uses time.time() for observation wall_time (needed
-        # for sin/cos ToD features) and datetime.now() for cooldowns,
-        # neither of which advance in fast-sim mode.
+        # Sim-time wall clock: freezegun patches `time.time()`, `datetime.now()`,
+        # and `dt_util.utcnow()` (HA core's canonical wrapper). Production code
+        # uses dt_util.utcnow() throughout — under freeze_time, those calls
+        # return sim-time, so CUSUM cooldown comparisons (`dt_util.utcnow() <
+        # cooldown_until`) expire naturally without bench-side bridging.
+        # `time.monotonic()` is NOT patched by freezegun — Stage C will replace
+        # the global `_time.monotonic = lambda...` patch with constructor DI.
         _sim_dt = _SIM_EPOCH + timedelta(seconds=adapter._sim_clock)
-        _sim_epoch_ts = _SIM_EPOCH.timestamp()
         original_monotonic = _time.monotonic
-        original_time = _time.time
         _time.monotonic = lambda: adapter._sim_clock
-        _time.time = lambda: _sim_epoch_ts + adapter._sim_clock
-        # Patch CUSUM cooldown: if set, re-anchor to sim time
-        if pi._cusum_cooldown_until is not None:
-            # Cooldown was set at some sim time.  Check if enough sim time
-            # has passed by comparing sim_dt against the cooldown target.
-            # On first alarm, we replace the wall-clock cooldown with a
-            # sim-time cooldown so future checks against datetime.now()
-            # (which is wall-clock) expire correctly.
-            if not hasattr(pi, '_cusum_cooldown_sim_end'):
-                # First time seeing a cooldown — record when it should end
-                # in sim time (30 min from now in sim).
-                from custom_components.tasmota_irhvac.pi.health_checks import CUSUM_COOLDOWN_SEC
-                pi._cusum_cooldown_sim_end = adapter._sim_clock + CUSUM_COOLDOWN_SEC
-            if adapter._sim_clock >= pi._cusum_cooldown_sim_end:
-                pi._cusum_cooldown_until = None
-                del pi._cusum_cooldown_sim_end
         try:
-            adapter._loop.run_until_complete(pi._pi_tick())
+            with freeze_time(_sim_dt):
+                adapter._loop.run_until_complete(pi._pi_tick())
         finally:
             _time.monotonic = original_monotonic
-            _time.time = original_time
 
         hp_setpoint = float(pi._hp_setpoint)
 

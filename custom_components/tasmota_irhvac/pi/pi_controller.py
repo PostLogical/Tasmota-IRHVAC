@@ -35,6 +35,7 @@ from homeassistant.helpers.event import (
     async_track_state_change_event,
     async_track_time_change,
 )
+from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_conversion import TemperatureConverter
 
 import math
@@ -204,7 +205,7 @@ def _compute_prior_run_age_s(saved_at_wallclock: str) -> float | None:
         return None
     if prior.tzinfo is None:
         prior = prior.replace(tzinfo=timezone.utc)
-    return max(0.0, (datetime.now(timezone.utc) - prior).total_seconds())
+    return max(0.0, (dt_util.utcnow() - prior).total_seconds())
 
 
 class PIController:
@@ -1088,7 +1089,7 @@ class PIController:
         if greybox is not None:
             log_greybox_result(greybox, log_prefix=self._log_prefix)
             self._last_greybox_result = greybox
-            self._last_greybox_timestamp_iso = datetime.now(tz=timezone.utc).isoformat()
+            self._last_greybox_timestamp_iso = dt_util.utcnow().isoformat()
 
             # Bridge: convert rate coefficients to WLS-compatible β
             bridge = greybox_to_beta(
@@ -1326,7 +1327,7 @@ class PIController:
 
         self._last_batch_result = result
         self._last_batch_timestamp = time.monotonic()
-        self._last_batch_wallclock = datetime.now().isoformat(timespec="seconds")
+        self._last_batch_wallclock = dt_util.now().isoformat(timespec="seconds")
         self._metrics.batch_model_rms = result.residual_rms
 
         # Emit typed event so the future event log captures every batch run
@@ -1654,7 +1655,7 @@ class PIController:
             detected_lag_tau_counts=dict(self._detected_lag_tau_count),
             debug_capture_full_p=self._debug_capture_full_p,
             pi_event_log_enabled=self._pi_event_log_enabled,
-            saved_at_wallclock=datetime.now(timezone.utc).isoformat(),
+            saved_at_wallclock=dt_util.utcnow().isoformat(),
             cusum_pos=self._cusum_pos,
             cusum_neg=self._cusum_neg,
             cusum_cooldown_until_epoch=(
@@ -1854,12 +1855,12 @@ class PIController:
         # forgets the cooldown timer (allowing the same anomaly to
         # re-emit if a restart lands within the 30-min window).  Cooldown
         # epoch=0 means none active; otherwise convert epoch back to a
-        # naive datetime to match the comparison semantics in
-        # ``_update_cusum`` (which uses ``datetime.now()``).
+        # UTC-aware datetime to match the comparison semantics in
+        # ``_update_cusum`` (which uses ``dt_util.utcnow()``).
         self._cusum_pos = data.cusum_pos
         self._cusum_neg = data.cusum_neg
         if data.cusum_cooldown_until_epoch > 0.0:
-            self._cusum_cooldown_until = datetime.fromtimestamp(
+            self._cusum_cooldown_until = dt_util.utc_from_timestamp(
                 data.cusum_cooldown_until_epoch,
             )
         else:
@@ -4442,7 +4443,7 @@ class PIController:
         self._last_residual = residual
         self._residual_history.append(residual)
 
-        now = _now or datetime.now()
+        now = _now or dt_util.utcnow()
 
         # Cooldown: suppress detection after a recent alarm
         if self._cusum_cooldown_until is not None:
@@ -5027,7 +5028,7 @@ class PIController:
                 self._plant_id.plant.tau_fast.confidence,
                 self._plant_id.plant.tau_slow.confidence,
             ) if self._plant_id.enabled else 1.0,
-            current_hour=datetime.now().hour,
+            current_hour=dt_util.now().hour,
             room_rate_noise_floor=noise_floor,
         )
 
@@ -5295,7 +5296,7 @@ class PIController:
                 or self._hp_setpoint >= self._max_temp_c
             ) and not probe_active,
             learning_suppressed=self._manual_ff_suppress,
-            current_hour=datetime.now().hour,
+            current_hour=dt_util.now().hour,
             auto_perturb_active=self._auto_perturb.offset != 0.0,
         )
         if probe_result.force_min_setpoint:

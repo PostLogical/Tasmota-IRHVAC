@@ -5,7 +5,10 @@ Wraps specific controller implementations to conform to HVACController protocol.
 
 import asyncio
 import time
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
+
+from freezegun import freeze_time
 
 from homeassistant.components.climate.const import HVACMode
 from homeassistant.const import UnitOfTemperature
@@ -14,6 +17,11 @@ from custom_components.tasmota_irhvac.const import DEFAULT_KAPPA_THRESHOLD
 
 from tests.conftest import _PITestEntityRoomTempMixin, make_pi_config
 from tests.hvac_bench.mock_states import MockStates
+
+# Reference sim epoch (UTC-aware) shared with full_stack_runner — same value
+# so reference_scenarios paths and full_stack paths produce comparable
+# timestamps for any cross-path observation comparison.
+_SIM_EPOCH = datetime(2026, 1, 15, 0, 0, 0, tzinfo=timezone.utc)
 
 
 class TasmotaPIAdapter:
@@ -116,11 +124,15 @@ class TasmotaPIAdapter:
         # Set timing
         self._pi._pi_last_tick_time = self._sim_clock - dt_seconds
 
-        # Mock time.monotonic for the PI controller
+        # Sim-time wall clock + monotonic. freezegun patches `time.time` and
+        # `dt_util.utcnow()` consistently; `time.monotonic` is NOT freezegun-
+        # patched — Stage C will replace this global patch with constructor DI.
+        sim_dt = _SIM_EPOCH + timedelta(seconds=self._sim_clock)
         original = time.monotonic
         time.monotonic = lambda: self._sim_clock
         try:
-            self._loop.run_until_complete(self._pi._pi_tick())
+            with freeze_time(sim_dt):
+                self._loop.run_until_complete(self._pi._pi_tick())
         finally:
             time.monotonic = original
 

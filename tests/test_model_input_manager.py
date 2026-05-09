@@ -572,42 +572,38 @@ class TestTimeOfDayFeatures:
         assert tod_features(0.0) == (0.0, 0.0)
 
     def test_tod_features_midnight(self):
-        """At midnight local, sin=0, cos=1."""
-        import datetime as _dt
+        """At UTC midnight, sin=0, cos=1."""
+        from datetime import datetime, timezone
         from custom_components.tasmota_irhvac.pi.model_input_manager import tod_features
-        # Find a UTC epoch that corresponds to midnight local
-        midnight = _dt.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        wt = midnight.timestamp()
-        sin_h, cos_h = tod_features(wt)
+        midnight_utc = datetime(2026, 1, 15, 0, 0, 0, tzinfo=timezone.utc)
+        sin_h, cos_h = tod_features(midnight_utc.timestamp())
         assert abs(sin_h) < 0.01  # sin(0) = 0
         assert abs(cos_h - 1.0) < 0.01  # cos(0) = 1
 
     def test_tod_features_noon(self):
-        """At noon local, sin≈0, cos≈-1."""
-        import datetime as _dt
+        """At UTC noon, sin≈0, cos≈-1."""
+        from datetime import datetime, timezone
         from custom_components.tasmota_irhvac.pi.model_input_manager import tod_features
-        noon = _dt.datetime.now().replace(hour=12, minute=0, second=0, microsecond=0)
-        wt = noon.timestamp()
-        sin_h, cos_h = tod_features(wt)
+        noon_utc = datetime(2026, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
+        sin_h, cos_h = tod_features(noon_utc.timestamp())
         assert abs(sin_h) < 0.01  # sin(π) ≈ 0
         assert abs(cos_h + 1.0) < 0.01  # cos(π) ≈ -1
 
     def test_tod_features_6am(self):
-        """At 6am local, sin=1, cos=0."""
-        import datetime as _dt
+        """At UTC 6am, sin=1, cos=0."""
+        from datetime import datetime, timezone
         from custom_components.tasmota_irhvac.pi.model_input_manager import tod_features
-        six_am = _dt.datetime.now().replace(hour=6, minute=0, second=0, microsecond=0)
-        wt = six_am.timestamp()
-        sin_h, cos_h = tod_features(wt)
+        six_am_utc = datetime(2026, 1, 15, 6, 0, 0, tzinfo=timezone.utc)
+        sin_h, cos_h = tod_features(six_am_utc.timestamp())
         assert abs(sin_h - 1.0) < 0.01  # sin(π/2) = 1
         assert abs(cos_h) < 0.01  # cos(π/2) = 0
 
     def test_feature_vector_with_wall_time(self):
         """Feature vector includes non-zero ToD when wall_time is provided."""
-        import datetime as _dt
+        from datetime import datetime, timezone
         mgr = ModelInputManager(model_inputs=[], outdoor_temp_sensor=None)
-        six_am = _dt.datetime.now().replace(hour=6, minute=0, second=0, microsecond=0)
-        x = mgr.build_feature_vector(5.0, wall_time=six_am.timestamp())
+        six_am_utc = datetime(2026, 1, 15, 6, 0, 0, tzinfo=timezone.utc)
+        x = mgr.build_feature_vector(5.0, wall_time=six_am_utc.timestamp())
         assert len(x) == 4  # intercept + outdoor_delta + 2 ToD
         assert abs(x[2] - 1.0) < 0.01  # sin(6h) ≈ 1
         assert abs(x[3]) < 0.01  # cos(6h) ≈ 0

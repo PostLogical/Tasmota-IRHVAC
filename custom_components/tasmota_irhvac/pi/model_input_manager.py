@@ -8,12 +8,12 @@ RLS setup (seeds, clamps, feature scales stay in PIController for RLS init).
 
 from __future__ import annotations
 
-import datetime as _dt
 import logging
 import math
 from dataclasses import dataclass
 from typing import Any
 
+from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_conversion import TemperatureConverter
 from homeassistant.const import UnitOfTemperature
 
@@ -33,14 +33,18 @@ _TWO_PI_OVER_24 = 2.0 * math.pi / 24.0
 
 
 def tod_features(wall_time: float | None) -> tuple[float, float]:
-    """Compute sin/cos of local fractional hour from UTC epoch seconds.
+    """Compute sin/cos of UTC fractional hour from epoch seconds.
 
-    Returns (sin(2π·hour/24), cos(2π·hour/24)) using the system's local
-    timezone, consistent with batch_learning's wall-hour derivation.
+    Returns (sin(2π·hour/24), cos(2π·hour/24)) using UTC. The sin/cos pair
+    are nuisance regressors absorbing diurnal residual variance — the
+    timezone interpretation has no semantic meaning, only consistency with
+    batch_learning's wall-hour derivation matters. UTC is HA-canonical
+    storage convention (recorder/statistics), avoids DST artifacts in the
+    feature trajectory, and is reproducible across machines (bench).
     """
     if wall_time is None or wall_time <= 0:
         return 0.0, 0.0
-    dt = _dt.datetime.fromtimestamp(wall_time)
+    dt = dt_util.utc_from_timestamp(wall_time)
     hour_frac = dt.hour + dt.minute / 60.0 + dt.second / 3600.0
     angle = _TWO_PI_OVER_24 * hour_frac
     return math.sin(angle), math.cos(angle)

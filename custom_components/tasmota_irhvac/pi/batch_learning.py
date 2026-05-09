@@ -2583,9 +2583,9 @@ def analyze_residuals_by_hour(
         List of detected patterns (contiguous hour spans with consistent
         bias). Empty if no patterns exceed threshold.
     """
-    import datetime as _dt
+    from homeassistant.util import dt as dt_util
 
-    # Bin residuals by wall-clock hour
+    # Bin residuals by UTC hour — same convention as model_input_manager.tod_features.
     hour_residuals: dict[int, list[float]] = {h: [] for h in range(24)}
 
     for o in observations:
@@ -2593,8 +2593,9 @@ def analyze_residuals_by_hour(
             continue
         if abs(o.room_rate) >= room_rate_threshold:
             continue
-        # Derive wall hour from wall_time (UTC epoch → local hour)
-        wall_hour = _dt.datetime.fromtimestamp(o.wall_time).hour if o.wall_time > 0 else -1
+        # Derive UTC hour from wall_time (epoch → UTC hour) — see
+        # model_input_manager.tod_features for the architectural rationale.
+        wall_hour = dt_util.utc_from_timestamp(o.wall_time).hour if o.wall_time > 0 else -1
         if wall_hour < 0:
             continue
         # Build feature vector from raw readings + current config
