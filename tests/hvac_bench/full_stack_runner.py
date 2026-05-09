@@ -24,6 +24,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable
 from unittest.mock import patch
 
+from custom_components.tasmota_irhvac.const import DEFAULT_KAPPA_THRESHOLD
+
 from tests.hvac_bench.adapters import TasmotaPIAdapter
 from tests.hvac_bench.house_profiles import PROFILES, PROFILES_2R2C
 from tests.hvac_bench.thermal_model import ThermalModel2R2C
@@ -521,12 +523,15 @@ def run_full_stack(
         "pi_setpoint_weight": 0.3,
         **config.pi_overrides,
     }
+    # Bench-only κ-gate relaxation: 10000 effectively disables the gate for
+    # synthetic-learning experiments. Production scenarios pass relax=False
+    # and use the default 100. Threaded through PIController's ctor kwarg
+    # rather than post-construction private-attr write (#84).
+    kappa_threshold = 10000.0 if config.relax_kappa_gate else DEFAULT_KAPPA_THRESHOLD
     adapter = TasmotaPIAdapter(pi_config,
-                               head_calibration_bounds=config.head_calibration_bounds)
+                               head_calibration_bounds=config.head_calibration_bounds,
+                               kappa_threshold=kappa_threshold)
     pi = adapter._pi
-
-    if config.relax_kappa_gate:
-        pi._batch_kappa_threshold = 10000
 
     # Resolve model input physics: couple true_thermal_effect ↔ FF coefficient.
     for mi in config.model_inputs:
@@ -726,19 +731,14 @@ def run_full_stack(
         adapter._entity._attr_current_temperature = sensor_reading
         pi._inputs.outdoor_temp = model.outdoor_temp
 
-        # Mock model input entity states.  delta_from_room inputs need a
-        # temperature unit advertised so the controller's model_input_manager
-        # converts the absolute reading into a delta against current room.
-        _mock_states: dict = {}
+        # Update model input entity states via the bench's MockStates registry.
+        # delta_from_room inputs need a temperature unit advertised so the
+        # controller's model_input_manager converts the absolute reading
+        # into a delta against current room.
         for mi in config.model_inputs:
             val = input_values[mi.name]
             unit = "°C" if mi.delta_from_room else None
-            ms = type("MockState", (), {
-                "state": str(val),
-                "attributes": {"unit_of_measurement": unit},
-            })()
-            _mock_states[mi.entity_id] = ms
-        pi._hass.states.get = lambda eid, _s=_mock_states: _s.get(eid)
+            adapter.mock_states.set(mi.entity_id, val, unit)
 
         # Mock time.monotonic and time.time to sim clock.  The PI
         # controller uses time.time() for observation wall_time (needed

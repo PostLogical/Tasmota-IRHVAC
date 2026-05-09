@@ -40,9 +40,8 @@ def _run_and_collect_observations(outdoor_base: float, n_days: int = 7,
         "pi_deadband": 0.5,
         "pi_setpoint_weight": 0.3,
     }
-    adapter = TasmotaPIAdapter(pi_config)
+    adapter = TasmotaPIAdapter(pi_config, kappa_threshold=10000)
     pi = adapter._pi
-    pi._batch_kappa_threshold = 10000
 
     model = ThermalModel2R2C(
         profile=profile, initial_temp=20.5, outdoor_temp=outdoor_base,

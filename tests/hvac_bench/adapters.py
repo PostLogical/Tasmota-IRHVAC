@@ -10,7 +10,10 @@ from unittest.mock import MagicMock
 from homeassistant.components.climate.const import HVACMode
 from homeassistant.const import UnitOfTemperature
 
+from custom_components.tasmota_irhvac.const import DEFAULT_KAPPA_THRESHOLD
+
 from tests.conftest import _PITestEntityRoomTempMixin, make_pi_config
+from tests.hvac_bench.mock_states import MockStates
 
 
 class TasmotaPIAdapter:
@@ -21,7 +24,9 @@ class TasmotaPIAdapter:
     """
 
     def __init__(self, config_overrides: dict | None = None,
-                 head_calibration_bounds: tuple[float, float] = (0.0, 0.0)):
+                 head_calibration_bounds: tuple[float, float] = (0.0, 0.0),
+                 *,
+                 kappa_threshold: float = DEFAULT_KAPPA_THRESHOLD):
         """Initialize with optional config overrides.
 
         Args:
@@ -30,6 +35,9 @@ class TasmotaPIAdapter:
             head_calibration_bounds: (cal_min, cal_max) for uncertain zone.
                 Default (0.0, 0.0) = no uncertain zone (perfect sensor).
                 Use None for production defaults (±2.0°C).
+            kappa_threshold: Bench-only test seam — pass 10000 (or larger)
+                to disable the production κ-gate for synthetic-learning
+                experiments. See PIController.__init__.
         """
         overrides = dict(config_overrides or {})
         # Pull out test-only seed overrides before make_pi_config (they are
@@ -40,7 +48,8 @@ class TasmotaPIAdapter:
         config = make_pi_config(overrides)
         self._config = config
         self._entity = _FakeBenchEntity(config,
-                                        head_calibration_bounds=head_calibration_bounds)
+                                        head_calibration_bounds=head_calibration_bounds,
+                                        kappa_threshold=kappa_threshold)
         self._pi = self._entity._pi
         self._loop = asyncio.new_event_loop()
         self._sim_clock = 0.0
@@ -48,6 +57,11 @@ class TasmotaPIAdapter:
 
         if tau_fast_seed is not None or tau_slow_seed is not None:
             self._inject_plant_seeds(tau_fast_seed, tau_slow_seed)
+
+    @property
+    def mock_states(self) -> MockStates:
+        """Bench-side states registry — runner calls `.set(eid, value, unit)`."""
+        return self._entity.mock_states
 
     def _inject_plant_seeds(self, tau_fast_seed: float | None,
                             tau_slow_seed: float | None) -> None:
@@ -86,12 +100,18 @@ class TasmotaPIAdapter:
         self._entity._attr_current_temperature = room_temp_c
         self._pi._inputs.outdoor_temp = outdoor_temp_c
 
-        # Update model inputs if provided
+        # Write model inputs to MockStates so the controller's resolver
+        # picks them up via the normal `hass.states.get` path. Replaces the
+        # earlier `pi._inputs.values[i] = ...` direct write that bypassed
+        # the resolver — see #84. Resolver is canonical: production reads
+        # state via the resolver, so the bench should too.
         if model_inputs:
-            for i, m_input in enumerate(self._pi._model_inputs):
+            for m_input in self._pi._model_inputs:
                 name = m_input.get("name", "")
                 if name in model_inputs:
-                    self._pi._inputs.values[i] = model_inputs[name]
+                    entity_id = m_input.get("entity_id", "")
+                    unit = "°C" if m_input.get("delta_from_room") else None
+                    self.mock_states.set(entity_id, model_inputs[name], unit)
 
         # Set timing
         self._pi._pi_last_tick_time = self._sim_clock - dt_seconds
@@ -209,11 +229,18 @@ class TextbookPIController:
 class _FakeBenchEntity(_PITestEntityRoomTempMixin):
     """Minimal fake entity for PIController adapter."""
 
-    def __init__(self, config, head_calibration_bounds=None):
+    def __init__(self, config, head_calibration_bounds=None,
+                 *, kappa_threshold=DEFAULT_KAPPA_THRESHOLD):
         from custom_components.tasmota_irhvac.pi.pi_controller import PIController
 
         self.hass = MagicMock()
-        self.hass.states.get = MagicMock(return_value=None)
+        # Real dict-backed states substitute — replaces the per-tick
+        # `pi._hass.states.get = lambda...` override the runner used to install
+        # (see #84). Bench code calls `mock_states.set(eid, value, unit)`
+        # whenever a sensor "changes" and the resolver reads via the normal
+        # `hass.states.get(eid)` path.
+        self.mock_states = MockStates()
+        self.hass.states.get = self.mock_states.get
         self._pi_test_room_temp = 20.0  # mixin backing field
         self._attr_target_temperature = 20.0
         self._attr_hvac_mode = HVACMode.HEAT
@@ -229,7 +256,7 @@ class _FakeBenchEntity(_PITestEntityRoomTempMixin):
         self._attr_min_temp = self._min_temp
         self._attr_max_temp = self._max_temp
 
-        self._pi = PIController(self, config)
+        self._pi = PIController(self, config, kappa_threshold=kappa_threshold)
         self._sync_room_temp_to_pi()
         self._pi._pi_enabled = True
         # Head calibration bounds: None = production defaults (±2.0°C),

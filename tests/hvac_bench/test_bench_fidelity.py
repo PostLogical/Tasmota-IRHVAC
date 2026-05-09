@@ -44,9 +44,8 @@ def _run_with_tick_interval(tick_min: float, n_days: int = 14) -> dict:
         "pi_deadband": 0.5,
         "pi_setpoint_weight": 0.3,
     }
-    adapter = TasmotaPIAdapter(pi_config)
+    adapter = TasmotaPIAdapter(pi_config, kappa_threshold=10000)
     pi = adapter._pi
-    pi._batch_kappa_threshold = 10000
     pi._rls_online_learning = False
 
     model = ThermalModel2R2C(
@@ -226,9 +225,8 @@ class TestObservationDataQuality:
             "pi_deadband": 0.5,
             "pi_setpoint_weight": 0.3,
         }
-        adapter = TasmotaPIAdapter(pi_config)
+        adapter = TasmotaPIAdapter(pi_config, kappa_threshold=10000)
         pi = adapter._pi
-        pi._batch_kappa_threshold = 10000
 
         model = ThermalModel2R2C(
             profile=profile, initial_temp=20.5, outdoor_temp=-5.0,

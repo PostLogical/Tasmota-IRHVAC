@@ -97,6 +97,7 @@ from ..const import (
     DEFAULT_PI_INTERCEPT_SEED_COOL,
     DEFAULT_PI_INTERCEPT_SEED_HEAT,
     DEFAULT_PI_OUTDOOR_SEED_COOL,
+    DEFAULT_KAPPA_THRESHOLD,
     DEFAULT_PI_OUTDOOR_SEED_HEAT,
     DEFAULT_PI_OUTDOOR_SEED_CLAMP_MAX,
     DEFAULT_PI_OUTDOOR_SEED_CLAMP_MIN,
@@ -239,14 +240,24 @@ class PIController:
     HEALTH_FEATURE_DIVERSITY_MIN: float = 0.05   # 5% activity floor per feature
     HEALTH_FEATURE_DIVERSITY_MIN_OBS: int = 100   # don't fire until enough data
 
-    def __init__(self, entity: TasmotaIrhvac, config: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        entity: TasmotaIrhvac,
+        config: dict[str, Any],
+        *,
+        kappa_threshold: float = DEFAULT_KAPPA_THRESHOLD,
+    ) -> None:
         """Initialize PI controller.
 
         Args:
             entity: The climate entity this controller is attached to.
             config: Merged config dict (entry.data + entry.options).
+            kappa_threshold: Batch WLS condition-number ceiling above which
+                a recommendation is rejected. Bench-only test seam — production
+                should always use the default. Not a user-facing config key.
         """
         self._entity = entity
+        self._kappa_threshold: float = float(kappa_threshold)
         self._log_prefix: str = ""  # set in async_added when entity_id is known
 
         # Convert entity temp limits to °C for internal PI math
@@ -1221,9 +1232,8 @@ class PIController:
         # κ gate: reject batch recommendation when condition number indicates
         # severe multicollinearity.  The coefficients may look different from
         # current values but the data geometry can't reliably separate them.
-        kappa_threshold = getattr(self, '_batch_kappa_threshold', 100)
         if result.recommend_update:
-            if not math.isinf(kappa) and kappa > kappa_threshold:
+            if not math.isinf(kappa) and kappa > self._kappa_threshold:
                 _LOGGER.warning(
                     "%sBatch WLS: κ=%.0f (severe) — rejecting recommendation "
                     "until data geometry improves",

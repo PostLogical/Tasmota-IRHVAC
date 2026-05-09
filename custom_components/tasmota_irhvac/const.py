@@ -235,6 +235,13 @@ DEFAULT_PI_KI = 0.20             # Optimized via 2R2C parameter sweep (Apr 2026)
 MIN_PI_KI = 0.01                 # Hard floor — ki=0 (P-only) breaks anti-windup, FF correction, and bumpless transfer; users wanting "no PI" should toggle pi_enabled instead
 DEFAULT_PI_KD = 0.0              # Literature + 72h replay: D contraindicated for quantized HVAC
 DEFAULT_PI_KD_FILTER_N = 8       # Derivative filter coefficient: Tf = Td/N. Higher N = less filtering.
+
+# Batch WLS κ-gate: condition-number ceiling above which a batch
+# recommendation is rejected. Production default 100 (severe-multicollinearity
+# threshold per Belsley/Kuh/Welsch); bench scenarios that need to disable the
+# gate for synthetic-learning experiments pass a larger value via the
+# `kappa_threshold` ctor kwarg on PIController. Not a user-facing config key.
+DEFAULT_KAPPA_THRESHOLD = 100.0
 DEFAULT_PI_TICK_FALLBACK = 900
 DEFAULT_PI_DEADBAND = 0.5
 
