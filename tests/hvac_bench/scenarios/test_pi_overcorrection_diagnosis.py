@@ -37,6 +37,7 @@ from dataclasses import replace
 
 import pytest
 
+from tests.hvac_bench.conftest import check_bench_metrics
 from tests.hvac_bench.reference_scenarios import (
     CANONICAL_SCENARIOS,
     make_well_tuned_for_scenario,
@@ -45,7 +46,21 @@ from tests.hvac_bench.reference_scenarios import (
 
 
 @pytest.mark.slow
-def test_tracking_error_grows_with_finer_ticks_than_gain_calibration():
+@pytest.mark.xfail(
+    strict=False,
+    reason=(
+        "Premise invalidated by q-feedback dt_factor fix (commit ea1cc50). "
+        "The test measured cadence-dependent over-correction that was "
+        "dominated by q-feedback's effective-gain scaling with sample rate. "
+        "After the fix, q-feedback is cadence-invariant; PI integration is "
+        "also cadence-invariant by design (avg_error * dt_factor); so finer "
+        "ticks no longer produce more tracking error — they produce LESS "
+        "(better discretization of the disturbance response).  "
+        "Empirical post-fix: fine_tdis ≈ 0.22, coarse_tdis ≈ 0.84.  "
+        "Replace this test with a 'cadence-invariance' assertion or remove."
+    ),
+)
+def test_tracking_error_grows_with_finer_ticks_than_gain_calibration(bench_metrics, num_regression):
     """Closed-loop ``tdis_tot`` rises when ticks are finer than 15-min nominal.
 
     PI gains were tuned for ``pi_tick_fallback=900s``.  Running the same
@@ -66,6 +81,11 @@ def test_tracking_error_grows_with_finer_ticks_than_gain_calibration():
 
     fine_tdis = fine_bundle.tdis_tot
     coarse_tdis = coarse_bundle.tdis_tot
+
+    bench_metrics["fine_tdis_tot"] = fine_tdis
+    bench_metrics["coarse_tdis_tot"] = coarse_tdis
+    bench_metrics["tdis_ratio"] = fine_tdis / coarse_tdis if coarse_tdis > 1e-9 else 0.0
+    check_bench_metrics(num_regression, bench_metrics)
 
     # Hard floor: directional property must hold.  If fine ≤ coarse the
     # cadence/gain coupling has been fundamentally changed (e.g. gain

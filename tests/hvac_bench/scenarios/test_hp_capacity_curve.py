@@ -24,6 +24,7 @@ import logging
 
 import pytest
 
+from tests.hvac_bench.conftest import check_bench_metrics
 from tests.hvac_bench.full_stack_runner import (
     FullStackConfig,
     FullStackResult,
@@ -147,7 +148,7 @@ def capacity_runs() -> dict[str, FullStackResult]:
 class TestHPCapacityCurveSaturation:
     """Capacity curve raises winter saturation rate (#43 validation)."""
 
-    def test_capacity_increases_saturation(self, capacity_runs):
+    def test_capacity_increases_saturation(self, bench_metrics, num_regression, capacity_runs):
         """Enabling the curve must raise the rail-time fraction.
 
         The bench's pre-#43 fixed-gain model rails ~2-5% in winter (PI
@@ -159,6 +160,12 @@ class TestHPCapacityCurveSaturation:
         """
         sat_fixed = _saturation_pct(capacity_runs["fixed"])
         sat_cap = _saturation_pct(capacity_runs["capacity"])
+        bench_metrics["sat_fixed_pct"] = sat_fixed
+        bench_metrics["sat_capacity_pct"] = sat_cap
+        bench_metrics["sat_delta_pp"] = sat_cap - sat_fixed
+        bench_metrics["ctrl_comfort_fixed_pct"] = capacity_runs["fixed"].ctrl_comfort_pct
+        bench_metrics["ctrl_comfort_capacity_pct"] = capacity_runs["capacity"].ctrl_comfort_pct
+        check_bench_metrics(num_regression, bench_metrics)
         assert sat_fixed < 10.0, (
             f"Pre-capacity saturation should be low (<10%): {sat_fixed:.2f}%"
         )
@@ -167,10 +174,14 @@ class TestHPCapacityCurveSaturation:
             f"fixed={sat_fixed:.2f}%, capacity={sat_cap:.2f}%"
         )
 
-    def test_capacity_increases_cold_violations(self, capacity_runs):
+    def test_capacity_increases_cold_violations(self, bench_metrics, num_regression, capacity_runs):
         """Cold-side comfort violations should rise too (less control authority)."""
         cold_fixed = capacity_runs["fixed"].cold_violations
         cold_cap = capacity_runs["capacity"].cold_violations
+        bench_metrics["cold_violations_fixed"] = cold_fixed
+        bench_metrics["cold_violations_capacity"] = cold_cap
+        bench_metrics["cold_violations_delta"] = cold_cap - cold_fixed
+        check_bench_metrics(num_regression, bench_metrics)
         assert cold_cap > cold_fixed, (
             f"Capacity curve should produce more cold violations: "
             f"fixed={cold_fixed}, capacity={cold_cap}"
