@@ -395,21 +395,24 @@ def _make_window_disturbances(n_days: int, tick_minutes: float = 15.0):
     Every ~3 days, a window opens for 60 min in the late morning.
     Modeled as a thermal disturbance with reduced tau_env (leakier
     envelope) — heat loss accelerates while the window is open.
+
+    Note: ``tick_minutes`` parameter retained for API compatibility but
+    is no longer needed — Disturbance fields are wall-clock minutes.
     """
-    ticks_per_day = int(24 * 60 / tick_minutes)
-    duration_ticks = max(1, int(60 / tick_minutes))
+    del tick_minutes  # no longer used; kept for backwards-compat callers
+    minutes_per_day = 24 * 60
     disturbances = []
     for d in range(n_days):
         if d % 3 == 2:  # every 3 days
             # Late morning: 10 AM
-            start_tick = d * ticks_per_day + int(10 * 60 / tick_minutes)
+            start_minute = d * minutes_per_day + 10 * 60
             disturbances.append(ThermalDisturbance(
                 name=f"Window day {d}",
                 heat_gain_c_per_min=0.0,
                 tau_factor=0.4,  # 60% increase in heat loss
-                start_tick=start_tick,
-                duration_ticks=duration_ticks,
-                ramp_ticks=max(1, int(5 / tick_minutes)),
+                start_minute=start_minute,
+                duration_minutes=60.0,
+                ramp_minutes=5.0,
             ))
     return disturbances
 
@@ -420,19 +423,19 @@ def _make_oven_disturbances(n_days: int, tick_minutes: float = 15.0):
     Every 4 days at dinner time (6 PM), oven heats LR by ~1.5 kW for
     30 min.  Modeled as direct heat gain with no tau modification.
     """
-    ticks_per_day = int(24 * 60 / tick_minutes)
-    duration_ticks = max(1, int(30 / tick_minutes))
+    del tick_minutes
+    minutes_per_day = 24 * 60
     disturbances = []
     for d in range(n_days):
         if d % 4 == 1:
-            start_tick = d * ticks_per_day + int(18 * 60 / tick_minutes)
+            start_minute = d * minutes_per_day + 18 * 60
             disturbances.append(ThermalDisturbance(
                 name=f"Oven day {d}",
                 heat_gain_c_per_min=0.06,  # ~1.5°C over 30 min
                 tau_factor=1.0,
-                start_tick=start_tick,
-                duration_ticks=duration_ticks,
-                ramp_ticks=max(1, int(5 / tick_minutes)),
+                start_minute=start_minute,
+                duration_minutes=30.0,
+                ramp_minutes=5.0,
             ))
     return disturbances
 

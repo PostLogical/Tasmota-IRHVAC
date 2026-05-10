@@ -55,15 +55,17 @@ class TestOilBoiler:
         ctrl = _make_controller(profile, seed_factor=1.0)
         ctrl.set_desired_temp(20.5)
         model = ThermalModel(profile=profile, initial_temp=20.5, outdoor_temp=5.0)
-        model.add_disturbance(oil_boiler(start_tick=8))
+        model.add_disturbance(oil_boiler(start_minute=120))
 
-        history = run_scenario(ctrl, model, n_ticks=32, mode="heat")
+        history = run_scenario(ctrl, model, duration_minutes=8 * 60, mode="heat")
         _record_run(bench_metrics, history, profile_name=profile_name,
                     scenario="oil_boiler", desired=20.5)
         check_bench_metrics(num_regression, bench_metrics)
 
         # Room should recover to target after disturbance ends
-        post_disturbance = [h for h in history if h["tick"] >= 16]
+        # (was tick >= 16 at 15-min cadence = minute 240; oil_boiler
+        # ends at minute 150, so 240 gives 90 min recovery window).
+        post_disturbance = [h for h in history if h["minute"] >= 240]
         for h in post_disturbance:
             assert abs(h["room_temp"] - 20.5) < 2.5, (
                 f"{profile_name} tick {h['tick']}: room={h['room_temp']:.1f} "
@@ -86,15 +88,16 @@ class TestFrontDoorOpen:
         ctrl = _make_controller(profile, seed_factor=1.0)
         ctrl.set_desired_temp(20.5)
         model = ThermalModel(profile=profile, initial_temp=20.5, outdoor_temp=0.0)
-        model.add_disturbance(front_door_open(start_tick=8))
+        model.add_disturbance(front_door_open(start_minute=120))
 
-        history = run_scenario(ctrl, model, n_ticks=32, mode="heat")
+        history = run_scenario(ctrl, model, duration_minutes=8 * 60, mode="heat")
         _record_run(bench_metrics, history, profile_name=profile_name,
                     scenario="front_door_open", desired=20.5)
         check_bench_metrics(num_regression, bench_metrics)
 
-        # Should recover within 8 ticks (2 hours) after door closes
-        post = [h for h in history if h["tick"] >= 12]
+        # Should recover within 2 hours after door closes (was tick >= 12
+        # at 15-min cadence = minute 180; door closes at minute 135).
+        post = [h for h in history if h["minute"] >= 180]
         for h in post:
             assert abs(h["room_temp"] - 20.5) < 3.0, (
                 f"{profile_name} tick {h['tick']}: room={h['room_temp']:.1f}"
@@ -117,15 +120,15 @@ class TestGarageDoorOpen:
         ctrl = _make_controller(profile, seed_factor=1.0)
         ctrl.set_desired_temp(20.5)
         model = ThermalModel(profile=profile, initial_temp=20.5, outdoor_temp=2.0)
-        model.add_disturbance(garage_door_open(start_tick=8))
+        model.add_disturbance(garage_door_open(start_minute=120))
 
-        history = run_scenario(ctrl, model, n_ticks=24, mode="heat")
+        history = run_scenario(ctrl, model, duration_minutes=6 * 60, mode="heat")
         _record_run(bench_metrics, history, profile_name=profile_name,
                     scenario="garage_door_open", desired=20.5)
         check_bench_metrics(num_regression, bench_metrics)
 
-        # Room may drop but shouldn't crash
-        min_temp = min(h["room_temp"] for h in history if h["tick"] >= 8)
+        # Room may drop but shouldn't crash (window starts at minute 120).
+        min_temp = min(h["room_temp"] for h in history if h["minute"] >= 120)
         assert min_temp > 16.0, (
             f"{profile_name}: room dropped to {min_temp:.1f}°C during garage open"
         )
@@ -143,9 +146,9 @@ class TestCooking:
         ctrl = _make_controller(profile, seed_factor=1.0)
         ctrl.set_desired_temp(20.5)
         model = ThermalModel(profile=profile, initial_temp=20.5, outdoor_temp=5.0)
-        model.add_disturbance(cooking(start_tick=8))
+        model.add_disturbance(cooking(start_minute=120))
 
-        history = run_scenario(ctrl, model, n_ticks=24, mode="heat")
+        history = run_scenario(ctrl, model, duration_minutes=6 * 60, mode="heat")
         _record_run(bench_metrics, history, profile_name=profile_name,
                     scenario="cooking", desired=20.5)
         check_bench_metrics(num_regression, bench_metrics)
@@ -172,15 +175,16 @@ class TestParty:
         ctrl = _make_controller(profile, seed_factor=1.0)
         ctrl.set_desired_temp(20.5)
         model = ThermalModel(profile=profile, initial_temp=20.5, outdoor_temp=5.0)
-        model.add_disturbance(party(start_tick=4))
+        model.add_disturbance(party(start_minute=60))
 
-        history = run_scenario(ctrl, model, n_ticks=32, mode="heat")
+        history = run_scenario(ctrl, model, duration_minutes=8 * 60, mode="heat")
         _record_run(bench_metrics, history, profile_name=profile_name,
                     scenario="party", desired=20.5)
         check_bench_metrics(num_regression, bench_metrics)
 
-        # After party ends (tick 16), should recover within 8 ticks
-        post_party = [h for h in history if h["tick"] >= 20]
+        # Party ends at minute 240 (60 + 180 ramp included). Recovery
+        # window starts at minute 300 (was tick >= 20 at 15-min cadence).
+        post_party = [h for h in history if h["minute"] >= 300]
         if post_party:
             for h in post_party:
                 assert abs(h["room_temp"] - 20.5) < 3.0, (

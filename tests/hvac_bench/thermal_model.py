@@ -127,11 +127,12 @@ class ThermalModel:
         if self.profile.hp_capacity is not None:
             hp_gain *= self.profile.hp_capacity.factor(self.outdoor_temp, mode)
 
-        # Apply disturbances
+        # Apply disturbances (minute-keyed for cadence-invariance).
+        minute = tick * dt_minutes
         extra_heat = 0.0
         tau_modifier = 1.0
         for d in self._disturbances:
-            intensity = d.intensity(tick)
+            intensity = d.intensity(minute)
             if intensity > 0:
                 extra_heat += d.heat_gain_c_per_min * intensity * dt_minutes
                 tau_modifier *= 1.0 - (1.0 - d.tau_factor) * intensity
@@ -286,11 +287,13 @@ class ThermalModel2R2C:
         if p.hp_capacity is not None:
             g *= p.hp_capacity.factor(self.outdoor_temp, mode)
 
-        # Apply disturbances (affect envelope only, like the 1R1C model)
+        # Apply disturbances (minute-keyed for cadence-invariance, affect
+        # envelope only, like the 1R1C model).
+        minute = tick * dt_minutes
         extra_heat = 0.0
         tau_modifier = 1.0
         for d in self._disturbances:
-            intensity = d.intensity(tick)
+            intensity = d.intensity(minute)
             if intensity > 0:
                 extra_heat += d.heat_gain_c_per_min * intensity
                 tau_modifier *= 1.0 - (1.0 - d.tau_factor) * intensity
