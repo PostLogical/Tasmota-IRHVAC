@@ -43,14 +43,22 @@ class _BenchHass:
     """Hand-rolled hass fake — exposes only the bench-active controller surface.
 
     The PI subpackage (``custom_components/tasmota_irhvac/pi/``) is
-    deliberately HA-decoupled. Its bench-active hass surface is exactly:
-      * ``hass.states.get(eid)`` — sensor reads (covered by ``MockStates``)
-      * ``hass.is_running`` — boolean read once for event metadata
+    deliberately HA-decoupled.  Its bench-active hass surface is:
+
+      * ``hass.states.get(eid)`` — sensor reads (covered by ``MockStates``).
+      * ``hass.is_running`` — boolean read once for event metadata.
+      * ``hass.data`` — read by HA's ``async_dispatcher_send`` helper,
+        which the controller invokes per batch (line ~1528 of pi_controller).
+        Empty ``dict`` is the right value for bench: dispatcher-send
+        early-exits when there are no subscribed listeners.
+      * ``hass.verify_event_loop_thread(name)`` — debug guard called by
+        ``async_dispatcher_send``.  Bench has its own deterministic loop
+        and isn't doing cross-thread calls; the guard is a no-op.
 
     Other hass attributes (``async_add_executor_job``, ``config.path``,
-    ``data``, ``bus``) live behind feature flags the bench doesn't enable
-    (e.g. ``_pi_event_log_enabled = False``).  Exposing only the active
-    surface and raising ``AttributeError`` on anything else means any new
+    ``bus``) live behind feature flags the bench doesn't enable (e.g.
+    ``_pi_event_log_enabled = False``).  Exposing only the active surface
+    and raising ``AttributeError`` on anything else means any new
     controller hass dependency surfaces immediately as a test failure
     rather than silently consuming a truthy ``MagicMock`` child — this
     is the architectural fix for the bug class first seen in #83
@@ -60,8 +68,15 @@ class _BenchHass:
     Use ``__slots__`` so attribute typos on this object also fail loud.
     """
 
-    __slots__ = ("states", "is_running")
+    __slots__ = ("states", "is_running", "data")
 
     def __init__(self, mock_states: MockStates) -> None:
         self.states = mock_states
         self.is_running = True
+        # Empty dict — dispatcher_send checks ``hass.data.get(DATA_DISPATCHER)``
+        # and early-exits on None.  Bench has no dispatcher subscribers so
+        # this is the desired path.
+        self.data: dict = {}
+
+    def verify_event_loop_thread(self, what: str) -> None:
+        """No-op: bench runs deterministically on its own loop."""
