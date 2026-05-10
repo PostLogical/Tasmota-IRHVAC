@@ -7,6 +7,7 @@ in the controller's model inputs. The PI integral must handle these alone.
 import pytest
 
 from tests.hvac_bench.adapters import TasmotaPIAdapter
+from tests.hvac_bench.conftest import check_bench_metrics
 from tests.hvac_bench.house_profiles import QUICK_PROFILES
 from tests.hvac_bench.thermal_model import ThermalModel2R2C as ThermalModel
 from tests.hvac_bench.disturbances import (
@@ -49,7 +50,7 @@ class TestOilBoiler:
     """
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
-    def test_oil_boiler_recovery(self, bench_metrics, profile_name):
+    def test_oil_boiler_recovery(self, bench_metrics, num_regression, profile_name):
         profile = QUICK_PROFILES[profile_name]
         ctrl = _make_controller(profile, seed_factor=1.0)
         ctrl.set_desired_temp(20.5)
@@ -59,6 +60,7 @@ class TestOilBoiler:
         history = run_scenario(ctrl, model, n_ticks=32, mode="heat")
         _record_run(bench_metrics, history, profile_name=profile_name,
                     scenario="oil_boiler", desired=20.5)
+        check_bench_metrics(num_regression, bench_metrics)
 
         # Room should recover to target after disturbance ends
         post_disturbance = [h for h in history if h["tick"] >= 16]
@@ -79,7 +81,7 @@ class TestFrontDoorOpen:
     """
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
-    def test_front_door_recovery(self, bench_metrics, profile_name):
+    def test_front_door_recovery(self, bench_metrics, num_regression, profile_name):
         profile = QUICK_PROFILES[profile_name]
         ctrl = _make_controller(profile, seed_factor=1.0)
         ctrl.set_desired_temp(20.5)
@@ -89,6 +91,7 @@ class TestFrontDoorOpen:
         history = run_scenario(ctrl, model, n_ticks=32, mode="heat")
         _record_run(bench_metrics, history, profile_name=profile_name,
                     scenario="front_door_open", desired=20.5)
+        check_bench_metrics(num_regression, bench_metrics)
 
         # Should recover within 8 ticks (2 hours) after door closes
         post = [h for h in history if h["tick"] >= 12]
@@ -109,7 +112,7 @@ class TestGarageDoorOpen:
     """
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
-    def test_garage_door_during(self, bench_metrics, profile_name):
+    def test_garage_door_during(self, bench_metrics, num_regression, profile_name):
         profile = QUICK_PROFILES[profile_name]
         ctrl = _make_controller(profile, seed_factor=1.0)
         ctrl.set_desired_temp(20.5)
@@ -119,6 +122,7 @@ class TestGarageDoorOpen:
         history = run_scenario(ctrl, model, n_ticks=24, mode="heat")
         _record_run(bench_metrics, history, profile_name=profile_name,
                     scenario="garage_door_open", desired=20.5)
+        check_bench_metrics(num_regression, bench_metrics)
 
         # Room may drop but shouldn't crash
         min_temp = min(h["room_temp"] for h in history if h["tick"] >= 8)
@@ -134,7 +138,7 @@ class TestCooking:
     """Cooking for 45 min — moderate unmodeled heat gain."""
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
-    def test_cooking_no_overshoot(self, bench_metrics, profile_name):
+    def test_cooking_no_overshoot(self, bench_metrics, num_regression, profile_name):
         profile = QUICK_PROFILES[profile_name]
         ctrl = _make_controller(profile, seed_factor=1.0)
         ctrl.set_desired_temp(20.5)
@@ -144,6 +148,7 @@ class TestCooking:
         history = run_scenario(ctrl, model, n_ticks=24, mode="heat")
         _record_run(bench_metrics, history, profile_name=profile_name,
                     scenario="cooking", desired=20.5)
+        check_bench_metrics(num_regression, bench_metrics)
 
         # Cooking adds heat — room should warm slightly, not overshoot wildly
         max_temp = max(h["room_temp"] for h in history)
@@ -162,7 +167,7 @@ class TestParty:
     """
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
-    def test_party_recovery(self, bench_metrics, profile_name):
+    def test_party_recovery(self, bench_metrics, num_regression, profile_name):
         profile = QUICK_PROFILES[profile_name]
         ctrl = _make_controller(profile, seed_factor=1.0)
         ctrl.set_desired_temp(20.5)
@@ -172,6 +177,7 @@ class TestParty:
         history = run_scenario(ctrl, model, n_ticks=32, mode="heat")
         _record_run(bench_metrics, history, profile_name=profile_name,
                     scenario="party", desired=20.5)
+        check_bench_metrics(num_regression, bench_metrics)
 
         # After party ends (tick 16), should recover within 8 ticks
         post_party = [h for h in history if h["tick"] >= 20]

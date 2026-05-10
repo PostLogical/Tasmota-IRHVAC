@@ -1,0 +1,2 @@
+,seed_factor,n_ticks,rollup_itae,rollup_overshoot,rollup_settling_time,rollup_reversals,rollup_setpoint_changes,rollup_integral_rms,rollup_rls_obs_count,rollup_cold_ticks,rollup_cold_max_run,rollup_cold_max_undershoot,rollup_total_kwh,rollup_avg_cop,rollup_kwh_per_degree_hour,ramp_max_abs_dev,ramp_mean_abs_dev
+0,0.5,32,75.540000000000006,1.21,31,4,9,14.07,0,5,5,1.21,0.997,3.02,0.0064000000000000003,0.96523938771843021,0.60264437973496376

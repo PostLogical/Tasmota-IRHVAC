@@ -1,0 +1,2 @@
+,seed_factor,n_ticks,rollup_itae,rollup_overshoot,rollup_settling_time,rollup_reversals,rollup_setpoint_changes,rollup_integral_rms,rollup_rls_obs_count,rollup_cold_ticks,rollup_cold_max_run,rollup_cold_max_undershoot,rollup_total_kwh,rollup_avg_cop,rollup_kwh_per_degree_hour,final_error,final_room_temp,post_step_max_room_temp
+0,0.5,32,123.53,2.9300000000000002,22,0,3,19.059999999999999,0,7,7,2.3399999999999999,0.183,3.1499999999999999,0.0014,0.36015112450923681,22.139848875490763,22.139848875490763

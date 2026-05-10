@@ -7,6 +7,7 @@ not just comfortable ones.
 import pytest
 
 from tests.hvac_bench.adapters import TasmotaPIAdapter
+from tests.hvac_bench.conftest import check_bench_metrics
 from tests.hvac_bench.house_profiles import QUICK_PROFILES
 from tests.hvac_bench.thermal_model import ThermalModel2R2C as ThermalModel, COPModel
 from tests.hvac_bench.runner import run_scenario
@@ -53,7 +54,7 @@ class TestCOPTracking:
     """Verify COP is tracked and physically reasonable."""
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
-    def test_heating_cop_range(self, bench_metrics, profile_name):
+    def test_heating_cop_range(self, bench_metrics, num_regression, profile_name):
         """COP should be in realistic range during heating."""
         profile = QUICK_PROFILES[profile_name]
         ctrl = _make_controller(profile, seed_factor=1.0)
@@ -64,6 +65,7 @@ class TestCOPTracking:
         history = run_scenario(ctrl, model, duration_minutes=6 * 60, mode="heat")
         _record_run(bench_metrics, history, profile_name=profile_name,
                     scenario="heating_cop_range", desired=20.5)
+        check_bench_metrics(num_regression, bench_metrics)
 
         cops = [h["cop"] for h in history if h["cop"] > 0]
         assert len(cops) > 0, "No COP data recorded"
@@ -72,7 +74,7 @@ class TestCOPTracking:
         )
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
-    def test_cooling_cop_range(self, bench_metrics, profile_name):
+    def test_cooling_cop_range(self, bench_metrics, num_regression, profile_name):
         """COP should be in realistic range during cooling."""
         profile = QUICK_PROFILES[profile_name]
         ctrl = _make_controller(profile, seed_factor=1.0)
@@ -83,12 +85,13 @@ class TestCOPTracking:
         history = run_scenario(ctrl, model, duration_minutes=6 * 60, mode="cool")
         _record_run(bench_metrics, history, profile_name=profile_name,
                     scenario="cooling_cop_range", desired=24.0)
+        check_bench_metrics(num_regression, bench_metrics)
 
         cops = [h["cop"] for h in history if h["cop"] > 0]
         assert len(cops) > 0
         assert all(1.0 <= c <= 7.0 for c in cops)
 
-    def test_energy_accumulates(self, bench_metrics):
+    def test_energy_accumulates(self, bench_metrics, num_regression):
         """Cumulative kWh should increase over time."""
         profile = QUICK_PROFILES["standard_residential"]
         ctrl = _make_controller(profile, seed_factor=1.0)
@@ -99,6 +102,7 @@ class TestCOPTracking:
         history = run_scenario(ctrl, model, duration_minutes=6 * 60, mode="heat")
         _record_run(bench_metrics, history, profile_name="standard_residential",
                     scenario="energy_accumulates", desired=20.5)
+        check_bench_metrics(num_regression, bench_metrics)
 
         # Energy should be monotonically increasing
         kwhs = [h["cumulative_kwh"] for h in history]
@@ -115,7 +119,7 @@ class TestCOPTracking:
 class TestCustomCOP:
     """Verify custom COP function override works."""
 
-    def test_custom_cop_fn(self, bench_metrics):
+    def test_custom_cop_fn(self, bench_metrics, num_regression):
         """Custom COP function should be used instead of default."""
         def constant_cop(outdoor_c, setpoint_c, mode):
             return 3.0
@@ -130,6 +134,7 @@ class TestCustomCOP:
         history = run_scenario(ctrl, model, duration_minutes=2 * 60, mode="heat")
         _record_run(bench_metrics, history, profile_name="standard_residential",
                     scenario="custom_cop_fn", desired=20.5)
+        check_bench_metrics(num_regression, bench_metrics)
 
         for h in history:
             assert h["cop"] == 3.0
@@ -146,7 +151,7 @@ class TestOvershootEnergyCost:
     """
 
     @pytest.mark.parametrize("profile_name", ["standard_residential"])
-    def test_overseed_wastes_energy(self, bench_metrics, profile_name):
+    def test_overseed_wastes_energy(self, bench_metrics, num_regression, profile_name):
         profile = QUICK_PROFILES[profile_name]
 
         # Correctly seeded
@@ -179,3 +184,4 @@ class TestOvershootEnergyCost:
         bench_metrics["kwh_delta_overseed_vs_correct"] = kwh_over - kwh_good
         bench_metrics["final_room_correct_seed"] = hist_good[-1]["room_temp"]
         bench_metrics["final_room_over_seed"] = hist_over[-1]["room_temp"]
+        check_bench_metrics(num_regression, bench_metrics)

@@ -204,13 +204,19 @@ def check_bench_metrics(
     ``num_regression.check()`` for tolerance-aware comparison against
     the saved baseline.
 
-    Default tolerance: rtol=1e-3, atol=1e-6 — tight enough to catch
-    real behavioral drift, loose enough to absorb float-noise from
-    cadence-equivalent re-runs.  Pass ``default_tolerance`` to override
-    per-test.
+    Default tolerance: ``rtol=1e-6, atol=1e-9`` — tight enough to catch
+    any real behavioral drift while absorbing accumulated float noise
+    from a few hundred ticks of summation.  This matches the
+    convention in scipy/numpy regression suites: tight default, loosen
+    only with documented justification.
+
+    Per-metric or per-test overrides: pass ``default_tolerance`` (e.g.
+    ``{"rtol": 1e-3}`` for tests where larger numerical drift is
+    expected and intentional).  Test code should comment why if it
+    overrides.
     """
     if default_tolerance is None:
-        default_tolerance = {"rtol": 1e-3, "atol": 1e-6}
+        default_tolerance = {"rtol": 1e-6, "atol": 1e-9}
     numeric = {
         k: v for k, v in bench_metrics.items()
         if isinstance(v, (int, float)) and not isinstance(v, bool)
@@ -218,3 +224,46 @@ def check_bench_metrics(
     if not numeric:
         return  # nothing to check — test recorded only context
     num_regression.check(numeric, default_tolerance=default_tolerance)
+
+
+def record_scenario_rollup(
+    bench_metrics: dict[str, Any],
+    history: list[dict[str, Any]],
+    *,
+    profile_name: str | None = None,
+    seed_factor: float | None = None,
+    scenario: str | None = None,
+    desired: float | None = None,
+    deadband: float = 0.5,
+) -> None:
+    """Universal scenario-level metric recorder.
+
+    Captures parametrization context (profile, seed, scenario name) +
+    control-quality rollup (every key from ``compute_all_metrics``:
+    itae, overshoot, settling_time, reversals, setpoint_changes,
+    integral_rms, comfort violations, energy).
+
+    Test-specific assertion values (``final_error``, ``late_temp_range``,
+    etc.) should be recorded inline by the caller next to the assert,
+    not in this helper.
+
+    Replaces the per-file ``_record_run`` helpers we accumulated
+    across heating / cooling / derivative / energy / disturbances —
+    one source of truth for the scenario-rollup recording shape.
+    """
+    # Lazy import to avoid pulling tests/* into conftest at module load
+    # time (the bench tests aren't always on the import path during
+    # collection).
+    from tests.hvac_bench.metrics import compute_all_metrics
+
+    if profile_name is not None:
+        bench_metrics["profile_name"] = profile_name
+    if seed_factor is not None:
+        bench_metrics["seed_factor"] = seed_factor
+    if scenario is not None:
+        bench_metrics["scenario"] = scenario
+    bench_metrics["n_ticks"] = len(history)
+    if desired is not None and history:
+        rollup = compute_all_metrics(history, desired=desired, deadband=deadband)
+        for k, v in rollup.items():
+            bench_metrics[f"rollup_{k}"] = v

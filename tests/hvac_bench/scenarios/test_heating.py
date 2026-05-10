@@ -7,11 +7,10 @@ Every controller should pass these — they define minimum viable behavior.
 import pytest
 
 from tests.hvac_bench.adapters import TasmotaPIAdapter
-from tests.hvac_bench.conftest import check_bench_metrics
+from tests.hvac_bench.conftest import check_bench_metrics, record_scenario_rollup
 from tests.hvac_bench.house_profiles import QUICK_PROFILES, HouseProfile2R2C as HouseProfile
 from tests.hvac_bench.thermal_model import ThermalModel2R2C as ThermalModel
 from tests.hvac_bench.runner import run_scenario
-from tests.hvac_bench.metrics import compute_all_metrics
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
@@ -51,24 +50,6 @@ def _make_model(profile, initial_temp=20.0, outdoor=5.0, **kwargs):
                         outdoor_temp=outdoor, **kwargs)
 
 
-def _record_run(bench_metrics, history, *, profile_name, seed_factor,
-                desired, deadband=0.5):
-    """Record parametrization + control-quality rollup from a heating run.
-
-    Captures every key in ``compute_all_metrics`` so phase-to-phase diffs
-    surface drift in itae, overshoot, settling_time, reversals,
-    setpoint_changes, integral_rms, comfort violations, and energy.
-    Test-specific assertion values are recorded by the caller next to the
-    assert (e.g. ``final_error``, ``late_temp_range``).
-    """
-    bench_metrics["profile_name"] = profile_name
-    bench_metrics["seed_factor"] = seed_factor
-    bench_metrics["n_ticks"] = len(history)
-    rollup = compute_all_metrics(history, desired=desired, deadband=deadband)
-    for k, v in rollup.items():
-        bench_metrics[f"rollup_{k}"] = v
-
-
 # ── Cold Start ────────────────────────────────────────────────────────────
 
 
@@ -87,7 +68,7 @@ class TestHeatingColdStart:
         # 15-min cadence).  Duration is the contract; tick count is a
         # discretization detail and now scales with TICK_MINUTES_DEFAULT.
         history = run_scenario(ctrl, model, duration_minutes=8 * 60, mode="heat")
-        _record_run(bench_metrics, history, profile_name=profile_name,
+        record_scenario_rollup(bench_metrics, history, profile_name=profile_name,
                     seed_factor=seed_factor, desired=20.5)
 
         # Must reach target eventually
@@ -120,7 +101,7 @@ class TestHeatingColdSnap:
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
     @pytest.mark.parametrize("seed_factor", SEED_FACTORS)
-    def test_cold_snap(self, bench_metrics, request, profile_name, seed_factor):
+    def test_cold_snap(self, bench_metrics, num_regression, request, profile_name, seed_factor):
         if seed_factor == 1.5 and profile_name == "drafty_bungalow":
             request.node.add_marker(pytest.mark.xfail(
                 strict=False,
@@ -146,7 +127,7 @@ class TestHeatingColdSnap:
 
         history = run_scenario(ctrl, model, duration_minutes=8 * 60, mode="heat",
                                outdoor_minute_schedule=outdoor_schedule)
-        _record_run(bench_metrics, history, profile_name=profile_name,
+        record_scenario_rollup(bench_metrics, history, profile_name=profile_name,
                     seed_factor=seed_factor, desired=20.5)
 
         # Room should stay within tolerance after a 90-min settle window
@@ -162,6 +143,8 @@ class TestHeatingColdSnap:
             sum(post_settle_devs) / len(post_settle_devs) if post_settle_devs else 0.0
         )
         bench_metrics["tolerance_threshold"] = tol
+        check_bench_metrics(num_regression, bench_metrics)
+
         for h in post_settle:
             assert abs(h["room_temp"] - 20.5) < tol, (
                 f"{profile_name} seed={seed_factor} tick {h['tick']}: "
@@ -177,7 +160,7 @@ class TestHeatingSetpointUp:
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
     @pytest.mark.parametrize("seed_factor", [0.5, 1.0, 1.5])
-    def test_setpoint_up(self, bench_metrics, profile_name, seed_factor):
+    def test_setpoint_up(self, bench_metrics, num_regression, profile_name, seed_factor):
         profile = QUICK_PROFILES[profile_name]
         ctrl = _make_controller(profile, seed_factor)
         ctrl.set_desired_temp(20.5)
@@ -189,7 +172,7 @@ class TestHeatingSetpointUp:
                                desired_minute_schedule={150.0: 22.5})
         # Final desired is 22.5; rollup is computed against final desired
         # so post-step tracking error dominates the metrics.
-        _record_run(bench_metrics, history, profile_name=profile_name,
+        record_scenario_rollup(bench_metrics, history, profile_name=profile_name,
                     seed_factor=seed_factor, desired=22.5)
 
         # Should reach new target
@@ -202,6 +185,7 @@ class TestHeatingSetpointUp:
             bench_metrics["post_step_max_room_temp"] = max(
                 h["room_temp"] for h in post_step
             )
+        check_bench_metrics(num_regression, bench_metrics)
         assert final_error < 2.0, (
             f"{profile_name} seed={seed_factor}: final error {final_error:.1f}°C"
         )
@@ -212,7 +196,7 @@ class TestHeatingSetpointDown:
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
     @pytest.mark.parametrize("seed_factor", [0.5, 1.0, 1.5])
-    def test_setpoint_down(self, bench_metrics, request, profile_name, seed_factor):
+    def test_setpoint_down(self, bench_metrics, num_regression, request, profile_name, seed_factor):
         if seed_factor == 1.5 and profile_name == "drafty_bungalow":
             request.node.add_marker(pytest.mark.xfail(
                 strict=False,
@@ -234,7 +218,7 @@ class TestHeatingSetpointDown:
         # Setpoint step down at 150 min = 2.5h (was tick=10 at 15-min).
         history = run_scenario(ctrl, model, duration_minutes=8 * 60, mode="heat",
                                desired_minute_schedule={150.0: 20.5})
-        _record_run(bench_metrics, history, profile_name=profile_name,
+        record_scenario_rollup(bench_metrics, history, profile_name=profile_name,
                     seed_factor=seed_factor, desired=20.5)
 
         final_error = abs(history[-1]["room_temp"] - 20.5)
@@ -245,6 +229,7 @@ class TestHeatingSetpointDown:
             bench_metrics["post_step_min_room_temp"] = min(
                 h["room_temp"] for h in post_step
             )
+        check_bench_metrics(num_regression, bench_metrics)
         assert final_error < 2.0
 
 
@@ -256,7 +241,7 @@ class TestHeatingSteadyState:
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
     @pytest.mark.parametrize("seed_factor", [0.5, 1.0, 1.5])
-    def test_steady_state(self, bench_metrics, request, profile_name, seed_factor):
+    def test_steady_state(self, bench_metrics, num_regression, request, profile_name, seed_factor):
         if seed_factor == 1.5 and profile_name in (
             "drafty_bungalow", "standard_residential",
         ):
@@ -280,7 +265,7 @@ class TestHeatingSteadyState:
         # 12h run; the last 4h should be stable (was n_ticks=48, last
         # 16 ticks at 15-min cadence = 4h).
         history = run_scenario(ctrl, model, duration_minutes=12 * 60, mode="heat")
-        _record_run(bench_metrics, history, profile_name=profile_name,
+        record_scenario_rollup(bench_metrics, history, profile_name=profile_name,
                     seed_factor=seed_factor, desired=20.5)
 
         late = [h for h in history if h["minute"] >= 8 * 60]
@@ -290,6 +275,7 @@ class TestHeatingSteadyState:
         bench_metrics["late_temp_max"] = max(late_temps)
         bench_metrics["late_temp_min"] = min(late_temps)
         bench_metrics["late_temp_mean"] = sum(late_temps) / len(late_temps)
+        check_bench_metrics(num_regression, bench_metrics)
         assert temp_range < 2.0, (
             f"{profile_name} seed={seed_factor}: range {temp_range:.1f}°C in last 4h"
         )
@@ -303,7 +289,7 @@ class TestHeatingRampDisturbance:
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
     @pytest.mark.parametrize("seed_factor", [0.5, 1.0])
-    def test_ramp_disturbance(self, bench_metrics, profile_name, seed_factor):
+    def test_ramp_disturbance(self, bench_metrics, num_regression, profile_name, seed_factor):
         profile = QUICK_PROFILES[profile_name]
         ctrl = _make_controller(profile, seed_factor)
         ctrl.set_desired_temp(20.5)
@@ -316,7 +302,7 @@ class TestHeatingRampDisturbance:
 
         history = run_scenario(ctrl, model, duration_minutes=8 * 60, mode="heat",
                                outdoor_minute_schedule=outdoor_schedule)
-        _record_run(bench_metrics, history, profile_name=profile_name,
+        record_scenario_rollup(bench_metrics, history, profile_name=profile_name,
                     seed_factor=seed_factor, desired=20.5)
 
         # Should track within tolerance after a 2h settle window
@@ -329,6 +315,7 @@ class TestHeatingRampDisturbance:
         bench_metrics["ramp_mean_abs_dev"] = (
             sum(post_settle_devs) / len(post_settle_devs) if post_settle_devs else 0.0
         )
+        check_bench_metrics(num_regression, bench_metrics)
         for h in post_settle:
             assert abs(h["room_temp"] - 20.5) < 2.5, (
                 f"{profile_name} seed={seed_factor} tick {h['tick']}: "
