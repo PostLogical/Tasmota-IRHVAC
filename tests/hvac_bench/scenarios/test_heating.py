@@ -66,7 +66,10 @@ class TestHeatingColdStart:
         ctrl.set_desired_temp(20.5)
         model = _make_model(profile, initial_temp=17.0, outdoor=2.0)
 
-        history = run_scenario(ctrl, model, n_ticks=32, mode="heat")
+        # 8 hours of recovery from a 3.5°C cold start (was n_ticks=32 at
+        # 15-min cadence).  Duration is the contract; tick count is a
+        # discretization detail and now scales with TICK_MINUTES_DEFAULT.
+        history = run_scenario(ctrl, model, duration_minutes=8 * 60, mode="heat")
         _record_run(bench_metrics, history, profile_name=profile_name,
                     seed_factor=seed_factor, desired=20.5)
 
@@ -114,17 +117,21 @@ class TestHeatingColdSnap:
         ctrl.set_desired_temp(20.5)
         model = _make_model(profile, initial_temp=20.5, outdoor=10.0)
 
-        def outdoor(tick):
-            return max(-5.0, 10.0 - tick * 1.25)
+        # Outdoor drops from 10°C to -5°C over the first 3 hours, then
+        # holds.  Original (15-min ticks): 1.25°C per tick = 5°C/h.
+        def outdoor_schedule(minute):
+            return max(-5.0, 10.0 - minute * (5.0 / 60.0))
 
-        history = run_scenario(ctrl, model, n_ticks=32, mode="heat",
-                               outdoor_schedule=outdoor)
+        history = run_scenario(ctrl, model, duration_minutes=8 * 60, mode="heat",
+                               outdoor_minute_schedule=outdoor_schedule)
         _record_run(bench_metrics, history, profile_name=profile_name,
                     seed_factor=seed_factor, desired=20.5)
 
-        # Room should stay within tolerance after settling
+        # Room should stay within tolerance after a 90-min settle window
+        # (was tick > 6 at 15-min cadence; converted to minutes for
+        # cadence independence).
         tol = 3.0 if seed_factor == 0.0 else 2.0
-        post_settle = [h for h in history if h["tick"] > 6]
+        post_settle = [h for h in history if h["minute"] > 90]
         post_settle_devs = [abs(h["room_temp"] - 20.5) for h in post_settle]
         bench_metrics["post_settle_max_abs_dev"] = (
             max(post_settle_devs) if post_settle_devs else 0.0
@@ -154,8 +161,10 @@ class TestHeatingSetpointUp:
         ctrl.set_desired_temp(20.5)
         model = _make_model(profile, initial_temp=20.5, outdoor=5.0)
 
-        history = run_scenario(ctrl, model, n_ticks=32, mode="heat",
-                               desired_schedule={10: 22.5})
+        # Setpoint step at 150 min = 2.5h (was tick=10 at 15-min cadence).
+        # Total run 8h.
+        history = run_scenario(ctrl, model, duration_minutes=8 * 60, mode="heat",
+                               desired_minute_schedule={150.0: 22.5})
         # Final desired is 22.5; rollup is computed against final desired
         # so post-step tracking error dominates the metrics.
         _record_run(bench_metrics, history, profile_name=profile_name,
@@ -165,8 +174,8 @@ class TestHeatingSetpointUp:
         final_error = abs(history[-1]["room_temp"] - 22.5)
         bench_metrics["final_error"] = final_error
         bench_metrics["final_room_temp"] = history[-1]["room_temp"]
-        # Step-response shape (post-tick-10):
-        post_step = [h for h in history if h["tick"] >= 10]
+        # Step-response shape (post-step):
+        post_step = [h for h in history if h["minute"] >= 150]
         if post_step:
             bench_metrics["post_step_max_room_temp"] = max(
                 h["room_temp"] for h in post_step
@@ -200,15 +209,16 @@ class TestHeatingSetpointDown:
         ctrl.set_desired_temp(22.5)
         model = _make_model(profile, initial_temp=22.5, outdoor=5.0)
 
-        history = run_scenario(ctrl, model, n_ticks=32, mode="heat",
-                               desired_schedule={10: 20.5})
+        # Setpoint step down at 150 min = 2.5h (was tick=10 at 15-min).
+        history = run_scenario(ctrl, model, duration_minutes=8 * 60, mode="heat",
+                               desired_minute_schedule={150.0: 20.5})
         _record_run(bench_metrics, history, profile_name=profile_name,
                     seed_factor=seed_factor, desired=20.5)
 
         final_error = abs(history[-1]["room_temp"] - 20.5)
         bench_metrics["final_error"] = final_error
         bench_metrics["final_room_temp"] = history[-1]["room_temp"]
-        post_step = [h for h in history if h["tick"] >= 10]
+        post_step = [h for h in history if h["minute"] >= 150]
         if post_step:
             bench_metrics["post_step_min_room_temp"] = min(
                 h["room_temp"] for h in post_step
@@ -245,19 +255,21 @@ class TestHeatingSteadyState:
         ctrl.set_desired_temp(20.5)
         model = _make_model(profile, initial_temp=20.5, outdoor=5.0)
 
-        history = run_scenario(ctrl, model, n_ticks=48, mode="heat")
+        # 12h run; the last 4h should be stable (was n_ticks=48, last
+        # 16 ticks at 15-min cadence = 4h).
+        history = run_scenario(ctrl, model, duration_minutes=12 * 60, mode="heat")
         _record_run(bench_metrics, history, profile_name=profile_name,
                     seed_factor=seed_factor, desired=20.5)
 
-        # Last 16 ticks should be stable
-        late_temps = [h["room_temp"] for h in history[-16:]]
+        late = [h for h in history if h["minute"] >= 8 * 60]
+        late_temps = [h["room_temp"] for h in late]
         temp_range = max(late_temps) - min(late_temps)
         bench_metrics["late_temp_range"] = temp_range
         bench_metrics["late_temp_max"] = max(late_temps)
         bench_metrics["late_temp_min"] = min(late_temps)
         bench_metrics["late_temp_mean"] = sum(late_temps) / len(late_temps)
         assert temp_range < 2.0, (
-            f"{profile_name} seed={seed_factor}: range {temp_range:.1f}°C in last 16 ticks"
+            f"{profile_name} seed={seed_factor}: range {temp_range:.1f}°C in last 4h"
         )
 
 
@@ -275,17 +287,19 @@ class TestHeatingRampDisturbance:
         ctrl.set_desired_temp(20.5)
         model = _make_model(profile, initial_temp=20.5, outdoor=5.0)
 
-        # 1°C/hour = 0.25°C per 15-min tick
-        def outdoor(tick):
-            return 5.0 - tick * 0.25
+        # Outdoor drops at 1°C/h continuously over 8h (was 0.25°C per
+        # 15-min tick = 1°C/h).
+        def outdoor_schedule(minute):
+            return 5.0 - minute * (1.0 / 60.0)
 
-        history = run_scenario(ctrl, model, n_ticks=32, mode="heat",
-                               outdoor_schedule=outdoor)
+        history = run_scenario(ctrl, model, duration_minutes=8 * 60, mode="heat",
+                               outdoor_minute_schedule=outdoor_schedule)
         _record_run(bench_metrics, history, profile_name=profile_name,
                     seed_factor=seed_factor, desired=20.5)
 
-        # Should track within tolerance despite continuous disturbance
-        post_settle = [h for h in history if h["tick"] > 8]
+        # Should track within tolerance after a 2h settle window
+        # (was tick > 8 at 15-min cadence = 120 min).
+        post_settle = [h for h in history if h["minute"] > 120]
         post_settle_devs = [abs(h["room_temp"] - 20.5) for h in post_settle]
         bench_metrics["ramp_max_abs_dev"] = (
             max(post_settle_devs) if post_settle_devs else 0.0
