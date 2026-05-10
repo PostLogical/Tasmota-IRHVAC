@@ -30,18 +30,24 @@ from custom_components.tasmota_irhvac.const import DEFAULT_KAPPA_THRESHOLD
 
 from tests.benchmark_metrics import count_reversals
 from tests.hvac_bench.adapters import TasmotaPIAdapter
+from tests.hvac_bench.constants import (
+    BATCH_INTERVAL_HOURS_DEFAULT,
+    TICK_MINUTES_DEFAULT,
+    _SIM_EPOCH,
+)
 from tests.hvac_bench.house_profiles import PROFILES, PROFILES_2R2C
 from tests.hvac_bench.thermal_model import ThermalModel2R2C
 
 
-# ── Constants ────────────────────────────────────────────────────────────
+# ── Local derived constants ─────────────────────────────────────────────
+#
+# Re-exports of TICK_MINUTES_DEFAULT, BATCH_INTERVAL_HOURS_DEFAULT, and
+# _SIM_EPOCH live in ``tests.hvac_bench.constants``; downstream callers
+# (open_loop_runner, test files) import via this module for backwards
+# compatibility, but the source of truth is the constants module.
 
-TICK_MINUTES_DEFAULT = 15.0
-# Simulated wall-clock epoch: datetime corresponding to sim_clock=0.
-_SIM_EPOCH = datetime(2026, 1, 15, 0, 0, 0, tzinfo=timezone.utc)
 TICKS_PER_HOUR = int(60 / TICK_MINUTES_DEFAULT)
-TICKS_PER_DAY = 24 * TICKS_PER_HOUR  # 96
-BATCH_INTERVAL_HOURS_DEFAULT = 12
+TICKS_PER_DAY = 24 * TICKS_PER_HOUR  # at 15-min default → 96
 DEADBAND = 0.5
 
 

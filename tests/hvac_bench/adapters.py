@@ -4,7 +4,7 @@ Wraps specific controller implementations to conform to HVACController protocol.
 """
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 from freezegun import freeze_time
 
@@ -14,12 +14,8 @@ from homeassistant.const import UnitOfTemperature
 from custom_components.tasmota_irhvac.const import DEFAULT_KAPPA_THRESHOLD
 
 from tests.conftest import _PITestEntityRoomTempMixin, make_pi_config
+from tests.hvac_bench.constants import _SIM_EPOCH
 from tests.hvac_bench.mock_states import MockStates, _BenchHass
-
-# Reference sim epoch (UTC-aware) shared with full_stack_runner — same value
-# so reference_scenarios paths and full_stack paths produce comparable
-# timestamps for any cross-path observation comparison.
-_SIM_EPOCH = datetime(2026, 1, 15, 0, 0, 0, tzinfo=timezone.utc)
 
 
 class TasmotaPIAdapter:

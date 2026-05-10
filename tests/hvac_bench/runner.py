@@ -4,6 +4,7 @@ Couples a ThermalModel with an HVACController and runs a scenario,
 recording history at each tick.
 """
 
+from .constants import TICK_MINUTES_DEFAULT
 from .thermal_model import ThermalModel
 from .controller_protocol import HVACController
 from .house_profiles import HouseProfile
@@ -14,7 +15,7 @@ def run_scenario(controller: HVACController, model: ThermalModel,
                  n_ticks: int, mode: str = "heat",
                  outdoor_schedule=None, solar_schedule=None,
                  desired_schedule=None, stove_schedule=None,
-                 tick_interval_min: float = 15.0,
+                 tick_interval_min: float = TICK_MINUTES_DEFAULT,
                  solar_gain: float | None = None,
                  stove_gain: float | None = None) -> list[dict]:
     """Run a benchmark scenario.
@@ -28,7 +29,9 @@ def run_scenario(controller: HVACController, model: ThermalModel,
         solar_schedule: dict {tick: val} or callable(tick) -> val.
         desired_schedule: dict {tick: temp} for setpoint changes.
         stove_schedule: dict {tick: val} or callable(tick) -> val.
-        tick_interval_min: Minutes per tick (default 15).
+        tick_interval_min: Minutes per tick.  Defaults to
+            ``constants.TICK_MINUTES_DEFAULT`` (overridable via
+            ``pytest --tick-minutes=N`` or ``BENCH_TICK_MINUTES`` env).
         solar_gain: Override model's solar gain for this run.
         stove_gain: Override model's stove gain for this run.
 
