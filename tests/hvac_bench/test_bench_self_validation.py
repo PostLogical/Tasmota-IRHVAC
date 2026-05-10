@@ -116,6 +116,35 @@ def test_tod_features_cover_diurnal_cycle():
 
 
 @pytest.mark.slow
+def test_run_reference_scenario_does_not_mutate_canonical_specs():
+    """Running a CANONICAL_SCENARIOS scenario must not mutate its ModelInputSpec.
+
+    Regression test for C3: the runner called ``mi.resolve(profile.hp_gain)``
+    on the spec instances stored in module-level ``CANONICAL_SCENARIOS``,
+    overwriting ``true_thermal_effect`` in place. Today this is benign
+    because the same scenario is always run with the same profile; it
+    becomes a silent cross-test contamination the moment a sweep applies
+    the same spec to two different ``hp_gain`` values.
+    """
+    scenario = CANONICAL_SCENARIOS["lr_heat_with_solar"]
+    assert scenario.model_inputs, "scenario fixture lost model_inputs"
+
+    pre_run_effects = [mi.true_thermal_effect for mi in scenario.model_inputs]
+    pre_run_ff_coefs = [mi._true_ff_coef for mi in scenario.model_inputs]
+
+    controller = make_well_tuned_for_scenario(scenario)
+    run_reference_scenario(controller, scenario)
+
+    for mi, pre_effect, pre_ff in zip(
+        scenario.model_inputs, pre_run_effects, pre_run_ff_coefs, strict=True
+    ):
+        assert mi.true_thermal_effect == pre_effect, (
+            f"ModelInputSpec {mi.name!r} was mutated by run_reference_scenario: "
+            f"true_thermal_effect went from {pre_effect} to {mi.true_thermal_effect}"
+        )
+        assert mi._true_ff_coef == pre_ff
+
+
 def test_kpis_consistent_across_cadence():
     """Comfort metrics should not vary wildly across reasonable tick rates.
 

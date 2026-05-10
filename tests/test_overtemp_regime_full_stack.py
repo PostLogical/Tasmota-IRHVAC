@@ -31,6 +31,7 @@ import pytest
 from homeassistant.components.climate.const import HVACMode
 
 from .conftest import make_pi_config
+from .hvac_bench.mock_states import _MockState
 from .test_pi_controller import FakePIEntity
 
 
@@ -44,10 +45,7 @@ class _MockedSensorEntity(FakePIEntity):
         def states_get(entity_id: str):
             if entity_id in self._sensor_callables:
                 value = self._sensor_callables[entity_id]()
-                state = MagicMock()
-                state.state = str(value)
-                state.attributes = {"unit_of_measurement": "°C"}
-                return state
+                return _MockState(str(value), "°C")
             return None
         states.get = states_get
         self.hass.states = states

@@ -17,7 +17,9 @@ from homeassistant.const import STATE_ON, UnitOfTemperature
 
 from custom_components.tasmota_irhvac.pi.pi_controller import PIController
 
+from .benchmark_metrics import count_reversals
 from .conftest import _PITestEntityRoomTempMixin, make_pi_config
+from .hvac_bench.mock_states import _MockState
 
 
 # ── Thermal Model ─────────────────────────────────────────────────────
@@ -526,8 +528,7 @@ class TestStoveOnOff:
         }])
         entity = SimEntity(config)
         entity._pi._desired_temp = 20.5
-        stove_state = MagicMock()
-        stove_state.state = "0"
+        stove_state = _MockState("0", None)
 
         def get_state(entity_id):
             if entity_id == "sensor.stove":
@@ -561,20 +562,6 @@ class TestStoveOnOff:
 # ── Limit Cycle Tests ────────────────────────────────────────────────
 
 
-def _count_setpoint_reversals(history):
-    """Count direction reversals in setpoint (up then down or vice versa)."""
-    reversals = 0
-    last_direction = 0
-    for i in range(1, len(history)):
-        delta = history[i]["hp_setpoint"] - history[i-1]["hp_setpoint"]
-        if delta != 0:
-            direction = 1 if delta > 0 else -1
-            if last_direction != 0 and direction != last_direction:
-                reversals += 1
-            last_direction = direction
-    return reversals
-
-
 class TestLimitCycle:
     """Tests for setpoint oscillation near integer boundary.
 
@@ -605,7 +592,7 @@ class TestLimitCycle:
         # Insulated houses (τ=120) take longer to reach thermal equilibrium.
         # Without quantization feedback, the bunkroom had 10+ reversals overnight.
         settled = [h for h in history if h["tick"] >= 24]
-        reversals = _count_setpoint_reversals(settled)
+        reversals = count_reversals(settled)
         assert reversals <= 3, (
             f"Limit cycle detected: {reversals} setpoint reversals after settling "
             f"(τ={time_constant}, seed={seed_factor}). "
@@ -644,7 +631,7 @@ class TestLimitCycle:
 
         # Setpoint should ramp up monotonically (or nearly so) as outdoor drops
         # Anti-oscillation should prevent the 25↔26 bouncing
-        reversals = _count_setpoint_reversals(history)
+        reversals = count_reversals(history)
         assert reversals <= 4, (
             f"Bunkroom limit cycle: {reversals} reversals over 48 ticks. "
             f"Setpoints: {[h['hp_setpoint'] for h in history]}"

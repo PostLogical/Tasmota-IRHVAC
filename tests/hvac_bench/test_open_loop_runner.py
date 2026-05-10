@@ -259,6 +259,27 @@ class TestProbeRecoversOutdoorBeta:
         )
         return run_open_loop_probe(config)
 
+    def test_true_coefs_outdoor_delta_uses_open_loop_asymptote(
+        self, step_probe_result
+    ):
+        """Regression test for C5: open-loop truth must be the open-loop
+        asymptote ``-1/(g·τ_env+1)`` in signed physics-space, NOT
+        ``+profile.true_seed`` (the previous buggy value, which had wrong
+        sign AND wrong magnitude — that's the closed-loop seed in
+        user-facing convention).
+        """
+        profile = PROFILES_2R2C["living_room"]
+        expected = -1.0 / (profile.hp_gain * profile.tau_env + 1.0)
+        actual = step_probe_result.true_coefs["outdoor_delta"]
+        assert actual == pytest.approx(expected), (
+            f"open-loop true_coefs['outdoor_delta']={actual:.4f} "
+            f"expected {expected:.4f} = -1/(g·τ_env+1)"
+        )
+        # Sign must be negative (heat mode: cold outdoor → +setpoint headroom).
+        assert actual < 0.0
+        # Must NOT equal +profile.true_seed (the original buggy value).
+        assert actual != profile.true_seed
+
     def test_observation_count_matches_ticks(self, step_probe_result):
         assert len(step_probe_result.observations) == step_probe_result.n_ticks
         assert step_probe_result.n_ticks == 30 * 24 * 4  # 2880

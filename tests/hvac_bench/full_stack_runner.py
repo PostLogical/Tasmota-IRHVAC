@@ -16,6 +16,7 @@ Usage:
 
 from __future__ import annotations
 
+import copy
 import math
 import random
 from dataclasses import dataclass, field
@@ -27,6 +28,7 @@ from freezegun import freeze_time
 
 from custom_components.tasmota_irhvac.const import DEFAULT_KAPPA_THRESHOLD
 
+from tests.benchmark_metrics import count_reversals
 from tests.hvac_bench.adapters import TasmotaPIAdapter
 from tests.hvac_bench.house_profiles import PROFILES, PROFILES_2R2C
 from tests.hvac_bench.thermal_model import ThermalModel2R2C
@@ -428,24 +430,6 @@ def diurnal_solar(
 # ── Metric helpers ───────────────────────────────────────────────────────
 
 
-def _count_reversals(history: list[dict]) -> int:
-    """Count HP setpoint direction changes."""
-    prev_dir = 0
-    count = 0
-    for i in range(1, len(history)):
-        delta = history[i]["hp_setpoint"] - history[i - 1]["hp_setpoint"]
-        if delta > 0:
-            d = 1
-        elif delta < 0:
-            d = -1
-        else:
-            continue
-        if prev_dir != 0 and d != prev_dir:
-            count += 1
-        prev_dir = d
-    return count
-
-
 def _zero_crossing_rate(history: list[dict], field: str = "error") -> float:
     """Zero-crossings per hour of the error signal (oscillation proxy)."""
     if len(history) < 2:
@@ -489,6 +473,13 @@ def run_full_stack(
         profile = PROFILES[config.profile_name]
     else:
         raise ValueError(f"Unknown profile: {config.profile_name}")
+
+    # Work on a per-run copy of the model input specs so direct callers
+    # of run_full_stack don't have their inputs mutated by .resolve()
+    # (monte_carlo._clone_config already deep-copies; this protects
+    # callers that pass a config with shared/module-level specs).
+    config = copy.copy(config)
+    config.model_inputs = [copy.copy(mi) for mi in config.model_inputs]
 
     tick_min = config.tick_minutes
     n_ticks = int(config.n_days * 24 * 60 / tick_min)
@@ -937,7 +928,7 @@ def run_full_stack(
 
             daily_itae.append(day_itae)
             daily_violations.append(day_violations)
-            daily_reversals.append(_count_reversals(day_slice))
+            daily_reversals.append(count_reversals(day_slice))
             daily_mae.append(sum(day_errors) / day_len)
             daily_integral_rms.append(
                 math.sqrt(day_integral_sq / ticks_per_day)
@@ -1033,7 +1024,7 @@ def run_full_stack(
                     batches_to_converge=batches_to_converge,
                     period_itae=period_itae_val,
                     period_violations=period_viols,
-                    period_reversals=_count_reversals(period_slice),
+                    period_reversals=count_reversals(period_slice),
                     period_mae=(sum(period_errors) / len(period_errors)
                                 if period_errors else 0.0),
                     total_itae=total_itae,
@@ -1084,7 +1075,7 @@ def run_full_stack(
         integral_rms=math.sqrt(integral_sq_sum / n_ticks) if n_ticks else 0.0,
         total_itae=total_itae,
         total_violations=total_violations,
-        total_reversals=_count_reversals(history),
+        total_reversals=count_reversals(history),
         batches_to_converge=batches_to_converge,
         n_batches=batch_count,
         n_ticks=n_ticks,

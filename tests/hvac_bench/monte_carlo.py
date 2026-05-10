@@ -23,6 +23,7 @@ from .full_stack_runner import (
     run_full_stack,
     Checkpoint,
 )
+from .house_profiles import PROFILES, PROFILES_2R2C
 
 
 @dataclass
@@ -93,15 +94,22 @@ def run_monte_carlo(mc_config: MonteCarloConfig) -> MonteCarloResult:
 
     results: list[FullStackResult] = []
 
+    profile = _resolve_profile(base.profile_name)
+
     for i in range(n):
         cfg = _clone_config(base)
         cfg.noise_seed = noise_seeds[i]
 
-        # Scale FF seeds
+        # Scale FF seeds.  The runner sets pi_outdoor_seed_{heat,cool} from
+        # profile.true_seed and then merges pi_overrides on top, so we
+        # compute the scaled seed here and write it via pi_overrides.  An
+        # explicit caller-provided override always wins.
         scale = seed_scales[i]
+        scaled_seed = profile.true_seed * scale
         if "pi_outdoor_seed_heat" not in cfg.pi_overrides:
-            # Will be set by runner from profile.true_seed; scale it
-            cfg.pi_overrides["pi_outdoor_seed_heat_scale"] = scale
+            cfg.pi_overrides["pi_outdoor_seed_heat"] = scaled_seed
+        if "pi_outdoor_seed_cool" not in cfg.pi_overrides:
+            cfg.pi_overrides["pi_outdoor_seed_cool"] = scaled_seed
         for mi in cfg.model_inputs:
             mi.seed_heat *= scale
 
@@ -250,6 +258,15 @@ def _cycle(lst: list, n: int) -> list:
     if not lst:
         return [0] * n
     return [lst[i % len(lst)] for i in range(n)]
+
+
+def _resolve_profile(name: str):
+    """Look up a profile by name, mirroring full_stack_runner's resolution."""
+    if name in PROFILES_2R2C:
+        return PROFILES_2R2C[name]
+    if name in PROFILES:
+        return PROFILES[name]
+    raise ValueError(f"Unknown profile: {name}")
 
 
 def _clone_config(cfg: FullStackConfig) -> FullStackConfig:

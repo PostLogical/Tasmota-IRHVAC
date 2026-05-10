@@ -28,6 +28,7 @@ commit, with a comment explaining what changed about the bench.
 
 from __future__ import annotations
 
+import copy
 import math
 from dataclasses import dataclass, field
 from typing import Callable
@@ -99,16 +100,17 @@ def run_reference_scenario(
     profile = _resolve_profile(scenario.profile_name)
     initial_temp = scenario.initial_temp_c if scenario.initial_temp_c is not None else scenario.desired_c
 
-    # Resolve model-input physics: derive true_thermal_effect from FF coef.
-    # Same convention as full_stack_runner — the spec authors β, the runner
-    # computes the °C/min injection rate.
-    for mi in scenario.model_inputs:
+    # Resolve model-input physics on a per-run copy so the module-level
+    # CANONICAL_SCENARIOS instances stay pristine across runs (mutating
+    # them silently corrupts any future run that uses a different hp_gain).
+    model_inputs = tuple(copy.copy(mi) for mi in scenario.model_inputs)
+    for mi in model_inputs:
         mi.resolve(profile.hp_gain)
 
     # Solar inputs feed the model's built-in 2R2C solar pathway
     # (matches full_stack_runner.run_full_stack semantics).
     solar_thermal_gain = sum(
-        mi.true_thermal_effect for mi in scenario.model_inputs
+        mi.true_thermal_effect for mi in model_inputs
         if mi.input_role == "solar"
     )
 
@@ -146,7 +148,7 @@ def run_reference_scenario(
         solar_proxy_value = 0.0
         q_air_extra = 0.0
         q_wall_extra = 0.0
-        for mi in scenario.model_inputs:
+        for mi in model_inputs:
             val = mi.schedule(tick) if mi.schedule is not None else 0.0
             input_values[mi.name] = val
             if mi.input_role == "solar":

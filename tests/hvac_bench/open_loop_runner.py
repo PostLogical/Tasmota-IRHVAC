@@ -26,6 +26,7 @@ one observation. Filtering is the caller's responsibility (typically the
 
 from __future__ import annotations
 
+import copy
 import math
 import random
 from dataclasses import dataclass, field
@@ -270,12 +271,15 @@ def run_open_loop_probe(config: OpenLoopConfig) -> OpenLoopResult:
     tick_min = config.tick_minutes
     n_ticks = int(config.n_days * 24 * 60 / tick_min)
 
-    for mi in config.model_inputs:
+    # Per-run copies so the runner's .resolve() doesn't mutate the
+    # caller's specs (matches full_stack_runner / reference_scenarios).
+    model_inputs = [copy.copy(mi) for mi in config.model_inputs]
+    for mi in model_inputs:
         mi.resolve(profile.hp_gain)
 
     solar_thermal_gain = sum(
         mi.true_thermal_effect
-        for mi in config.model_inputs
+        for mi in model_inputs
         if mi.input_role == "solar"
     )
 
@@ -301,11 +305,21 @@ def run_open_loop_probe(config: OpenLoopConfig) -> OpenLoopResult:
     )
 
     # Truth coefficients for downstream comparison.
+    #
+    # Physics-space (signed β), matching full_stack_runner's convention so
+    # callers can consume either runner's true_coefs interchangeably.
+    #
+    # NOTE: open-loop and closed-loop have DIFFERENT outdoor_delta truths.
+    # Closed loop:  -1/(g·τ_env)        = -profile.true_seed
+    # Open loop:    -1/(g·τ_env + 1)    (asymptote of fixed-setpoint regression)
+    # See test_open_loop_runner.test_beta_outdoor_differs_from_closed_loop_truth
+    # for the derivation.
+    open_loop_outdoor_truth = -1.0 / (profile.hp_gain * profile.tau_env + 1.0)
     true_coefs: dict[str, float] = {
         "intercept": 0.0,
-        "outdoor_delta": profile.true_seed,
+        "outdoor_delta": open_loop_outdoor_truth,
     }
-    for mi in config.model_inputs:
+    for mi in model_inputs:
         true_coefs[mi.name] = mi.true_ff_coef(profile.hp_gain)
 
     observations: list[Observation] = []
@@ -329,7 +343,7 @@ def run_open_loop_probe(config: OpenLoopConfig) -> OpenLoopResult:
         q_air_extra = 0.0
         q_wall_extra = 0.0
         raw_readings: dict[str, float] = {}
-        for mi in config.model_inputs:
+        for mi in model_inputs:
             val = mi.schedule(tick) if mi.schedule is not None else 0.0
             input_values[mi.name] = val
             raw_readings[mi.entity_id] = val
@@ -346,7 +360,7 @@ def run_open_loop_probe(config: OpenLoopConfig) -> OpenLoopResult:
 
         # Default solar contribution from the diurnal generator (only
         # active when no model input owns the solar role).
-        if not any(mi.input_role == "solar" for mi in config.model_inputs):
+        if not any(mi.input_role == "solar" for mi in model_inputs):
             solar_proxy_value = solar_fn(tick)
 
         # Read sensor at the START of the tick (room_rate is computed
@@ -399,7 +413,7 @@ def run_open_loop_probe(config: OpenLoopConfig) -> OpenLoopResult:
             "room_rate": room_rate,
             "solar_proxy": solar_proxy_value,
             **{f"input_{mi.name}": input_values[mi.name]
-               for mi in config.model_inputs},
+               for mi in model_inputs},
         })
 
     return OpenLoopResult(
