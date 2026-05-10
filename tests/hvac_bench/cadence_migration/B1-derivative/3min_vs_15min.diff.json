@@ -1,0 +1,5980 @@
+{
+  "baseline_dir": "local/bench_metrics/B1-derivative-refactored",
+  "current_dir": "local/bench_metrics/B1-derivative-3min",
+  "n_baseline": 13,
+  "n_current": 13,
+  "n_added": 0,
+  "n_removed": 0,
+  "n_status_flipped": 0,
+  "tests": {
+    "tests/hvac_bench/scenarios/test_derivative.py::TestDerivativeColdSnap::test_kd_sweep_cold_snap[drafty_bungalow]": {
+      "status": {
+        "before": "passed",
+        "after": "passed",
+        "flipped": false
+      },
+      "duration_s": {
+        "before": 2.7580473329871893,
+        "after": 13.73371658299584,
+        "delta": 10.97566925000865,
+        "pct_change": 397.95072110387275
+      },
+      "metrics": {
+        "kd_0.0_max_abs_d": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_avg_cop": {
+          "before": 2.5,
+          "after": 2.49,
+          "delta": -0.009999999999999787,
+          "pct_change": -0.39999999999999153
+        },
+        "kd_0.0_rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_integral_rms": {
+          "before": 1.25,
+          "after": 0.65,
+          "delta": -0.6,
+          "pct_change": -48.0
+        },
+        "kd_0.0_rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0084,
+          "after": 0.0017,
+          "delta": -0.006699999999999999,
+          "pct_change": -79.76190476190476
+        },
+        "kd_0.0_rollup_overshoot": {
+          "before": 0.39,
+          "after": 0.33,
+          "delta": -0.06,
+          "pct_change": -15.384615384615383
+        },
+        "kd_0.0_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_setpoint_changes": {
+          "before": 5,
+          "after": 5,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_total_kwh": {
+          "before": 2.357,
+          "after": 2.375,
+          "delta": 0.017999999999999794,
+          "pct_change": 0.7636826474331689
+        },
+        "kd_0.5_max_abs_d": {
+          "before": 0.007680830979366336,
+          "after": 0.015297295188108307,
+          "delta": 0.0076164642087419715,
+          "pct_change": 99.16198168144464
+        },
+        "kd_0.5_rollup_avg_cop": {
+          "before": 2.5,
+          "after": 2.49,
+          "delta": -0.009999999999999787,
+          "pct_change": -0.39999999999999153
+        },
+        "kd_0.5_rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_integral_rms": {
+          "before": 1.24,
+          "after": 0.53,
+          "delta": -0.71,
+          "pct_change": -57.258064516129025
+        },
+        "kd_0.5_rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_kwh_per_degree_hour": {
+          "before": 0.0084,
+          "after": 0.0017,
+          "delta": -0.006699999999999999,
+          "pct_change": -79.76190476190476
+        },
+        "kd_0.5_rollup_overshoot": {
+          "before": 0.39,
+          "after": 0.28,
+          "delta": -0.10999999999999999,
+          "pct_change": -28.2051282051282
+        },
+        "kd_0.5_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_setpoint_changes": {
+          "before": 5,
+          "after": 5,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_total_kwh": {
+          "before": 2.357,
+          "after": 2.377,
+          "delta": 0.019999999999999574,
+          "pct_change": 0.8485362749257349
+        },
+        "kd_1.0_max_abs_d": {
+          "before": 0.01540944565463498,
+          "after": 0.029982698568692286,
+          "delta": 0.014573252914057306,
+          "pct_change": 94.57350537249107
+        },
+        "kd_1.0_rollup_avg_cop": {
+          "before": 2.5,
+          "after": 2.49,
+          "delta": -0.009999999999999787,
+          "pct_change": -0.39999999999999153
+        },
+        "kd_1.0_rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_integral_rms": {
+          "before": 1.06,
+          "after": 0.53,
+          "delta": -0.53,
+          "pct_change": -50.0
+        },
+        "kd_1.0_rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0084,
+          "after": 0.0017,
+          "delta": -0.006699999999999999,
+          "pct_change": -79.76190476190476
+        },
+        "kd_1.0_rollup_overshoot": {
+          "before": 0.38,
+          "after": 0.28,
+          "delta": -0.09999999999999998,
+          "pct_change": -26.315789473684205
+        },
+        "kd_1.0_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_setpoint_changes": {
+          "before": 5,
+          "after": 5,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_total_kwh": {
+          "before": 2.359,
+          "after": 2.377,
+          "delta": 0.017999999999999794,
+          "pct_change": 0.7630351844001608
+        },
+        "kd_2.0_max_abs_d": {
+          "before": 0.030420377871685025,
+          "after": 0.05765903570902363,
+          "delta": 0.027238657837338604,
+          "pct_change": 89.54082671896086
+        },
+        "kd_2.0_rollup_avg_cop": {
+          "before": 2.5,
+          "after": 2.49,
+          "delta": -0.009999999999999787,
+          "pct_change": -0.39999999999999153
+        },
+        "kd_2.0_rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_integral_rms": {
+          "before": 0.83,
+          "after": 0.49,
+          "delta": -0.33999999999999997,
+          "pct_change": -40.963855421686745
+        },
+        "kd_2.0_rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0084,
+          "after": 0.0017,
+          "delta": -0.006699999999999999,
+          "pct_change": -79.76190476190476
+        },
+        "kd_2.0_rollup_overshoot": {
+          "before": 0.28,
+          "after": 0.28,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_setpoint_changes": {
+          "before": 5,
+          "after": 5,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_total_kwh": {
+          "before": 2.361,
+          "after": 2.377,
+          "delta": 0.01599999999999957,
+          "pct_change": 0.6776789495976099
+        },
+        "kd_5.0_max_abs_d": {
+          "before": 0.07324253211813793,
+          "after": 0.12923576969263917,
+          "delta": 0.05599323757450124,
+          "pct_change": 76.44907399458266
+        },
+        "kd_5.0_rollup_avg_cop": {
+          "before": 2.5,
+          "after": 2.49,
+          "delta": -0.009999999999999787,
+          "pct_change": -0.39999999999999153
+        },
+        "kd_5.0_rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_integral_rms": {
+          "before": 0.79,
+          "after": 0.44,
+          "delta": -0.35000000000000003,
+          "pct_change": -44.30379746835443
+        },
+        "kd_5.0_rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0084,
+          "after": 0.0017,
+          "delta": -0.006699999999999999,
+          "pct_change": -79.76190476190476
+        },
+        "kd_5.0_rollup_overshoot": {
+          "before": 0.28,
+          "after": 0.23,
+          "delta": -0.05000000000000002,
+          "pct_change": -17.85714285714286
+        },
+        "kd_5.0_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_setpoint_changes": {
+          "before": 5,
+          "after": 5,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_total_kwh": {
+          "before": 2.361,
+          "after": 2.379,
+          "delta": 0.017999999999999794,
+          "pct_change": 0.7623888182973229
+        },
+        "profile_name": {
+          "before": "drafty_bungalow",
+          "after": "drafty_bungalow"
+        },
+        "scenario": {
+          "before": "cold_snap",
+          "after": "cold_snap"
+        }
+      }
+    },
+    "tests/hvac_bench/scenarios/test_derivative.py::TestDerivativeColdSnap::test_kd_sweep_cold_snap[standard_residential]": {
+      "status": {
+        "before": "passed",
+        "after": "passed",
+        "flipped": false
+      },
+      "duration_s": {
+        "before": 2.656147792004049,
+        "after": 13.700824000057764,
+        "delta": 11.044676208053716,
+        "pct_change": 415.81557476967686
+      },
+      "metrics": {
+        "kd_0.0_max_abs_d": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_avg_cop": {
+          "before": 2.41,
+          "after": 2.4,
+          "delta": -0.010000000000000231,
+          "pct_change": -0.4149377593361091
+        },
+        "kd_0.0_rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_integral_rms": {
+          "before": 2.45,
+          "after": 2.38,
+          "delta": -0.07000000000000028,
+          "pct_change": -2.8571428571428683
+        },
+        "kd_0.0_rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0042,
+          "after": 0.0008,
+          "delta": -0.0034,
+          "pct_change": -80.95238095238095
+        },
+        "kd_0.0_rollup_overshoot": {
+          "before": 0.42,
+          "after": 0.43,
+          "delta": 0.010000000000000009,
+          "pct_change": 2.380952380952383
+        },
+        "kd_0.0_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_setpoint_changes": {
+          "before": 5,
+          "after": 5,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_total_kwh": {
+          "before": 1.194,
+          "after": 1.199,
+          "delta": 0.0050000000000001155,
+          "pct_change": 0.41876046901173497
+        },
+        "kd_0.5_max_abs_d": {
+          "before": 0.005928412702023843,
+          "after": 0.006242601065160178,
+          "delta": 0.0003141883631363352,
+          "pct_change": 5.299704641498348
+        },
+        "kd_0.5_rollup_avg_cop": {
+          "before": 2.41,
+          "after": 2.4,
+          "delta": -0.010000000000000231,
+          "pct_change": -0.4149377593361091
+        },
+        "kd_0.5_rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_integral_rms": {
+          "before": 2.45,
+          "after": 2.37,
+          "delta": -0.08000000000000007,
+          "pct_change": -3.265306122448982
+        },
+        "kd_0.5_rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_kwh_per_degree_hour": {
+          "before": 0.0042,
+          "after": 0.0008,
+          "delta": -0.0034,
+          "pct_change": -80.95238095238095
+        },
+        "kd_0.5_rollup_overshoot": {
+          "before": 0.42,
+          "after": 0.43,
+          "delta": 0.010000000000000009,
+          "pct_change": 2.380952380952383
+        },
+        "kd_0.5_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_setpoint_changes": {
+          "before": 5,
+          "after": 5,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_total_kwh": {
+          "before": 1.194,
+          "after": 1.199,
+          "delta": 0.0050000000000001155,
+          "pct_change": 0.41876046901173497
+        },
+        "kd_1.0_max_abs_d": {
+          "before": 0.011831912274075297,
+          "after": 0.01223549808771395,
+          "delta": 0.0004035858136386527,
+          "pct_change": 3.410993965218477
+        },
+        "kd_1.0_rollup_avg_cop": {
+          "before": 2.41,
+          "after": 2.4,
+          "delta": -0.010000000000000231,
+          "pct_change": -0.4149377593361091
+        },
+        "kd_1.0_rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_integral_rms": {
+          "before": 2.48,
+          "after": 2.37,
+          "delta": -0.10999999999999988,
+          "pct_change": -4.435483870967737
+        },
+        "kd_1.0_rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0042,
+          "after": 0.0008,
+          "delta": -0.0034,
+          "pct_change": -80.95238095238095
+        },
+        "kd_1.0_rollup_overshoot": {
+          "before": 0.42,
+          "after": 0.43,
+          "delta": 0.010000000000000009,
+          "pct_change": 2.380952380952383
+        },
+        "kd_1.0_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_setpoint_changes": {
+          "before": 5,
+          "after": 5,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_total_kwh": {
+          "before": 1.194,
+          "after": 1.199,
+          "delta": 0.0050000000000001155,
+          "pct_change": 0.41876046901173497
+        },
+        "kd_2.0_max_abs_d": {
+          "before": 0.023563082463979174,
+          "after": 0.02352980401483452,
+          "delta": -3.3278449144653194e-05,
+          "pct_change": -0.1412313061991184
+        },
+        "kd_2.0_rollup_avg_cop": {
+          "before": 2.41,
+          "after": 2.4,
+          "delta": -0.010000000000000231,
+          "pct_change": -0.4149377593361091
+        },
+        "kd_2.0_rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_integral_rms": {
+          "before": 2.48,
+          "after": 2.37,
+          "delta": -0.10999999999999988,
+          "pct_change": -4.435483870967737
+        },
+        "kd_2.0_rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0042,
+          "after": 0.0008,
+          "delta": -0.0034,
+          "pct_change": -80.95238095238095
+        },
+        "kd_2.0_rollup_overshoot": {
+          "before": 0.42,
+          "after": 0.43,
+          "delta": 0.010000000000000009,
+          "pct_change": 2.380952380952383
+        },
+        "kd_2.0_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_setpoint_changes": {
+          "before": 5,
+          "after": 5,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_total_kwh": {
+          "before": 1.194,
+          "after": 1.2,
+          "delta": 0.006000000000000005,
+          "pct_change": 0.5025125628140708
+        },
+        "kd_5.0_max_abs_d": {
+          "before": 0.058134261979252644,
+          "after": 0.05273921589531875,
+          "delta": -0.005395046083933895,
+          "pct_change": -9.280320933392629
+        },
+        "kd_5.0_rollup_avg_cop": {
+          "before": 2.41,
+          "after": 2.4,
+          "delta": -0.010000000000000231,
+          "pct_change": -0.4149377593361091
+        },
+        "kd_5.0_rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_integral_rms": {
+          "before": 2.47,
+          "after": 2.38,
+          "delta": -0.0900000000000003,
+          "pct_change": -3.6437246963562875
+        },
+        "kd_5.0_rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0042,
+          "after": 0.0008,
+          "delta": -0.0034,
+          "pct_change": -80.95238095238095
+        },
+        "kd_5.0_rollup_overshoot": {
+          "before": 0.42,
+          "after": 0.43,
+          "delta": 0.010000000000000009,
+          "pct_change": 2.380952380952383
+        },
+        "kd_5.0_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_setpoint_changes": {
+          "before": 5,
+          "after": 5,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_total_kwh": {
+          "before": 1.194,
+          "after": 1.201,
+          "delta": 0.007000000000000117,
+          "pct_change": 0.5862646566164252
+        },
+        "profile_name": {
+          "before": "standard_residential",
+          "after": "standard_residential"
+        },
+        "scenario": {
+          "before": "cold_snap",
+          "after": "cold_snap"
+        }
+      }
+    },
+    "tests/hvac_bench/scenarios/test_derivative.py::TestDerivativeColdSnap::test_kd_sweep_cold_snap[well_insulated]": {
+      "status": {
+        "before": "passed",
+        "after": "passed",
+        "flipped": false
+      },
+      "duration_s": {
+        "before": 2.6972250839462504,
+        "after": 13.638973457971588,
+        "delta": 10.941748374025337,
+        "pct_change": 405.66686255255746
+      },
+      "metrics": {
+        "kd_0.0_max_abs_d": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_avg_cop": {
+          "before": 2.41,
+          "after": 2.4,
+          "delta": -0.010000000000000231,
+          "pct_change": -0.4149377593361091
+        },
+        "kd_0.0_rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_integral_rms": {
+          "before": 2.42,
+          "after": 2.42,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0017,
+          "after": 0.0003,
+          "delta": -0.0014,
+          "pct_change": -82.3529411764706
+        },
+        "kd_0.0_rollup_overshoot": {
+          "before": 0.37,
+          "after": 0.38,
+          "delta": 0.010000000000000009,
+          "pct_change": 2.7027027027027053
+        },
+        "kd_0.0_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_setpoint_changes": {
+          "before": 5,
+          "after": 5,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_total_kwh": {
+          "before": 0.475,
+          "after": 0.477,
+          "delta": 0.0020000000000000018,
+          "pct_change": 0.4210526315789478
+        },
+        "kd_0.5_max_abs_d": {
+          "before": 0.003046462179554247,
+          "after": 0.002597759875925476,
+          "delta": -0.00044870230362877104,
+          "pct_change": -14.72863528850453
+        },
+        "kd_0.5_rollup_avg_cop": {
+          "before": 2.41,
+          "after": 2.4,
+          "delta": -0.010000000000000231,
+          "pct_change": -0.4149377593361091
+        },
+        "kd_0.5_rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_integral_rms": {
+          "before": 2.42,
+          "after": 2.42,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_kwh_per_degree_hour": {
+          "before": 0.0017,
+          "after": 0.0003,
+          "delta": -0.0014,
+          "pct_change": -82.3529411764706
+        },
+        "kd_0.5_rollup_overshoot": {
+          "before": 0.37,
+          "after": 0.38,
+          "delta": 0.010000000000000009,
+          "pct_change": 2.7027027027027053
+        },
+        "kd_0.5_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_setpoint_changes": {
+          "before": 5,
+          "after": 5,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_total_kwh": {
+          "before": 0.475,
+          "after": 0.477,
+          "delta": 0.0020000000000000018,
+          "pct_change": 0.4210526315789478
+        },
+        "kd_1.0_max_abs_d": {
+          "before": 0.00607768361848292,
+          "after": 0.005091609356813933,
+          "delta": -0.0009860742616689868,
+          "pct_change": -16.224507946912933
+        },
+        "kd_1.0_rollup_avg_cop": {
+          "before": 2.41,
+          "after": 2.4,
+          "delta": -0.010000000000000231,
+          "pct_change": -0.4149377593361091
+        },
+        "kd_1.0_rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_integral_rms": {
+          "before": 2.41,
+          "after": 2.42,
+          "delta": 0.009999999999999787,
+          "pct_change": 0.41493775933609073
+        },
+        "kd_1.0_rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0017,
+          "after": 0.0003,
+          "delta": -0.0014,
+          "pct_change": -82.3529411764706
+        },
+        "kd_1.0_rollup_overshoot": {
+          "before": 0.37,
+          "after": 0.38,
+          "delta": 0.010000000000000009,
+          "pct_change": 2.7027027027027053
+        },
+        "kd_1.0_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_setpoint_changes": {
+          "before": 5,
+          "after": 5,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_total_kwh": {
+          "before": 0.475,
+          "after": 0.477,
+          "delta": 0.0020000000000000018,
+          "pct_change": 0.4210526315789478
+        },
+        "kd_2.0_max_abs_d": {
+          "before": 0.012094196239379951,
+          "after": 0.00979155645541141,
+          "delta": -0.0023026397839685415,
+          "pct_change": -19.039213010873006
+        },
+        "kd_2.0_rollup_avg_cop": {
+          "before": 2.41,
+          "after": 2.4,
+          "delta": -0.010000000000000231,
+          "pct_change": -0.4149377593361091
+        },
+        "kd_2.0_rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_integral_rms": {
+          "before": 2.41,
+          "after": 2.42,
+          "delta": 0.009999999999999787,
+          "pct_change": 0.41493775933609073
+        },
+        "kd_2.0_rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0017,
+          "after": 0.0003,
+          "delta": -0.0014,
+          "pct_change": -82.3529411764706
+        },
+        "kd_2.0_rollup_overshoot": {
+          "before": 0.37,
+          "after": 0.38,
+          "delta": 0.010000000000000009,
+          "pct_change": 2.7027027027027053
+        },
+        "kd_2.0_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_setpoint_changes": {
+          "before": 5,
+          "after": 5,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_total_kwh": {
+          "before": 0.475,
+          "after": 0.477,
+          "delta": 0.0020000000000000018,
+          "pct_change": 0.4210526315789478
+        },
+        "kd_5.0_max_abs_d": {
+          "before": 0.029773990861455463,
+          "after": 0.02197275896806851,
+          "delta": -0.0078012318933869534,
+          "pct_change": -26.2014989179237
+        },
+        "kd_5.0_rollup_avg_cop": {
+          "before": 2.41,
+          "after": 2.4,
+          "delta": -0.010000000000000231,
+          "pct_change": -0.4149377593361091
+        },
+        "kd_5.0_rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_integral_rms": {
+          "before": 2.41,
+          "after": 2.42,
+          "delta": 0.009999999999999787,
+          "pct_change": 0.41493775933609073
+        },
+        "kd_5.0_rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0017,
+          "after": 0.0003,
+          "delta": -0.0014,
+          "pct_change": -82.3529411764706
+        },
+        "kd_5.0_rollup_overshoot": {
+          "before": 0.37,
+          "after": 0.38,
+          "delta": 0.010000000000000009,
+          "pct_change": 2.7027027027027053
+        },
+        "kd_5.0_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_setpoint_changes": {
+          "before": 5,
+          "after": 5,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_total_kwh": {
+          "before": 0.475,
+          "after": 0.477,
+          "delta": 0.0020000000000000018,
+          "pct_change": 0.4210526315789478
+        },
+        "profile_name": {
+          "before": "well_insulated",
+          "after": "well_insulated"
+        },
+        "scenario": {
+          "before": "cold_snap",
+          "after": "cold_snap"
+        }
+      }
+    },
+    "tests/hvac_bench/scenarios/test_derivative.py::TestDerivativeColdStart::test_kd_sweep_cold_start[drafty_bungalow]": {
+      "status": {
+        "before": "passed",
+        "after": "passed",
+        "flipped": false
+      },
+      "duration_s": {
+        "before": 3.9020952919963747,
+        "after": 14.877819875022396,
+        "delta": 10.975724583026022,
+        "pct_change": 281.27771778250616
+      },
+      "metrics": {
+        "kd_0.0_max_abs_d": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_avg_cop": {
+          "before": 2.99,
+          "after": 2.99,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_cold_max_run": {
+          "before": 0,
+          "after": 4,
+          "delta": 4,
+          "pct_change": Infinity
+        },
+        "kd_0.0_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 2.83,
+          "delta": 2.83,
+          "pct_change": Infinity
+        },
+        "kd_0.0_rollup_cold_ticks": {
+          "before": 0,
+          "after": 4,
+          "delta": 4,
+          "pct_change": Infinity
+        },
+        "kd_0.0_rollup_integral_rms": {
+          "before": 2.4,
+          "after": 2.62,
+          "delta": 0.2200000000000002,
+          "pct_change": 9.166666666666675
+        },
+        "kd_0.0_rollup_itae": {
+          "before": 0.0,
+          "after": 8.46,
+          "delta": 8.46,
+          "pct_change": Infinity
+        },
+        "kd_0.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0072,
+          "after": 0.0014,
+          "delta": -0.0058,
+          "pct_change": -80.55555555555554
+        },
+        "kd_0.0_rollup_overshoot": {
+          "before": 0.44,
+          "after": 2.83,
+          "delta": 2.39,
+          "pct_change": 543.1818181818181
+        },
+        "kd_0.0_rollup_reversals": {
+          "before": 0,
+          "after": 2,
+          "delta": 2,
+          "pct_change": Infinity
+        },
+        "kd_0.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_setpoint_changes": {
+          "before": 1,
+          "after": 4,
+          "delta": 3,
+          "pct_change": 300.0
+        },
+        "kd_0.0_rollup_settling_time": {
+          "before": 0,
+          "after": 15,
+          "delta": 15,
+          "pct_change": Infinity
+        },
+        "kd_0.0_rollup_total_kwh": {
+          "before": 1.591,
+          "after": 1.593,
+          "delta": 0.0020000000000000018,
+          "pct_change": 0.1257071024512886
+        },
+        "kd_0.5_max_abs_d": {
+          "before": 0.10559971927732151,
+          "after": 0.10801811047418444,
+          "delta": 0.0024183911968629346,
+          "pct_change": 2.290149266885699
+        },
+        "kd_0.5_rollup_avg_cop": {
+          "before": 2.99,
+          "after": 2.99,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_cold_max_run": {
+          "before": 0,
+          "after": 4,
+          "delta": 4,
+          "pct_change": Infinity
+        },
+        "kd_0.5_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 2.83,
+          "delta": 2.83,
+          "pct_change": Infinity
+        },
+        "kd_0.5_rollup_cold_ticks": {
+          "before": 0,
+          "after": 4,
+          "delta": 4,
+          "pct_change": Infinity
+        },
+        "kd_0.5_rollup_integral_rms": {
+          "before": 2.4,
+          "after": 2.62,
+          "delta": 0.2200000000000002,
+          "pct_change": 9.166666666666675
+        },
+        "kd_0.5_rollup_itae": {
+          "before": 0.0,
+          "after": 8.46,
+          "delta": 8.46,
+          "pct_change": Infinity
+        },
+        "kd_0.5_rollup_kwh_per_degree_hour": {
+          "before": 0.0072,
+          "after": 0.0014,
+          "delta": -0.0058,
+          "pct_change": -80.55555555555554
+        },
+        "kd_0.5_rollup_overshoot": {
+          "before": 0.44,
+          "after": 2.83,
+          "delta": 2.39,
+          "pct_change": 543.1818181818181
+        },
+        "kd_0.5_rollup_reversals": {
+          "before": 0,
+          "after": 2,
+          "delta": 2,
+          "pct_change": Infinity
+        },
+        "kd_0.5_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_setpoint_changes": {
+          "before": 1,
+          "after": 4,
+          "delta": 3,
+          "pct_change": 300.0
+        },
+        "kd_0.5_rollup_settling_time": {
+          "before": 0,
+          "after": 15,
+          "delta": 15,
+          "pct_change": Infinity
+        },
+        "kd_0.5_rollup_total_kwh": {
+          "before": 1.591,
+          "after": 1.593,
+          "delta": 0.0020000000000000018,
+          "pct_change": 0.1257071024512886
+        },
+        "kd_1.0_max_abs_d": {
+          "before": 0.2103267136019379,
+          "after": 0.21496673129743438,
+          "delta": 0.00464001769549649,
+          "pct_change": 2.2061000317240436
+        },
+        "kd_1.0_rollup_avg_cop": {
+          "before": 2.99,
+          "after": 2.99,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_cold_max_run": {
+          "before": 0,
+          "after": 4,
+          "delta": 4,
+          "pct_change": Infinity
+        },
+        "kd_1.0_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 2.83,
+          "delta": 2.83,
+          "pct_change": Infinity
+        },
+        "kd_1.0_rollup_cold_ticks": {
+          "before": 0,
+          "after": 4,
+          "delta": 4,
+          "pct_change": Infinity
+        },
+        "kd_1.0_rollup_integral_rms": {
+          "before": 2.4,
+          "after": 2.62,
+          "delta": 0.2200000000000002,
+          "pct_change": 9.166666666666675
+        },
+        "kd_1.0_rollup_itae": {
+          "before": 0.0,
+          "after": 8.46,
+          "delta": 8.46,
+          "pct_change": Infinity
+        },
+        "kd_1.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0072,
+          "after": 0.0014,
+          "delta": -0.0058,
+          "pct_change": -80.55555555555554
+        },
+        "kd_1.0_rollup_overshoot": {
+          "before": 0.44,
+          "after": 2.83,
+          "delta": 2.39,
+          "pct_change": 543.1818181818181
+        },
+        "kd_1.0_rollup_reversals": {
+          "before": 0,
+          "after": 2,
+          "delta": 2,
+          "pct_change": Infinity
+        },
+        "kd_1.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_setpoint_changes": {
+          "before": 1,
+          "after": 4,
+          "delta": 3,
+          "pct_change": 300.0
+        },
+        "kd_1.0_rollup_settling_time": {
+          "before": 0,
+          "after": 15,
+          "delta": 15,
+          "pct_change": Infinity
+        },
+        "kd_1.0_rollup_total_kwh": {
+          "before": 1.591,
+          "after": 1.593,
+          "delta": 0.0020000000000000018,
+          "pct_change": 0.1257071024512886
+        },
+        "kd_2.0_max_abs_d": {
+          "before": 0.4172054482923686,
+          "after": 0.42518088146204897,
+          "delta": 0.007975433169680357,
+          "pct_change": 1.9116320753537581
+        },
+        "kd_2.0_rollup_avg_cop": {
+          "before": 2.99,
+          "after": 3.0,
+          "delta": 0.009999999999999787,
+          "pct_change": 0.3344481605351099
+        },
+        "kd_2.0_rollup_cold_max_run": {
+          "before": 0,
+          "after": 4,
+          "delta": 4,
+          "pct_change": Infinity
+        },
+        "kd_2.0_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 2.83,
+          "delta": 2.83,
+          "pct_change": Infinity
+        },
+        "kd_2.0_rollup_cold_ticks": {
+          "before": 0,
+          "after": 4,
+          "delta": 4,
+          "pct_change": Infinity
+        },
+        "kd_2.0_rollup_integral_rms": {
+          "before": 2.4,
+          "after": 2.61,
+          "delta": 0.20999999999999996,
+          "pct_change": 8.75
+        },
+        "kd_2.0_rollup_itae": {
+          "before": 0.0,
+          "after": 9.62,
+          "delta": 9.62,
+          "pct_change": Infinity
+        },
+        "kd_2.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0072,
+          "after": 0.0014,
+          "delta": -0.0058,
+          "pct_change": -80.55555555555554
+        },
+        "kd_2.0_rollup_overshoot": {
+          "before": 0.44,
+          "after": 2.83,
+          "delta": 2.39,
+          "pct_change": 543.1818181818181
+        },
+        "kd_2.0_rollup_reversals": {
+          "before": 0,
+          "after": 2,
+          "delta": 2,
+          "pct_change": Infinity
+        },
+        "kd_2.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_setpoint_changes": {
+          "before": 1,
+          "after": 4,
+          "delta": 3,
+          "pct_change": 300.0
+        },
+        "kd_2.0_rollup_settling_time": {
+          "before": 0,
+          "after": 7,
+          "delta": 7,
+          "pct_change": Infinity
+        },
+        "kd_2.0_rollup_total_kwh": {
+          "before": 1.591,
+          "after": 1.591,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_max_abs_d": {
+          "before": 1.0179812938333794,
+          "after": 1.0212956632223589,
+          "delta": 0.0033143693889794434,
+          "pct_change": 0.3255825435159647
+        },
+        "kd_5.0_rollup_avg_cop": {
+          "before": 2.99,
+          "after": 2.97,
+          "delta": -0.020000000000000018,
+          "pct_change": -0.6688963210702347
+        },
+        "kd_5.0_rollup_cold_max_run": {
+          "before": 0,
+          "after": 6,
+          "delta": 6,
+          "pct_change": Infinity
+        },
+        "kd_5.0_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 2.83,
+          "delta": 2.83,
+          "pct_change": Infinity
+        },
+        "kd_5.0_rollup_cold_ticks": {
+          "before": 0,
+          "after": 6,
+          "delta": 6,
+          "pct_change": Infinity
+        },
+        "kd_5.0_rollup_integral_rms": {
+          "before": 2.39,
+          "after": 5.59,
+          "delta": 3.1999999999999997,
+          "pct_change": 133.8912133891213
+        },
+        "kd_5.0_rollup_itae": {
+          "before": 0.0,
+          "after": 254.79,
+          "delta": 254.79,
+          "pct_change": Infinity
+        },
+        "kd_5.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0072,
+          "after": 0.0015,
+          "delta": -0.0057,
+          "pct_change": -79.16666666666667
+        },
+        "kd_5.0_rollup_overshoot": {
+          "before": 0.44,
+          "after": 2.83,
+          "delta": 2.39,
+          "pct_change": 543.1818181818181
+        },
+        "kd_5.0_rollup_reversals": {
+          "before": 0,
+          "after": 16,
+          "delta": 16,
+          "pct_change": Infinity
+        },
+        "kd_5.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_setpoint_changes": {
+          "before": 1,
+          "after": 18,
+          "delta": 17,
+          "pct_change": 1700.0
+        },
+        "kd_5.0_rollup_settling_time": {
+          "before": 0,
+          "after": 157,
+          "delta": 157,
+          "pct_change": Infinity
+        },
+        "kd_5.0_rollup_total_kwh": {
+          "before": 1.591,
+          "after": 1.634,
+          "delta": 0.04299999999999993,
+          "pct_change": 2.702702702702698
+        },
+        "profile_name": {
+          "before": "drafty_bungalow",
+          "after": "drafty_bungalow"
+        },
+        "scenario": {
+          "before": "cold_start",
+          "after": "cold_start"
+        }
+      }
+    },
+    "tests/hvac_bench/scenarios/test_derivative.py::TestDerivativeColdStart::test_kd_sweep_cold_start[standard_residential]": {
+      "status": {
+        "before": "passed",
+        "after": "passed",
+        "flipped": false
+      },
+      "duration_s": {
+        "before": 2.6941852919990197,
+        "after": 13.755002583027817,
+        "delta": 11.060817291028798,
+        "pct_change": 410.5440454996301
+      },
+      "metrics": {
+        "kd_0.0_max_abs_d": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_avg_cop": {
+          "before": 2.84,
+          "after": 2.84,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_cold_max_run": {
+          "before": 1,
+          "after": 10,
+          "delta": 9,
+          "pct_change": 900.0
+        },
+        "kd_0.0_rollup_cold_max_undershoot": {
+          "before": 1.62,
+          "after": 3.21,
+          "delta": 1.5899999999999999,
+          "pct_change": 98.14814814814812
+        },
+        "kd_0.0_rollup_cold_ticks": {
+          "before": 1,
+          "after": 10,
+          "delta": 9,
+          "pct_change": 900.0
+        },
+        "kd_0.0_rollup_integral_rms": {
+          "before": 7.16,
+          "after": 7.24,
+          "delta": 0.08000000000000007,
+          "pct_change": 1.1173184357541908
+        },
+        "kd_0.0_rollup_itae": {
+          "before": 0.73,
+          "after": 66.37,
+          "delta": 65.64,
+          "pct_change": 8991.780821917808
+        },
+        "kd_0.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0041,
+          "after": 0.0008,
+          "delta": -0.0033000000000000004,
+          "pct_change": -80.48780487804879
+        },
+        "kd_0.0_rollup_overshoot": {
+          "before": 1.62,
+          "after": 3.21,
+          "delta": 1.5899999999999999,
+          "pct_change": 98.14814814814812
+        },
+        "kd_0.0_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_setpoint_changes": {
+          "before": 1,
+          "after": 1,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_settling_time": {
+          "before": 3,
+          "after": 19,
+          "delta": 16,
+          "pct_change": 533.3333333333333
+        },
+        "kd_0.0_rollup_total_kwh": {
+          "before": 0.907,
+          "after": 0.91,
+          "delta": 0.0030000000000000027,
+          "pct_change": 0.3307607497243663
+        },
+        "kd_0.5_max_abs_d": {
+          "before": 0.06226721825538054,
+          "after": 0.06366946308326216,
+          "delta": 0.0014022448278816144,
+          "pct_change": 2.251979239108607
+        },
+        "kd_0.5_rollup_avg_cop": {
+          "before": 2.84,
+          "after": 2.84,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_cold_max_run": {
+          "before": 1,
+          "after": 10,
+          "delta": 9,
+          "pct_change": 900.0
+        },
+        "kd_0.5_rollup_cold_max_undershoot": {
+          "before": 1.62,
+          "after": 3.21,
+          "delta": 1.5899999999999999,
+          "pct_change": 98.14814814814812
+        },
+        "kd_0.5_rollup_cold_ticks": {
+          "before": 1,
+          "after": 10,
+          "delta": 9,
+          "pct_change": 900.0
+        },
+        "kd_0.5_rollup_integral_rms": {
+          "before": 7.16,
+          "after": 7.24,
+          "delta": 0.08000000000000007,
+          "pct_change": 1.1173184357541908
+        },
+        "kd_0.5_rollup_itae": {
+          "before": 0.73,
+          "after": 66.37,
+          "delta": 65.64,
+          "pct_change": 8991.780821917808
+        },
+        "kd_0.5_rollup_kwh_per_degree_hour": {
+          "before": 0.0041,
+          "after": 0.0008,
+          "delta": -0.0033000000000000004,
+          "pct_change": -80.48780487804879
+        },
+        "kd_0.5_rollup_overshoot": {
+          "before": 1.62,
+          "after": 3.21,
+          "delta": 1.5899999999999999,
+          "pct_change": 98.14814814814812
+        },
+        "kd_0.5_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_setpoint_changes": {
+          "before": 1,
+          "after": 1,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_settling_time": {
+          "before": 3,
+          "after": 19,
+          "delta": 16,
+          "pct_change": 533.3333333333333
+        },
+        "kd_0.5_rollup_total_kwh": {
+          "before": 0.907,
+          "after": 0.91,
+          "delta": 0.0030000000000000027,
+          "pct_change": 0.3307607497243663
+        },
+        "kd_1.0_max_abs_d": {
+          "before": 0.12401983140121249,
+          "after": 0.12716562799541203,
+          "delta": 0.003145796594199543,
+          "pct_change": 2.536527068822308
+        },
+        "kd_1.0_rollup_avg_cop": {
+          "before": 2.84,
+          "after": 2.84,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_cold_max_run": {
+          "before": 1,
+          "after": 10,
+          "delta": 9,
+          "pct_change": 900.0
+        },
+        "kd_1.0_rollup_cold_max_undershoot": {
+          "before": 1.62,
+          "after": 3.21,
+          "delta": 1.5899999999999999,
+          "pct_change": 98.14814814814812
+        },
+        "kd_1.0_rollup_cold_ticks": {
+          "before": 1,
+          "after": 10,
+          "delta": 9,
+          "pct_change": 900.0
+        },
+        "kd_1.0_rollup_integral_rms": {
+          "before": 7.17,
+          "after": 7.25,
+          "delta": 0.08000000000000007,
+          "pct_change": 1.115760111576012
+        },
+        "kd_1.0_rollup_itae": {
+          "before": 0.73,
+          "after": 70.14,
+          "delta": 69.41,
+          "pct_change": 9508.219178082192
+        },
+        "kd_1.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0041,
+          "after": 0.0008,
+          "delta": -0.0033000000000000004,
+          "pct_change": -80.48780487804879
+        },
+        "kd_1.0_rollup_overshoot": {
+          "before": 1.62,
+          "after": 3.21,
+          "delta": 1.5899999999999999,
+          "pct_change": 98.14814814814812
+        },
+        "kd_1.0_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_setpoint_changes": {
+          "before": 1,
+          "after": 1,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_settling_time": {
+          "before": 3,
+          "after": 19,
+          "delta": 16,
+          "pct_change": 533.3333333333333
+        },
+        "kd_1.0_rollup_total_kwh": {
+          "before": 0.907,
+          "after": 0.909,
+          "delta": 0.0020000000000000018,
+          "pct_change": 0.22050716648291088
+        },
+        "kd_2.0_max_abs_d": {
+          "before": 0.24600655081224118,
+          "after": 0.23523628594215876,
+          "delta": -0.010770264870082424,
+          "pct_change": -4.378039867036947
+        },
+        "kd_2.0_rollup_avg_cop": {
+          "before": 2.84,
+          "after": 2.84,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_cold_max_run": {
+          "before": 1,
+          "after": 11,
+          "delta": 10,
+          "pct_change": 1000.0
+        },
+        "kd_2.0_rollup_cold_max_undershoot": {
+          "before": 1.62,
+          "after": 3.21,
+          "delta": 1.5899999999999999,
+          "pct_change": 98.14814814814812
+        },
+        "kd_2.0_rollup_cold_ticks": {
+          "before": 1,
+          "after": 11,
+          "delta": 10,
+          "pct_change": 1000.0
+        },
+        "kd_2.0_rollup_integral_rms": {
+          "before": 7.18,
+          "after": 7.27,
+          "delta": 0.08999999999999986,
+          "pct_change": 1.253481894150416
+        },
+        "kd_2.0_rollup_itae": {
+          "before": 0.73,
+          "after": 73.61,
+          "delta": 72.88,
+          "pct_change": 9983.561643835616
+        },
+        "kd_2.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0041,
+          "after": 0.0008,
+          "delta": -0.0033000000000000004,
+          "pct_change": -80.48780487804879
+        },
+        "kd_2.0_rollup_overshoot": {
+          "before": 1.62,
+          "after": 3.21,
+          "delta": 1.5899999999999999,
+          "pct_change": 98.14814814814812
+        },
+        "kd_2.0_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_setpoint_changes": {
+          "before": 1,
+          "after": 1,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_settling_time": {
+          "before": 3,
+          "after": 20,
+          "delta": 17,
+          "pct_change": 566.6666666666667
+        },
+        "kd_2.0_rollup_total_kwh": {
+          "before": 0.907,
+          "after": 0.909,
+          "delta": 0.0020000000000000018,
+          "pct_change": 0.22050716648291088
+        },
+        "kd_5.0_max_abs_d": {
+          "before": 0.6002559839818684,
+          "after": 0.5369788341506503,
+          "delta": -0.06327714983121813,
+          "pct_change": -10.541694130471093
+        },
+        "kd_5.0_rollup_avg_cop": {
+          "before": 2.84,
+          "after": 2.84,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_cold_max_run": {
+          "before": 1,
+          "after": 11,
+          "delta": 10,
+          "pct_change": 1000.0
+        },
+        "kd_5.0_rollup_cold_max_undershoot": {
+          "before": 1.62,
+          "after": 3.21,
+          "delta": 1.5899999999999999,
+          "pct_change": 98.14814814814812
+        },
+        "kd_5.0_rollup_cold_ticks": {
+          "before": 1,
+          "after": 11,
+          "delta": 10,
+          "pct_change": 1000.0
+        },
+        "kd_5.0_rollup_integral_rms": {
+          "before": 7.2,
+          "after": 7.31,
+          "delta": 0.10999999999999943,
+          "pct_change": 1.52777777777777
+        },
+        "kd_5.0_rollup_itae": {
+          "before": 0.73,
+          "after": 76.81,
+          "delta": 76.08,
+          "pct_change": 10421.917808219177
+        },
+        "kd_5.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0041,
+          "after": 0.0008,
+          "delta": -0.0033000000000000004,
+          "pct_change": -80.48780487804879
+        },
+        "kd_5.0_rollup_overshoot": {
+          "before": 1.62,
+          "after": 3.21,
+          "delta": 1.5899999999999999,
+          "pct_change": 98.14814814814812
+        },
+        "kd_5.0_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_setpoint_changes": {
+          "before": 1,
+          "after": 1,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_settling_time": {
+          "before": 3,
+          "after": 20,
+          "delta": 17,
+          "pct_change": 566.6666666666667
+        },
+        "kd_5.0_rollup_total_kwh": {
+          "before": 0.907,
+          "after": 0.909,
+          "delta": 0.0020000000000000018,
+          "pct_change": 0.22050716648291088
+        },
+        "profile_name": {
+          "before": "standard_residential",
+          "after": "standard_residential"
+        },
+        "scenario": {
+          "before": "cold_start",
+          "after": "cold_start"
+        }
+      }
+    },
+    "tests/hvac_bench/scenarios/test_derivative.py::TestDerivativeColdStart::test_kd_sweep_cold_start[well_insulated]": {
+      "status": {
+        "before": "passed",
+        "after": "passed",
+        "flipped": false
+      },
+      "duration_s": {
+        "before": 2.6604217080166563,
+        "after": 13.76412170799449,
+        "delta": 11.103699999977835,
+        "pct_change": 417.36616291015156
+      },
+      "metrics": {
+        "kd_0.0_max_abs_d": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_avg_cop": {
+          "before": 2.76,
+          "after": 2.76,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_cold_max_run": {
+          "before": 4,
+          "after": 21,
+          "delta": 17,
+          "pct_change": 425.0
+        },
+        "kd_0.0_rollup_cold_max_undershoot": {
+          "before": 2.6,
+          "after": 3.38,
+          "delta": 0.7799999999999998,
+          "pct_change": 29.999999999999993
+        },
+        "kd_0.0_rollup_cold_ticks": {
+          "before": 4,
+          "after": 21,
+          "delta": 17,
+          "pct_change": 425.0
+        },
+        "kd_0.0_rollup_integral_rms": {
+          "before": 13.14,
+          "after": 13.13,
+          "delta": -0.009999999999999787,
+          "pct_change": -0.07610350076103338
+        },
+        "kd_0.0_rollup_itae": {
+          "before": 6.96,
+          "after": 302.19,
+          "delta": 295.23,
+          "pct_change": 4241.810344827586
+        },
+        "kd_0.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0019,
+          "after": 0.0004,
+          "delta": -0.0015,
+          "pct_change": -78.94736842105263
+        },
+        "kd_0.0_rollup_overshoot": {
+          "before": 2.6,
+          "after": 3.38,
+          "delta": 0.7799999999999998,
+          "pct_change": 29.999999999999993
+        },
+        "kd_0.0_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_setpoint_changes": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_settling_time": {
+          "before": 6,
+          "after": 34,
+          "delta": 28,
+          "pct_change": 466.6666666666667
+        },
+        "kd_0.0_rollup_total_kwh": {
+          "before": 0.417,
+          "after": 0.418,
+          "delta": 0.0010000000000000009,
+          "pct_change": 0.23980815347721846
+        },
+        "kd_0.5_max_abs_d": {
+          "before": 0.029928685977023358,
+          "after": 0.029348050715288766,
+          "delta": -0.0005806352617345918,
+          "pct_change": -1.9400626615560506
+        },
+        "kd_0.5_rollup_avg_cop": {
+          "before": 2.76,
+          "after": 2.76,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_cold_max_run": {
+          "before": 4,
+          "after": 21,
+          "delta": 17,
+          "pct_change": 425.0
+        },
+        "kd_0.5_rollup_cold_max_undershoot": {
+          "before": 2.6,
+          "after": 3.38,
+          "delta": 0.7799999999999998,
+          "pct_change": 29.999999999999993
+        },
+        "kd_0.5_rollup_cold_ticks": {
+          "before": 4,
+          "after": 21,
+          "delta": 17,
+          "pct_change": 425.0
+        },
+        "kd_0.5_rollup_integral_rms": {
+          "before": 13.14,
+          "after": 13.13,
+          "delta": -0.009999999999999787,
+          "pct_change": -0.07610350076103338
+        },
+        "kd_0.5_rollup_itae": {
+          "before": 6.96,
+          "after": 302.19,
+          "delta": 295.23,
+          "pct_change": 4241.810344827586
+        },
+        "kd_0.5_rollup_kwh_per_degree_hour": {
+          "before": 0.0019,
+          "after": 0.0004,
+          "delta": -0.0015,
+          "pct_change": -78.94736842105263
+        },
+        "kd_0.5_rollup_overshoot": {
+          "before": 2.6,
+          "after": 3.38,
+          "delta": 0.7799999999999998,
+          "pct_change": 29.999999999999993
+        },
+        "kd_0.5_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_setpoint_changes": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_settling_time": {
+          "before": 6,
+          "after": 34,
+          "delta": 28,
+          "pct_change": 466.6666666666667
+        },
+        "kd_0.5_rollup_total_kwh": {
+          "before": 0.417,
+          "after": 0.418,
+          "delta": 0.0010000000000000009,
+          "pct_change": 0.23980815347721846
+        },
+        "kd_1.0_max_abs_d": {
+          "before": 0.059610027441839915,
+          "after": 0.05855201935321554,
+          "delta": -0.0010580080886243778,
+          "pct_change": -1.774882740419221
+        },
+        "kd_1.0_rollup_avg_cop": {
+          "before": 2.76,
+          "after": 2.76,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_cold_max_run": {
+          "before": 4,
+          "after": 21,
+          "delta": 17,
+          "pct_change": 425.0
+        },
+        "kd_1.0_rollup_cold_max_undershoot": {
+          "before": 2.6,
+          "after": 3.38,
+          "delta": 0.7799999999999998,
+          "pct_change": 29.999999999999993
+        },
+        "kd_1.0_rollup_cold_ticks": {
+          "before": 4,
+          "after": 21,
+          "delta": 17,
+          "pct_change": 425.0
+        },
+        "kd_1.0_rollup_integral_rms": {
+          "before": 13.14,
+          "after": 13.13,
+          "delta": -0.009999999999999787,
+          "pct_change": -0.07610350076103338
+        },
+        "kd_1.0_rollup_itae": {
+          "before": 6.96,
+          "after": 302.19,
+          "delta": 295.23,
+          "pct_change": 4241.810344827586
+        },
+        "kd_1.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0019,
+          "after": 0.0004,
+          "delta": -0.0015,
+          "pct_change": -78.94736842105263
+        },
+        "kd_1.0_rollup_overshoot": {
+          "before": 2.6,
+          "after": 3.38,
+          "delta": 0.7799999999999998,
+          "pct_change": 29.999999999999993
+        },
+        "kd_1.0_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_setpoint_changes": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_settling_time": {
+          "before": 6,
+          "after": 34,
+          "delta": 28,
+          "pct_change": 466.6666666666667
+        },
+        "kd_1.0_rollup_total_kwh": {
+          "before": 0.417,
+          "after": 0.418,
+          "delta": 0.0010000000000000009,
+          "pct_change": 0.23980815347721846
+        },
+        "kd_2.0_max_abs_d": {
+          "before": 0.1182428413190595,
+          "after": 0.11645140443074775,
+          "delta": -0.001791436888311751,
+          "pct_change": -1.5150489182493878
+        },
+        "kd_2.0_rollup_avg_cop": {
+          "before": 2.76,
+          "after": 2.76,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_cold_max_run": {
+          "before": 4,
+          "after": 21,
+          "delta": 17,
+          "pct_change": 425.0
+        },
+        "kd_2.0_rollup_cold_max_undershoot": {
+          "before": 2.6,
+          "after": 3.38,
+          "delta": 0.7799999999999998,
+          "pct_change": 29.999999999999993
+        },
+        "kd_2.0_rollup_cold_ticks": {
+          "before": 4,
+          "after": 21,
+          "delta": 17,
+          "pct_change": 425.0
+        },
+        "kd_2.0_rollup_integral_rms": {
+          "before": 13.15,
+          "after": 13.14,
+          "delta": -0.009999999999999787,
+          "pct_change": -0.07604562737642423
+        },
+        "kd_2.0_rollup_itae": {
+          "before": 6.96,
+          "after": 302.19,
+          "delta": 295.23,
+          "pct_change": 4241.810344827586
+        },
+        "kd_2.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0019,
+          "after": 0.0004,
+          "delta": -0.0015,
+          "pct_change": -78.94736842105263
+        },
+        "kd_2.0_rollup_overshoot": {
+          "before": 2.6,
+          "after": 3.38,
+          "delta": 0.7799999999999998,
+          "pct_change": 29.999999999999993
+        },
+        "kd_2.0_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_setpoint_changes": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_settling_time": {
+          "before": 6,
+          "after": 34,
+          "delta": 28,
+          "pct_change": 466.6666666666667
+        },
+        "kd_2.0_rollup_total_kwh": {
+          "before": 0.417,
+          "after": 0.418,
+          "delta": 0.0010000000000000009,
+          "pct_change": 0.23980815347721846
+        },
+        "kd_5.0_max_abs_d": {
+          "before": 0.2885125328185052,
+          "after": 0.28985608417121134,
+          "delta": 0.0013435513527061405,
+          "pct_change": 0.46568214544472813
+        },
+        "kd_5.0_rollup_avg_cop": {
+          "before": 2.76,
+          "after": 2.76,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_cold_max_run": {
+          "before": 4,
+          "after": 21,
+          "delta": 17,
+          "pct_change": 425.0
+        },
+        "kd_5.0_rollup_cold_max_undershoot": {
+          "before": 2.6,
+          "after": 3.38,
+          "delta": 0.7799999999999998,
+          "pct_change": 29.999999999999993
+        },
+        "kd_5.0_rollup_cold_ticks": {
+          "before": 4,
+          "after": 21,
+          "delta": 17,
+          "pct_change": 425.0
+        },
+        "kd_5.0_rollup_integral_rms": {
+          "before": 13.17,
+          "after": 13.16,
+          "delta": -0.009999999999999787,
+          "pct_change": -0.07593014426727249
+        },
+        "kd_5.0_rollup_itae": {
+          "before": 6.96,
+          "after": 302.19,
+          "delta": 295.23,
+          "pct_change": 4241.810344827586
+        },
+        "kd_5.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0019,
+          "after": 0.0004,
+          "delta": -0.0015,
+          "pct_change": -78.94736842105263
+        },
+        "kd_5.0_rollup_overshoot": {
+          "before": 2.6,
+          "after": 3.38,
+          "delta": 0.7799999999999998,
+          "pct_change": 29.999999999999993
+        },
+        "kd_5.0_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_setpoint_changes": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_settling_time": {
+          "before": 6,
+          "after": 34,
+          "delta": 28,
+          "pct_change": 466.6666666666667
+        },
+        "kd_5.0_rollup_total_kwh": {
+          "before": 0.417,
+          "after": 0.418,
+          "delta": 0.0010000000000000009,
+          "pct_change": 0.23980815347721846
+        },
+        "profile_name": {
+          "before": "well_insulated",
+          "after": "well_insulated"
+        },
+        "scenario": {
+          "before": "cold_start",
+          "after": "cold_start"
+        }
+      }
+    },
+    "tests/hvac_bench/scenarios/test_derivative.py::TestDerivativeOscillation::test_kd_damps_oscillation": {
+      "status": {
+        "before": "passed",
+        "after": "passed",
+        "flipped": false
+      },
+      "duration_s": {
+        "before": 3.5999356250977144,
+        "after": 18.937553457915783,
+        "delta": 15.337617832818069,
+        "pct_change": 426.052558437118
+      },
+      "metrics": {
+        "kd_0.0_late_temp_std": {
+          "before": 0.038229959214100134,
+          "after": 0.03916685628396142,
+          "delta": 0.0009368970698612825,
+          "pct_change": 2.4506881229309085
+        },
+        "kd_0.0_max_abs_d": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_avg_cop": {
+          "before": 2.76,
+          "after": 2.76,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_cold_max_run": {
+          "before": 0,
+          "after": 3,
+          "delta": 3,
+          "pct_change": Infinity
+        },
+        "kd_0.0_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 2.82,
+          "delta": 2.82,
+          "pct_change": Infinity
+        },
+        "kd_0.0_rollup_cold_ticks": {
+          "before": 0,
+          "after": 3,
+          "delta": 3,
+          "pct_change": Infinity
+        },
+        "kd_0.0_rollup_integral_rms": {
+          "before": 1.77,
+          "after": 1.7,
+          "delta": -0.07000000000000006,
+          "pct_change": -3.9548022598870096
+        },
+        "kd_0.0_rollup_itae": {
+          "before": 1.14,
+          "after": 7.81,
+          "delta": 6.67,
+          "pct_change": 585.0877192982456
+        },
+        "kd_0.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0077,
+          "after": 0.0015,
+          "delta": -0.006200000000000001,
+          "pct_change": -80.51948051948052
+        },
+        "kd_0.0_rollup_overshoot": {
+          "before": 0.8,
+          "after": 2.82,
+          "delta": 2.0199999999999996,
+          "pct_change": 252.49999999999994
+        },
+        "kd_0.0_rollup_reversals": {
+          "before": 1,
+          "after": 0,
+          "delta": -1,
+          "pct_change": -100.0
+        },
+        "kd_0.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_setpoint_changes": {
+          "before": 2,
+          "after": 2,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_settling_time": {
+          "before": 4,
+          "after": 9,
+          "delta": 5,
+          "pct_change": 125.0
+        },
+        "kd_0.0_rollup_total_kwh": {
+          "before": 2.539,
+          "after": 2.542,
+          "delta": 0.0029999999999996696,
+          "pct_change": 0.11815675462779321
+        },
+        "kd_0.5_late_temp_std": {
+          "before": 0.038229959214100134,
+          "after": 0.03916685628396142,
+          "delta": 0.0009368970698612825,
+          "pct_change": 2.4506881229309085
+        },
+        "kd_0.5_max_abs_d": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_avg_cop": {
+          "before": 2.76,
+          "after": 2.76,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_cold_max_run": {
+          "before": 0,
+          "after": 3,
+          "delta": 3,
+          "pct_change": Infinity
+        },
+        "kd_0.5_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 2.82,
+          "delta": 2.82,
+          "pct_change": Infinity
+        },
+        "kd_0.5_rollup_cold_ticks": {
+          "before": 0,
+          "after": 3,
+          "delta": 3,
+          "pct_change": Infinity
+        },
+        "kd_0.5_rollup_integral_rms": {
+          "before": 1.77,
+          "after": 1.7,
+          "delta": -0.07000000000000006,
+          "pct_change": -3.9548022598870096
+        },
+        "kd_0.5_rollup_itae": {
+          "before": 1.14,
+          "after": 7.81,
+          "delta": 6.67,
+          "pct_change": 585.0877192982456
+        },
+        "kd_0.5_rollup_kwh_per_degree_hour": {
+          "before": 0.0077,
+          "after": 0.0015,
+          "delta": -0.006200000000000001,
+          "pct_change": -80.51948051948052
+        },
+        "kd_0.5_rollup_overshoot": {
+          "before": 0.8,
+          "after": 2.82,
+          "delta": 2.0199999999999996,
+          "pct_change": 252.49999999999994
+        },
+        "kd_0.5_rollup_reversals": {
+          "before": 1,
+          "after": 0,
+          "delta": -1,
+          "pct_change": -100.0
+        },
+        "kd_0.5_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_setpoint_changes": {
+          "before": 2,
+          "after": 2,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_settling_time": {
+          "before": 4,
+          "after": 9,
+          "delta": 5,
+          "pct_change": 125.0
+        },
+        "kd_0.5_rollup_total_kwh": {
+          "before": 2.539,
+          "after": 2.542,
+          "delta": 0.0029999999999996696,
+          "pct_change": 0.11815675462779321
+        },
+        "kd_1.0_late_temp_std": {
+          "before": 0.038229959214100134,
+          "after": 0.03916685628396142,
+          "delta": 0.0009368970698612825,
+          "pct_change": 2.4506881229309085
+        },
+        "kd_1.0_max_abs_d": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_avg_cop": {
+          "before": 2.76,
+          "after": 2.76,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_cold_max_run": {
+          "before": 0,
+          "after": 3,
+          "delta": 3,
+          "pct_change": Infinity
+        },
+        "kd_1.0_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 2.82,
+          "delta": 2.82,
+          "pct_change": Infinity
+        },
+        "kd_1.0_rollup_cold_ticks": {
+          "before": 0,
+          "after": 3,
+          "delta": 3,
+          "pct_change": Infinity
+        },
+        "kd_1.0_rollup_integral_rms": {
+          "before": 1.77,
+          "after": 1.7,
+          "delta": -0.07000000000000006,
+          "pct_change": -3.9548022598870096
+        },
+        "kd_1.0_rollup_itae": {
+          "before": 1.14,
+          "after": 7.81,
+          "delta": 6.67,
+          "pct_change": 585.0877192982456
+        },
+        "kd_1.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0077,
+          "after": 0.0015,
+          "delta": -0.006200000000000001,
+          "pct_change": -80.51948051948052
+        },
+        "kd_1.0_rollup_overshoot": {
+          "before": 0.8,
+          "after": 2.82,
+          "delta": 2.0199999999999996,
+          "pct_change": 252.49999999999994
+        },
+        "kd_1.0_rollup_reversals": {
+          "before": 1,
+          "after": 0,
+          "delta": -1,
+          "pct_change": -100.0
+        },
+        "kd_1.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_setpoint_changes": {
+          "before": 2,
+          "after": 2,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_settling_time": {
+          "before": 4,
+          "after": 9,
+          "delta": 5,
+          "pct_change": 125.0
+        },
+        "kd_1.0_rollup_total_kwh": {
+          "before": 2.539,
+          "after": 2.542,
+          "delta": 0.0029999999999996696,
+          "pct_change": 0.11815675462779321
+        },
+        "kd_2.0_late_temp_std": {
+          "before": 0.038229959214100134,
+          "after": 0.03933916099071828,
+          "delta": 0.001109201776618149,
+          "pct_change": 2.9013940883542677
+        },
+        "kd_2.0_max_abs_d": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_avg_cop": {
+          "before": 2.76,
+          "after": 2.76,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_cold_max_run": {
+          "before": 0,
+          "after": 4,
+          "delta": 4,
+          "pct_change": Infinity
+        },
+        "kd_2.0_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 2.82,
+          "delta": 2.82,
+          "pct_change": Infinity
+        },
+        "kd_2.0_rollup_cold_ticks": {
+          "before": 0,
+          "after": 4,
+          "delta": 4,
+          "pct_change": Infinity
+        },
+        "kd_2.0_rollup_integral_rms": {
+          "before": 1.78,
+          "after": 1.72,
+          "delta": -0.06000000000000005,
+          "pct_change": -3.3707865168539355
+        },
+        "kd_2.0_rollup_itae": {
+          "before": 1.14,
+          "after": 11.97,
+          "delta": 10.83,
+          "pct_change": 950.0
+        },
+        "kd_2.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0077,
+          "after": 0.0015,
+          "delta": -0.006200000000000001,
+          "pct_change": -80.51948051948052
+        },
+        "kd_2.0_rollup_overshoot": {
+          "before": 0.8,
+          "after": 2.82,
+          "delta": 2.0199999999999996,
+          "pct_change": 252.49999999999994
+        },
+        "kd_2.0_rollup_reversals": {
+          "before": 1,
+          "after": 0,
+          "delta": -1,
+          "pct_change": -100.0
+        },
+        "kd_2.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_setpoint_changes": {
+          "before": 2,
+          "after": 2,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_settling_time": {
+          "before": 4,
+          "after": 10,
+          "delta": 6,
+          "pct_change": 150.0
+        },
+        "kd_2.0_rollup_total_kwh": {
+          "before": 2.539,
+          "after": 2.54,
+          "delta": 0.0009999999999998899,
+          "pct_change": 0.03938558487593107
+        },
+        "kd_5.0_late_temp_std": {
+          "before": 0.038229959214100134,
+          "after": 0.03942530784813742,
+          "delta": 0.0011953486340372868,
+          "pct_change": 3.126732695012694
+        },
+        "kd_5.0_max_abs_d": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_avg_cop": {
+          "before": 2.76,
+          "after": 2.76,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_cold_max_run": {
+          "before": 0,
+          "after": 5,
+          "delta": 5,
+          "pct_change": Infinity
+        },
+        "kd_5.0_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 2.82,
+          "delta": 2.82,
+          "pct_change": Infinity
+        },
+        "kd_5.0_rollup_cold_ticks": {
+          "before": 0,
+          "after": 5,
+          "delta": 5,
+          "pct_change": Infinity
+        },
+        "kd_5.0_rollup_integral_rms": {
+          "before": 1.8,
+          "after": 1.73,
+          "delta": -0.07000000000000006,
+          "pct_change": -3.8888888888888924
+        },
+        "kd_5.0_rollup_itae": {
+          "before": 1.14,
+          "after": 14.2,
+          "delta": 13.059999999999999,
+          "pct_change": 1145.6140350877195
+        },
+        "kd_5.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0077,
+          "after": 0.0015,
+          "delta": -0.006200000000000001,
+          "pct_change": -80.51948051948052
+        },
+        "kd_5.0_rollup_overshoot": {
+          "before": 0.8,
+          "after": 2.82,
+          "delta": 2.0199999999999996,
+          "pct_change": 252.49999999999994
+        },
+        "kd_5.0_rollup_reversals": {
+          "before": 1,
+          "after": 0,
+          "delta": -1,
+          "pct_change": -100.0
+        },
+        "kd_5.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_setpoint_changes": {
+          "before": 2,
+          "after": 2,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_settling_time": {
+          "before": 4,
+          "after": 10,
+          "delta": 6,
+          "pct_change": 150.0
+        },
+        "kd_5.0_rollup_total_kwh": {
+          "before": 2.539,
+          "after": 2.54,
+          "delta": 0.0009999999999998899,
+          "pct_change": 0.03938558487593107
+        },
+        "profile_name": {
+          "before": "drafty_bungalow",
+          "after": "drafty_bungalow"
+        },
+        "scenario": {
+          "before": "oscillation_damping",
+          "after": "oscillation_damping"
+        }
+      }
+    },
+    "tests/hvac_bench/scenarios/test_derivative.py::TestDerivativeSetpointStep::test_kd_sweep_setpoint_step[drafty_bungalow]": {
+      "status": {
+        "before": "passed",
+        "after": "passed",
+        "flipped": false
+      },
+      "duration_s": {
+        "before": 2.691228665993549,
+        "after": 13.812856207950972,
+        "delta": 11.121627541957423,
+        "pct_change": 413.2546476815836
+      },
+      "metrics": {
+        "kd_0.0_d_at_step": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_max_abs_d": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_avg_cop": {
+          "before": 3.13,
+          "after": 3.13,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_cold_max_run": {
+          "before": 0,
+          "after": 2,
+          "delta": 2,
+          "pct_change": Infinity
+        },
+        "kd_0.0_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 1.43,
+          "delta": 1.43,
+          "pct_change": Infinity
+        },
+        "kd_0.0_rollup_cold_ticks": {
+          "before": 0,
+          "after": 2,
+          "delta": 2,
+          "pct_change": Infinity
+        },
+        "kd_0.0_rollup_integral_rms": {
+          "before": 3.59,
+          "after": 3.46,
+          "delta": -0.1299999999999999,
+          "pct_change": -3.6211699164345377
+        },
+        "kd_0.0_rollup_itae": {
+          "before": 0.0,
+          "after": 98.54,
+          "delta": 98.54,
+          "pct_change": Infinity
+        },
+        "kd_0.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0068,
+          "after": 0.0014,
+          "delta": -0.005399999999999999,
+          "pct_change": -79.41176470588235
+        },
+        "kd_0.0_rollup_overshoot": {
+          "before": 1.85,
+          "after": 2.14,
+          "delta": 0.29000000000000004,
+          "pct_change": 15.675675675675677
+        },
+        "kd_0.0_rollup_reversals": {
+          "before": 1,
+          "after": 0,
+          "delta": -1,
+          "pct_change": -100.0
+        },
+        "kd_0.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_setpoint_changes": {
+          "before": 2,
+          "after": 1,
+          "delta": -1,
+          "pct_change": -50.0
+        },
+        "kd_0.0_rollup_settling_time": {
+          "before": 0,
+          "after": 54,
+          "delta": 54,
+          "pct_change": Infinity
+        },
+        "kd_0.0_rollup_total_kwh": {
+          "before": 1.402,
+          "after": 1.4,
+          "delta": -0.0020000000000000018,
+          "pct_change": -0.14265335235378046
+        },
+        "kd_0.5_d_at_step": {
+          "before": -7.053298223230524e-05,
+          "after": -7.287062077247273e-05,
+          "delta": -2.337638540167493e-06,
+          "pct_change": -3.3142488325083423
+        },
+        "kd_0.5_max_abs_d": {
+          "before": 0.06043321584848721,
+          "after": 0.0547353154418059,
+          "delta": -0.005697900406681312,
+          "pct_change": -9.428424959159184
+        },
+        "kd_0.5_rollup_avg_cop": {
+          "before": 3.13,
+          "after": 3.13,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_cold_max_run": {
+          "before": 0,
+          "after": 2,
+          "delta": 2,
+          "pct_change": Infinity
+        },
+        "kd_0.5_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 1.43,
+          "delta": 1.43,
+          "pct_change": Infinity
+        },
+        "kd_0.5_rollup_cold_ticks": {
+          "before": 0,
+          "after": 2,
+          "delta": 2,
+          "pct_change": Infinity
+        },
+        "kd_0.5_rollup_integral_rms": {
+          "before": 3.59,
+          "after": 3.47,
+          "delta": -0.11999999999999966,
+          "pct_change": -3.3426183844011046
+        },
+        "kd_0.5_rollup_itae": {
+          "before": 0.0,
+          "after": 98.54,
+          "delta": 98.54,
+          "pct_change": Infinity
+        },
+        "kd_0.5_rollup_kwh_per_degree_hour": {
+          "before": 0.0068,
+          "after": 0.0014,
+          "delta": -0.005399999999999999,
+          "pct_change": -79.41176470588235
+        },
+        "kd_0.5_rollup_overshoot": {
+          "before": 1.85,
+          "after": 2.14,
+          "delta": 0.29000000000000004,
+          "pct_change": 15.675675675675677
+        },
+        "kd_0.5_rollup_reversals": {
+          "before": 1,
+          "after": 0,
+          "delta": -1,
+          "pct_change": -100.0
+        },
+        "kd_0.5_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_setpoint_changes": {
+          "before": 2,
+          "after": 1,
+          "delta": -1,
+          "pct_change": -50.0
+        },
+        "kd_0.5_rollup_settling_time": {
+          "before": 0,
+          "after": 54,
+          "delta": 54,
+          "pct_change": Infinity
+        },
+        "kd_0.5_rollup_total_kwh": {
+          "before": 1.402,
+          "after": 1.4,
+          "delta": -0.0020000000000000018,
+          "pct_change": -0.14265335235378046
+        },
+        "kd_1.0_d_at_step": {
+          "before": -0.00014110023568164034,
+          "after": -0.00014577582211876725,
+          "delta": -4.6755864371269054e-06,
+          "pct_change": -3.313663095273825
+        },
+        "kd_1.0_max_abs_d": {
+          "before": 0.12036756683255262,
+          "after": 0.10903713052930421,
+          "delta": -0.011330436303248412,
+          "pct_change": -9.413197094039928
+        },
+        "kd_1.0_rollup_avg_cop": {
+          "before": 3.13,
+          "after": 3.13,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_cold_max_run": {
+          "before": 0,
+          "after": 2,
+          "delta": 2,
+          "pct_change": Infinity
+        },
+        "kd_1.0_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 1.43,
+          "delta": 1.43,
+          "pct_change": Infinity
+        },
+        "kd_1.0_rollup_cold_ticks": {
+          "before": 0,
+          "after": 2,
+          "delta": 2,
+          "pct_change": Infinity
+        },
+        "kd_1.0_rollup_integral_rms": {
+          "before": 3.59,
+          "after": 3.47,
+          "delta": -0.11999999999999966,
+          "pct_change": -3.3426183844011046
+        },
+        "kd_1.0_rollup_itae": {
+          "before": 0.0,
+          "after": 98.54,
+          "delta": 98.54,
+          "pct_change": Infinity
+        },
+        "kd_1.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0068,
+          "after": 0.0014,
+          "delta": -0.005399999999999999,
+          "pct_change": -79.41176470588235
+        },
+        "kd_1.0_rollup_overshoot": {
+          "before": 1.85,
+          "after": 2.14,
+          "delta": 0.29000000000000004,
+          "pct_change": 15.675675675675677
+        },
+        "kd_1.0_rollup_reversals": {
+          "before": 1,
+          "after": 0,
+          "delta": -1,
+          "pct_change": -100.0
+        },
+        "kd_1.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_setpoint_changes": {
+          "before": 2,
+          "after": 1,
+          "delta": -1,
+          "pct_change": -50.0
+        },
+        "kd_1.0_rollup_settling_time": {
+          "before": 0,
+          "after": 54,
+          "delta": 54,
+          "pct_change": Infinity
+        },
+        "kd_1.0_rollup_total_kwh": {
+          "before": 1.402,
+          "after": 1.4,
+          "delta": -0.0020000000000000018,
+          "pct_change": -0.14265335235378046
+        },
+        "kd_2.0_d_at_step": {
+          "before": -0.0002823376774166289,
+          "after": -0.00029169007189048076,
+          "delta": -9.352394473851873e-06,
+          "pct_change": -3.3124854463016287
+        },
+        "kd_2.0_max_abs_d": {
+          "before": 0.23876421023246888,
+          "after": 0.2160513203845196,
+          "delta": -0.02271288984794928,
+          "pct_change": -9.512686103932932
+        },
+        "kd_2.0_rollup_avg_cop": {
+          "before": 3.13,
+          "after": 3.13,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_cold_max_run": {
+          "before": 0,
+          "after": 2,
+          "delta": 2,
+          "pct_change": Infinity
+        },
+        "kd_2.0_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 1.43,
+          "delta": 1.43,
+          "pct_change": Infinity
+        },
+        "kd_2.0_rollup_cold_ticks": {
+          "before": 0,
+          "after": 2,
+          "delta": 2,
+          "pct_change": Infinity
+        },
+        "kd_2.0_rollup_integral_rms": {
+          "before": 3.59,
+          "after": 3.48,
+          "delta": -0.10999999999999988,
+          "pct_change": -3.064066852367685
+        },
+        "kd_2.0_rollup_itae": {
+          "before": 0.0,
+          "after": 98.54,
+          "delta": 98.54,
+          "pct_change": Infinity
+        },
+        "kd_2.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0068,
+          "after": 0.0014,
+          "delta": -0.005399999999999999,
+          "pct_change": -79.41176470588235
+        },
+        "kd_2.0_rollup_overshoot": {
+          "before": 1.85,
+          "after": 2.14,
+          "delta": 0.29000000000000004,
+          "pct_change": 15.675675675675677
+        },
+        "kd_2.0_rollup_reversals": {
+          "before": 1,
+          "after": 0,
+          "delta": -1,
+          "pct_change": -100.0
+        },
+        "kd_2.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_setpoint_changes": {
+          "before": 2,
+          "after": 1,
+          "delta": -1,
+          "pct_change": -50.0
+        },
+        "kd_2.0_rollup_settling_time": {
+          "before": 0,
+          "after": 54,
+          "delta": 54,
+          "pct_change": Infinity
+        },
+        "kd_2.0_rollup_total_kwh": {
+          "before": 1.402,
+          "after": 1.4,
+          "delta": -0.0020000000000000018,
+          "pct_change": -0.14265335235378046
+        },
+        "kd_5.0_d_at_step": {
+          "before": -0.000706875743704259,
+          "after": -0.0007302655095673192,
+          "delta": -2.3389765863060215e-05,
+          "pct_change": -3.308893546196709
+        },
+        "kd_5.0_max_abs_d": {
+          "before": 0.5826016544898756,
+          "after": 0.5211564836614991,
+          "delta": -0.061445170828376416,
+          "pct_change": -10.546686634829014
+        },
+        "kd_5.0_rollup_avg_cop": {
+          "before": 3.13,
+          "after": 3.13,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_cold_max_run": {
+          "before": 0,
+          "after": 2,
+          "delta": 2,
+          "pct_change": Infinity
+        },
+        "kd_5.0_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 1.43,
+          "delta": 1.43,
+          "pct_change": Infinity
+        },
+        "kd_5.0_rollup_cold_ticks": {
+          "before": 0,
+          "after": 2,
+          "delta": 2,
+          "pct_change": Infinity
+        },
+        "kd_5.0_rollup_integral_rms": {
+          "before": 3.59,
+          "after": 3.52,
+          "delta": -0.06999999999999984,
+          "pct_change": -1.9498607242339787
+        },
+        "kd_5.0_rollup_itae": {
+          "before": 0.0,
+          "after": 98.54,
+          "delta": 98.54,
+          "pct_change": Infinity
+        },
+        "kd_5.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0068,
+          "after": 0.0014,
+          "delta": -0.005399999999999999,
+          "pct_change": -79.41176470588235
+        },
+        "kd_5.0_rollup_overshoot": {
+          "before": 1.85,
+          "after": 2.14,
+          "delta": 0.29000000000000004,
+          "pct_change": 15.675675675675677
+        },
+        "kd_5.0_rollup_reversals": {
+          "before": 1,
+          "after": 0,
+          "delta": -1,
+          "pct_change": -100.0
+        },
+        "kd_5.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_setpoint_changes": {
+          "before": 2,
+          "after": 1,
+          "delta": -1,
+          "pct_change": -50.0
+        },
+        "kd_5.0_rollup_settling_time": {
+          "before": 0,
+          "after": 54,
+          "delta": 54,
+          "pct_change": Infinity
+        },
+        "kd_5.0_rollup_total_kwh": {
+          "before": 1.402,
+          "after": 1.4,
+          "delta": -0.0020000000000000018,
+          "pct_change": -0.14265335235378046
+        },
+        "profile_name": {
+          "before": "drafty_bungalow",
+          "after": "drafty_bungalow"
+        },
+        "scenario": {
+          "before": "setpoint_step",
+          "after": "setpoint_step"
+        }
+      }
+    },
+    "tests/hvac_bench/scenarios/test_derivative.py::TestDerivativeSetpointStep::test_kd_sweep_setpoint_step[standard_residential]": {
+      "status": {
+        "before": "passed",
+        "after": "passed",
+        "flipped": false
+      },
+      "duration_s": {
+        "before": 2.6980466669192538,
+        "after": 13.741135458927602,
+        "delta": 11.043088792008348,
+        "pct_change": 409.29939898399994
+      },
+      "metrics": {
+        "kd_0.0_d_at_step": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_max_abs_d": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_avg_cop": {
+          "before": 3.05,
+          "after": 3.05,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_cold_max_run": {
+          "before": 1,
+          "after": 5,
+          "delta": 4,
+          "pct_change": 400.0
+        },
+        "kd_0.0_rollup_cold_max_undershoot": {
+          "before": 1.03,
+          "after": 1.67,
+          "delta": 0.6399999999999999,
+          "pct_change": 62.135922330097074
+        },
+        "kd_0.0_rollup_cold_ticks": {
+          "before": 1,
+          "after": 5,
+          "delta": 4,
+          "pct_change": 400.0
+        },
+        "kd_0.0_rollup_integral_rms": {
+          "before": 2.89,
+          "after": 2.87,
+          "delta": -0.020000000000000018,
+          "pct_change": -0.6920415224913501
+        },
+        "kd_0.0_rollup_itae": {
+          "before": 6.75,
+          "after": 312.24,
+          "delta": 305.49,
+          "pct_change": 4525.777777777778
+        },
+        "kd_0.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0036,
+          "after": 0.0007,
+          "delta": -0.0029,
+          "pct_change": -80.55555555555554
+        },
+        "kd_0.0_rollup_overshoot": {
+          "before": 1.92,
+          "after": 2.08,
+          "delta": 0.16000000000000014,
+          "pct_change": 8.333333333333341
+        },
+        "kd_0.0_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_setpoint_changes": {
+          "before": 1,
+          "after": 1,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_settling_time": {
+          "before": 12,
+          "after": 63,
+          "delta": 51,
+          "pct_change": 425.0
+        },
+        "kd_0.0_rollup_total_kwh": {
+          "before": 0.728,
+          "after": 0.729,
+          "delta": 0.0010000000000000009,
+          "pct_change": 0.13736263736263749
+        },
+        "kd_0.5_d_at_step": {
+          "before": -3.289400072793026e-05,
+          "after": -3.550927747249901e-05,
+          "delta": -2.61527674456875e-06,
+          "pct_change": -7.950619221419672
+        },
+        "kd_0.5_max_abs_d": {
+          "before": 0.026728877780590434,
+          "after": 0.02759959120900582,
+          "delta": 0.0008707134284153852,
+          "pct_change": 3.2575757035623343
+        },
+        "kd_0.5_rollup_avg_cop": {
+          "before": 3.05,
+          "after": 3.05,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_cold_max_run": {
+          "before": 1,
+          "after": 5,
+          "delta": 4,
+          "pct_change": 400.0
+        },
+        "kd_0.5_rollup_cold_max_undershoot": {
+          "before": 1.03,
+          "after": 1.67,
+          "delta": 0.6399999999999999,
+          "pct_change": 62.135922330097074
+        },
+        "kd_0.5_rollup_cold_ticks": {
+          "before": 1,
+          "after": 5,
+          "delta": 4,
+          "pct_change": 400.0
+        },
+        "kd_0.5_rollup_integral_rms": {
+          "before": 2.89,
+          "after": 2.87,
+          "delta": -0.020000000000000018,
+          "pct_change": -0.6920415224913501
+        },
+        "kd_0.5_rollup_itae": {
+          "before": 6.75,
+          "after": 312.24,
+          "delta": 305.49,
+          "pct_change": 4525.777777777778
+        },
+        "kd_0.5_rollup_kwh_per_degree_hour": {
+          "before": 0.0036,
+          "after": 0.0007,
+          "delta": -0.0029,
+          "pct_change": -80.55555555555554
+        },
+        "kd_0.5_rollup_overshoot": {
+          "before": 1.92,
+          "after": 2.08,
+          "delta": 0.16000000000000014,
+          "pct_change": 8.333333333333341
+        },
+        "kd_0.5_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_setpoint_changes": {
+          "before": 1,
+          "after": 1,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_settling_time": {
+          "before": 12,
+          "after": 63,
+          "delta": 51,
+          "pct_change": 425.0
+        },
+        "kd_0.5_rollup_total_kwh": {
+          "before": 0.728,
+          "after": 0.729,
+          "delta": 0.0010000000000000009,
+          "pct_change": 0.13736263736263749
+        },
+        "kd_1.0_d_at_step": {
+          "before": -6.582911413489145e-05,
+          "after": -7.106396679665962e-05,
+          "delta": -5.234852661768175e-06,
+          "pct_change": -7.952184577543241
+        },
+        "kd_1.0_max_abs_d": {
+          "before": 0.05323712793583225,
+          "after": 0.05489007144997822,
+          "delta": 0.0016529435141459728,
+          "pct_change": 3.1048698121699916
+        },
+        "kd_1.0_rollup_avg_cop": {
+          "before": 3.05,
+          "after": 3.05,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_cold_max_run": {
+          "before": 1,
+          "after": 5,
+          "delta": 4,
+          "pct_change": 400.0
+        },
+        "kd_1.0_rollup_cold_max_undershoot": {
+          "before": 1.03,
+          "after": 1.67,
+          "delta": 0.6399999999999999,
+          "pct_change": 62.135922330097074
+        },
+        "kd_1.0_rollup_cold_ticks": {
+          "before": 1,
+          "after": 5,
+          "delta": 4,
+          "pct_change": 400.0
+        },
+        "kd_1.0_rollup_integral_rms": {
+          "before": 2.89,
+          "after": 2.87,
+          "delta": -0.020000000000000018,
+          "pct_change": -0.6920415224913501
+        },
+        "kd_1.0_rollup_itae": {
+          "before": 6.75,
+          "after": 312.24,
+          "delta": 305.49,
+          "pct_change": 4525.777777777778
+        },
+        "kd_1.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0036,
+          "after": 0.0007,
+          "delta": -0.0029,
+          "pct_change": -80.55555555555554
+        },
+        "kd_1.0_rollup_overshoot": {
+          "before": 1.92,
+          "after": 2.08,
+          "delta": 0.16000000000000014,
+          "pct_change": 8.333333333333341
+        },
+        "kd_1.0_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_setpoint_changes": {
+          "before": 1,
+          "after": 1,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_settling_time": {
+          "before": 12,
+          "after": 63,
+          "delta": 51,
+          "pct_change": 425.0
+        },
+        "kd_1.0_rollup_total_kwh": {
+          "before": 0.728,
+          "after": 0.729,
+          "delta": 0.0010000000000000009,
+          "pct_change": 0.13736263736263749
+        },
+        "kd_2.0_d_at_step": {
+          "before": -0.00013182466248654032,
+          "after": -0.00014231119966577236,
+          "delta": -1.048653717923204e-05,
+          "pct_change": -7.954912974120259
+        },
+        "kd_2.0_max_abs_d": {
+          "before": 0.10560259796367301,
+          "after": 0.10885001320499096,
+          "delta": 0.0032474152413179552,
+          "pct_change": 3.075128172921519
+        },
+        "kd_2.0_rollup_avg_cop": {
+          "before": 3.05,
+          "after": 3.05,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_cold_max_run": {
+          "before": 1,
+          "after": 5,
+          "delta": 4,
+          "pct_change": 400.0
+        },
+        "kd_2.0_rollup_cold_max_undershoot": {
+          "before": 1.03,
+          "after": 1.67,
+          "delta": 0.6399999999999999,
+          "pct_change": 62.135922330097074
+        },
+        "kd_2.0_rollup_cold_ticks": {
+          "before": 1,
+          "after": 5,
+          "delta": 4,
+          "pct_change": 400.0
+        },
+        "kd_2.0_rollup_integral_rms": {
+          "before": 2.9,
+          "after": 2.87,
+          "delta": -0.029999999999999805,
+          "pct_change": -1.0344827586206828
+        },
+        "kd_2.0_rollup_itae": {
+          "before": 6.75,
+          "after": 312.24,
+          "delta": 305.49,
+          "pct_change": 4525.777777777778
+        },
+        "kd_2.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0036,
+          "after": 0.0007,
+          "delta": -0.0029,
+          "pct_change": -80.55555555555554
+        },
+        "kd_2.0_rollup_overshoot": {
+          "before": 1.92,
+          "after": 2.08,
+          "delta": 0.16000000000000014,
+          "pct_change": 8.333333333333341
+        },
+        "kd_2.0_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_setpoint_changes": {
+          "before": 1,
+          "after": 1,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_settling_time": {
+          "before": 12,
+          "after": 63,
+          "delta": 51,
+          "pct_change": 425.0
+        },
+        "kd_2.0_rollup_total_kwh": {
+          "before": 0.728,
+          "after": 0.729,
+          "delta": 0.0010000000000000009,
+          "pct_change": 0.13736263736263749
+        },
+        "kd_5.0_d_at_step": {
+          "before": -0.00033085121669680943,
+          "after": -0.000357185835656578,
+          "delta": -2.6334618959768566e-05,
+          "pct_change": -7.959656072204048
+        },
+        "kd_5.0_max_abs_d": {
+          "before": 0.25767830009353054,
+          "after": 0.2700638301785023,
+          "delta": 0.01238553008497173,
+          "pct_change": 4.806586383283382
+        },
+        "kd_5.0_rollup_avg_cop": {
+          "before": 3.05,
+          "after": 3.05,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_cold_max_run": {
+          "before": 1,
+          "after": 5,
+          "delta": 4,
+          "pct_change": 400.0
+        },
+        "kd_5.0_rollup_cold_max_undershoot": {
+          "before": 1.03,
+          "after": 1.67,
+          "delta": 0.6399999999999999,
+          "pct_change": 62.135922330097074
+        },
+        "kd_5.0_rollup_cold_ticks": {
+          "before": 1,
+          "after": 5,
+          "delta": 4,
+          "pct_change": 400.0
+        },
+        "kd_5.0_rollup_integral_rms": {
+          "before": 2.91,
+          "after": 2.88,
+          "delta": -0.03000000000000025,
+          "pct_change": -1.030927835051555
+        },
+        "kd_5.0_rollup_itae": {
+          "before": 6.75,
+          "after": 312.24,
+          "delta": 305.49,
+          "pct_change": 4525.777777777778
+        },
+        "kd_5.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0036,
+          "after": 0.0007,
+          "delta": -0.0029,
+          "pct_change": -80.55555555555554
+        },
+        "kd_5.0_rollup_overshoot": {
+          "before": 1.92,
+          "after": 2.08,
+          "delta": 0.16000000000000014,
+          "pct_change": 8.333333333333341
+        },
+        "kd_5.0_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_setpoint_changes": {
+          "before": 1,
+          "after": 1,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_settling_time": {
+          "before": 12,
+          "after": 63,
+          "delta": 51,
+          "pct_change": 425.0
+        },
+        "kd_5.0_rollup_total_kwh": {
+          "before": 0.728,
+          "after": 0.729,
+          "delta": 0.0010000000000000009,
+          "pct_change": 0.13736263736263749
+        },
+        "profile_name": {
+          "before": "standard_residential",
+          "after": "standard_residential"
+        },
+        "scenario": {
+          "before": "setpoint_step",
+          "after": "setpoint_step"
+        }
+      }
+    },
+    "tests/hvac_bench/scenarios/test_derivative.py::TestDerivativeSetpointStep::test_kd_sweep_setpoint_step[well_insulated]": {
+      "status": {
+        "before": "passed",
+        "after": "passed",
+        "flipped": false
+      },
+      "duration_s": {
+        "before": 2.69729495793581,
+        "after": 14.204814792028628,
+        "delta": 11.507519834092818,
+        "pct_change": 426.63186687225743
+      },
+      "metrics": {
+        "kd_0.0_d_at_step": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_max_abs_d": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_avg_cop": {
+          "before": 3.05,
+          "after": 3.05,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_cold_max_run": {
+          "before": 2,
+          "after": 14,
+          "delta": 12,
+          "pct_change": 600.0
+        },
+        "kd_0.0_rollup_cold_max_undershoot": {
+          "before": 1.47,
+          "after": 1.79,
+          "delta": 0.32000000000000006,
+          "pct_change": 21.768707482993204
+        },
+        "kd_0.0_rollup_cold_ticks": {
+          "before": 2,
+          "after": 14,
+          "delta": 12,
+          "pct_change": 600.0
+        },
+        "kd_0.0_rollup_integral_rms": {
+          "before": 2.73,
+          "after": 2.72,
+          "delta": -0.009999999999999787,
+          "pct_change": -0.3663003663003585
+        },
+        "kd_0.0_rollup_itae": {
+          "before": 32.49,
+          "after": 1024.56,
+          "delta": 992.0699999999999,
+          "pct_change": 3053.4626038781157
+        },
+        "kd_0.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0015,
+          "after": 0.0003,
+          "delta": -0.0012000000000000001,
+          "pct_change": -80.0
+        },
+        "kd_0.0_rollup_overshoot": {
+          "before": 1.96,
+          "after": 2.03,
+          "delta": 0.06999999999999984,
+          "pct_change": 3.5714285714285636
+        },
+        "kd_0.0_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_setpoint_changes": {
+          "before": 1,
+          "after": 1,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_settling_time": {
+          "before": 18,
+          "after": 90,
+          "delta": 72,
+          "pct_change": 400.0
+        },
+        "kd_0.0_rollup_total_kwh": {
+          "before": 0.3,
+          "after": 0.301,
+          "delta": 0.0010000000000000009,
+          "pct_change": 0.33333333333333365
+        },
+        "kd_0.5_d_at_step": {
+          "before": -9.438057951973443e-05,
+          "after": -0.00011395841161825879,
+          "delta": -1.9577832098524353e-05,
+          "pct_change": -20.743496382569617
+        },
+        "kd_0.5_max_abs_d": {
+          "before": 0.012906509868816132,
+          "after": 0.012832858754796946,
+          "delta": -7.365111401918568e-05,
+          "pct_change": -0.5706508945314233
+        },
+        "kd_0.5_rollup_avg_cop": {
+          "before": 3.05,
+          "after": 3.05,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_cold_max_run": {
+          "before": 2,
+          "after": 14,
+          "delta": 12,
+          "pct_change": 600.0
+        },
+        "kd_0.5_rollup_cold_max_undershoot": {
+          "before": 1.47,
+          "after": 1.79,
+          "delta": 0.32000000000000006,
+          "pct_change": 21.768707482993204
+        },
+        "kd_0.5_rollup_cold_ticks": {
+          "before": 2,
+          "after": 14,
+          "delta": 12,
+          "pct_change": 600.0
+        },
+        "kd_0.5_rollup_integral_rms": {
+          "before": 2.73,
+          "after": 2.72,
+          "delta": -0.009999999999999787,
+          "pct_change": -0.3663003663003585
+        },
+        "kd_0.5_rollup_itae": {
+          "before": 32.49,
+          "after": 1024.56,
+          "delta": 992.0699999999999,
+          "pct_change": 3053.4626038781157
+        },
+        "kd_0.5_rollup_kwh_per_degree_hour": {
+          "before": 0.0015,
+          "after": 0.0003,
+          "delta": -0.0012000000000000001,
+          "pct_change": -80.0
+        },
+        "kd_0.5_rollup_overshoot": {
+          "before": 1.96,
+          "after": 2.03,
+          "delta": 0.06999999999999984,
+          "pct_change": 3.5714285714285636
+        },
+        "kd_0.5_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_setpoint_changes": {
+          "before": 1,
+          "after": 1,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_settling_time": {
+          "before": 18,
+          "after": 90,
+          "delta": 72,
+          "pct_change": 400.0
+        },
+        "kd_0.5_rollup_total_kwh": {
+          "before": 0.3,
+          "after": 0.301,
+          "delta": 0.0010000000000000009,
+          "pct_change": 0.33333333333333365
+        },
+        "kd_1.0_d_at_step": {
+          "before": -0.00018899571912628732,
+          "after": -0.00022817562198671227,
+          "delta": -3.917990286042496e-05,
+          "pct_change": -20.730576883725536
+        },
+        "kd_1.0_max_abs_d": {
+          "before": 0.025707136310118135,
+          "after": 0.02563418330201882,
+          "delta": -7.295300809931349e-05,
+          "pct_change": -0.2837850440408632
+        },
+        "kd_1.0_rollup_avg_cop": {
+          "before": 3.05,
+          "after": 3.05,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_cold_max_run": {
+          "before": 2,
+          "after": 14,
+          "delta": 12,
+          "pct_change": 600.0
+        },
+        "kd_1.0_rollup_cold_max_undershoot": {
+          "before": 1.47,
+          "after": 1.79,
+          "delta": 0.32000000000000006,
+          "pct_change": 21.768707482993204
+        },
+        "kd_1.0_rollup_cold_ticks": {
+          "before": 2,
+          "after": 14,
+          "delta": 12,
+          "pct_change": 600.0
+        },
+        "kd_1.0_rollup_integral_rms": {
+          "before": 2.73,
+          "after": 2.72,
+          "delta": -0.009999999999999787,
+          "pct_change": -0.3663003663003585
+        },
+        "kd_1.0_rollup_itae": {
+          "before": 32.49,
+          "after": 1024.56,
+          "delta": 992.0699999999999,
+          "pct_change": 3053.4626038781157
+        },
+        "kd_1.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0015,
+          "after": 0.0003,
+          "delta": -0.0012000000000000001,
+          "pct_change": -80.0
+        },
+        "kd_1.0_rollup_overshoot": {
+          "before": 1.96,
+          "after": 2.03,
+          "delta": 0.06999999999999984,
+          "pct_change": 3.5714285714285636
+        },
+        "kd_1.0_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_setpoint_changes": {
+          "before": 1,
+          "after": 1,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_settling_time": {
+          "before": 18,
+          "after": 90,
+          "delta": 72,
+          "pct_change": 400.0
+        },
+        "kd_1.0_rollup_total_kwh": {
+          "before": 0.3,
+          "after": 0.301,
+          "delta": 0.0010000000000000009,
+          "pct_change": 0.33333333333333365
+        },
+        "kd_2.0_d_at_step": {
+          "before": -0.0003789340102102558,
+          "after": -0.00045739063624814343,
+          "delta": -7.845662603788762e-05,
+          "pct_change": -20.704561724178593
+        },
+        "kd_2.0_max_abs_d": {
+          "before": 0.05099595789861276,
+          "after": 0.051111202024352535,
+          "delta": 0.00011524412573977322,
+          "pct_change": 0.22598678500930403
+        },
+        "kd_2.0_rollup_avg_cop": {
+          "before": 3.05,
+          "after": 3.05,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_cold_max_run": {
+          "before": 2,
+          "after": 14,
+          "delta": 12,
+          "pct_change": 600.0
+        },
+        "kd_2.0_rollup_cold_max_undershoot": {
+          "before": 1.47,
+          "after": 1.79,
+          "delta": 0.32000000000000006,
+          "pct_change": 21.768707482993204
+        },
+        "kd_2.0_rollup_cold_ticks": {
+          "before": 2,
+          "after": 14,
+          "delta": 12,
+          "pct_change": 600.0
+        },
+        "kd_2.0_rollup_integral_rms": {
+          "before": 2.73,
+          "after": 2.72,
+          "delta": -0.009999999999999787,
+          "pct_change": -0.3663003663003585
+        },
+        "kd_2.0_rollup_itae": {
+          "before": 32.49,
+          "after": 1024.56,
+          "delta": 992.0699999999999,
+          "pct_change": 3053.4626038781157
+        },
+        "kd_2.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0015,
+          "after": 0.0003,
+          "delta": -0.0012000000000000001,
+          "pct_change": -80.0
+        },
+        "kd_2.0_rollup_overshoot": {
+          "before": 1.96,
+          "after": 2.03,
+          "delta": 0.06999999999999984,
+          "pct_change": 3.5714285714285636
+        },
+        "kd_2.0_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_setpoint_changes": {
+          "before": 1,
+          "after": 1,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_settling_time": {
+          "before": 18,
+          "after": 90,
+          "delta": 72,
+          "pct_change": 400.0
+        },
+        "kd_2.0_rollup_total_kwh": {
+          "before": 0.3,
+          "after": 0.301,
+          "delta": 0.0010000000000000009,
+          "pct_change": 0.33333333333333365
+        },
+        "kd_5.0_d_at_step": {
+          "before": -0.0009544921650477334,
+          "after": -0.0011513570126422236,
+          "delta": -0.0001968648475944902,
+          "pct_change": -20.62508785335552
+        },
+        "kd_5.0_max_abs_d": {
+          "before": 0.12445315959880864,
+          "after": 0.12601303308792472,
+          "delta": 0.0015598734891160843,
+          "pct_change": 1.2533819905774548
+        },
+        "kd_5.0_rollup_avg_cop": {
+          "before": 3.05,
+          "after": 3.05,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_cold_max_run": {
+          "before": 2,
+          "after": 14,
+          "delta": 12,
+          "pct_change": 600.0
+        },
+        "kd_5.0_rollup_cold_max_undershoot": {
+          "before": 1.47,
+          "after": 1.79,
+          "delta": 0.32000000000000006,
+          "pct_change": 21.768707482993204
+        },
+        "kd_5.0_rollup_cold_ticks": {
+          "before": 2,
+          "after": 14,
+          "delta": 12,
+          "pct_change": 600.0
+        },
+        "kd_5.0_rollup_integral_rms": {
+          "before": 2.73,
+          "after": 2.73,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_itae": {
+          "before": 32.49,
+          "after": 1024.56,
+          "delta": 992.0699999999999,
+          "pct_change": 3053.4626038781157
+        },
+        "kd_5.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0015,
+          "after": 0.0003,
+          "delta": -0.0012000000000000001,
+          "pct_change": -80.0
+        },
+        "kd_5.0_rollup_overshoot": {
+          "before": 1.96,
+          "after": 2.03,
+          "delta": 0.06999999999999984,
+          "pct_change": 3.5714285714285636
+        },
+        "kd_5.0_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_setpoint_changes": {
+          "before": 1,
+          "after": 1,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_settling_time": {
+          "before": 18,
+          "after": 90,
+          "delta": 72,
+          "pct_change": 400.0
+        },
+        "kd_5.0_rollup_total_kwh": {
+          "before": 0.3,
+          "after": 0.301,
+          "delta": 0.0010000000000000009,
+          "pct_change": 0.33333333333333365
+        },
+        "profile_name": {
+          "before": "well_insulated",
+          "after": "well_insulated"
+        },
+        "scenario": {
+          "before": "setpoint_step",
+          "after": "setpoint_step"
+        }
+      }
+    },
+    "tests/hvac_bench/scenarios/test_derivative.py::TestDerivativeSteadyStateNoise::test_kd_sweep_noisy_steady[drafty_bungalow]": {
+      "status": {
+        "before": "passed",
+        "after": "passed",
+        "flipped": false
+      },
+      "duration_s": {
+        "before": 3.5812162910588086,
+        "after": 18.48055812495295,
+        "delta": 14.899341833894141,
+        "pct_change": 416.0413843501494
+      },
+      "metrics": {
+        "kd_0.0_d_std": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_max_abs_d": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_avg_cop": {
+          "before": 3.32,
+          "after": 3.32,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_integral_rms": {
+          "before": 1.81,
+          "after": 1.6,
+          "delta": -0.20999999999999996,
+          "pct_change": -11.60220994475138
+        },
+        "kd_0.0_rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0061,
+          "after": 0.0012,
+          "delta": -0.004900000000000001,
+          "pct_change": -80.32786885245903
+        },
+        "kd_0.0_rollup_overshoot": {
+          "before": 0.25,
+          "after": 0.25,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_setpoint_changes": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_total_kwh": {
+          "before": 1.523,
+          "after": 1.523,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_d_std": {
+          "before": 0.00577203999769257,
+          "after": 0.024076788118141023,
+          "delta": 0.018304748120448452,
+          "pct_change": 317.1278807452124
+        },
+        "kd_0.5_max_abs_d": {
+          "before": 0.01563477052706233,
+          "after": 0.06826200927361711,
+          "delta": 0.05262723874655478,
+          "pct_change": 336.6038449714496
+        },
+        "kd_0.5_rollup_avg_cop": {
+          "before": 3.32,
+          "after": 3.32,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_integral_rms": {
+          "before": 1.81,
+          "after": 1.59,
+          "delta": -0.21999999999999997,
+          "pct_change": -12.154696132596683
+        },
+        "kd_0.5_rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_kwh_per_degree_hour": {
+          "before": 0.0061,
+          "after": 0.0012,
+          "delta": -0.004900000000000001,
+          "pct_change": -80.32786885245903
+        },
+        "kd_0.5_rollup_overshoot": {
+          "before": 0.25,
+          "after": 0.25,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_setpoint_changes": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_total_kwh": {
+          "before": 1.523,
+          "after": 1.523,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_d_std": {
+          "before": 0.011477783120525296,
+          "after": 0.047427473244286186,
+          "delta": 0.03594969012376089,
+          "pct_change": 313.2110943922035
+        },
+        "kd_1.0_max_abs_d": {
+          "before": 0.03103519505694154,
+          "after": 0.15035374528342696,
+          "delta": 0.11931855022648542,
+          "pct_change": 384.46205995343934
+        },
+        "kd_1.0_rollup_avg_cop": {
+          "before": 3.32,
+          "after": 3.32,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_integral_rms": {
+          "before": 1.81,
+          "after": 1.61,
+          "delta": -0.19999999999999996,
+          "pct_change": -11.049723756906074
+        },
+        "kd_1.0_rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0061,
+          "after": 0.0012,
+          "delta": -0.004900000000000001,
+          "pct_change": -80.32786885245903
+        },
+        "kd_1.0_rollup_overshoot": {
+          "before": 0.25,
+          "after": 0.26,
+          "delta": 0.010000000000000009,
+          "pct_change": 4.0000000000000036
+        },
+        "kd_1.0_rollup_reversals": {
+          "before": 0,
+          "after": 1,
+          "delta": 1,
+          "pct_change": Infinity
+        },
+        "kd_1.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_setpoint_changes": {
+          "before": 0,
+          "after": 2,
+          "delta": 2,
+          "pct_change": Infinity
+        },
+        "kd_1.0_rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_total_kwh": {
+          "before": 1.523,
+          "after": 1.52,
+          "delta": -0.0029999999999998916,
+          "pct_change": -0.19697964543663113
+        },
+        "kd_2.0_d_std": {
+          "before": 0.02269527363493416,
+          "after": 0.09120258642387563,
+          "delta": 0.06850731278894147,
+          "pct_change": 301.85717912424815
+        },
+        "kd_2.0_max_abs_d": {
+          "before": 0.06115106739068902,
+          "after": 0.28090839137716833,
+          "delta": 0.21975732398647932,
+          "pct_change": 359.3679282529417
+        },
+        "kd_2.0_rollup_avg_cop": {
+          "before": 3.32,
+          "after": 3.32,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_integral_rms": {
+          "before": 1.81,
+          "after": 1.65,
+          "delta": -0.16000000000000014,
+          "pct_change": -8.83977900552487
+        },
+        "kd_2.0_rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0061,
+          "after": 0.0012,
+          "delta": -0.004900000000000001,
+          "pct_change": -80.32786885245903
+        },
+        "kd_2.0_rollup_overshoot": {
+          "before": 0.25,
+          "after": 0.27,
+          "delta": 0.020000000000000018,
+          "pct_change": 8.000000000000007
+        },
+        "kd_2.0_rollup_reversals": {
+          "before": 0,
+          "after": 3,
+          "delta": 3,
+          "pct_change": Infinity
+        },
+        "kd_2.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_setpoint_changes": {
+          "before": 0,
+          "after": 4,
+          "delta": 4,
+          "pct_change": Infinity
+        },
+        "kd_2.0_rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_total_kwh": {
+          "before": 1.523,
+          "after": 1.518,
+          "delta": -0.004999999999999893,
+          "pct_change": -0.3282994090610567
+        },
+        "kd_5.0_d_std": {
+          "before": 0.06918638447410655,
+          "after": 0.20248674669000047,
+          "delta": 0.13330036221589392,
+          "pct_change": 192.6684899480221
+        },
+        "kd_5.0_max_abs_d": {
+          "before": 0.2918075438699388,
+          "after": 0.6515956154464383,
+          "delta": 0.3597880715764995,
+          "pct_change": 123.29635718289045
+        },
+        "kd_5.0_rollup_avg_cop": {
+          "before": 3.32,
+          "after": 3.33,
+          "delta": 0.010000000000000231,
+          "pct_change": 0.3012048192771154
+        },
+        "kd_5.0_rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_integral_rms": {
+          "before": 1.85,
+          "after": 1.79,
+          "delta": -0.06000000000000005,
+          "pct_change": -3.243243243243246
+        },
+        "kd_5.0_rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0061,
+          "after": 0.0012,
+          "delta": -0.004900000000000001,
+          "pct_change": -80.32786885245903
+        },
+        "kd_5.0_rollup_overshoot": {
+          "before": 0.31,
+          "after": 0.28,
+          "delta": -0.02999999999999997,
+          "pct_change": -9.677419354838701
+        },
+        "kd_5.0_rollup_reversals": {
+          "before": 1,
+          "after": 7,
+          "delta": 6,
+          "pct_change": 600.0
+        },
+        "kd_5.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_setpoint_changes": {
+          "before": 2,
+          "after": 8,
+          "delta": 6,
+          "pct_change": 300.0
+        },
+        "kd_5.0_rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_total_kwh": {
+          "before": 1.519,
+          "after": 1.513,
+          "delta": -0.006000000000000005,
+          "pct_change": -0.39499670836076406
+        },
+        "profile_name": {
+          "before": "drafty_bungalow",
+          "after": "drafty_bungalow"
+        },
+        "scenario": {
+          "before": "noisy_steady",
+          "after": "noisy_steady"
+        }
+      }
+    },
+    "tests/hvac_bench/scenarios/test_derivative.py::TestDerivativeSteadyStateNoise::test_kd_sweep_noisy_steady[standard_residential]": {
+      "status": {
+        "before": "passed",
+        "after": "passed",
+        "flipped": false
+      },
+      "duration_s": {
+        "before": 3.5883424999192357,
+        "after": 18.419641249929555,
+        "delta": 14.831298750010319,
+        "pct_change": 413.3189278989988
+      },
+      "metrics": {
+        "kd_0.0_d_std": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_max_abs_d": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_avg_cop": {
+          "before": 3.24,
+          "after": 3.24,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_integral_rms": {
+          "before": 1.68,
+          "after": 1.53,
+          "delta": -0.1499999999999999,
+          "pct_change": -8.928571428571423
+        },
+        "kd_0.0_rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0031,
+          "after": 0.0006,
+          "delta": -0.0025,
+          "pct_change": -80.64516129032259
+        },
+        "kd_0.0_rollup_overshoot": {
+          "before": 0.19,
+          "after": 0.19,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_setpoint_changes": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_total_kwh": {
+          "before": 0.781,
+          "after": 0.781,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_d_std": {
+          "before": 0.0057505315218414526,
+          "after": 0.024051261492701367,
+          "delta": 0.018300729970859915,
+          "pct_change": 318.2441466732383
+        },
+        "kd_0.5_max_abs_d": {
+          "before": 0.015627127373523782,
+          "after": 0.06825853127608131,
+          "delta": 0.05263140390255752,
+          "pct_change": 336.795129677692
+        },
+        "kd_0.5_rollup_avg_cop": {
+          "before": 3.24,
+          "after": 3.24,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_integral_rms": {
+          "before": 1.68,
+          "after": 1.52,
+          "delta": -0.15999999999999992,
+          "pct_change": -9.523809523809518
+        },
+        "kd_0.5_rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_kwh_per_degree_hour": {
+          "before": 0.0031,
+          "after": 0.0006,
+          "delta": -0.0025,
+          "pct_change": -80.64516129032259
+        },
+        "kd_0.5_rollup_overshoot": {
+          "before": 0.19,
+          "after": 0.19,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_setpoint_changes": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_total_kwh": {
+          "before": 0.781,
+          "after": 0.781,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_d_std": {
+          "before": 0.011434798000140555,
+          "after": 0.046840980541958004,
+          "delta": 0.035406182541817446,
+          "pct_change": 309.6354001302186
+        },
+        "kd_1.0_max_abs_d": {
+          "before": 0.031019909651224226,
+          "after": 0.13217492193753527,
+          "delta": 0.10115501228631105,
+          "pct_change": 326.09705645070727
+        },
+        "kd_1.0_rollup_avg_cop": {
+          "before": 3.24,
+          "after": 3.24,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_integral_rms": {
+          "before": 1.68,
+          "after": 1.52,
+          "delta": -0.15999999999999992,
+          "pct_change": -9.523809523809518
+        },
+        "kd_1.0_rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0031,
+          "after": 0.0006,
+          "delta": -0.0025,
+          "pct_change": -80.64516129032259
+        },
+        "kd_1.0_rollup_overshoot": {
+          "before": 0.19,
+          "after": 0.19,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_setpoint_changes": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_total_kwh": {
+          "before": 0.781,
+          "after": 0.781,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_d_std": {
+          "before": 0.022609416926236955,
+          "after": 0.08986468763462936,
+          "delta": 0.0672552707083924,
+          "pct_change": 297.4657459226489
+        },
+        "kd_2.0_max_abs_d": {
+          "before": 0.0611205001912922,
+          "after": 0.2494921282806377,
+          "delta": 0.1883716280893455,
+          "pct_change": 308.19713107678837
+        },
+        "kd_2.0_rollup_avg_cop": {
+          "before": 3.24,
+          "after": 3.24,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_integral_rms": {
+          "before": 1.68,
+          "after": 1.57,
+          "delta": -0.10999999999999988,
+          "pct_change": -6.547619047619041
+        },
+        "kd_2.0_rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0031,
+          "after": 0.0006,
+          "delta": -0.0025,
+          "pct_change": -80.64516129032259
+        },
+        "kd_2.0_rollup_overshoot": {
+          "before": 0.19,
+          "after": 0.19,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_reversals": {
+          "before": 0,
+          "after": 3,
+          "delta": 3,
+          "pct_change": Infinity
+        },
+        "kd_2.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_setpoint_changes": {
+          "before": 0,
+          "after": 4,
+          "delta": 4,
+          "pct_change": Infinity
+        },
+        "kd_2.0_rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_total_kwh": {
+          "before": 0.781,
+          "after": 0.778,
+          "delta": -0.0030000000000000027,
+          "pct_change": -0.3841229193341873
+        },
+        "kd_5.0_d_std": {
+          "before": 0.054664437527552096,
+          "after": 0.19633791792532848,
+          "delta": 0.14167348039777639,
+          "pct_change": 259.1693737384013
+        },
+        "kd_5.0_max_abs_d": {
+          "before": 0.14624774745633684,
+          "after": 0.5293478155922616,
+          "delta": 0.3831000681359248,
+          "pct_change": 261.95279913648017
+        },
+        "kd_5.0_rollup_avg_cop": {
+          "before": 3.24,
+          "after": 3.24,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_integral_rms": {
+          "before": 1.68,
+          "after": 1.58,
+          "delta": -0.09999999999999987,
+          "pct_change": -5.952380952380945
+        },
+        "kd_5.0_rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0031,
+          "after": 0.0006,
+          "delta": -0.0025,
+          "pct_change": -80.64516129032259
+        },
+        "kd_5.0_rollup_overshoot": {
+          "before": 0.19,
+          "after": 0.19,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_reversals": {
+          "before": 0,
+          "after": 3,
+          "delta": 3,
+          "pct_change": Infinity
+        },
+        "kd_5.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_setpoint_changes": {
+          "before": 0,
+          "after": 4,
+          "delta": 4,
+          "pct_change": Infinity
+        },
+        "kd_5.0_rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_total_kwh": {
+          "before": 0.781,
+          "after": 0.778,
+          "delta": -0.0030000000000000027,
+          "pct_change": -0.3841229193341873
+        },
+        "profile_name": {
+          "before": "standard_residential",
+          "after": "standard_residential"
+        },
+        "scenario": {
+          "before": "noisy_steady",
+          "after": "noisy_steady"
+        }
+      }
+    },
+    "tests/hvac_bench/scenarios/test_derivative.py::TestDerivativeSteadyStateNoise::test_kd_sweep_noisy_steady[well_insulated]": {
+      "status": {
+        "before": "passed",
+        "after": "passed",
+        "flipped": false
+      },
+      "duration_s": {
+        "before": 3.6153978750808164,
+        "after": 18.93327516701538,
+        "delta": 15.317877291934565,
+        "pct_change": 423.68441375465926
+      },
+      "metrics": {
+        "kd_0.0_d_std": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_max_abs_d": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_avg_cop": {
+          "before": 3.24,
+          "after": 3.24,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_integral_rms": {
+          "before": 1.72,
+          "after": 1.58,
+          "delta": -0.1399999999999999,
+          "pct_change": -8.139534883720925
+        },
+        "kd_0.0_rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0013,
+          "after": 0.0003,
+          "delta": -0.001,
+          "pct_change": -76.92307692307693
+        },
+        "kd_0.0_rollup_overshoot": {
+          "before": 0.17,
+          "after": 0.17,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_setpoint_changes": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.0_rollup_total_kwh": {
+          "before": 0.313,
+          "after": 0.313,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_d_std": {
+          "before": 0.005741440798436257,
+          "after": 0.024041865843182887,
+          "delta": 0.018300425044746632,
+          "pct_change": 318.7427283014213
+        },
+        "kd_0.5_max_abs_d": {
+          "before": 0.01562764539514087,
+          "after": 0.06826145154455744,
+          "delta": 0.05263380614941657,
+          "pct_change": 336.7993374470993
+        },
+        "kd_0.5_rollup_avg_cop": {
+          "before": 3.24,
+          "after": 3.24,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_integral_rms": {
+          "before": 1.71,
+          "after": 1.58,
+          "delta": -0.1299999999999999,
+          "pct_change": -7.602339181286544
+        },
+        "kd_0.5_rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_kwh_per_degree_hour": {
+          "before": 0.0013,
+          "after": 0.0003,
+          "delta": -0.001,
+          "pct_change": -76.92307692307693
+        },
+        "kd_0.5_rollup_overshoot": {
+          "before": 0.17,
+          "after": 0.17,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_setpoint_changes": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_0.5_rollup_total_kwh": {
+          "before": 0.313,
+          "after": 0.313,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_d_std": {
+          "before": 0.011416573073648614,
+          "after": 0.0468222862930789,
+          "delta": 0.035405713219430285,
+          "pct_change": 310.1255778860004
+        },
+        "kd_1.0_max_abs_d": {
+          "before": 0.03102094673047864,
+          "after": 0.13218076395201223,
+          "delta": 0.10115981722153358,
+          "pct_change": 326.101643835848
+        },
+        "kd_1.0_rollup_avg_cop": {
+          "before": 3.24,
+          "after": 3.24,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_integral_rms": {
+          "before": 1.71,
+          "after": 1.58,
+          "delta": -0.1299999999999999,
+          "pct_change": -7.602339181286544
+        },
+        "kd_1.0_rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0013,
+          "after": 0.0003,
+          "delta": -0.001,
+          "pct_change": -76.92307692307693
+        },
+        "kd_1.0_rollup_overshoot": {
+          "before": 0.17,
+          "after": 0.17,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_setpoint_changes": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_1.0_rollup_total_kwh": {
+          "before": 0.313,
+          "after": 0.313,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_d_std": {
+          "before": 0.022572793152598233,
+          "after": 0.0891534389902148,
+          "delta": 0.06658064583761657,
+          "pct_change": 294.95971272812034
+        },
+        "kd_2.0_max_abs_d": {
+          "before": 0.061122578495176064,
+          "after": 0.24837175348764834,
+          "delta": 0.1872491749924723,
+          "pct_change": 306.35025485263264
+        },
+        "kd_2.0_rollup_avg_cop": {
+          "before": 3.24,
+          "after": 3.24,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_integral_rms": {
+          "before": 1.71,
+          "after": 1.59,
+          "delta": -0.11999999999999988,
+          "pct_change": -7.017543859649117
+        },
+        "kd_2.0_rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0013,
+          "after": 0.0003,
+          "delta": -0.001,
+          "pct_change": -76.92307692307693
+        },
+        "kd_2.0_rollup_overshoot": {
+          "before": 0.17,
+          "after": 0.17,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_reversals": {
+          "before": 0,
+          "after": 1,
+          "delta": 1,
+          "pct_change": Infinity
+        },
+        "kd_2.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_setpoint_changes": {
+          "before": 0,
+          "after": 2,
+          "delta": 2,
+          "pct_change": Infinity
+        },
+        "kd_2.0_rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_2.0_rollup_total_kwh": {
+          "before": 0.313,
+          "after": 0.313,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_d_std": {
+          "before": 0.05457158314164906,
+          "after": 0.19502558196195735,
+          "delta": 0.1404539988203083,
+          "pct_change": 257.37570862794655
+        },
+        "kd_5.0_max_abs_d": {
+          "before": 0.14625297433225967,
+          "after": 0.5231058672349077,
+          "delta": 0.376852892902648,
+          "pct_change": 257.67195137276866
+        },
+        "kd_5.0_rollup_avg_cop": {
+          "before": 3.24,
+          "after": 3.24,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_integral_rms": {
+          "before": 1.71,
+          "after": 1.62,
+          "delta": -0.08999999999999986,
+          "pct_change": -5.2631578947368345
+        },
+        "kd_5.0_rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_kwh_per_degree_hour": {
+          "before": 0.0013,
+          "after": 0.0003,
+          "delta": -0.001,
+          "pct_change": -76.92307692307693
+        },
+        "kd_5.0_rollup_overshoot": {
+          "before": 0.17,
+          "after": 0.16,
+          "delta": -0.010000000000000009,
+          "pct_change": -5.8823529411764754
+        },
+        "kd_5.0_rollup_reversals": {
+          "before": 0,
+          "after": 3,
+          "delta": 3,
+          "pct_change": Infinity
+        },
+        "kd_5.0_rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_setpoint_changes": {
+          "before": 0,
+          "after": 4,
+          "delta": 4,
+          "pct_change": Infinity
+        },
+        "kd_5.0_rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "kd_5.0_rollup_total_kwh": {
+          "before": 0.313,
+          "after": 0.312,
+          "delta": -0.0010000000000000009,
+          "pct_change": -0.31948881789137407
+        },
+        "profile_name": {
+          "before": "well_insulated",
+          "after": "well_insulated"
+        },
+        "scenario": {
+          "before": "noisy_steady",
+          "after": "noisy_steady"
+        }
+      }
+    }
+  }
+}

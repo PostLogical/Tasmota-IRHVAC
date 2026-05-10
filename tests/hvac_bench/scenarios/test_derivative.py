@@ -29,6 +29,8 @@ def _make_controller(kd, profile, seed_factor=1.0, **overrides):
 
 
 def _make_model(profile, initial_temp=20.0, outdoor=5.0, **kwargs):
+    """2R2C model with hp_lag_minutes=2.0 default (matches test_heating)."""
+    kwargs.setdefault("hp_lag_minutes", 2.0)
     return ThermalModel(profile=profile, initial_temp=initial_temp,
                         outdoor_temp=outdoor, **kwargs)
 
@@ -70,7 +72,8 @@ class TestDerivativeColdStart:
             ctrl.set_desired_temp(20.5)
             model = _make_model(profile, initial_temp=17.0, outdoor=2.0)
 
-            history = run_scenario(ctrl, model, n_ticks=48, mode="heat")
+            # 12h recovery (was n_ticks=48 at 15-min cadence).
+            history = run_scenario(ctrl, model, duration_minutes=12 * 60, mode="heat")
             m = compute_all_metrics(history, desired=20.5)
 
             d_terms = [h["d_term"] for h in history]
@@ -118,16 +121,18 @@ class TestDerivativeColdSnap:
         profile = QUICK_PROFILES[profile_name]
         results = {}
 
-        def outdoor(tick):
-            return max(-5.0, 10.0 - tick * 1.25)
+        # Outdoor drops 10°C → -5°C over 3h, then holds (was 1.25°C
+        # per tick at 15-min cadence = 5°C/h).
+        def outdoor_schedule(minute):
+            return max(-5.0, 10.0 - minute * (5.0 / 60.0))
 
         for kd in KD_VALUES:
             ctrl = _make_controller(kd, profile)
             ctrl.set_desired_temp(20.5)
             model = _make_model(profile, initial_temp=20.5, outdoor=10.0)
 
-            history = run_scenario(ctrl, model, n_ticks=48, mode="heat",
-                                   outdoor_schedule=outdoor)
+            history = run_scenario(ctrl, model, duration_minutes=12 * 60, mode="heat",
+                                   outdoor_minute_schedule=outdoor_schedule)
             m = compute_all_metrics(history, desired=20.5)
 
             d_terms = [h["d_term"] for h in history]
@@ -177,7 +182,8 @@ class TestDerivativeSteadyStateNoise:
                                 sensor_noise_sigma=0.15,
                                 noise_seed=42)
 
-            history = run_scenario(ctrl, model, n_ticks=64, mode="heat")
+            # 16h noisy steady-state (was n_ticks=64 at 15-min).
+            history = run_scenario(ctrl, model, duration_minutes=16 * 60, mode="heat")
             m = compute_all_metrics(history, desired=20.5)
 
             d_terms = [h["d_term"] for h in history]
@@ -220,20 +226,27 @@ class TestDerivativeSetpointStep:
         profile = QUICK_PROFILES[profile_name]
         results = {}
 
+        # Setpoint step at minute 150 (was tick=10 at 15-min cadence).
+        STEP_MINUTE = 150.0
+
         for kd in KD_VALUES:
             ctrl = _make_controller(kd, profile)
             ctrl.set_desired_temp(20.5)
             model = _make_model(profile, initial_temp=20.5, outdoor=5.0)
 
-            history = run_scenario(ctrl, model, n_ticks=48, mode="heat",
-                                   desired_schedule={10: 22.5})
+            history = run_scenario(ctrl, model, duration_minutes=12 * 60, mode="heat",
+                                   desired_minute_schedule={STEP_MINUTE: 22.5})
             m = compute_all_metrics(history, desired=22.5)
 
+            # D at the step moment should be small — measurement hasn't
+            # changed yet, only the setpoint did.  Find the tick whose
+            # minute matches the step.
+            step_tick = next(
+                (i for i, h in enumerate(history) if h["minute"] == STEP_MINUTE),
+                None,
+            )
+            d_at_step = history[step_tick]["d_term"] if step_tick is not None else 0.0
             d_terms = [h["d_term"] for h in history]
-
-            # D at the step tick (tick 10) should be small — measurement
-            # hasn't changed yet, only the setpoint did
-            d_at_step = d_terms[10] if len(d_terms) > 10 else 0.0
 
             results[kd] = {
                 "metrics": m,
@@ -294,11 +307,13 @@ class TestDerivativeOscillation:
             ctrl.set_desired_temp(20.5)
             model = _make_model(profile, initial_temp=17.0, outdoor=0.0)
 
-            history = run_scenario(ctrl, model, n_ticks=64, mode="heat")
+            # 16h run with last 8h as the steady-state oscillation
+            # window (was n_ticks=64, last 32 ticks at 15-min = 8h).
+            history = run_scenario(ctrl, model, duration_minutes=16 * 60, mode="heat")
             m = compute_all_metrics(history, desired=20.5)
 
-            # Measure oscillation: std dev of room temp in last 32 ticks
-            late_temps = [h["room_temp"] for h in history[-32:]]
+            late = [h for h in history if h["minute"] >= 8 * 60]
+            late_temps = [h["room_temp"] for h in late]
             temp_std = _std(late_temps)
 
             results[kd] = {
