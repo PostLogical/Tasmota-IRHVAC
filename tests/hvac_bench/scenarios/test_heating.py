@@ -30,6 +30,22 @@ def _make_controller(profile: HouseProfile, seed_factor=1.0, **overrides):
 
 
 def _make_model(profile, initial_temp=20.0, outdoor=5.0, **kwargs):
+    """Build a 2R2C thermal model for the heating tests.
+
+    The remaining knobs (sensor noise/quantization, head sensor offset,
+    head calibration bounds, solar/stove inputs) are deliberately left
+    at their idealized defaults — these tests check minimum-viable PI
+    control quality on a clean thermal model.  Full-stack realism (noise,
+    head offset, model inputs, real weather) lives in
+    ``test_full_stack_learning.py``.
+
+    The one realism knob we DO set: ``hp_lag_minutes=2.0`` (typical
+    inverter compressor spool time).  Without this, the HP delivers
+    commanded heat instantaneously, which becomes increasingly
+    unrealistic as the bench cadence approaches the spool timescale.
+    Tests can override via kwargs.
+    """
+    kwargs.setdefault("hp_lag_minutes", 2.0)
     return ThermalModel(profile=profile, initial_temp=initial_temp,
                         outdoor_temp=outdoor, **kwargs)
 
