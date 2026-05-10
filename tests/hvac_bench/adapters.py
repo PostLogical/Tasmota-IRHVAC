@@ -5,7 +5,6 @@ Wraps specific controller implementations to conform to HVACController protocol.
 
 import asyncio
 from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock
 
 from freezegun import freeze_time
 
@@ -15,7 +14,7 @@ from homeassistant.const import UnitOfTemperature
 from custom_components.tasmota_irhvac.const import DEFAULT_KAPPA_THRESHOLD
 
 from tests.conftest import _PITestEntityRoomTempMixin, make_pi_config
-from tests.hvac_bench.mock_states import MockStates
+from tests.hvac_bench.mock_states import MockStates, _BenchHass
 
 # Reference sim epoch (UTC-aware) shared with full_stack_runner — same value
 # so reference_scenarios paths and full_stack paths produce comparable
@@ -247,14 +246,14 @@ class _FakeBenchEntity(_PITestEntityRoomTempMixin):
                  monotonic=None):
         from custom_components.tasmota_irhvac.pi.pi_controller import PIController
 
-        self.hass = MagicMock()
-        # Real dict-backed states substitute — replaces the per-tick
-        # `pi._hass.states.get = lambda...` override the runner used to install
-        # (see #84). Bench code calls `mock_states.set(eid, value, unit)`
-        # whenever a sensor "changes" and the resolver reads via the normal
-        # `hass.states.get(eid)` path.
+        # Hand-rolled hass fake exposing only the bench-active controller
+        # surface (states + is_running).  Replaces the prior
+        # ``self.hass = MagicMock()`` pattern that was the architectural
+        # root of #83's mock-leak bug class — any new controller hass
+        # dependency now raises AttributeError instead of silently
+        # consuming a truthy MagicMock child.  See ``_BenchHass`` docstring.
         self.mock_states = MockStates()
-        self.hass.states.get = self.mock_states.get
+        self.hass = _BenchHass(self.mock_states)
         self._pi_test_room_temp = 20.0  # mixin backing field
         self._attr_target_temperature = 20.0
         self._attr_hvac_mode = HVACMode.HEAT

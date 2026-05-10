@@ -27,15 +27,58 @@ These tests catch the bug class going forward:
 from __future__ import annotations
 
 from dataclasses import replace
+from unittest.mock import Mock
 
 import pytest
 
 from custom_components.tasmota_irhvac.pi.model_input_manager import tod_features
+from tests.hvac_bench.adapters import TasmotaPIAdapter
+from tests.hvac_bench.mock_states import _BenchHass
 from tests.hvac_bench.reference_scenarios import (
     CANONICAL_SCENARIOS,
     make_well_tuned_for_scenario,
     run_reference_scenario,
 )
+
+
+# ── Test 0: hass is a hand-rolled fake, not a Mock derivative ────────────
+
+
+def test_bench_hass_is_not_mock_derivative():
+    """``_FakeBenchEntity.hass`` must be a hand-rolled ``_BenchHass``.
+
+    Regression catcher for the architectural fix to #83's bug class:
+    bare ``MagicMock()`` for ``hass`` would silently consume a truthy
+    child for any new controller hass dependency, allowing Mock attrs
+    to leak into bench math.  The fix is a hand-rolled ``_BenchHass``
+    exposing only the bench-active surface (``states``, ``is_running``)
+    and raising AttributeError on anything else.
+
+    If a future change makes ``self.hass = MagicMock()`` again — or wraps
+    a Mock around the fake — this test fails immediately.
+    """
+    adapter = TasmotaPIAdapter()
+    entity = adapter._entity
+    assert isinstance(entity.hass, _BenchHass), (
+        f"_FakeBenchEntity.hass must be _BenchHass, got "
+        f"{type(entity.hass).__name__}.  Bare MagicMock for hass was "
+        f"the architectural root of #83 — see _BenchHass docstring."
+    )
+    # Belt-and-suspenders: directly check it's not a Mock derivative.
+    assert not isinstance(entity.hass, Mock), (
+        f"_FakeBenchEntity.hass leaked a Mock instance; "
+        f"got {type(entity.hass).__name__}."
+    )
+
+    # The fake's surface must include the bench-active controller
+    # dependencies and reject everything else.  Any new controller hass
+    # dependency should fire here as a deliberate review point.
+    assert entity.hass.is_running is True
+    assert entity.hass.states is adapter.mock_states
+    with pytest.raises(AttributeError):
+        _ = entity.hass.bus  # not exposed — bench doesn't use it
+    with pytest.raises(AttributeError):
+        _ = entity.hass.async_add_executor_job  # event_log gated off in bench
 
 
 # ── Test 1: wall_time covers sim duration ─────────────────────────────────

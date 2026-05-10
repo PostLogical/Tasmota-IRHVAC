@@ -37,3 +37,31 @@ class MockStates:
 
     def remove(self, entity_id: str) -> None:
         self._states.pop(entity_id, None)
+
+
+class _BenchHass:
+    """Hand-rolled hass fake — exposes only the bench-active controller surface.
+
+    The PI subpackage (``custom_components/tasmota_irhvac/pi/``) is
+    deliberately HA-decoupled. Its bench-active hass surface is exactly:
+      * ``hass.states.get(eid)`` — sensor reads (covered by ``MockStates``)
+      * ``hass.is_running`` — boolean read once for event metadata
+
+    Other hass attributes (``async_add_executor_job``, ``config.path``,
+    ``data``, ``bus``) live behind feature flags the bench doesn't enable
+    (e.g. ``_pi_event_log_enabled = False``).  Exposing only the active
+    surface and raising ``AttributeError`` on anything else means any new
+    controller hass dependency surfaces immediately as a test failure
+    rather than silently consuming a truthy ``MagicMock`` child — this
+    is the architectural fix for the bug class first seen in #83
+    (``_FakeBenchEntity.hass = MagicMock()`` letting Mock attrs leak into
+    bench math).
+
+    Use ``__slots__`` so attribute typos on this object also fail loud.
+    """
+
+    __slots__ = ("states", "is_running")
+
+    def __init__(self, mock_states: MockStates) -> None:
+        self.states = mock_states
+        self.is_running = True
