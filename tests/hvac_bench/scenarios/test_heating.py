@@ -7,6 +7,7 @@ Every controller should pass these — they define minimum viable behavior.
 import pytest
 
 from tests.hvac_bench.adapters import TasmotaPIAdapter
+from tests.hvac_bench.conftest import check_bench_metrics
 from tests.hvac_bench.house_profiles import QUICK_PROFILES, HouseProfile2R2C as HouseProfile
 from tests.hvac_bench.thermal_model import ThermalModel2R2C as ThermalModel
 from tests.hvac_bench.runner import run_scenario
@@ -76,7 +77,7 @@ class TestHeatingColdStart:
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
     @pytest.mark.parametrize("seed_factor", SEED_FACTORS)
-    def test_cold_start(self, bench_metrics, profile_name, seed_factor):
+    def test_cold_start(self, bench_metrics, num_regression, profile_name, seed_factor):
         profile = QUICK_PROFILES[profile_name]
         ctrl = _make_controller(profile, seed_factor)
         ctrl.set_desired_temp(20.5)
@@ -93,15 +94,20 @@ class TestHeatingColdStart:
         final_error = abs(history[-1]["room_temp"] - 20.5)
         bench_metrics["final_error"] = final_error
         bench_metrics["final_room_temp"] = history[-1]["room_temp"]
-        assert final_error < 2.0, (
-            f"{profile_name} seed={seed_factor}: final error {final_error:.1f}°C"
-        )
-
         # Setpoint stays in bounds
         sp_min = min(h["hp_setpoint"] for h in history)
         sp_max = max(h["hp_setpoint"] for h in history)
         bench_metrics["setpoint_min"] = sp_min
         bench_metrics["setpoint_max"] = sp_max
+
+        # Snapshot regression: catches any drift in recorded metrics
+        # beyond the default tolerance.  Runs before threshold asserts
+        # so drift surfaces even if subsequent asserts pass.
+        check_bench_metrics(num_regression, bench_metrics)
+
+        assert final_error < 2.0, (
+            f"{profile_name} seed={seed_factor}: final error {final_error:.1f}°C"
+        )
         for h in history:
             assert 16 <= h["hp_setpoint"] <= 30
 

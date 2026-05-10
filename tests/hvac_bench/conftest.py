@@ -165,3 +165,56 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo):
     out_dir.mkdir(parents=True, exist_ok=True)
     out_file = out_dir / f"{_flatten_nodeid(item.nodeid)}.json"
     out_file.write_text(json.dumps(record, indent=2, default=str))
+
+
+# ── pytest-regressions integration: cadence-aware data directory ────────
+
+
+@pytest.fixture
+def original_datadir(request: pytest.FixtureRequest) -> Path:
+    """Override pytest-datadir's default to put regression baselines under
+    ``tests/hvac_bench/regression_data/<tick-minutes>/``.
+
+    Cadence-aware: ``--tick-minutes=3.0`` writes to a separate baseline
+    directory than the default 15-min cadence, so tests can carry distinct
+    snapshots per cadence.  Without ``--tick-minutes``, baselines live
+    under ``regression_data/default/``.
+
+    Why override: pytest-datadir's default puts baselines next to the
+    test file, which doesn't compose with our cadence-sweep workflow.
+    """
+    tick_min = request.config.getoption("--tick-minutes")
+    suffix = f"{tick_min}min" if tick_min is not None else "default"
+    base = Path(__file__).parent / "regression_data" / suffix
+    # Per-test data dir convention from pytest-datadir: <test_module_name>/
+    test_module_name = Path(request.module.__file__).stem
+    return base / test_module_name
+
+
+def check_bench_metrics(
+    num_regression,
+    bench_metrics: dict[str, Any],
+    *,
+    default_tolerance: dict[str, float] | None = None,
+) -> None:
+    """Snapshot-check numeric values in ``bench_metrics``.
+
+    Filters out non-numeric values (parametrization context like
+    ``profile_name``, ``scenario``) and passes the numeric subset to
+    ``num_regression.check()`` for tolerance-aware comparison against
+    the saved baseline.
+
+    Default tolerance: rtol=1e-3, atol=1e-6 — tight enough to catch
+    real behavioral drift, loose enough to absorb float-noise from
+    cadence-equivalent re-runs.  Pass ``default_tolerance`` to override
+    per-test.
+    """
+    if default_tolerance is None:
+        default_tolerance = {"rtol": 1e-3, "atol": 1e-6}
+    numeric = {
+        k: v for k, v in bench_metrics.items()
+        if isinstance(v, (int, float)) and not isinstance(v, bool)
+    }
+    if not numeric:
+        return  # nothing to check — test recorded only context
+    num_regression.check(numeric, default_tolerance=default_tolerance)
