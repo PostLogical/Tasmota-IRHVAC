@@ -1,0 +1,1160 @@
+{
+  "baseline_dir": "local/bench_metrics/B1-energy-15min",
+  "current_dir": "local/bench_metrics/B1-energy-3min",
+  "n_baseline": 9,
+  "n_current": 9,
+  "n_added": 0,
+  "n_removed": 0,
+  "n_status_flipped": 0,
+  "tests": {
+    "tests/hvac_bench/scenarios/test_energy.py::TestCOPTracking::test_cooling_cop_range[drafty_bungalow]": {
+      "status": {
+        "before": "passed",
+        "after": "passed",
+        "flipped": false
+      },
+      "duration_s": {
+        "before": 0.2797560830367729,
+        "after": 1.36473708297126,
+        "delta": 1.084980999934487,
+        "pct_change": 387.8310663192515
+      },
+      "metrics": {
+        "cop_max": {
+          "before": 4.9,
+          "after": 4.9,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "cop_mean": {
+          "before": 4.9,
+          "after": 4.9,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "cop_min": {
+          "before": 4.9,
+          "after": 4.9,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "final_cumulative_kwh": {
+          "before": 0.20468726407022533,
+          "after": 0.20474638613924365,
+          "delta": 5.912206901831363e-05,
+          "pct_change": 0.02888409754601521
+        },
+        "final_room_temp": {
+          "before": 23.766506948243002,
+          "after": 23.766988336476174,
+          "delta": 0.00048138823317245283,
+          "pct_change": 0.0020254900487513194
+        },
+        "n_ticks": {
+          "before": 24,
+          "after": 120,
+          "delta": 96,
+          "pct_change": 400.0
+        },
+        "profile_name": {
+          "before": "drafty_bungalow",
+          "after": "drafty_bungalow"
+        },
+        "rollup_avg_cop": {
+          "before": 4.9,
+          "after": 4.9,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_integral_rms": {
+          "before": 1.77,
+          "after": 1.61,
+          "delta": -0.15999999999999992,
+          "pct_change": -9.039548022598867
+        },
+        "rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "rollup_kwh_per_degree_hour": {
+          "before": 0.0043,
+          "after": 0.0009,
+          "delta": -0.0034000000000000002,
+          "pct_change": -79.06976744186048
+        },
+        "rollup_overshoot": {
+          "before": 0.23,
+          "after": 0.23,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_setpoint_changes": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_total_kwh": {
+          "before": 0.205,
+          "after": 0.205,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "scenario": {
+          "before": "cooling_cop_range",
+          "after": "cooling_cop_range"
+        }
+      }
+    },
+    "tests/hvac_bench/scenarios/test_energy.py::TestCOPTracking::test_cooling_cop_range[standard_residential]": {
+      "status": {
+        "before": "passed",
+        "after": "passed",
+        "flipped": false
+      },
+      "duration_s": {
+        "before": 0.26689545903354883,
+        "after": 1.3918326660059392,
+        "delta": 1.1249372069723904,
+        "pct_change": 421.4898264083937
+      },
+      "metrics": {
+        "cop_max": {
+          "before": 4.9,
+          "after": 4.9,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "cop_mean": {
+          "before": 4.9,
+          "after": 4.9,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "cop_min": {
+          "before": 4.9,
+          "after": 4.9,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "final_cumulative_kwh": {
+          "before": 0.09510155741533903,
+          "after": 0.0949588553518678,
+          "delta": -0.0001427020634712367,
+          "pct_change": -0.15005228867915485
+        },
+        "final_room_temp": {
+          "before": 24.116695572140102,
+          "after": 24.117078796511155,
+          "delta": 0.0003832243710526484,
+          "pct_change": 0.0015890417901835347
+        },
+        "n_ticks": {
+          "before": 24,
+          "after": 120,
+          "delta": 96,
+          "pct_change": 400.0
+        },
+        "profile_name": {
+          "before": "standard_residential",
+          "after": "standard_residential"
+        },
+        "rollup_avg_cop": {
+          "before": 4.9,
+          "after": 4.9,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_integral_rms": {
+          "before": 1.09,
+          "after": 1.0,
+          "delta": -0.09000000000000008,
+          "pct_change": -8.256880733944962
+        },
+        "rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "rollup_kwh_per_degree_hour": {
+          "before": 0.002,
+          "after": 0.0004,
+          "delta": -0.0016,
+          "pct_change": -80.0
+        },
+        "rollup_overshoot": {
+          "before": 0.12,
+          "after": 0.12,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_setpoint_changes": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_total_kwh": {
+          "before": 0.095,
+          "after": 0.095,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "scenario": {
+          "before": "cooling_cop_range",
+          "after": "cooling_cop_range"
+        }
+      }
+    },
+    "tests/hvac_bench/scenarios/test_energy.py::TestCOPTracking::test_cooling_cop_range[well_insulated]": {
+      "status": {
+        "before": "passed",
+        "after": "passed",
+        "flipped": false
+      },
+      "duration_s": {
+        "before": 0.2773542089853436,
+        "after": 1.3926683749305084,
+        "delta": 1.1153141659451649,
+        "pct_change": 402.126281056042
+      },
+      "metrics": {
+        "cop_max": {
+          "before": 4.9,
+          "after": 4.9,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "cop_mean": {
+          "before": 4.9,
+          "after": 4.9,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "cop_min": {
+          "before": 4.9,
+          "after": 4.9,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "final_cumulative_kwh": {
+          "before": 0.037815832238936434,
+          "after": 0.03775377782452942,
+          "delta": -6.205441440701454e-05,
+          "pct_change": -0.1640963869707494
+        },
+        "final_room_temp": {
+          "before": 24.1029974199288,
+          "after": 24.103295779079605,
+          "delta": 0.00029835915080411723,
+          "pct_change": 0.0012378508183278
+        },
+        "n_ticks": {
+          "before": 24,
+          "after": 120,
+          "delta": 96,
+          "pct_change": 400.0
+        },
+        "profile_name": {
+          "before": "well_insulated",
+          "after": "well_insulated"
+        },
+        "rollup_avg_cop": {
+          "before": 4.9,
+          "after": 4.9,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_integral_rms": {
+          "before": 1.11,
+          "after": 1.04,
+          "delta": -0.07000000000000006,
+          "pct_change": -6.306306306306311
+        },
+        "rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "rollup_kwh_per_degree_hour": {
+          "before": 0.0008,
+          "after": 0.0002,
+          "delta": -0.0006000000000000001,
+          "pct_change": -75.0
+        },
+        "rollup_overshoot": {
+          "before": 0.1,
+          "after": 0.1,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_setpoint_changes": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_total_kwh": {
+          "before": 0.038,
+          "after": 0.038,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "scenario": {
+          "before": "cooling_cop_range",
+          "after": "cooling_cop_range"
+        }
+      }
+    },
+    "tests/hvac_bench/scenarios/test_energy.py::TestCOPTracking::test_energy_accumulates": {
+      "status": {
+        "before": "passed",
+        "after": "passed",
+        "flipped": false
+      },
+      "duration_s": {
+        "before": 0.2693048749351874,
+        "after": 1.3891218750504777,
+        "delta": 1.1198170001152903,
+        "pct_change": 415.8175749268529
+      },
+      "metrics": {
+        "cop_max": {
+          "before": 2.68,
+          "after": 2.68,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "cop_mean": {
+          "before": 2.6133333333333333,
+          "after": 2.65,
+          "delta": 0.036666666666666625,
+          "pct_change": 1.4030612244897944
+        },
+        "cop_min": {
+          "before": 2.6,
+          "after": 2.6,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "final_cumulative_kwh": {
+          "before": 0.5524567785608372,
+          "after": 0.5338869642904426,
+          "delta": -0.018569814270394613,
+          "pct_change": -3.361315308460765
+        },
+        "final_room_temp": {
+          "before": 20.60766135038288,
+          "after": 20.057054680255007,
+          "delta": -0.5506066701278733,
+          "pct_change": -2.6718542233694236
+        },
+        "n_ticks": {
+          "before": 24,
+          "after": 120,
+          "delta": 96,
+          "pct_change": 400.0
+        },
+        "profile_name": {
+          "before": "standard_residential",
+          "after": "standard_residential"
+        },
+        "rollup_avg_cop": {
+          "before": 2.61,
+          "after": 2.65,
+          "delta": 0.040000000000000036,
+          "pct_change": 1.5325670498084305
+        },
+        "rollup_cold_max_run": {
+          "before": 2,
+          "after": 10,
+          "delta": 8,
+          "pct_change": 400.0
+        },
+        "rollup_cold_max_undershoot": {
+          "before": 1.84,
+          "after": 3.27,
+          "delta": 1.43,
+          "pct_change": 77.71739130434781
+        },
+        "rollup_cold_ticks": {
+          "before": 2,
+          "after": 10,
+          "delta": 8,
+          "pct_change": 400.0
+        },
+        "rollup_integral_rms": {
+          "before": 7.17,
+          "after": 3.88,
+          "delta": -3.29,
+          "pct_change": -45.88563458856346
+        },
+        "rollup_itae": {
+          "before": 2.69,
+          "after": 87.76,
+          "delta": 85.07000000000001,
+          "pct_change": 3162.4535315985136
+        },
+        "rollup_kwh_per_degree_hour": {
+          "before": 0.0045,
+          "after": 0.0009,
+          "delta": -0.0036,
+          "pct_change": -80.0
+        },
+        "rollup_overshoot": {
+          "before": 1.84,
+          "after": 3.27,
+          "delta": 1.43,
+          "pct_change": 77.71739130434781
+        },
+        "rollup_reversals": {
+          "before": 3,
+          "after": 8,
+          "delta": 5,
+          "pct_change": 166.66666666666669
+        },
+        "rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_setpoint_changes": {
+          "before": 4,
+          "after": 9,
+          "delta": 5,
+          "pct_change": 125.0
+        },
+        "rollup_settling_time": {
+          "before": 8,
+          "after": 76,
+          "delta": 68,
+          "pct_change": 850.0
+        },
+        "rollup_total_kwh": {
+          "before": 0.552,
+          "after": 0.534,
+          "delta": -0.018000000000000016,
+          "pct_change": -3.260869565217394
+        },
+        "scenario": {
+          "before": "energy_accumulates",
+          "after": "energy_accumulates"
+        }
+      }
+    },
+    "tests/hvac_bench/scenarios/test_energy.py::TestCOPTracking::test_heating_cop_range[drafty_bungalow]": {
+      "status": {
+        "before": "passed",
+        "after": "passed",
+        "flipped": false
+      },
+      "duration_s": {
+        "before": 1.483210333972238,
+        "after": 2.3665217499947175,
+        "delta": 0.8833114160224795,
+        "pct_change": 59.554022500426626
+      },
+      "metrics": {
+        "cop_max": {
+          "before": 3.3200000000000003,
+          "after": 3.3200000000000003,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "cop_mean": {
+          "before": 3.3200000000000003,
+          "after": 3.3200000000000003,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "cop_min": {
+          "before": 3.3200000000000003,
+          "after": 3.3200000000000003,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "final_cumulative_kwh": {
+          "before": 0.573181138105246,
+          "after": 0.5730758337219327,
+          "delta": -0.00010530438331324277,
+          "pct_change": -0.018371920552261275
+        },
+        "final_room_temp": {
+          "before": 20.73348907201834,
+          "after": 20.732606526924183,
+          "delta": -0.0008825450941571944,
+          "pct_change": -0.004256616390476538
+        },
+        "n_ticks": {
+          "before": 24,
+          "after": 120,
+          "delta": 96,
+          "pct_change": 400.0
+        },
+        "profile_name": {
+          "before": "drafty_bungalow",
+          "after": "drafty_bungalow"
+        },
+        "rollup_avg_cop": {
+          "before": 3.32,
+          "after": 3.32,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_integral_rms": {
+          "before": 1.77,
+          "after": 1.62,
+          "delta": -0.1499999999999999,
+          "pct_change": -8.474576271186436
+        },
+        "rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "rollup_kwh_per_degree_hour": {
+          "before": 0.0062,
+          "after": 0.0012,
+          "delta": -0.005,
+          "pct_change": -80.64516129032259
+        },
+        "rollup_overshoot": {
+          "before": 0.23,
+          "after": 0.23,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_setpoint_changes": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_total_kwh": {
+          "before": 0.573,
+          "after": 0.573,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "scenario": {
+          "before": "heating_cop_range",
+          "after": "heating_cop_range"
+        }
+      }
+    },
+    "tests/hvac_bench/scenarios/test_energy.py::TestCOPTracking::test_heating_cop_range[standard_residential]": {
+      "status": {
+        "before": "passed",
+        "after": "passed",
+        "flipped": false
+      },
+      "duration_s": {
+        "before": 0.2727512919809669,
+        "after": 1.3902991660870612,
+        "delta": 1.1175478741060942,
+        "pct_change": 409.73146854390654
+      },
+      "metrics": {
+        "cop_max": {
+          "before": 3.24,
+          "after": 3.24,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "cop_mean": {
+          "before": 3.24,
+          "after": 3.24,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "cop_min": {
+          "before": 3.24,
+          "after": 3.24,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "final_cumulative_kwh": {
+          "before": 0.2935147238903136,
+          "after": 0.2933354589151634,
+          "delta": -0.00017926497515019513,
+          "pct_change": -0.061075292160534485
+        },
+        "final_room_temp": {
+          "before": 20.675029608265216,
+          "after": 20.674199288794593,
+          "delta": -0.0008303194706229533,
+          "pct_change": -0.004016049729336388
+        },
+        "n_ticks": {
+          "before": 24,
+          "after": 120,
+          "delta": 96,
+          "pct_change": 400.0
+        },
+        "profile_name": {
+          "before": "standard_residential",
+          "after": "standard_residential"
+        },
+        "rollup_avg_cop": {
+          "before": 3.24,
+          "after": 3.24,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_integral_rms": {
+          "before": 1.63,
+          "after": 1.52,
+          "delta": -0.10999999999999988,
+          "pct_change": -6.748466257668705
+        },
+        "rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "rollup_kwh_per_degree_hour": {
+          "before": 0.0032,
+          "after": 0.0006,
+          "delta": -0.0026000000000000003,
+          "pct_change": -81.25000000000001
+        },
+        "rollup_overshoot": {
+          "before": 0.18,
+          "after": 0.17,
+          "delta": -0.009999999999999981,
+          "pct_change": -5.555555555555546
+        },
+        "rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_setpoint_changes": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_total_kwh": {
+          "before": 0.294,
+          "after": 0.293,
+          "delta": -0.0010000000000000009,
+          "pct_change": -0.34013605442176903
+        },
+        "scenario": {
+          "before": "heating_cop_range",
+          "after": "heating_cop_range"
+        }
+      }
+    },
+    "tests/hvac_bench/scenarios/test_energy.py::TestCOPTracking::test_heating_cop_range[well_insulated]": {
+      "status": {
+        "before": "passed",
+        "after": "passed",
+        "flipped": false
+      },
+      "duration_s": {
+        "before": 0.27625641704071313,
+        "after": 1.3604998340597376,
+        "delta": 1.0842434170190245,
+        "pct_change": 392.47718790880964
+      },
+      "metrics": {
+        "cop_max": {
+          "before": 3.24,
+          "after": 3.24,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "cop_mean": {
+          "before": 3.24,
+          "after": 3.24,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "cop_min": {
+          "before": 3.24,
+          "after": 3.24,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "final_cumulative_kwh": {
+          "before": 0.11791550980399647,
+          "after": 0.11782203077899515,
+          "delta": -9.3479025001314e-05,
+          "pct_change": -0.07927627600194266
+        },
+        "final_room_temp": {
+          "before": 20.65448539918134,
+          "after": 20.653838954354608,
+          "delta": -0.0006464448267315959,
+          "pct_change": -0.0031298035958679383
+        },
+        "n_ticks": {
+          "before": 24,
+          "after": 120,
+          "delta": 96,
+          "pct_change": 400.0
+        },
+        "profile_name": {
+          "before": "well_insulated",
+          "after": "well_insulated"
+        },
+        "rollup_avg_cop": {
+          "before": 3.24,
+          "after": 3.24,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_integral_rms": {
+          "before": 1.67,
+          "after": 1.58,
+          "delta": -0.08999999999999986,
+          "pct_change": -5.389221556886219
+        },
+        "rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "rollup_kwh_per_degree_hour": {
+          "before": 0.0013,
+          "after": 0.0003,
+          "delta": -0.001,
+          "pct_change": -76.92307692307693
+        },
+        "rollup_overshoot": {
+          "before": 0.15,
+          "after": 0.15,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_setpoint_changes": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_total_kwh": {
+          "before": 0.118,
+          "after": 0.118,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "scenario": {
+          "before": "heating_cop_range",
+          "after": "heating_cop_range"
+        }
+      }
+    },
+    "tests/hvac_bench/scenarios/test_energy.py::TestCustomCOP::test_custom_cop_fn": {
+      "status": {
+        "before": "passed",
+        "after": "passed",
+        "flipped": false
+      },
+      "duration_s": {
+        "before": 0.08591241692192852,
+        "after": 0.45854512497317046,
+        "delta": 0.37263270805124193,
+        "pct_change": 433.7355662917337
+      },
+      "metrics": {
+        "cop_max": {
+          "before": 3.0,
+          "after": 3.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "cop_mean": {
+          "before": 3.0,
+          "after": 3.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "cop_min": {
+          "before": 3.0,
+          "after": 3.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "final_cumulative_kwh": {
+          "before": 0.10597867360039337,
+          "after": 0.10574133296584393,
+          "delta": -0.00023734063454944332,
+          "pct_change": -0.22395131632272325
+        },
+        "final_room_temp": {
+          "before": 20.66216177560674,
+          "after": 20.66057933254037,
+          "delta": -0.001582443066372008,
+          "pct_change": -0.00765865200145806
+        },
+        "n_ticks": {
+          "before": 8,
+          "after": 40,
+          "delta": 32,
+          "pct_change": 400.0
+        },
+        "profile_name": {
+          "before": "standard_residential",
+          "after": "standard_residential"
+        },
+        "rollup_avg_cop": {
+          "before": 3.0,
+          "after": 3.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "rollup_cold_max_run": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_cold_max_undershoot": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "rollup_cold_ticks": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_integral_rms": {
+          "before": 1.38,
+          "after": 1.33,
+          "delta": -0.04999999999999982,
+          "pct_change": -3.623188405797089
+        },
+        "rollup_itae": {
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "rollup_kwh_per_degree_hour": {
+          "before": 0.0034,
+          "after": 0.0007,
+          "delta": -0.0026999999999999997,
+          "pct_change": -79.41176470588235
+        },
+        "rollup_overshoot": {
+          "before": 0.16,
+          "after": 0.16,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "rollup_reversals": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_rls_obs_count": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_setpoint_changes": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_settling_time": {
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "pct_change": 0.0
+        },
+        "rollup_total_kwh": {
+          "before": 0.106,
+          "after": 0.106,
+          "delta": 0.0,
+          "pct_change": 0.0
+        },
+        "scenario": {
+          "before": "custom_cop_fn",
+          "after": "custom_cop_fn"
+        }
+      }
+    },
+    "tests/hvac_bench/scenarios/test_energy.py::TestOvershootEnergyCost::test_overseed_wastes_energy[standard_residential]": {
+      "status": {
+        "before": "passed",
+        "after": "passed",
+        "flipped": false
+      },
+      "duration_s": {
+        "before": 0.7159152500098571,
+        "after": 3.707154291914776,
+        "delta": 2.991239041904919,
+        "pct_change": 417.82027158434374
+      },
+      "metrics": {
+        "final_room_correct_seed": {
+          "before": 20.71272542069189,
+          "after": 20.13963821480653,
+          "delta": -0.5730872058853578,
+          "pct_change": -2.766836301092695
+        },
+        "final_room_over_seed": {
+          "before": 20.701910109435715,
+          "after": 20.70295366398335,
+          "delta": 0.0010435545476354946,
+          "pct_change": 0.005040861167491271
+        },
+        "kwh_correct_seed": {
+          "before": 0.731919449645116,
+          "after": 0.6999361595743959,
+          "delta": -0.031983290070720094,
+          "pct_change": -4.369782779543262
+        },
+        "kwh_delta_overseed_vs_correct": {
+          "before": -0.008321990754538655,
+          "after": 0.027581904390082235,
+          "delta": 0.03590389514462089,
+          "pct_change": 431.4339705921878
+        },
+        "kwh_over_seed": {
+          "before": 0.7235974588905774,
+          "after": 0.7275180639644782,
+          "delta": 0.003920605073900796,
+          "pct_change": 0.541821288304672
+        },
+        "profile_name": {
+          "before": "standard_residential",
+          "after": "standard_residential"
+        },
+        "scenario": {
+          "before": "overseed_wastes_energy",
+          "after": "overseed_wastes_energy"
+        }
+      }
+    }
+  }
+}

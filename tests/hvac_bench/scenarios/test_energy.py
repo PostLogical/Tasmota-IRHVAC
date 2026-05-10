@@ -21,6 +21,31 @@ def _make_controller(profile, seed_factor=1.0):
     })
 
 
+def _make_model(profile, **kwargs):
+    """2R2C model with hp_lag_minutes=2.0 default."""
+    kwargs.setdefault("hp_lag_minutes", 2.0)
+    if "cop_model" not in kwargs:
+        kwargs["cop_model"] = COPModel()
+    return ThermalModel(profile=profile, **kwargs)
+
+
+def _record_run(bench_metrics, history, *, profile_name, scenario, desired):
+    """Record control-quality rollup + COP/energy summary."""
+    bench_metrics["profile_name"] = profile_name
+    bench_metrics["scenario"] = scenario
+    bench_metrics["n_ticks"] = len(history)
+    rollup = compute_all_metrics(history, desired=desired)
+    for k, v in rollup.items():
+        bench_metrics[f"rollup_{k}"] = v
+    cops = [h["cop"] for h in history if h["cop"] > 0]
+    if cops:
+        bench_metrics["cop_min"] = min(cops)
+        bench_metrics["cop_max"] = max(cops)
+        bench_metrics["cop_mean"] = sum(cops) / len(cops)
+    bench_metrics["final_cumulative_kwh"] = history[-1]["cumulative_kwh"] if history else 0.0
+    bench_metrics["final_room_temp"] = history[-1]["room_temp"] if history else None
+
+
 # ── COP Tracking ─────────────────────────────────────────────────────────
 
 
@@ -28,17 +53,17 @@ class TestCOPTracking:
     """Verify COP is tracked and physically reasonable."""
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
-    def test_heating_cop_range(self, profile_name):
+    def test_heating_cop_range(self, bench_metrics, profile_name):
         """COP should be in realistic range during heating."""
         profile = QUICK_PROFILES[profile_name]
         ctrl = _make_controller(profile, seed_factor=1.0)
         ctrl.set_desired_temp(20.5)
-        model = ThermalModel(
-            profile=profile, initial_temp=20.5, outdoor_temp=5.0,
-            cop_model=COPModel(),
-        )
+        model = _make_model(profile, initial_temp=20.5, outdoor_temp=5.0)
 
-        history = run_scenario(ctrl, model, n_ticks=24, mode="heat")
+        # 6h run (was n_ticks=24 at 15-min cadence).
+        history = run_scenario(ctrl, model, duration_minutes=6 * 60, mode="heat")
+        _record_run(bench_metrics, history, profile_name=profile_name,
+                    scenario="heating_cop_range", desired=20.5)
 
         cops = [h["cop"] for h in history if h["cop"] > 0]
         assert len(cops) > 0, "No COP data recorded"
@@ -47,33 +72,33 @@ class TestCOPTracking:
         )
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
-    def test_cooling_cop_range(self, profile_name):
+    def test_cooling_cop_range(self, bench_metrics, profile_name):
         """COP should be in realistic range during cooling."""
         profile = QUICK_PROFILES[profile_name]
         ctrl = _make_controller(profile, seed_factor=1.0)
         ctrl.set_desired_temp(24.0)
-        model = ThermalModel(
-            profile=profile, initial_temp=24.0, outdoor_temp=32.0,
-            cop_model=COPModel(),
-        )
+        model = _make_model(profile, initial_temp=24.0, outdoor_temp=32.0)
 
-        history = run_scenario(ctrl, model, n_ticks=24, mode="cool")
+        # 6h run.
+        history = run_scenario(ctrl, model, duration_minutes=6 * 60, mode="cool")
+        _record_run(bench_metrics, history, profile_name=profile_name,
+                    scenario="cooling_cop_range", desired=24.0)
 
         cops = [h["cop"] for h in history if h["cop"] > 0]
         assert len(cops) > 0
         assert all(1.0 <= c <= 7.0 for c in cops)
 
-    def test_energy_accumulates(self):
+    def test_energy_accumulates(self, bench_metrics):
         """Cumulative kWh should increase over time."""
         profile = QUICK_PROFILES["standard_residential"]
         ctrl = _make_controller(profile, seed_factor=1.0)
         ctrl.set_desired_temp(20.5)
-        model = ThermalModel(
-            profile=profile, initial_temp=17.0, outdoor_temp=0.0,
-            cop_model=COPModel(),
-        )
+        model = _make_model(profile, initial_temp=17.0, outdoor_temp=0.0)
 
-        history = run_scenario(ctrl, model, n_ticks=24, mode="heat")
+        # 6h run.
+        history = run_scenario(ctrl, model, duration_minutes=6 * 60, mode="heat")
+        _record_run(bench_metrics, history, profile_name="standard_residential",
+                    scenario="energy_accumulates", desired=20.5)
 
         # Energy should be monotonically increasing
         kwhs = [h["cumulative_kwh"] for h in history]
@@ -81,7 +106,7 @@ class TestCOPTracking:
             assert kwhs[i] >= kwhs[i-1], (
                 f"Energy decreased at tick {i}: {kwhs[i-1]:.3f} → {kwhs[i]:.3f}"
             )
-        assert kwhs[-1] > 0, "No energy consumed in 24 ticks of heating from cold"
+        assert kwhs[-1] > 0, "No energy consumed in 6h of heating from cold"
 
 
 # ── Custom COP Model ─────────────────────────────────────────────────────
@@ -90,7 +115,7 @@ class TestCOPTracking:
 class TestCustomCOP:
     """Verify custom COP function override works."""
 
-    def test_custom_cop_fn(self):
+    def test_custom_cop_fn(self, bench_metrics):
         """Custom COP function should be used instead of default."""
         def constant_cop(outdoor_c, setpoint_c, mode):
             return 3.0
@@ -98,12 +123,13 @@ class TestCustomCOP:
         profile = QUICK_PROFILES["standard_residential"]
         ctrl = _make_controller(profile, seed_factor=1.0)
         ctrl.set_desired_temp(20.5)
-        model = ThermalModel(
-            profile=profile, initial_temp=20.5, outdoor_temp=5.0,
-            cop_model=COPModel(cop_fn=constant_cop),
-        )
+        model = _make_model(profile, initial_temp=20.5, outdoor_temp=5.0,
+                            cop_model=COPModel(cop_fn=constant_cop))
 
-        history = run_scenario(ctrl, model, n_ticks=8, mode="heat")
+        # 2h run (was n_ticks=8 at 15-min cadence).
+        history = run_scenario(ctrl, model, duration_minutes=2 * 60, mode="heat")
+        _record_run(bench_metrics, history, profile_name="standard_residential",
+                    scenario="custom_cop_fn", desired=20.5)
 
         for h in history:
             assert h["cop"] == 3.0
@@ -120,26 +146,23 @@ class TestOvershootEnergyCost:
     """
 
     @pytest.mark.parametrize("profile_name", ["standard_residential"])
-    def test_overseed_wastes_energy(self, profile_name):
+    def test_overseed_wastes_energy(self, bench_metrics, profile_name):
         profile = QUICK_PROFILES[profile_name]
 
         # Correctly seeded
         ctrl_good = _make_controller(profile, seed_factor=1.0)
         ctrl_good.set_desired_temp(20.5)
-        model_good = ThermalModel(
-            profile=profile, initial_temp=17.0, outdoor_temp=0.0,
-            cop_model=COPModel(),
-        )
-        hist_good = run_scenario(ctrl_good, model_good, n_ticks=32, mode="heat")
+        model_good = _make_model(profile, initial_temp=17.0, outdoor_temp=0.0)
+        # 8h run (was n_ticks=32 at 15-min cadence).
+        hist_good = run_scenario(ctrl_good, model_good, duration_minutes=8 * 60,
+                                 mode="heat")
 
         # Overseeded
         ctrl_over = _make_controller(profile, seed_factor=1.5)
         ctrl_over.set_desired_temp(20.5)
-        model_over = ThermalModel(
-            profile=profile, initial_temp=17.0, outdoor_temp=0.0,
-            cop_model=COPModel(),
-        )
-        hist_over = run_scenario(ctrl_over, model_over, n_ticks=32, mode="heat")
+        model_over = _make_model(profile, initial_temp=17.0, outdoor_temp=0.0)
+        hist_over = run_scenario(ctrl_over, model_over, duration_minutes=8 * 60,
+                                 mode="heat")
 
         # Both should reach target
         assert abs(hist_good[-1]["room_temp"] - 20.5) < 2.0
@@ -149,5 +172,10 @@ class TestOvershootEnergyCost:
         # This is informational — we log it but don't strictly assert
         kwh_good = hist_good[-1]["cumulative_kwh"]
         kwh_over = hist_over[-1]["cumulative_kwh"]
-        print(f"\n  Energy: correct={kwh_good:.3f} kWh, overseed={kwh_over:.3f} kWh "
-              f"(delta={kwh_over-kwh_good:+.3f})")
+        bench_metrics["profile_name"] = profile_name
+        bench_metrics["scenario"] = "overseed_wastes_energy"
+        bench_metrics["kwh_correct_seed"] = kwh_good
+        bench_metrics["kwh_over_seed"] = kwh_over
+        bench_metrics["kwh_delta_overseed_vs_correct"] = kwh_over - kwh_good
+        bench_metrics["final_room_correct_seed"] = hist_good[-1]["room_temp"]
+        bench_metrics["final_room_over_seed"] = hist_over[-1]["room_temp"]
