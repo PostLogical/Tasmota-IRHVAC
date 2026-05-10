@@ -24,6 +24,20 @@ def _make_controller(profile, seed_factor=1.0):
     })
 
 
+def _record_run(bench_metrics, history, *, profile_name, scenario, desired):
+    """Record control-quality rollup + disturbance-relevant deviations."""
+    bench_metrics["profile_name"] = profile_name
+    bench_metrics["scenario"] = scenario
+    bench_metrics["n_ticks"] = len(history)
+    rollup = compute_all_metrics(history, desired=desired)
+    for k, v in rollup.items():
+        bench_metrics[f"rollup_{k}"] = v
+    if history:
+        bench_metrics["max_room_temp"] = max(h["room_temp"] for h in history)
+        bench_metrics["min_room_temp"] = min(h["room_temp"] for h in history)
+        bench_metrics["final_room_temp"] = history[-1]["room_temp"]
+
+
 # ── Oil Boiler (unknown heat source) ─────────────────────────────────────
 
 
@@ -35,7 +49,7 @@ class TestOilBoiler:
     """
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
-    def test_oil_boiler_recovery(self, profile_name):
+    def test_oil_boiler_recovery(self, bench_metrics, profile_name):
         profile = QUICK_PROFILES[profile_name]
         ctrl = _make_controller(profile, seed_factor=1.0)
         ctrl.set_desired_temp(20.5)
@@ -43,6 +57,8 @@ class TestOilBoiler:
         model.add_disturbance(oil_boiler(start_tick=8))
 
         history = run_scenario(ctrl, model, n_ticks=32, mode="heat")
+        _record_run(bench_metrics, history, profile_name=profile_name,
+                    scenario="oil_boiler", desired=20.5)
 
         # Room should recover to target after disturbance ends
         post_disturbance = [h for h in history if h["tick"] >= 16]
@@ -63,7 +79,7 @@ class TestFrontDoorOpen:
     """
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
-    def test_front_door_recovery(self, profile_name):
+    def test_front_door_recovery(self, bench_metrics, profile_name):
         profile = QUICK_PROFILES[profile_name]
         ctrl = _make_controller(profile, seed_factor=1.0)
         ctrl.set_desired_temp(20.5)
@@ -71,6 +87,8 @@ class TestFrontDoorOpen:
         model.add_disturbance(front_door_open(start_tick=8))
 
         history = run_scenario(ctrl, model, n_ticks=32, mode="heat")
+        _record_run(bench_metrics, history, profile_name=profile_name,
+                    scenario="front_door_open", desired=20.5)
 
         # Should recover within 8 ticks (2 hours) after door closes
         post = [h for h in history if h["tick"] >= 12]
@@ -91,7 +109,7 @@ class TestGarageDoorOpen:
     """
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
-    def test_garage_door_during(self, profile_name):
+    def test_garage_door_during(self, bench_metrics, profile_name):
         profile = QUICK_PROFILES[profile_name]
         ctrl = _make_controller(profile, seed_factor=1.0)
         ctrl.set_desired_temp(20.5)
@@ -99,6 +117,8 @@ class TestGarageDoorOpen:
         model.add_disturbance(garage_door_open(start_tick=8))
 
         history = run_scenario(ctrl, model, n_ticks=24, mode="heat")
+        _record_run(bench_metrics, history, profile_name=profile_name,
+                    scenario="garage_door_open", desired=20.5)
 
         # Room may drop but shouldn't crash
         min_temp = min(h["room_temp"] for h in history if h["tick"] >= 8)
@@ -114,7 +134,7 @@ class TestCooking:
     """Cooking for 45 min — moderate unmodeled heat gain."""
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
-    def test_cooking_no_overshoot(self, profile_name):
+    def test_cooking_no_overshoot(self, bench_metrics, profile_name):
         profile = QUICK_PROFILES[profile_name]
         ctrl = _make_controller(profile, seed_factor=1.0)
         ctrl.set_desired_temp(20.5)
@@ -122,6 +142,8 @@ class TestCooking:
         model.add_disturbance(cooking(start_tick=8))
 
         history = run_scenario(ctrl, model, n_ticks=24, mode="heat")
+        _record_run(bench_metrics, history, profile_name=profile_name,
+                    scenario="cooking", desired=20.5)
 
         # Cooking adds heat — room should warm slightly, not overshoot wildly
         max_temp = max(h["room_temp"] for h in history)
@@ -140,7 +162,7 @@ class TestParty:
     """
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
-    def test_party_recovery(self, profile_name):
+    def test_party_recovery(self, bench_metrics, profile_name):
         profile = QUICK_PROFILES[profile_name]
         ctrl = _make_controller(profile, seed_factor=1.0)
         ctrl.set_desired_temp(20.5)
@@ -148,6 +170,8 @@ class TestParty:
         model.add_disturbance(party(start_tick=4))
 
         history = run_scenario(ctrl, model, n_ticks=32, mode="heat")
+        _record_run(bench_metrics, history, profile_name=profile_name,
+                    scenario="party", desired=20.5)
 
         # After party ends (tick 16), should recover within 8 ticks
         post_party = [h for h in history if h["tick"] >= 20]
