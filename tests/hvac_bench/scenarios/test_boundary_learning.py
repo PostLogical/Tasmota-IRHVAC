@@ -22,6 +22,8 @@ Scenarios:
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from tests.hvac_bench.full_stack_runner import (
@@ -125,23 +127,62 @@ class TestZeroOffsetBandNarrowing:
             f"got {result.observation_yield_pct:.1f}%"
         )
 
-        # -- Learning quality: FF fraction should grow.
-        # Trajectory checkpoint — fragile to a single non-stationary spring
-        # window (#49 Phase 3). Run across three independent spring starts
-        # and assert the median delta. Bound (≥0) unchanged.
-        deltas: list[float] = []
-        for sd in SPRING_MC_STARTS:
-            mc_result = run_full_stack(
-                _spring_config(offset=0.0, n_days=21, start_day=sd)
-            )
-            if len(mc_result.daily_ff_fraction) >= 14:
-                first = sum(mc_result.daily_ff_fraction[:7]) / 7
-                last = sum(mc_result.daily_ff_fraction[-7:]) / 7
-                deltas.append(last - first)
-        deltas.sort()
-        assert deltas and deltas[len(deltas) // 2] >= 0, (
-            f"Median FF-fraction (last - first week) should be ≥0, "
-            f"got deltas {[f'{d:+.3f}' for d in deltas]}"
+        # -- Learning quality: WLS posterior covariance trace must tighten.
+        # Replaces a previous FF-fraction trajectory check that was
+        # confounded by the wall-clock leak fixed in #84 (pre-fix, ToD
+        # nuisance regressors were stuck and β_outdoor absorbed diurnal
+        # variance, inflating |FF| / (|FF|+|integral|); the trajectory's
+        # nominal "growth" was leak-driven).
+        #
+        # Σ σ̂(β_i)² (sum of squared WLS standard errors at each batch) is
+        # the trace of the WLS covariance matrix — the literature-standard
+        # CRLB / information-accumulation metric (Ljung 1999 §11), computed
+        # batch-side over the buffer.  As more diverse observations enter
+        # the buffer, this trace decreases.  Exactly the causal claim the
+        # boundary-narrowing test makes: narrower band → more usable
+        # observations → tighter parameter estimates.  Multi-coefficient,
+        # truth-agnostic, decoupled from FF-vs-integral controller mechanics.
+        #
+        # Note: ``batch_covariance_trace`` (RLS prior) is constant since
+        # online RLS was removed; we use the batch-side equivalent.
+        # Sum σ̂² over identifiable features only — held features (sin/cos
+        # nuisance regressors during low-diversity buffer state) get inf
+        # σ̂ as a sentinel.  Excluding them gives the trace of the
+        # active-features-only Fisher information, which IS the right
+        # CRLB on what the model is currently learning.
+        traces = [
+            sum(s * s for s in row if math.isfinite(s))
+            for row in result.batch_std_err_trajectory
+            if any(math.isfinite(s) for s in row)
+        ]
+        assert len(traces) >= 5, (
+            f"Need at least 5 batches with std_err to assert decay; "
+            f"got {len(traces)}"
+        )
+        # Hard floor: trace at end must be strictly less than early-run
+        # baseline.  Information must accumulate; if not, learning is
+        # fundamentally broken.  Use batch index 2 to skip very-small-n
+        # batches where σ̂ is dominated by buffer-fill noise.
+        early = traces[2]
+        late = traces[-1]
+        assert late < early, (
+            f"WLS Σσ̂² must decrease as the buffer fills with diverse "
+            f"observations (CRLB / information accumulation). Got "
+            f"early[batch 2]={early:.4g}, late[final]={late:.4g}; "
+            f"trajectory: {[f'{t:.3g}' for t in traces[::max(1, len(traces)//8)]]}"
+        )
+        # Tighter sensitivity: a 21-day run with 12h batches accumulates
+        # ~40× more observations than the early-run baseline.  CRLB scaling
+        # predicts Σσ̂² ∝ σ²_w / n_eff, so the ratio should drop
+        # substantially.  Threshold of 0.5 is well above the theoretical
+        # asymptote (~1/40) and well below "barely decreasing" (~1.0) —
+        # catches subtle regressions in feature diversity or WLS
+        # weighting without locking against a specific magnitude.
+        assert late < early * 0.5, (
+            f"WLS Σσ̂² decreased less than expected for a 21-day run "
+            f"(CRLB sensitivity threshold). Got ratio "
+            f"late/early={late/early:.3f}, expected <0.5. "
+            f"trajectory: {[f'{t:.3g}' for t in traces[::max(1, len(traces)//8)]]}"
         )
 
         # -- Comfort --

@@ -296,7 +296,13 @@ class FullStackResult:
 
     # Per-batch snapshots
     batch_kappa: list[float]  # condition number at each batch
-    batch_covariance_trace: list[float]  # tr(P) at each batch
+    batch_covariance_trace: list[float]  # tr(P) at each batch (RLS prior;
+    # constant since online RLS removed — kept for back-compat)
+    # Per-coefficient WLS standard errors at each batch.  Sum-of-squared
+    # entries gives the trace of the WLS covariance matrix — same content
+    # as tr(P) for the batch path.  Decreases as the buffer accumulates
+    # diverse observations (CRLB / Fisher information).
+    batch_std_err_trajectory: list[list[float]]
 
     # ── Observation yield metrics ────────────────────────────────────
     # Zone model classification across all ticks:
@@ -650,6 +656,7 @@ def run_full_stack(
 
     batch_kappa: list[float] = []
     batch_covariance_trace: list[float] = []
+    batch_std_err_trajectory: list[list[float]] = []
 
     checkpoint_data: list[dict] = []
     last_checkpoint_tick = 0
@@ -908,6 +915,16 @@ def run_full_stack(
             kappa = pi._cached_kappa
             batch_kappa.append(kappa if kappa is not None else float("inf"))
 
+            # WLS standard errors (per-coefficient σ̂) at batch time —
+            # tr(WLS covariance) = Σ σ̂² is the batch-side analog of tr(P)
+            # and the right CRLB-aligned learning-quality metric since
+            # online RLS was removed.
+            batch_result = pi._last_batch_result
+            if batch_result is not None and batch_result.beta_std_err:
+                batch_std_err_trajectory.append(list(batch_result.beta_std_err))
+            else:
+                batch_std_err_trajectory.append([])
+
             # Check convergence
             if batches_to_converge is None:
                 snap = coef_trajectory[-1]
@@ -1114,6 +1131,7 @@ def run_full_stack(
         daily_buffer_utilization=daily_buffer_utilization,
         batch_kappa=batch_kappa,
         batch_covariance_trace=batch_covariance_trace,
+        batch_std_err_trajectory=batch_std_err_trajectory,
         # Equipment
         daily_setpoint_limited_pct=daily_setpoint_limited_pct,
         daily_rapid_sp_changes=daily_rapid_sp_changes,
