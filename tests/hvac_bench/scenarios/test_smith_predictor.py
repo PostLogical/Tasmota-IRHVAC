@@ -18,10 +18,27 @@ Smith predictor correction stays near zero and tests would be meaningless.
 import pytest
 
 from tests.hvac_bench.adapters import TasmotaPIAdapter
+from tests.hvac_bench.conftest import check_bench_metrics
 from tests.hvac_bench.house_profiles import QUICK_PROFILES, HouseProfile2R2C as HouseProfile
 from tests.hvac_bench.thermal_model import ThermalModel2R2C as ThermalModel
 from tests.hvac_bench.runner import run_scenario
 from tests.hvac_bench.metrics import compute_all_metrics
+
+
+def _record_pair(bench_metrics, imc, smith, *, profile_name, scenario):
+    """Record IMC vs Smith comparison metrics."""
+    bench_metrics["profile_name"] = profile_name
+    bench_metrics["scenario"] = scenario
+    for key in ["itae", "overshoot", "reversals", "setpoint_changes",
+                "integral_rms", "total_kwh"]:
+        if key in imc:
+            bench_metrics[f"imc_{key}"] = imc[key]
+        if key in smith:
+            bench_metrics[f"smith_{key}"] = smith[key]
+    if imc.get("settling_time") is not None:
+        bench_metrics["imc_settling_time"] = imc["settling_time"]
+    if smith.get("settling_time") is not None:
+        bench_metrics["smith_settling_time"] = smith["settling_time"]
 
 HP_LAG = 15.0  # minutes — must match pi_response_lag default
 
@@ -119,19 +136,21 @@ class TestSmithNoRegression:
     """
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
-    def test_cold_start_bounded(self, profile_name):
+    def test_cold_start_bounded(self, bench_metrics, num_regression, profile_name):
         profile = QUICK_PROFILES[profile_name]
         imc, smith = _run_pair(profile, initial=17.0, outdoor=2.0,
                                desired=20.5, n_ticks=48, mode="heat")
         # Relaxed from +5.0 to +12.0: continuous q-feedback (lower=0.0)
         # slightly delays Smith transient settling for standard_residential
         # cold start (ITAE 2.5→13.6 at 12h, converges by day 2).
+        _record_pair(bench_metrics, imc, smith, profile_name=profile_name, scenario="cold_start_bounded")
+        check_bench_metrics(num_regression, bench_metrics)
         assert smith["itae"] <= imc["itae"] * 1.50 + 12.0, (
             f"{profile_name}: Smith ITAE {smith['itae']:.1f} vs IMC {imc['itae']:.1f}"
         )
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
-    def test_cold_snap_bounded(self, profile_name):
+    def test_cold_snap_bounded(self, bench_metrics, num_regression, profile_name):
         """Cold snap is the hardest scenario for Smith: the outdoor ramp
         creates a disturbance the Smith model doesn't account for.  Wider
         bounds than other scenarios.
@@ -142,27 +161,33 @@ class TestSmithNoRegression:
             n_ticks=48, mode="heat",
             outdoor_schedule=lambda t: max(-5.0, 10.0 - t * 1.25),
         )
+        _record_pair(bench_metrics, imc, smith, profile_name=profile_name, scenario="cold_snap_bounded")
+        check_bench_metrics(num_regression, bench_metrics)
         assert smith["itae"] <= imc["itae"] * 3.0 + 15.0, (
             f"{profile_name}: Smith ITAE {smith['itae']:.1f} vs IMC {imc['itae']:.1f}"
         )
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
-    def test_setpoint_change_bounded(self, profile_name):
+    def test_setpoint_change_bounded(self, bench_metrics, num_regression, profile_name):
         profile = QUICK_PROFILES[profile_name]
         imc, smith = _run_pair(
             profile, initial=20.5, outdoor=5.0, desired=20.5,
             n_ticks=48, mode="heat",
             desired_schedule={10: 22.5},
         )
+        _record_pair(bench_metrics, imc, smith, profile_name=profile_name, scenario="setpoint_change_bounded")
+        check_bench_metrics(num_regression, bench_metrics)
         assert smith["itae"] <= imc["itae"] * 1.50 + 5.0, (
             f"{profile_name}: Smith ITAE {smith['itae']:.1f} vs IMC {imc['itae']:.1f}"
         )
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
-    def test_cooling_bounded(self, profile_name):
+    def test_cooling_bounded(self, bench_metrics, num_regression, profile_name):
         profile = QUICK_PROFILES[profile_name]
         imc, smith = _run_pair(profile, initial=28.0, outdoor=32.0,
                                desired=24.0, n_ticks=48, mode="cool")
+        _record_pair(bench_metrics, imc, smith, profile_name=profile_name, scenario="cooling_bounded")
+        check_bench_metrics(num_regression, bench_metrics)
         assert smith["itae"] <= imc["itae"] * 1.50 + 5.0, (
             f"{profile_name}: Smith ITAE {smith['itae']:.1f} vs IMC {imc['itae']:.1f}"
         )
@@ -179,7 +204,7 @@ class TestSmithImprovesSlowProfiles:
     improve settling time compared to IMC-only.
     """
 
-    def test_cold_start_overshoot_reduction(self):
+    def test_cold_start_overshoot_reduction(self, bench_metrics, num_regression):
         """Smith should reduce overshoot on cold start for slow profiles."""
         profile = QUICK_PROFILES["well_insulated"]
         imc, smith = _run_pair(profile, initial=17.0, outdoor=2.0,
@@ -187,9 +212,11 @@ class TestSmithImprovesSlowProfiles:
         print(f"\n  well_insulated cold_start: IMC overshoot={imc['overshoot']:.2f}°C, "
               f"Smith={smith['overshoot']:.2f}°C")
         # Smith should not make overshoot significantly worse
+        _record_pair(bench_metrics, imc, smith, profile_name="well_insulated", scenario="cold_start_overshoot_reduction")
+        check_bench_metrics(num_regression, bench_metrics)
         assert smith["overshoot"] <= imc["overshoot"] + 0.3
 
-    def test_setpoint_change_settling(self):
+    def test_setpoint_change_settling(self, bench_metrics, num_regression):
         """Smith should improve or not harm settling on setpoint changes."""
         profile = QUICK_PROFILES["well_insulated"]
         imc, smith = _run_pair(
@@ -204,7 +231,7 @@ class TestSmithImprovesSlowProfiles:
         smith_settle = smith["settling_time"] if smith["settling_time"] is not None else 48
         assert smith_settle <= imc_settle + 5
 
-    def test_cold_snap_disturbance_rejection(self):
+    def test_cold_snap_disturbance_rejection(self, bench_metrics, num_regression):
         """Cold snap is harder for Smith — outdoor ramp is an unmodeled
         disturbance.  Assert bounded regression, not improvement.
         """
@@ -216,6 +243,8 @@ class TestSmithImprovesSlowProfiles:
         )
         print(f"\n  well_insulated cold_snap: IMC ITAE={imc['itae']:.1f}, "
               f"Smith={smith['itae']:.1f}")
+        _record_pair(bench_metrics, imc, smith, profile_name="well_insulated", scenario="cold_snap_disturbance_rejection")
+        check_bench_metrics(num_regression, bench_metrics)
         assert smith["itae"] <= imc["itae"] * 5.0 + 15.0
 
 
@@ -227,7 +256,7 @@ class TestSmithNeutralOnFastProfiles:
     Smith correction should be small and harmless.
     """
 
-    def test_drafty_cold_start_neutral(self):
+    def test_drafty_cold_start_neutral(self, bench_metrics, num_regression):
         """Smith should not significantly hurt drafty bungalow."""
         profile = QUICK_PROFILES["drafty_bungalow"]
         imc, smith = _run_pair(profile, initial=17.0, outdoor=2.0,
@@ -237,9 +266,11 @@ class TestSmithNeutralOnFastProfiles:
         print(f"\n  drafty_bungalow cold_start: IMC ITAE={imc['itae']:.1f}, "
               f"Smith={smith['itae']:.1f} ({pct_change:+.0f}%)")
         # Allow up to 30% regression (small absolute numbers)
+        _record_pair(bench_metrics, imc, smith, profile_name="well_insulated", scenario="drafty_cold_start_neutral")
+        check_bench_metrics(num_regression, bench_metrics)
         assert smith["itae"] <= imc["itae"] * 1.30 + 5.0
 
-    def test_drafty_smith_correction_small(self):
+    def test_drafty_smith_correction_small(self, bench_metrics, num_regression):
         """Smith correction should be small for fast-τ profiles."""
         profile = QUICK_PROFILES["drafty_bungalow"]
         ctrl = _make_smith_controller(profile)
@@ -271,7 +302,7 @@ class TestSmithRobustness:
     """
 
     @pytest.mark.parametrize("tau_factor", [0.5, 1.5])
-    def test_tau_mismatch_stable(self, tau_factor):
+    def test_tau_mismatch_stable(self, bench_metrics, num_regression, tau_factor):
         """±50% τ mismatch should not cause instability."""
         profile = QUICK_PROFILES["well_insulated"]
         ctrl = _make_smith_mismatched(profile, tau_factor=tau_factor)
@@ -289,7 +320,7 @@ class TestSmithRobustness:
         assert metrics["reversals"] < 20, f"Too many reversals ({metrics['reversals']})"
 
     @pytest.mark.parametrize("lag_factor", [0.5, 1.5])
-    def test_lag_mismatch_stable(self, lag_factor):
+    def test_lag_mismatch_stable(self, bench_metrics, num_regression, lag_factor):
         """±50% L mismatch should not cause instability."""
         profile = QUICK_PROFILES["well_insulated"]
         ctrl = _make_smith_mismatched(profile, lag_factor=lag_factor)
@@ -305,7 +336,7 @@ class TestSmithRobustness:
         assert metrics["overshoot"] < 4.0
         assert metrics["reversals"] < 20
 
-    def test_combined_mismatch_stable(self):
+    def test_combined_mismatch_stable(self, bench_metrics, num_regression):
         """Both τ and L wrong by 50% should still be stable."""
         profile = QUICK_PROFILES["well_insulated"]
         ctrl = _make_smith_mismatched(profile, tau_factor=1.5, lag_factor=0.5)
@@ -327,7 +358,7 @@ class TestSmithRobustness:
 class TestSmithModelBehavior:
     """Verify the Smith predictor internal model produces sensible corrections."""
 
-    def test_correction_zero_at_steady_state(self):
+    def test_correction_zero_at_steady_state(self, bench_metrics, num_regression):
         """At steady state, smith_correction should be ≈ 0."""
         profile = QUICK_PROFILES["standard_residential"]
         ctrl = _make_smith_controller(profile)
@@ -343,7 +374,7 @@ class TestSmithModelBehavior:
         print(f"\n  Steady state avg |smith_correction| = {avg_correction:.4f}°C")
         assert avg_correction < 0.5
 
-    def test_correction_nonzero_during_recovery(self):
+    def test_correction_nonzero_during_recovery(self, bench_metrics, num_regression):
         """During cold start recovery, smith_correction should be nonzero.
 
         Cold start forces a large setpoint change which diverges the nodelay
@@ -363,7 +394,7 @@ class TestSmithModelBehavior:
         print(f"\n  Recovery max |smith_correction| = {max_correction:.3f}°C")
         assert max_correction > 0.01, "Smith correction should be active during recovery"
 
-    def test_correction_decays_to_zero(self):
+    def test_correction_decays_to_zero(self, bench_metrics, num_regression):
         """Smith correction should decay back toward zero after transient."""
         profile = QUICK_PROFILES["standard_residential"]
         ctrl = _make_smith_controller(profile)
@@ -405,7 +436,7 @@ class TestSmithAggregate:
                             n_ticks=48, mode="cool")),
     ]
 
-    def test_aggregate_report(self):
+    def test_aggregate_report(self, bench_metrics, num_regression):
         """Print aggregate metrics for IMC-only vs Smith+IMC.
 
         This is a reporting test — it prints the comparison table.
@@ -482,7 +513,7 @@ class TestHoldTimerReduction:
                        n_ticks=48, mode="heat", desired_schedule={10: 22.5})
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
-    def test_reduced_hold_no_catastrophic_regression(self, profile_name):
+    def test_reduced_hold_no_catastrophic_regression(self, bench_metrics, num_regression, profile_name):
         """10-min hold must not be catastrophically worse than 30-min."""
         profile = QUICK_PROFILES[profile_name]
         for scenario in [self.STEADY, self.COLD_START, self.SETPOINT_UP]:
@@ -494,7 +525,7 @@ class TestHoldTimerReduction:
             )
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
-    def test_reduced_hold_setpoint_changes_bounded(self, profile_name):
+    def test_reduced_hold_setpoint_changes_bounded(self, bench_metrics, num_regression, profile_name):
         """10-min hold should not cause >2× the setpoint changes of 30-min."""
         profile = QUICK_PROFILES[profile_name]
         for scenario in [self.STEADY, self.COLD_START]:
@@ -505,7 +536,7 @@ class TestHoldTimerReduction:
                 f"30m={m30['setpoint_changes']}"
             )
 
-    def test_reduced_hold_improves_steady_state(self):
+    def test_reduced_hold_improves_steady_state(self, bench_metrics, num_regression):
         """Steady-state should benefit from faster reactions (shorter hold)."""
         for profile_name in ["drafty_bungalow", "well_insulated"]:
             profile = QUICK_PROFILES[profile_name]
@@ -516,7 +547,7 @@ class TestHoldTimerReduction:
             # 10-min should be at least as good
             assert m10["itae"] <= m30["itae"] * 1.1 + 2.0
 
-    def test_hold_report(self):
+    def test_hold_report(self, bench_metrics, num_regression):
         """Print hold × Smith comparison table."""
         scenarios = [
             ("cold_start", self.COLD_START),

@@ -18,10 +18,26 @@ Design principles (Skogestad SIMC, Åström & Hägglund):
 import pytest
 
 from tests.hvac_bench.adapters import TasmotaPIAdapter
+from tests.hvac_bench.conftest import check_bench_metrics
 from tests.hvac_bench.house_profiles import QUICK_PROFILES, HouseProfile2R2C as HouseProfile
 from tests.hvac_bench.thermal_model import ThermalModel2R2C as ThermalModel
 from tests.hvac_bench.runner import run_scenario
 from tests.hvac_bench.metrics import compute_all_metrics
+
+
+def _record_imc_pair(bench_metrics, flat, imc, *, profile_name, scenario):
+    bench_metrics["profile_name"] = profile_name
+    bench_metrics["scenario"] = scenario
+    for key in ["itae", "overshoot", "reversals", "setpoint_changes",
+                "integral_rms", "total_kwh"]:
+        if key in flat:
+            bench_metrics[f"flat_{key}"] = flat[key]
+        if key in imc:
+            bench_metrics[f"imc_{key}"] = imc[key]
+    if flat.get("settling_time") is not None:
+        bench_metrics["flat_settling_time"] = flat["settling_time"]
+    if imc.get("settling_time") is not None:
+        bench_metrics["imc_settling_time"] = imc["settling_time"]
 
 
 def _make_flat_controller(profile: HouseProfile):
@@ -96,43 +112,51 @@ class TestIMCNoRegression:
     """
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
-    def test_cold_start_bounded(self, profile_name):
+    def test_cold_start_bounded(self, bench_metrics, num_regression, profile_name):
         profile = QUICK_PROFILES[profile_name]
         flat, imc = _run_pair(profile, initial=17.0, outdoor=2.0,
                               desired=20.5, n_ticks=32, mode="heat")
+        _record_imc_pair(bench_metrics, flat, imc, profile_name=profile_name, scenario="cold_start_bounded")
+        check_bench_metrics(num_regression, bench_metrics)
         assert imc["itae"] <= flat["itae"] * 1.50 + 5.0, (
             f"{profile_name}: IMC ITAE {imc['itae']:.1f} vs flat {flat['itae']:.1f}"
         )
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
-    def test_cold_snap_bounded(self, profile_name):
+    def test_cold_snap_bounded(self, bench_metrics, num_regression, profile_name):
         profile = QUICK_PROFILES[profile_name]
         flat, imc = _run_pair(
             profile, initial=20.5, outdoor=10.0, desired=20.5,
             n_ticks=32, mode="heat",
             outdoor_schedule=lambda t: max(-5.0, 10.0 - t * 1.25),
         )
+        _record_imc_pair(bench_metrics, flat, imc, profile_name=profile_name, scenario="cold_snap_bounded")
+        check_bench_metrics(num_regression, bench_metrics)
         assert imc["itae"] <= flat["itae"] * 1.50 + 5.0, (
             f"{profile_name}: IMC ITAE {imc['itae']:.1f} vs flat {flat['itae']:.1f}"
         )
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
-    def test_steady_state_bounded(self, profile_name):
+    def test_steady_state_bounded(self, bench_metrics, num_regression, profile_name):
         profile = QUICK_PROFILES[profile_name]
         flat, imc = _run_pair(profile, initial=20.5, outdoor=5.0,
                               desired=20.5, n_ticks=48, mode="heat")
+        _record_imc_pair(bench_metrics, flat, imc, profile_name=profile_name, scenario="steady_state_bounded")
+        check_bench_metrics(num_regression, bench_metrics)
         assert imc["itae"] <= flat["itae"] * 1.50 + 5.0, (
             f"{profile_name}: IMC ITAE {imc['itae']:.1f} vs flat {flat['itae']:.1f}"
         )
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
-    def test_cooling_bounded(self, profile_name):
+    def test_cooling_bounded(self, bench_metrics, num_regression, profile_name):
         profile = QUICK_PROFILES[profile_name]
         flat, imc = _run_pair(profile, initial=28.0, outdoor=32.0,
                               desired=24.0, n_ticks=32, mode="cool")
         # Relaxed from +5.0 to +6.0: continuous q-feedback (lower=0.0)
         # slightly delays IMC transient settling for fast-τ cooling
         # (drafty_bungalow ITAE 2→5.6 at 8h, converges by day 2).
+        _record_imc_pair(bench_metrics, flat, imc, profile_name=profile_name, scenario="cooling_bounded")
+        check_bench_metrics(num_regression, bench_metrics)
         assert imc["itae"] <= flat["itae"] * 1.50 + 6.0, (
             f"{profile_name}: IMC ITAE {imc['itae']:.1f} vs flat {flat['itae']:.1f}"
         )
@@ -168,17 +192,20 @@ class TestIMCImprovesSlowProfiles:
     ]
 
     @pytest.mark.parametrize("scenario_name,kwargs", SCENARIOS, ids=[s[0] for s in SCENARIOS])
-    def test_well_insulated_no_regression(self, scenario_name, kwargs):
+    def test_well_insulated_no_regression(self, bench_metrics, num_regression, scenario_name, kwargs):
         """IMC should not regress on any scenario for well_insulated profile."""
         profile = QUICK_PROFILES["well_insulated"]
         flat, imc = _run_pair(profile, **kwargs)
         print(f"\n  well_insulated {scenario_name}: flat ITAE={flat['itae']:.1f}, "
               f"IMC={imc['itae']:.1f}, flat rev={flat['reversals']}, "
               f"IMC rev={imc['reversals']}")
+        _record_imc_pair(bench_metrics, flat, imc, profile_name="well_insulated",
+                         scenario=f"well_insulated_no_regression_{scenario_name}")
+        check_bench_metrics(num_regression, bench_metrics)
         assert imc["itae"] <= flat["itae"] * 1.50 + 5.0, (
             f"{scenario_name}: IMC ITAE {imc['itae']:.1f} vs flat {flat['itae']:.1f}")
 
-    def test_well_insulated_cooling_improvement(self):
+    def test_well_insulated_cooling_improvement(self, bench_metrics, num_regression):
         """IMC should measurably improve cooling for well-insulated profiles.
 
         Cooling a high-inertia house (τ_fast≈48 min) is where flat Kp=1.5
@@ -206,7 +233,7 @@ class TestIMCGainScaling:
     the room responds slowly and needs stronger corrective action.
     """
 
-    def test_kp_increases_with_tau(self):
+    def test_kp_increases_with_tau(self, bench_metrics, num_regression):
         """Kp should be monotonically increasing with τ (for fixed λ, L)."""
         gains = {}
         for name, profile in QUICK_PROFILES.items():
@@ -227,7 +254,7 @@ class TestIMCGainScaling:
                 f"Kp={kps[i]:.2f}→{kps[i+1]:.2f}"
             )
 
-    def test_ki_consistent_across_profiles(self):
+    def test_ki_consistent_across_profiles(self, bench_metrics, num_regression):
         """Ki = 3·Kp/τ — with λ=L/3 (fixed), Ki converges as τ grows.
 
         Ki = 3·τ/((L/3+L)·τ) = 3/(4L/3) = 9/(4L) ≈ 0.15 for L=15.
@@ -270,7 +297,7 @@ class TestIMCAggregate:
         ("warm_start", dict(initial=28.0, outdoor=32.0, desired=24.0, n_ticks=32, mode="cool")),
     ]
 
-    def test_aggregate_no_regression(self):
+    def test_aggregate_no_regression(self, bench_metrics, num_regression):
         """Total ITAE across all profiles × scenarios: IMC should not be worse."""
         flat_total = 0.0
         imc_total = 0.0
