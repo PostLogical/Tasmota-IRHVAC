@@ -5570,10 +5570,20 @@ class PIController:
         # steady-state correction and q-feedback nudges are negligible
         # against it.  With FF converged the integral is near zero and
         # q-feedback is the dominant force at the quantization boundary.
+        #
+        # Scaled by ``dt_factor`` so the per-wall-clock effective gain is
+        # cadence-invariant — matches the ``+= avg_error * dt_factor``
+        # integration above and the ``** dt_factor`` leaky decay below.
+        # Without this, q-feedback at 1-min ticks fires 15× more often
+        # than at the 15-min cadence at which gain=0.4 was tuned, which
+        # over-suppresses integral build at faster cadences and creates
+        # the very limit cycle q-feedback was designed to prevent.
         if self._pi_ff_enabled and in_deadband:
             q_error = float(self._hp_setpoint) - clamped_setpoint
             if self._q_feedback_lower < abs(q_error) <= 0.5:
-                self._pi_integral += (q_error / self._pi_ki) * self._q_feedback_gain
+                self._pi_integral += (
+                    (q_error / self._pi_ki) * self._q_feedback_gain * dt_factor
+                )
 
         # ── Observation recording ────────────────────────────────────
         # Gate on data quality: don't record observations with stale or
