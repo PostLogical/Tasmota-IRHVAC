@@ -28,6 +28,13 @@ def _make_controller(profile, seed_factor=1.0, **overrides):
 
 
 def _make_model(profile, initial_temp=24.0, outdoor=32.0, **kwargs):
+    """Build a 2R2C thermal model for the cooling tests.
+
+    Mirror of test_heating's _make_model.  Default ``hp_lag_minutes=2.0``
+    (typical inverter compressor spool); other realism knobs left at
+    idealized defaults.
+    """
+    kwargs.setdefault("hp_lag_minutes", 2.0)
     return ThermalModel(profile=profile, initial_temp=initial_temp,
                         outdoor_temp=outdoor, **kwargs)
 
@@ -57,7 +64,8 @@ class TestCoolingWarmStart:
         ctrl.set_desired_temp(24.0)
         model = _make_model(profile, initial_temp=28.0, outdoor=32.0)
 
-        history = run_scenario(ctrl, model, n_ticks=32, mode="cool")
+        # 8h cool-down (was n_ticks=32 at 15-min cadence).
+        history = run_scenario(ctrl, model, duration_minutes=8 * 60, mode="cool")
         _record_run(bench_metrics, history, profile_name=profile_name,
                     seed_factor=seed_factor, desired=24.0)
 
@@ -90,15 +98,18 @@ class TestCoolingHeatWave:
         ctrl.set_desired_temp(24.0)
         model = _make_model(profile, initial_temp=24.0, outdoor=30.0)
 
-        def outdoor(tick):
-            return min(40.0, 30.0 + tick * 0.8)
+        # Outdoor rises 30°C → 40°C over the first ~3.1h, then holds.
+        # Original (15-min ticks): 0.8°C per tick = 3.2°C/h.
+        def outdoor_schedule(minute):
+            return min(40.0, 30.0 + minute * (3.2 / 60.0))
 
-        history = run_scenario(ctrl, model, n_ticks=32, mode="cool",
-                               outdoor_schedule=outdoor)
+        history = run_scenario(ctrl, model, duration_minutes=8 * 60, mode="cool",
+                               outdoor_minute_schedule=outdoor_schedule)
         _record_run(bench_metrics, history, profile_name=profile_name,
                     seed_factor=seed_factor, desired=24.0)
 
-        post_settle = [h for h in history if h["tick"] > 6]
+        # 90-min settle (was tick > 6 at 15-min cadence).
+        post_settle = [h for h in history if h["minute"] > 90]
         post_settle_devs = [abs(h["room_temp"] - 24.0) for h in post_settle]
         bench_metrics["post_settle_max_abs_dev"] = (
             max(post_settle_devs) if post_settle_devs else 0.0
@@ -127,11 +138,14 @@ class TestCoolingSteadyState:
         ctrl.set_desired_temp(24.0)
         model = _make_model(profile, initial_temp=24.0, outdoor=32.0)
 
-        history = run_scenario(ctrl, model, n_ticks=48, mode="cool")
+        # 12h run; last 4h should be stable (was n_ticks=48, last 16
+        # ticks at 15-min cadence = 4h).
+        history = run_scenario(ctrl, model, duration_minutes=12 * 60, mode="cool")
         _record_run(bench_metrics, history, profile_name=profile_name,
                     seed_factor=seed_factor, desired=24.0)
 
-        late_temps = [h["room_temp"] for h in history[-16:]]
+        late = [h for h in history if h["minute"] >= 8 * 60]
+        late_temps = [h["room_temp"] for h in late]
         temp_range = max(late_temps) - min(late_temps)
         bench_metrics["late_temp_range"] = temp_range
         bench_metrics["late_temp_max"] = max(late_temps)
@@ -159,18 +173,20 @@ class TestCoolingSolarRejection:
         model = _make_model(profile, initial_temp=24.0, outdoor=30.0,
                             solar_gain=self.SOLAR_GAINS[profile_name])
 
-        def solar(tick):
-            if tick < 4:
+        # Solar starts after 60 min, ramps at 0.1/tick (15-min) = 0.4/h,
+        # caps at 0.8.  Original: tick<4 = 0; (tick-4)*0.1.
+        def solar_schedule(minute):
+            if minute < 60.0:
                 return 0.0
-            return min(0.8, (tick - 4) * 0.1)
+            return min(0.8, (minute - 60.0) * (0.4 / 60.0))
 
-        history = run_scenario(ctrl, model, n_ticks=32, mode="cool",
-                               solar_schedule=solar)
+        history = run_scenario(ctrl, model, duration_minutes=8 * 60, mode="cool",
+                               solar_minute_schedule=solar_schedule)
         _record_run(bench_metrics, history, profile_name=profile_name,
                     seed_factor=1.0, desired=24.0)
 
-        # Room should stay within tolerance despite solar heating
-        post_settle = [h for h in history if h["tick"] > 8]
+        # 120-min settle (was tick > 8 at 15-min cadence).
+        post_settle = [h for h in history if h["minute"] > 120]
         post_settle_devs = [abs(h["room_temp"] - 24.0) for h in post_settle]
         bench_metrics["post_settle_max_abs_dev"] = (
             max(post_settle_devs) if post_settle_devs else 0.0
