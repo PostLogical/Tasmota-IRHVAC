@@ -57,6 +57,7 @@ def _make_result(
         daily_covariance_trace=[],
         daily_buffer_utilization=daily_buffer_utilization,
         batch_kappa=[], batch_covariance_trace=[],
+        batch_std_err_trajectory=[],
         ticks_hp_on=0, ticks_uncertain=0, ticks_hp_off=0,
         observation_yield_pct=0.0,
         final_cal_min=0.0, final_cal_max=0.0,
