@@ -33,6 +33,27 @@ def _make_model(profile, initial_temp=20.0, outdoor=5.0, **kwargs):
                         outdoor_temp=outdoor, **kwargs)
 
 
+def _record_kd_sweep(bench_metrics, results, *, profile_name, scenario):
+    """Record per-kd metrics from a Kd sweep into bench_metrics.
+
+    Flattens nested {kd: {metric: value}} into ``kd_{kd}_{metric}`` keys
+    so phase-to-phase diffs can compare each Kd value separately.
+    """
+    bench_metrics["profile_name"] = profile_name
+    bench_metrics["scenario"] = scenario
+    for kd, r in results.items():
+        m = r["metrics"]
+        for k, v in m.items():
+            bench_metrics[f"kd_{kd}_rollup_{k}"] = v
+        bench_metrics[f"kd_{kd}_max_abs_d"] = r.get("max_abs_d", 0.0)
+        if "d_std" in r:
+            bench_metrics[f"kd_{kd}_d_std"] = r["d_std"]
+        if "late_temp_std" in r:
+            bench_metrics[f"kd_{kd}_late_temp_std"] = r["late_temp_std"]
+        if "d_at_step" in r:
+            bench_metrics[f"kd_{kd}_d_at_step"] = r["d_at_step"]
+
+
 # ── Cold Start (17°C → 20.5°C) ──────────────────────────────────────────
 
 
@@ -40,7 +61,7 @@ class TestDerivativeColdStart:
     """D's impact on cold start: overshoot damping as room approaches target."""
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
-    def test_kd_sweep_cold_start(self, profile_name):
+    def test_kd_sweep_cold_start(self, bench_metrics, profile_name):
         profile = QUICK_PROFILES[profile_name]
         results = {}
 
@@ -58,6 +79,8 @@ class TestDerivativeColdStart:
                 "max_abs_d": max(abs(d) for d in d_terms),
                 "history": history,
             }
+        _record_kd_sweep(bench_metrics, results, profile_name=profile_name,
+                         scenario="cold_start")
 
         # Print comparison table
         print(f"\n{'='*70}")
@@ -91,7 +114,7 @@ class TestDerivativeColdSnap:
     """D's impact during sudden outdoor temp drop — disturbance rejection."""
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
-    def test_kd_sweep_cold_snap(self, profile_name):
+    def test_kd_sweep_cold_snap(self, bench_metrics, profile_name):
         profile = QUICK_PROFILES[profile_name]
         results = {}
 
@@ -113,6 +136,8 @@ class TestDerivativeColdSnap:
                 "max_abs_d": max(abs(d) for d in d_terms),
                 "history": history,
             }
+        _record_kd_sweep(bench_metrics, results, profile_name=profile_name,
+                         scenario="cold_snap")
 
         print(f"\n{'='*70}")
         print(f"Cold Snap — {profile_name}")
@@ -141,7 +166,7 @@ class TestDerivativeSteadyStateNoise:
     """
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
-    def test_kd_sweep_noisy_steady(self, profile_name):
+    def test_kd_sweep_noisy_steady(self, bench_metrics, profile_name):
         profile = QUICK_PROFILES[profile_name]
         results = {}
 
@@ -161,6 +186,8 @@ class TestDerivativeSteadyStateNoise:
                 "max_abs_d": max(abs(d) for d in d_terms),
                 "d_std": _std(d_terms),
             }
+        _record_kd_sweep(bench_metrics, results, profile_name=profile_name,
+                         scenario="noisy_steady")
 
         print(f"\n{'='*70}")
         print(f"Noisy Steady State — {profile_name}")
@@ -189,7 +216,7 @@ class TestDerivativeSetpointStep:
     """
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
-    def test_kd_sweep_setpoint_step(self, profile_name):
+    def test_kd_sweep_setpoint_step(self, bench_metrics, profile_name):
         profile = QUICK_PROFILES[profile_name]
         results = {}
 
@@ -214,6 +241,8 @@ class TestDerivativeSetpointStep:
                 "max_abs_d": max(abs(d) for d in d_terms),
                 "history": history,
             }
+        _record_kd_sweep(bench_metrics, results, profile_name=profile_name,
+                         scenario="setpoint_step")
 
         print(f"\n{'='*70}")
         print(f"Setpoint Step — {profile_name}")
@@ -255,7 +284,7 @@ class TestDerivativeOscillation:
     induce oscillation, then check if D reduces it.
     """
 
-    def test_kd_damps_oscillation(self):
+    def test_kd_damps_oscillation(self, bench_metrics):
         profile = QUICK_PROFILES["drafty_bungalow"]
         results = {}
 
@@ -276,6 +305,8 @@ class TestDerivativeOscillation:
                 "metrics": m,
                 "late_temp_std": temp_std,
             }
+        _record_kd_sweep(bench_metrics, results, profile_name="drafty_bungalow",
+                         scenario="oscillation_damping")
 
         print(f"\n{'='*70}")
         print("Oscillation Damping — drafty_bungalow (aggressive PI)")
