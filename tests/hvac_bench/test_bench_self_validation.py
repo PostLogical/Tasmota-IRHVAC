@@ -145,6 +145,7 @@ def test_run_reference_scenario_does_not_mutate_canonical_specs():
         assert mi._true_ff_coef == pre_ff
 
 
+@pytest.mark.slow
 def test_kpis_consistent_across_cadence():
     """Comfort metrics should not vary wildly across reasonable tick rates.
 
