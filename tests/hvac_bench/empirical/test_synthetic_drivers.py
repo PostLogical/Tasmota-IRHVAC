@@ -20,6 +20,7 @@ from tests.hvac_bench.house_profiles import (
     FUJITSU_HYPERHEAT_CAPACITY,
     HouseProfile2R2C,
 )
+from tests.hvac_bench.conftest import check_bench_metrics
 
 
 _LIT_TRUTH = RCParams1R1C(

@@ -38,6 +38,7 @@ from tests.hvac_bench.house_profiles import (
     FUJITSU_HYPERHEAT_CAPACITY,
     HouseProfile2R2C,
 )
+from tests.hvac_bench.conftest import check_bench_metrics
 
 
 # Literature τ to keep apples-to-apples with Tier 1.3a (Levermore 2020

@@ -12,6 +12,7 @@ import time as _time
 from collections import Counter
 
 from tests.hvac_bench.adapters import TasmotaPIAdapter
+from tests.hvac_bench.conftest import check_bench_metrics
 from tests.hvac_bench.full_stack_runner import (
     FullStackConfig, ModelInputSpec, diurnal_solar, diurnal_outdoor,
     run_full_stack, TICK_MINUTES_DEFAULT,
@@ -157,7 +158,7 @@ class TestTickIntervalSensitivity:
     they can't be trusted.
     """
 
-    def test_tick_interval_sweep(self):
+    def test_tick_interval_sweep(self, bench_metrics, num_regression):
         """Comfort, coefficient, and integral should be similar across tick rates.
 
         5-min ticks are excluded from tight comfort checks — the
@@ -205,7 +206,7 @@ class TestTickIntervalSensitivity:
 class TestObservationDataQuality:
     """Verify the data the learning system actually sees is realistic."""
 
-    def test_observation_distributions(self):
+    def test_observation_distributions(self, bench_metrics, num_regression):
         """Check that observation features have realistic distributions."""
         profile = PROFILES_2R2C["living_room"]
         pi_config = {
@@ -329,7 +330,7 @@ class TestObservationDataQuality:
             f"Only {len(obs_list)} observations in 14 days — too few"
         )
 
-    def test_setpoint_realism(self):
+    def test_setpoint_realism(self, bench_metrics, num_regression):
         """HP setpoint should be integer-quantized with realistic patterns."""
         result = _run_with_tick_interval(15.0, n_days=7)
 

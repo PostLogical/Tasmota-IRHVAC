@@ -16,6 +16,7 @@ from tests.hvac_bench.full_stack_runner import (
     PostFillId,
     summarize_post_fill,
 )
+from tests.hvac_bench.conftest import check_bench_metrics
 
 
 def _make_result(
@@ -73,7 +74,7 @@ def _make_result(
 
 
 class TestSummarizePostFillEdgeCases:
-    def test_no_truth_returns_empty(self):
+    def test_no_truth_returns_empty(self, bench_metrics, num_regression):
         """No true_coefs → no entries to score."""
         result = _make_result(
             coef_trajectory=[{"outdoor_delta": -0.25}] * 5,
@@ -86,7 +87,7 @@ class TestSummarizePostFillEdgeCases:
         )
         assert out == {}
 
-    def test_buffer_never_fills_returns_nan_metrics(self):
+    def test_buffer_never_fills_returns_nan_metrics(self, bench_metrics, num_regression):
         """Without fill_day, all metrics are NaN and converges=False."""
         result = _make_result(
             coef_trajectory=[{"outdoor_delta": -0.20}] * 5,
@@ -109,7 +110,7 @@ class TestSummarizePostFillEdgeCases:
 
 
 class TestSummarizePostFillMetrics:
-    def test_constant_trajectory_post_fill_zero_drift_bias_exceeds_tol(self):
+    def test_constant_trajectory_post_fill_zero_drift_bias_exceeds_tol(self, bench_metrics, num_regression):
         """β stays at -0.18 throughout post-fill: bias = +0.07, std = 0,
         drift = 0.  bias > bias_tol=0.05 so converges=False."""
         # 30 days, fill at day 5, 12h batches → 60 batches over the run.
@@ -131,7 +132,7 @@ class TestSummarizePostFillMetrics:
         assert pf.drift_per_day == 0.0
         assert pf.converges is False
 
-    def test_within_tol_converges(self):
+    def test_within_tol_converges(self, bench_metrics, num_regression):
         """Constant β at -0.24, truth = -0.25 → bias = 0.01 < 0.05,
         std = 0 < 0.03 → converges."""
         coef_trajectory = [{"outdoor_delta": -0.24}] * 60
@@ -148,7 +149,7 @@ class TestSummarizePostFillMetrics:
         pf = out["outdoor_delta"]
         assert pf.converges is True
 
-    def test_drift_slope_matches_synthetic_linear_trajectory(self):
+    def test_drift_slope_matches_synthetic_linear_trajectory(self, bench_metrics, num_regression):
         """β_post = -0.25 + 0.005 * day → drift should be 0.005/day."""
         # 30 days, 12h batches → 60 batches, fill at day 0
         # day_j = j / 2 (since 2 batches per day)
@@ -173,7 +174,7 @@ class TestSummarizePostFillMetrics:
         # |end - truth| = 0.1475, |start - truth| = 0 → not improving (worse).
         assert pf.improves is False
 
-    def test_improves_flag_picks_up_convergence_to_truth(self):
+    def test_improves_flag_picks_up_convergence_to_truth(self, bench_metrics, num_regression):
         """β starts off at -0.20, drifts toward -0.25 by end → improves=True."""
         # Linear: β = -0.20 - 0.001 * j (over 50 batches, ends near -0.25)
         coef_trajectory = [

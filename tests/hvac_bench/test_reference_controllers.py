@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from tests.hvac_bench.controller_protocol import HVACController
+from tests.hvac_bench.conftest import check_bench_metrics
 from tests.hvac_bench.full_stack_runner import ModelInputSpec
 from tests.hvac_bench.reference_controllers import (
     NaiveBangBangController,
@@ -23,11 +24,11 @@ from tests.hvac_bench.reference_controllers import (
 
 
 class TestNaiveBangBang:
-    def test_protocol_conformance(self):
+    def test_protocol_conformance(self, bench_metrics, num_regression):
         c = NaiveBangBangController(min_temp=16.0, max_temp=30.0)
         assert isinstance(c, HVACController)
 
-    def test_heat_below_band_rails_to_max(self):
+    def test_heat_below_band_rails_to_max(self, bench_metrics, num_regression):
         c = NaiveBangBangController(min_temp=16.0, max_temp=30.0,
                                     hysteresis_c=0.5)
         c.set_mode("heat")
@@ -36,7 +37,7 @@ class TestNaiveBangBang:
                     dt_seconds=900, model_inputs=None)
         assert sp == 30.0
 
-    def test_heat_above_band_drops_to_min(self):
+    def test_heat_above_band_drops_to_min(self, bench_metrics, num_regression):
         c = NaiveBangBangController(min_temp=16.0, max_temp=30.0,
                                     hysteresis_c=0.5)
         c.set_mode("heat")
@@ -45,7 +46,7 @@ class TestNaiveBangBang:
         c.tick(room_temp_c=22.0, outdoor_temp_c=-5.0, dt_seconds=900)
         assert c.hp_setpoint == 16.0
 
-    def test_heat_inside_band_holds(self):
+    def test_heat_inside_band_holds(self, bench_metrics, num_regression):
         c = NaiveBangBangController(min_temp=16.0, max_temp=30.0,
                                     hysteresis_c=0.5,
                                     initial_hp_setpoint=30.0)
@@ -57,21 +58,21 @@ class TestNaiveBangBang:
         sp = c.tick(room_temp_c=20.3, outdoor_temp_c=-5.0, dt_seconds=900)
         assert sp == 30.0  # held
 
-    def test_cool_above_band_pulls_down(self):
+    def test_cool_above_band_pulls_down(self, bench_metrics, num_regression):
         c = NaiveBangBangController(min_temp=16.0, max_temp=30.0)
         c.set_mode("cool")
         c.set_desired_temp(24.0)
         sp = c.tick(room_temp_c=27.0, outdoor_temp_c=35.0, dt_seconds=900)
         assert sp == 16.0
 
-    def test_set_mode_resets_setpoint(self):
+    def test_set_mode_resets_setpoint(self, bench_metrics, num_regression):
         c = NaiveBangBangController(min_temp=16.0, max_temp=30.0)
         c.set_mode("heat")
         assert c.hp_setpoint == 30.0
         c.set_mode("cool")
         assert c.hp_setpoint == 16.0
 
-    def test_get_state_returns_required_keys(self):
+    def test_get_state_returns_required_keys(self, bench_metrics, num_regression):
         c = NaiveBangBangController(min_temp=16.0, max_temp=30.0)
         s = c.get_state()
         assert "integral" in s
@@ -79,7 +80,7 @@ class TestNaiveBangBang:
         assert s["integral"] == 0.0
         assert s["ff_offset"] == 0.0
 
-    def test_batch_update_is_noop(self):
+    def test_batch_update_is_noop(self, bench_metrics, num_regression):
         c = NaiveBangBangController(min_temp=16.0, max_temp=30.0)
         # Should not raise
         c.batch_update(tick=100)
@@ -89,31 +90,31 @@ class TestNaiveBangBang:
 
 
 class TestWellTunedPI:
-    def test_protocol_conformance(self):
+    def test_protocol_conformance(self, bench_metrics, num_regression):
         c = make_well_tuned_pi("living_room", mode="heat")
         assert isinstance(c, HVACController)
         assert isinstance(c, _BatchAwarePIController)
 
-    def test_learning_disabled_in_pi_config(self):
+    def test_learning_disabled_in_pi_config(self, bench_metrics, num_regression):
         c = make_well_tuned_pi("living_room", mode="heat")
         # Both batch WLS and plant ID off: well-tuned means frozen.
         assert c.adapter._config["pi_batch_wls_enabled"] is False
         assert c.adapter._config["pi_plant_id_enabled"] is False
 
-    def test_outdoor_seed_matches_profile_truth_heat(self):
+    def test_outdoor_seed_matches_profile_truth_heat(self, bench_metrics, num_regression):
         from tests.hvac_bench.house_profiles import PROFILES_2R2C
         profile = PROFILES_2R2C["living_room"]
         c = make_well_tuned_pi("living_room", mode="heat")
         assert c.adapter._config["pi_outdoor_seed_heat"] == profile.true_seed
 
-    def test_outdoor_seed_matches_profile_truth_cool(self):
+    def test_outdoor_seed_matches_profile_truth_cool(self, bench_metrics, num_regression):
         from tests.hvac_bench.house_profiles import PROFILES_2R2C
         profile = PROFILES_2R2C["living_room"]
         c = make_well_tuned_pi("living_room", mode="cool")
         # cool seed override goes into pi_outdoor_seed_cool
         assert c.adapter._config["pi_outdoor_seed_cool"] == profile.true_seed
 
-    def test_model_input_seeds_use_true_ff_coef(self):
+    def test_model_input_seeds_use_true_ff_coef(self, bench_metrics, num_regression):
         mi = ModelInputSpec(
             name="solar",
             entity_id="sensor.solar",
@@ -126,7 +127,7 @@ class TestWellTunedPI:
         assert len(configured) == 1
         assert configured[0]["seed_heat"] == -2.5
 
-    def test_batch_update_is_noop_when_learning_disabled(self):
+    def test_batch_update_is_noop_when_learning_disabled(self, bench_metrics, num_regression):
         c = make_well_tuned_pi("living_room", mode="heat")
         # Capture the WLS run count before/after; with learning disabled,
         # batch_update should not invoke _run_batch_analysis.
@@ -141,16 +142,16 @@ class TestWellTunedPI:
 
 
 class TestProductionPI:
-    def test_protocol_conformance(self):
+    def test_protocol_conformance(self, bench_metrics, num_regression):
         c = make_production_pi("living_room", mode="heat")
         assert isinstance(c, HVACController)
 
-    def test_learning_enabled_by_default(self):
+    def test_learning_enabled_by_default(self, bench_metrics, num_regression):
         c = make_production_pi("living_room", mode="heat")
         assert c.adapter._config["pi_batch_wls_enabled"] is True
         assert c.adapter._config["pi_plant_id_enabled"] is True
 
-    def test_default_seeds_not_truth(self):
+    def test_default_seeds_not_truth(self, bench_metrics, num_regression):
         # Without seed_with_truth, the conftest default seed (0.25) is
         # left in place. bunkroom's true_seed (~0.235) differs, so a
         # default-seeded production controller on bunkroom must show
@@ -161,13 +162,13 @@ class TestProductionPI:
         c = make_production_pi("bunkroom", mode="heat")
         assert c.adapter._config["pi_outdoor_seed_heat"] == 0.25
 
-    def test_seed_with_truth_overrides(self):
+    def test_seed_with_truth_overrides(self, bench_metrics, num_regression):
         from tests.hvac_bench.house_profiles import PROFILES_2R2C
         profile = PROFILES_2R2C["living_room"]
         c = make_production_pi("living_room", mode="heat", seed_with_truth=True)
         assert c.adapter._config["pi_outdoor_seed_heat"] == profile.true_seed
 
-    def test_batch_update_invokes_run_batch_analysis(self):
+    def test_batch_update_invokes_run_batch_analysis(self, bench_metrics, num_regression):
         c = make_production_pi("living_room", mode="heat")
         called = []
         original = c.pi._run_batch_analysis
@@ -190,7 +191,7 @@ class TestCrossControllerBehavior:
     setpoints must differ in the first few ticks (otherwise the suite is
     not discriminating)."""
 
-    def test_first_tick_setpoints_can_differ(self):
+    def test_first_tick_setpoints_can_differ(self, bench_metrics, num_regression):
         # Cold room (room=18, desired=20), no model inputs, heat mode
         cold_room = 18.0
         outdoor = -5.0

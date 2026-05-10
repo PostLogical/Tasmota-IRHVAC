@@ -33,6 +33,7 @@ import pytest
 
 from custom_components.tasmota_irhvac.pi.model_input_manager import tod_features
 from tests.hvac_bench.adapters import TasmotaPIAdapter
+from tests.hvac_bench.conftest import check_bench_metrics
 from tests.hvac_bench.mock_states import _BenchHass
 from tests.hvac_bench.reference_scenarios import (
     CANONICAL_SCENARIOS,
@@ -44,7 +45,7 @@ from tests.hvac_bench.reference_scenarios import (
 # ── Test 0: hass is a hand-rolled fake, not a Mock derivative ────────────
 
 
-def test_bench_hass_is_not_mock_derivative():
+def test_bench_hass_is_not_mock_derivative(bench_metrics, num_regression):
     """``_FakeBenchEntity.hass`` must be a hand-rolled ``_BenchHass``.
 
     Regression catcher for the architectural fix to #83's bug class:
@@ -84,7 +85,7 @@ def test_bench_hass_is_not_mock_derivative():
 # ── Test 1: wall_time covers sim duration ─────────────────────────────────
 
 
-def test_wall_time_spans_sim_duration():
+def test_wall_time_spans_sim_duration(bench_metrics, num_regression):
     """Observation `wall_time` must span the sim's 24-hour duration.
 
     Direct regression catcher for the #84 wall-clock leak: prior to Stage B,
@@ -117,7 +118,7 @@ def test_wall_time_spans_sim_duration():
 # ── Test 2: ToD features traverse the diurnal cycle ──────────────────────
 
 
-def test_tod_features_cover_diurnal_cycle():
+def test_tod_features_cover_diurnal_cycle(bench_metrics, num_regression):
     """sin/cos ToD features must traverse the unit circle over a 24h sim.
 
     Derived check: even if `wall_time` semantics shift in the future,
@@ -159,7 +160,7 @@ def test_tod_features_cover_diurnal_cycle():
 
 
 @pytest.mark.slow
-def test_run_reference_scenario_does_not_mutate_canonical_specs():
+def test_run_reference_scenario_does_not_mutate_canonical_specs(bench_metrics, num_regression):
     """Running a CANONICAL_SCENARIOS scenario must not mutate its ModelInputSpec.
 
     Regression test for C3: the runner called ``mi.resolve(profile.hp_gain)``
@@ -189,7 +190,7 @@ def test_run_reference_scenario_does_not_mutate_canonical_specs():
 
 
 @pytest.mark.slow
-def test_kpis_consistent_across_cadence():
+def test_kpis_consistent_across_cadence(bench_metrics, num_regression):
     """Comfort metrics should not vary wildly across reasonable tick rates.
 
     Phase 3b found `tdis_tot` non-monotone in cadence on the buggy bench.

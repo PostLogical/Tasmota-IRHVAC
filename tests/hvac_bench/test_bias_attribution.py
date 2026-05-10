@@ -29,6 +29,7 @@ from tests.hvac_bench.bias_attribution import (
     format_bias_report,
     run_bias_attribution,
 )
+from tests.hvac_bench.conftest import check_bench_metrics
 from tests.hvac_bench.house_profiles import PROFILES_2R2C
 
 
@@ -62,7 +63,7 @@ def living_room_attribution():
 
 class TestBothArmsRun:
 
-    def test_arms_produce_outdoor_delta_beta(self, living_room_attribution):
+    def test_arms_produce_outdoor_delta_beta(self, bench_metrics, num_regression, living_room_attribution):
         # Both arms must report β for outdoor_delta — that's the minimum
         # output for the comparison to be meaningful.
         cl = living_room_attribution.closed_loop.beta
@@ -70,7 +71,7 @@ class TestBothArmsRun:
         assert "outdoor_delta" in cl, f"closed-loop missing outdoor_delta: {cl}"
         assert "outdoor_delta" in ol, f"open-loop missing outdoor_delta: {ol}"
 
-    def test_betas_are_finite(self, living_room_attribution):
+    def test_betas_are_finite(self, bench_metrics, num_regression, living_room_attribution):
         for arm_name, arm in [
             ("closed_loop", living_room_attribution.closed_loop),
             ("open_loop", living_room_attribution.open_loop),
@@ -80,7 +81,7 @@ class TestBothArmsRun:
                     f"{arm_name}.{name}={val} is not finite"
                 )
 
-    def test_open_loop_identifiability_attached(self, living_room_attribution):
+    def test_open_loop_identifiability_attached(self, bench_metrics, num_regression, living_room_attribution):
         # Open-loop arm must carry the IdentifiabilityReport from Phase 1b.
         ol_id = living_room_attribution.open_loop.identifiability
         assert ol_id.n_observations > 1000  # 30-day probe yields plenty
@@ -89,7 +90,7 @@ class TestBothArmsRun:
             ol_id.feature_names.index("outdoor_delta")
         ] < 0.1
 
-    def test_closed_loop_identifiability_attached(self, living_room_attribution):
+    def test_closed_loop_identifiability_attached(self, bench_metrics, num_regression, living_room_attribution):
         # Phase 1e: closed-loop arm now carries a real identifiability
         # report (built from a snapshot of the production WLS buffer at
         # the last tick), not the empty placeholder Phase 1c had.
@@ -102,7 +103,7 @@ class TestBothArmsRun:
         )
         assert cl_id.rank >= 2
 
-    def test_both_arms_have_residual_diagnostics(self, living_room_attribution):
+    def test_both_arms_have_residual_diagnostics(self, bench_metrics, num_regression, living_room_attribution):
         # Phase 1e: both arms carry Phase 1d residual reports.
         cl_res = living_room_attribution.closed_loop.residuals
         ol_res = living_room_attribution.open_loop.residuals
@@ -130,7 +131,7 @@ class TestClosedLoopBiasIsNonzero:
     finding that the bias is not negligible on this scenario.
     """
 
-    def test_outdoor_delta_bias_is_measured(self, living_room_attribution):
+    def test_outdoor_delta_bias_is_measured(self, bench_metrics, num_regression, living_room_attribution):
         bias = living_room_attribution.closed_loop_bias["outdoor_delta"]
         # Print the report to stderr so it lands in test logs.
         print(format_bias_report(living_room_attribution))
@@ -146,7 +147,7 @@ class TestClosedLoopBiasIsNonzero:
             f"this scenario can't attribute closed-loop bias"
         )
 
-    def test_both_betas_in_physical_band(self, living_room_attribution):
+    def test_both_betas_in_physical_band(self, bench_metrics, num_regression, living_room_attribution):
         # Both estimators must produce physically plausible β, otherwise
         # the gap is meaningless. Living_room g·τ = 4 → asymptotic
         # closed-loop FF coefficient ≈ -0.25, open-loop ≈ -0.20.
@@ -179,7 +180,7 @@ class TestBiasDirectionMatchesLiterature:
     """
 
     def test_closed_loop_more_negative_than_open_loop(
-        self, living_room_attribution
+        self, bench_metrics, num_regression, living_room_attribution
     ):
         cl = living_room_attribution.closed_loop.beta["outdoor_delta"]
         ol = living_room_attribution.open_loop.beta["outdoor_delta"]

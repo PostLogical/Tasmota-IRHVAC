@@ -10,6 +10,7 @@ from __future__ import annotations
 import time as _time
 
 from tests.hvac_bench.adapters import TasmotaPIAdapter
+from tests.hvac_bench.conftest import check_bench_metrics
 from tests.hvac_bench.full_stack_runner import (
     FullStackConfig, ModelInputSpec, diurnal_solar, diurnal_outdoor,
     run_full_stack, TICK_MINUTES_DEFAULT,
@@ -118,7 +119,7 @@ def _run_and_collect_observations(outdoor_base: float, n_days: int = 7,
 class TestObservationRecording:
     """Verify observations are recorded with correct classification."""
 
-    def test_winter_observations(self):
+    def test_winter_observations(self, bench_metrics, num_regression):
         """Winter: most observations should be HP-on, few no_output."""
         stats = _run_and_collect_observations(outdoor_base=-5.0, n_days=7)
         wls = stats["wls"]
@@ -145,7 +146,7 @@ class TestObservationRecording:
             f"More no_output ({wls['no_output']}) than normal ({wls['normal']}) in winter"
         )
 
-    def test_spring_observations(self):
+    def test_spring_observations(self, bench_metrics, num_regression):
         """Spring: should see meaningful HP-off observations."""
         stats = _run_and_collect_observations(
             outdoor_base=14.0, n_days=7, solar_gain=0.02,
@@ -166,7 +167,7 @@ class TestObservationRecording:
             "No HP-off observations in spring — HP cycling not detected"
         )
 
-    def test_uncertain_observations_excluded_from_wls(self):
+    def test_uncertain_observations_excluded_from_wls(self, bench_metrics, num_regression):
         """Observations in the uncertain zone should be marked."""
         stats = _run_and_collect_observations(outdoor_base=-5.0, n_days=3)
         wls = stats["wls"]
@@ -181,7 +182,7 @@ class TestObservationRecording:
             # In winter this should be rare
             # (but not zero — transients during setpoint changes)
 
-    def test_no_output_observations_have_null_setpoint(self):
+    def test_no_output_observations_have_null_setpoint(self, bench_metrics, num_regression):
         """no_output observations should have hp_setpoint=None."""
         stats = _run_and_collect_observations(
             outdoor_base=14.0, n_days=7, solar_gain=0.02,
@@ -191,7 +192,7 @@ class TestObservationRecording:
             f"no_output ({wls['no_output']}) != hp_setpoint=None ({wls['hp_setpoint_none']})"
         )
 
-    def test_greybox_gets_hp_off_in_spring(self):
+    def test_greybox_gets_hp_off_in_spring(self, bench_metrics, num_regression):
         """Grey-box buffer should have HP-off observations in spring."""
         stats = _run_and_collect_observations(
             outdoor_base=14.0, n_days=7, solar_gain=0.02,

@@ -27,6 +27,7 @@ from tests.hvac_bench.identifiability import (
     identifiability_report,
     pe_diagnostics,
 )
+from tests.hvac_bench.conftest import check_bench_metrics
 from tests.hvac_bench.open_loop_runner import (
     OpenLoopConfig,
     make_step_excitation,
@@ -38,20 +39,20 @@ from tests.hvac_bench.open_loop_runner import (
 
 
 class TestFisherInformation:
-    def test_unit_weights_recover_ols_form(self):
+    def test_unit_weights_recover_ols_form(self, bench_metrics, num_regression):
         X = np.array([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
         fim = fisher_information(X, weights=None, sigma2=1.0)
         # X.T @ X = [[2, 1], [1, 2]] for this X.
         np.testing.assert_allclose(fim, np.array([[2.0, 1.0], [1.0, 2.0]]))
 
-    def test_sigma2_scales_inversely(self):
+    def test_sigma2_scales_inversely(self, bench_metrics, num_regression):
         X = np.array([[1.0], [1.0], [1.0]])
         fim_unit = fisher_information(X, sigma2=1.0)
         fim_quad = fisher_information(X, sigma2=4.0)
         # FIM ∝ 1/σ². Quadrupling σ² → 1/4 of FIM.
         np.testing.assert_allclose(fim_quad, fim_unit / 4.0)
 
-    def test_orthogonal_columns_give_diagonal_fim(self):
+    def test_orthogonal_columns_give_diagonal_fim(self, bench_metrics, num_regression):
         # Columns are orthogonal but not unit-normalized.
         X = np.array([[1.0, 2.0], [-1.0, 2.0], [1.0, -2.0], [-1.0, -2.0]])
         fim = fisher_information(X)
@@ -59,33 +60,33 @@ class TestFisherInformation:
         assert abs(fim[0, 1]) < 1e-12
         assert abs(fim[1, 0]) < 1e-12
 
-    def test_weights_enter_linearly(self):
+    def test_weights_enter_linearly(self, bench_metrics, num_regression):
         X = np.array([[1.0, 0.0], [0.0, 1.0]])
         w = np.array([2.0, 3.0])
         fim = fisher_information(X, weights=w, sigma2=1.0)
         # FIM = X^T diag(w) X = diag(w) for the identity-like X above.
         np.testing.assert_allclose(fim, np.diag([2.0, 3.0]))
 
-    def test_rejects_invalid_sigma2(self):
+    def test_rejects_invalid_sigma2(self, bench_metrics, num_regression):
         X = np.array([[1.0]])
         with pytest.raises(ValueError):
             fisher_information(X, sigma2=0.0)
         with pytest.raises(ValueError):
             fisher_information(X, sigma2=-1.0)
 
-    def test_rejects_mismatched_weights(self):
+    def test_rejects_mismatched_weights(self, bench_metrics, num_regression):
         X = np.array([[1.0], [2.0], [3.0]])
         with pytest.raises(ValueError):
             fisher_information(X, weights=np.array([1.0, 1.0]))
 
 
 class TestCrlbDiagonal:
-    def test_diagonal_fim_inverts_elementwise(self):
+    def test_diagonal_fim_inverts_elementwise(self, bench_metrics, num_regression):
         fim = np.diag([4.0, 9.0, 16.0])
         crlb = crlb_diagonal(fim)
         np.testing.assert_allclose(crlb, [0.25, 1.0 / 9.0, 1.0 / 16.0])
 
-    def test_singular_fim_marks_unidentifiable(self):
+    def test_singular_fim_marks_unidentifiable(self, bench_metrics, num_regression):
         # Rank-1 FIM: only one direction is identified.
         fim = np.array([[1.0, 1.0], [1.0, 1.0]])
         crlb = crlb_diagonal(fim)
@@ -93,7 +94,7 @@ class TestCrlbDiagonal:
         assert math.isinf(crlb[0])
         assert math.isinf(crlb[1])
 
-    def test_full_rank_fim_finite_crlb(self):
+    def test_full_rank_fim_finite_crlb(self, bench_metrics, num_regression):
         # Non-trivial 2x2 PD matrix.
         fim = np.array([[2.0, 0.5], [0.5, 3.0]])
         crlb = crlb_diagonal(fim)
@@ -102,7 +103,7 @@ class TestCrlbDiagonal:
         det = 2.0 * 3.0 - 0.5 * 0.5
         np.testing.assert_allclose(crlb, [3.0 / det, 2.0 / det])
 
-    def test_rejects_non_square(self):
+    def test_rejects_non_square(self, bench_metrics, num_regression):
         with pytest.raises(ValueError):
             crlb_diagonal(np.array([[1.0, 2.0]]))
 
@@ -112,13 +113,13 @@ class TestPeDiagnostics:
     A few tests use ``standardize=False`` to exercise the raw-SVD path
     explicitly."""
 
-    def test_identity_matrix_unstandardized_full_rank(self):
+    def test_identity_matrix_unstandardized_full_rank(self, bench_metrics, num_regression):
         X = np.eye(3)
         d = pe_diagnostics(X, standardize=False)
         assert d["rank"] == 3
         assert d["condition_number"] == pytest.approx(1.0, abs=1e-10)
 
-    def test_identity_matrix_standardized_loses_one_rank(self):
+    def test_identity_matrix_standardized_loses_one_rank(self, bench_metrics, num_regression):
         # Mean-centering every column removes the all-ones direction
         # from the column space → rank drops by 1. Expected behaviour
         # of the Belsley convention; only matters when the matrix has
@@ -127,14 +128,14 @@ class TestPeDiagnostics:
         d = pe_diagnostics(X, standardize=True)
         assert d["rank"] == 2
 
-    def test_constant_column_preserved_under_standardize(self):
+    def test_constant_column_preserved_under_standardize(self, bench_metrics, num_regression):
         # An intercept column (all 1) is left un-rescaled and not
         # mean-centered, so it still contributes a rank-1 direction.
         X = np.array([[1.0, 2.0], [1.0, 4.0], [1.0, 6.0]])
         d = pe_diagnostics(X, standardize=True)
         assert d["rank"] == 2
 
-    def test_constant_column_drops_rank_when_matrix_is_all_constant(self):
+    def test_constant_column_drops_rank_when_matrix_is_all_constant(self, bench_metrics, num_regression):
         # All rows identical → both columns constant → rank 1 either way.
         X = np.array([[1.0, 2.0], [1.0, 2.0], [1.0, 2.0]])
         d_unstd = pe_diagnostics(X, standardize=False)
@@ -143,12 +144,12 @@ class TestPeDiagnostics:
         # Standardize preserves both constant columns → still rank 1.
         assert d_std["rank"] == 1
 
-    def test_near_collinear_blows_up_condition(self):
+    def test_near_collinear_blows_up_condition(self, bench_metrics, num_regression):
         X = np.array([[1.0, 1.0], [1.0, 1.0 + 1e-9], [2.0, 2.0]])
         d = pe_diagnostics(X, standardize=False)
         assert d["condition_number"] > 1e6
 
-    def test_weights_reweight_singular_values(self):
+    def test_weights_reweight_singular_values(self, bench_metrics, num_regression):
         X = np.array([[1.0, 0.0], [0.0, 1.0]])
         # standardize=False so weight effect is visible at the SV level.
         d_eq = pe_diagnostics(X, weights=np.array([1.0, 1.0]), standardize=False)
@@ -158,7 +159,7 @@ class TestPeDiagnostics:
             d_eq["smallest_singular_value"], abs=1e-10
         )
 
-    def test_empty_matrix(self):
+    def test_empty_matrix(self, bench_metrics, num_regression):
         X = np.zeros((0, 3))
         d = pe_diagnostics(X)
         assert d["rank"] == 0
@@ -166,14 +167,14 @@ class TestPeDiagnostics:
 
 
 class TestEstimateSigma2:
-    def test_perfect_fit_zero_noise(self):
+    def test_perfect_fit_zero_noise(self, bench_metrics, num_regression):
         X = np.array([[1.0, 1.0], [1.0, 2.0], [1.0, 3.0]])
         beta = np.array([1.0, 2.0])
         y = X @ beta  # no noise
         s2 = estimate_sigma2_from_residuals(y, X, beta)
         assert s2 == pytest.approx(0.0, abs=1e-12)
 
-    def test_recovers_noise_variance(self):
+    def test_recovers_noise_variance(self, bench_metrics, num_regression):
         rng = np.random.default_rng(0)
         n = 1000
         X = np.column_stack([np.ones(n), rng.normal(size=n)])
@@ -185,7 +186,7 @@ class TestEstimateSigma2:
         # Within ~10% with n=1000.
         assert abs(s2_hat - sigma_true**2) / sigma_true**2 < 0.10
 
-    def test_zero_dof_returns_zero(self):
+    def test_zero_dof_returns_zero(self, bench_metrics, num_regression):
         X = np.array([[1.0]])
         beta = np.array([1.0])
         y = np.array([1.0])
@@ -224,7 +225,7 @@ def probe_observations():
 
 class TestIdentifiabilityReportFromProbe:
 
-    def test_full_rank_for_intercept_plus_outdoor(self, probe_observations):
+    def test_full_rank_for_intercept_plus_outdoor(self, bench_metrics, num_regression, probe_observations):
         rep = identifiability_report(
             probe_observations,
             feature_order=["intercept", "outdoor_delta"],
@@ -237,7 +238,7 @@ class TestIdentifiabilityReportFromProbe:
         # Most ticks pass the room_rate filter at 6h hold ≫ τ.
         assert rep.n_observations > 1000
 
-    def test_finite_crlb_for_each_feature(self, probe_observations):
+    def test_finite_crlb_for_each_feature(self, bench_metrics, num_regression, probe_observations):
         rep = identifiability_report(
             probe_observations,
             feature_order=["intercept", "outdoor_delta"],
@@ -246,7 +247,7 @@ class TestIdentifiabilityReportFromProbe:
         assert all(math.isfinite(c) and c > 0 for c in rep.crlb)
         assert all(math.isfinite(s) for s in rep.std_err_lower_bound)
 
-    def test_outdoor_delta_well_identified(self, probe_observations):
+    def test_outdoor_delta_well_identified(self, bench_metrics, num_regression, probe_observations):
         # With sigma2 set to the known sensor-noise variance, the CRLB
         # on outdoor_delta should be small enough that any unbiased
         # estimator can resolve β to within a few percent of typical
@@ -264,7 +265,7 @@ class TestIdentifiabilityReportFromProbe:
         # the two.
         assert rep.std_err_lower_bound[outdoor_idx] < 0.02
 
-    def test_condition_number_reasonable(self, probe_observations):
+    def test_condition_number_reasonable(self, bench_metrics, num_regression, probe_observations):
         # Step probe with diurnal outdoor produces well-conditioned X
         # because intercept (constant) is orthogonal to centered outdoor.
         rep = identifiability_report(
@@ -277,7 +278,7 @@ class TestIdentifiabilityReportFromProbe:
         # diurnal outdoor we expect well below 30.
         assert rep.condition_number < 30.0
 
-    def test_sigma2_estimation_from_residuals(self, probe_observations):
+    def test_sigma2_estimation_from_residuals(self, bench_metrics, num_regression, probe_observations):
         # Verifies the residual-based estimator wires correctly. The
         # reported sigma2 is the **residual variance** under the assumed
         # linear model — NOT the sensor-noise variance. Under model
@@ -311,7 +312,7 @@ class TestIdentifiabilityReportFromProbe:
             f"({sensor_noise_var:.4f}, {y_var:.4f})"
         )
 
-    def test_feature_variance_intercept_zero(self, probe_observations):
+    def test_feature_variance_intercept_zero(self, bench_metrics, num_regression, probe_observations):
         # The intercept column is constant 1.0 → zero centered variance.
         rep = identifiability_report(
             probe_observations,
@@ -327,7 +328,7 @@ class TestIdentifiabilityReportFromProbe:
 class TestEmptyObservations:
     """Edge case: no eligible observations after filter → safe report."""
 
-    def test_empty_input_returns_inf_crlb(self):
+    def test_empty_input_returns_inf_crlb(self, bench_metrics, num_regression):
         rep = identifiability_report(
             observations=[],
             feature_order=["intercept", "outdoor_delta"],
@@ -344,7 +345,7 @@ class TestRegressorMatrixMatchesWLS:
     produce the same WLS β as ``weighted_least_squares`` on the same
     observations. Verifies no off-by-one / convention drift."""
 
-    def test_beta_agrees_with_weighted_least_squares(self, probe_observations):
+    def test_beta_agrees_with_weighted_least_squares(self, bench_metrics, num_regression, probe_observations):
         from custom_components.tasmota_irhvac.pi.batch_learning import (
             weighted_least_squares,
         )

@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.hvac_bench.conftest import check_bench_metrics
+
 from tests.hvac_bench.empirical.runner import (
     CredibilityEnvelope,
     run_phase4_lite,

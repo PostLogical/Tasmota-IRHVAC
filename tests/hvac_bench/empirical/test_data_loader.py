@@ -14,6 +14,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from tests.hvac_bench.conftest import check_bench_metrics
+
 from tests.hvac_bench.empirical.data_loader import (
     GATE_STARVATION,
     LR_DOUBLE_BEEP,

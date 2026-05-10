@@ -5,6 +5,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from tests.hvac_bench.conftest import check_bench_metrics
+
 from tests.hvac_bench.empirical.cumulated_periodogram import (
     KS_CRITICAL_ALPHA,
     cumulated_periodogram,

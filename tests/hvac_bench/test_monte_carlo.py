@@ -39,7 +39,7 @@ def _capture_per_run_overrides(mc: MonteCarloConfig) -> list[dict]:
     return captured
 
 
-def test_seed_scale_factors_actually_scale_outdoor_seed():
+def test_seed_scale_factors_actually_scale_outdoor_seed(bench_metrics, num_regression):
     """seed_scale_factors must scale pi_outdoor_seed_heat/_cool, not write a no-op key.
 
     Regression test for C4: previous implementation wrote
@@ -73,7 +73,7 @@ def test_seed_scale_factors_actually_scale_outdoor_seed():
         )
 
 
-def test_seed_scale_factors_respect_explicit_pi_override():
+def test_seed_scale_factors_respect_explicit_pi_override(bench_metrics, num_regression):
     """If user sets pi_outdoor_seed_heat in pi_overrides, MC must not overwrite it."""
     base = FullStackConfig(
         profile_name="living_room",

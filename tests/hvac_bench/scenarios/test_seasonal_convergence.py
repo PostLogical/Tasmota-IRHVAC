@@ -50,6 +50,7 @@ from tests.hvac_bench.full_stack_runner import (
     print_full_stack_summary,
     run_full_stack,
 )
+from tests.hvac_bench.conftest import check_bench_metrics
 from tests.hvac_bench.house_profiles import PROFILES_2R2C
 from tests.hvac_bench.scenarios._weather_mode import (
     SHOULDER_FALL,
@@ -421,7 +422,7 @@ def seasonal_results() -> dict[str, FullStackResult]:
 class TestSeasonalConvergence:
     """Compare batch WLS convergence and final coefficients across heating seasons."""
 
-    def test_no_season_diverges(self, seasonal_results):
+    def test_no_season_diverges(self, bench_metrics, num_regression, seasonal_results):
         """Sanity: every season's final coefficients must be bounded."""
         for name, r in seasonal_results.items():
             od = r.final_coefs.get("outdoor_delta", 0.0)
@@ -433,7 +434,7 @@ class TestSeasonalConvergence:
                 f"{name}: Solar Proxy out of plausible range: {solar:.4f}"
             )
 
-    def test_cross_season_outdoor_agreement(self, seasonal_results):
+    def test_cross_season_outdoor_agreement(self, bench_metrics, num_regression, seasonal_results):
         """outdoor_delta should land in the same place across seasons.
 
         Underlying physics is identical; only weather (excitation) differs.
@@ -449,7 +450,7 @@ class TestSeasonalConvergence:
             f"Diversity buffer's persistence role appears load-bearing."
         )
 
-    def test_cross_season_solar_agreement(self, seasonal_results):
+    def test_cross_season_solar_agreement(self, bench_metrics, num_regression, seasonal_results):
         """Solar coefficient varies modestly across seasons.
 
         With AR(1) shared weather state, solar β identification depends on the
@@ -467,7 +468,7 @@ class TestSeasonalConvergence:
             f"(values: {[f'{v:.4f}' for v in solars]})"
         )
 
-    def test_each_season_stabilizes_within_run(self, seasonal_results):
+    def test_each_season_stabilizes_within_run(self, bench_metrics, num_regression, seasonal_results):
         """Each season should reach a stable outdoor_delta within 90 days.
 
         Loose bound — the printed summary shows the actual time-to-converge.

@@ -19,6 +19,7 @@ from tests.hvac_bench.house_profiles import (
     PROFILES_2R2C,
     STANDARD_HP_CAPACITY,
 )
+from tests.hvac_bench.conftest import check_bench_metrics
 from tests.hvac_bench.thermal_model import ThermalModel, ThermalModel2R2C
 
 
@@ -30,7 +31,7 @@ SS_TOL = 0.05  # 0.05°C
 class TestFreeDecay:
     """HP off, no solar: room should decay to outdoor temp."""
 
-    def test_1r1c_decays_toward_outdoor(self):
+    def test_1r1c_decays_toward_outdoor(self, bench_metrics, num_regression):
         """1R1C: room should approach outdoor monotonically."""
         profile = PROFILES_2R2C["living_room"]
         model = ThermalModel(
@@ -49,7 +50,7 @@ class TestFreeDecay:
             f"Room didn't converge to outdoor: {model.room_temp:.3f} vs 5.0"
         )
 
-    def test_2r2c_decays_toward_outdoor(self):
+    def test_2r2c_decays_toward_outdoor(self, bench_metrics, num_regression):
         """2R2C: room should approach outdoor, but wall mass slows it.
 
         The wall node (τ_wall=600 min) acts as a heat reservoir that
@@ -72,7 +73,7 @@ class TestFreeDecay:
             f"2R2C room still far from outdoor: {model.room_temp:.3f}"
         )
 
-    def test_1r1c_time_constant(self):
+    def test_1r1c_time_constant(self, bench_metrics, num_regression):
         """1R1C decay should follow exp(-t/τ_env)."""
         profile = PROFILES_2R2C["living_room"]
         T_init = 25.0
@@ -93,7 +94,7 @@ class TestFreeDecay:
             f"expected {expected_fraction:.3f}"
         )
 
-    def test_2r2c_time_constant_slower(self):
+    def test_2r2c_time_constant_slower(self, bench_metrics, num_regression):
         """2R2C decay should be SLOWER than 1R1C due to wall heat reservoir."""
         profile = PROFILES_2R2C["living_room"]
         T_init = 25.0
@@ -122,7 +123,7 @@ class TestFreeDecay:
 class TestHPSteadyState:
     """HP on at fixed setpoint — verify equilibrium temperature."""
 
-    def test_1r1c_equilibrium(self):
+    def test_1r1c_equilibrium(self, bench_metrics, num_regression):
         """1R1C steady state: T_eq = (T_out/τ + g*sp) / (1/τ + g)"""
         profile = PROFILES_2R2C["living_room"]
         T_out = 0.0
@@ -144,7 +145,7 @@ class TestHPSteadyState:
             f"{model.room_temp:.3f} vs {t_eq:.3f}"
         )
 
-    def test_2r2c_equilibrium(self):
+    def test_2r2c_equilibrium(self, bench_metrics, num_regression):
         """2R2C steady state should match 1R1C at equilibrium.
 
         At steady state d/dt=0, the wall coupling nets out (wall and air
@@ -168,7 +169,7 @@ class TestHPSteadyState:
             f"{model.room_temp:.3f} vs {t_eq:.3f}"
         )
 
-    def test_equilibrium_below_setpoint(self):
+    def test_equilibrium_below_setpoint(self, bench_metrics, num_regression):
         """Verify room settles BELOW setpoint (HP is thermostat-controlled).
 
         With HP cycling, the room oscillates around a point below setpoint.
@@ -205,7 +206,7 @@ class TestHPSteadyState:
 class TestHPCycling:
     """Verify HP actually cycles on/off in appropriate conditions."""
 
-    def test_hp_cycles_when_solar_pushes_past_setpoint(self):
+    def test_hp_cycles_when_solar_pushes_past_setpoint(self, bench_metrics, num_regression):
         """Strong solar + warm outdoor should push room above setpoint, idling HP.
 
         The HP must be close to equilibrium already (warm outdoor) so that
@@ -239,7 +240,7 @@ class TestHPCycling:
             f"HP off only {off_pct:.1f}% — expected more cycling"
         )
 
-    def test_no_cycling_when_cold(self):
+    def test_no_cycling_when_cold(self, bench_metrics, num_regression):
         """In deep cold with no solar, HP should always be on."""
         profile = PROFILES_2R2C["living_room"]
         model = ThermalModel2R2C(
@@ -256,7 +257,7 @@ class TestHPCycling:
 class TestSolarEffect:
     """Verify solar gain warms room regardless of HP state."""
 
-    def test_solar_warms_room_hp_off(self):
+    def test_solar_warms_room_hp_off(self, bench_metrics, num_regression):
         """Solar should warm room even when HP is off."""
         profile = PROFILES_2R2C["living_room"]
         # HP off (setpoint=0), but solar should warm
@@ -270,7 +271,7 @@ class TestSolarEffect:
             f"Solar didn't warm room: {model.room_temp:.3f}"
         )
 
-    def test_solar_warms_room_hp_on(self):
+    def test_solar_warms_room_hp_on(self, bench_metrics, num_regression):
         """Solar should add to HP heating."""
         profile = PROFILES_2R2C["living_room"]
         # Run two models: one with solar, one without
@@ -296,7 +297,7 @@ class TestSolarEffect:
 class TestStepResponse:
     """Verify response to step changes in outdoor temp."""
 
-    def test_outdoor_step_down(self):
+    def test_outdoor_step_down(self, bench_metrics, num_regression):
         """Sudden cold snap: room should cool then recover."""
         profile = PROFILES_2R2C["living_room"]
         model = ThermalModel2R2C(
@@ -329,7 +330,7 @@ class TestStepResponse:
 class TestCrossModelAgreement:
     """1R1C and 2R2C should agree on steady-state."""
 
-    def test_steady_state_agreement(self):
+    def test_steady_state_agreement(self, bench_metrics, num_regression):
         """Both models should converge to same equilibrium."""
         profile = PROFILES_2R2C["living_room"]
         T_out = 5.0
@@ -353,7 +354,7 @@ class TestCrossModelAgreement:
         )
 
     @pytest.mark.parametrize("profile_name", list(PROFILES_2R2C.keys()))
-    def test_all_profiles_converge(self, profile_name):
+    def test_all_profiles_converge(self, bench_metrics, num_regression, profile_name):
         """Every profile should reach steady state without divergence."""
         profile = PROFILES_2R2C[profile_name]
         model = ThermalModel2R2C(
@@ -386,31 +387,31 @@ class TestHPCapacityCurve:
 
     # ── factor() unit tests ──────────────────────────────────────────
 
-    def test_heating_anchor_points(self):
+    def test_heating_anchor_points(self, bench_metrics, num_regression):
         """Curve passes through the three named anchors."""
         c = HPCapacityCurve()
         assert c.factor(c.heating_design_t, "heat") == 0.0
         assert c.factor(c.heating_rated_t, "heat") == pytest.approx(1.0)
         assert c.factor(c.heating_mild_t, "heat") == pytest.approx(c.heating_mild_factor)
 
-    def test_heating_clamps_below_design(self):
+    def test_heating_clamps_below_design(self, bench_metrics, num_regression):
         """Below design temp, capacity stays at zero (HP can't run)."""
         c = HPCapacityCurve()
         assert c.factor(-30.0, "heat") == 0.0
         assert c.factor(-100.0, "heat") == 0.0
 
-    def test_heating_clamps_above_mild(self):
+    def test_heating_clamps_above_mild(self, bench_metrics, num_regression):
         """Above the mild knee, factor saturates at mild_factor."""
         c = HPCapacityCurve()
         assert c.factor(40.0, "heat") == pytest.approx(c.heating_mild_factor)
 
-    def test_heating_linear_below_rated(self):
+    def test_heating_linear_below_rated(self, bench_metrics, num_regression):
         """Halfway between design and rated → 50% capacity."""
         c = HPCapacityCurve(heating_design_t=-15.0, heating_rated_t=7.0)
         midpoint = (-15.0 + 7.0) / 2  # -4°C
         assert c.factor(midpoint, "heat") == pytest.approx(0.5)
 
-    def test_heating_linear_above_rated(self):
+    def test_heating_linear_above_rated(self, bench_metrics, num_regression):
         """Halfway between rated and mild → halfway from 1.0 to mild_factor."""
         c = HPCapacityCurve(heating_rated_t=7.0, heating_mild_t=20.0,
                              heating_mild_factor=1.15)
@@ -418,30 +419,30 @@ class TestHPCapacityCurve:
         expected = 1.0 + 0.5 * (1.15 - 1.0)
         assert c.factor(midpoint, "heat") == pytest.approx(expected)
 
-    def test_cooling_anchor_points(self):
+    def test_cooling_anchor_points(self, bench_metrics, num_regression):
         """Cooling mirrors heating with reversed slope."""
         c = HPCapacityCurve()
         assert c.factor(c.cooling_design_t, "cool") == 0.0
         assert c.factor(c.cooling_rated_t, "cool") == pytest.approx(1.0)
         assert c.factor(c.cooling_mild_t, "cool") == pytest.approx(c.cooling_mild_factor)
 
-    def test_cooling_clamps_above_design(self):
+    def test_cooling_clamps_above_design(self, bench_metrics, num_regression):
         """Above cooling design temp (extreme heat), factor is zero."""
         c = HPCapacityCurve()
         assert c.factor(60.0, "cool") == 0.0
 
-    def test_cooling_clamps_below_mild(self):
+    def test_cooling_clamps_below_mild(self, bench_metrics, num_regression):
         """Below cooling mild knee, factor saturates at mild_factor."""
         c = HPCapacityCurve()
         assert c.factor(0.0, "cool") == pytest.approx(c.cooling_mild_factor)
 
-    def test_cooling_linear_above_rated(self):
+    def test_cooling_linear_above_rated(self, bench_metrics, num_regression):
         """Halfway between cooling rated and design → 50% capacity."""
         c = HPCapacityCurve(cooling_rated_t=35.0, cooling_design_t=46.0)
         midpoint = (35.0 + 46.0) / 2  # 40.5°C
         assert c.factor(midpoint, "cool") == pytest.approx(0.5)
 
-    def test_cooling_linear_below_rated(self):
+    def test_cooling_linear_below_rated(self, bench_metrics, num_regression):
         """Halfway between mild and rated → halfway from mild_factor to 1.0."""
         c = HPCapacityCurve(cooling_mild_t=18.0, cooling_rated_t=35.0,
                              cooling_mild_factor=1.15)
@@ -449,7 +450,7 @@ class TestHPCapacityCurve:
         expected = 1.15 + 0.5 * (1.0 - 1.15)
         assert c.factor(midpoint, "cool") == pytest.approx(expected)
 
-    def test_cold_climate_curve_holds_capacity_below_minus_15(self):
+    def test_cold_climate_curve_holds_capacity_below_minus_15(self, bench_metrics, num_regression):
         """CCASHP curve still delivers >0 capacity at -15°C unlike standard."""
         assert STANDARD_HP_CAPACITY.factor(-15.0, "heat") == 0.0
         cc = COLD_CLIMATE_HP_CAPACITY.factor(-15.0, "heat")
@@ -459,7 +460,7 @@ class TestHPCapacityCurve:
 
     # ── ThermalModel integration ─────────────────────────────────────
 
-    def test_capacity_at_rated_matches_no_capacity(self):
+    def test_capacity_at_rated_matches_no_capacity(self, bench_metrics, num_regression):
         """At outdoor=rated_t, capacity=1.0 — model behaves identically."""
         base = PROFILES_2R2C["living_room"]
         assert base.hp_capacity is None
@@ -481,7 +482,7 @@ class TestHPCapacityCurve:
             f"no_cap={m_no_cap.room_temp:.3f} cap={m_cap.room_temp:.3f}"
         )
 
-    def test_2r2c_capacity_reduces_heating_in_cold(self):
+    def test_2r2c_capacity_reduces_heating_in_cold(self, bench_metrics, num_regression):
         """With capacity curve, cold weather → smaller HP contribution → cooler room."""
         base = PROFILES_2R2C["living_room"]
         with_cap = replace(base, hp_capacity=STANDARD_HP_CAPACITY)
@@ -501,7 +502,7 @@ class TestHPCapacityCurve:
             f"no_cap={m_no_cap.room_temp:.3f} cap={m_cap.room_temp:.3f}"
         )
 
-    def test_2r2c_capacity_zero_below_design_temp(self):
+    def test_2r2c_capacity_zero_below_design_temp(self, bench_metrics, num_regression):
         """At outdoor ≤ heating_design_t, HP delivers no heat (room → outdoor)."""
         base = PROFILES_2R2C["living_room"]
         with_cap = replace(base, hp_capacity=STANDARD_HP_CAPACITY)
@@ -518,7 +519,7 @@ class TestHPCapacityCurve:
             f"got {m_cap.room_temp:.3f}, expected ~-20.0"
         )
 
-    def test_1r1c_capacity_reduces_heating_in_cold(self):
+    def test_1r1c_capacity_reduces_heating_in_cold(self, bench_metrics, num_regression):
         """1R1C model also respects the capacity curve."""
         base = PROFILES_2R2C["living_room"]
         with_cap = replace(base, hp_capacity=STANDARD_HP_CAPACITY)
@@ -535,7 +536,7 @@ class TestHPCapacityCurve:
             m_cap.step(hp_setpoint=23.0, dt_minutes=15.0, mode="heat", tick=tick)
         assert m_cap.room_temp < m_no_cap.room_temp - 0.5
 
-    def test_capacity_boost_above_rated(self):
+    def test_capacity_boost_above_rated(self, bench_metrics, num_regression):
         """At outdoor above rated_t, capacity factor > 1 → faster warming."""
         base = PROFILES_2R2C["living_room"]
         with_cap = replace(base, hp_capacity=STANDARD_HP_CAPACITY)
@@ -557,7 +558,7 @@ class TestHPCapacityCurve:
             f"no_cap={m_no_cap.room_temp:.3f} cap={m_cap.room_temp:.3f}"
         )
 
-    def test_cooling_capacity_reduces_in_extreme_heat(self):
+    def test_cooling_capacity_reduces_in_extreme_heat(self, bench_metrics, num_regression):
         """In cool mode, very hot outdoor reduces HP cooling capacity."""
         # Build a profile with cooling capacity curve (reuse standard).
         base = PROFILES_2R2C["living_room"]
@@ -581,7 +582,7 @@ class TestHPCapacityCurve:
             f"no_cap={m_no_cap.room_temp:.3f} cap={m_cap.room_temp:.3f}"
         )
 
-    def test_living_room_capacity_profile_registered(self):
+    def test_living_room_capacity_profile_registered(self, bench_metrics, num_regression):
         """PROFILES_2R2C['living_room_capacity'] uses STANDARD_HP_CAPACITY."""
         profile = PROFILES_2R2C["living_room_capacity"]
         assert profile.hp_capacity is STANDARD_HP_CAPACITY

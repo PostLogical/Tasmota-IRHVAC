@@ -12,6 +12,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from tests.hvac_bench.conftest import check_bench_metrics
+
 from tests.hvac_bench.empirical.pem_fit import (
     DEFAULT_BOUNDS_1R1C,
     DEFAULT_BOUNDS_2R2C,

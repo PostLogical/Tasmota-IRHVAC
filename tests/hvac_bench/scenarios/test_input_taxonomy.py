@@ -36,6 +36,7 @@ import math
 import pytest
 
 from tests.hvac_bench.disturbances import Disturbance as ThermalDisturbance
+from tests.hvac_bench.conftest import check_bench_metrics
 from tests.hvac_bench.full_stack_runner import (
     FullStackConfig,
     ModelInputSpec,
@@ -186,7 +187,7 @@ class TestDirectActiveSource:
             relax_kappa_gate=True,
         )
 
-    def test_stove_unlocks_within_30d(self):
+    def test_stove_unlocks_within_30d(self, bench_metrics, num_regression):
         """Stove model input should unlock by day 30."""
         result = run_full_stack(self._make_config())
         if result.coef_trajectory:
@@ -209,7 +210,7 @@ class TestDirectActiveSource:
             "regularization.  See project_bench_audit_20260509.md."
         ),
     )
-    def test_stove_beta_recovers_meaningful_magnitude(self):
+    def test_stove_beta_recovers_meaningful_magnitude(self, bench_metrics, num_regression):
         """Stove β should reach at least 50% of true magnitude."""
         result = run_full_stack(self._make_config())
         beta = result.final_coefs.get("Pellet Stove", 0.0)
@@ -218,7 +219,7 @@ class TestDirectActiveSource:
             f"Stove β only {beta:.3f}, expected ≤ -1.5 (true -3.0)"
         )
 
-    def test_stove_does_not_destabilize_outdoor(self):
+    def test_stove_does_not_destabilize_outdoor(self, bench_metrics, num_regression):
         """outdoor_delta should converge near the regression-sign truth.
 
         The runner stores profile.true_seed (positive) under
@@ -233,7 +234,7 @@ class TestDirectActiveSource:
             f"outdoor_delta diverged: {od:.3f} vs expected {expected:.3f}"
         )
 
-    def test_comfort_above_85_pct(self):
+    def test_comfort_above_85_pct(self, bench_metrics, num_regression):
         """Comfort should exceed 85% with active-source FF."""
         result = run_full_stack(self._make_config())
         assert result.ctrl_comfort_pct >= 85.0, (
@@ -277,7 +278,7 @@ class TestAdjacentZoneProxy:
             relax_kappa_gate=True,
         )
 
-    def test_dr_temp_unlocks_within_30d(self):
+    def test_dr_temp_unlocks_within_30d(self, bench_metrics, num_regression):
         """DR_temp should unlock once oil/cooking events accumulate."""
         result = run_full_stack(self._make_config())
         if result.coef_trajectory:
@@ -286,7 +287,7 @@ class TestAdjacentZoneProxy:
                 "DR_temp never unlocked despite mixed-source variance"
             )
 
-    def test_dr_temp_beta_correct_sign(self):
+    def test_dr_temp_beta_correct_sign(self, bench_metrics, num_regression):
         """β should be negative (warmer DR → less HP needed in LR)."""
         result = run_full_stack(self._make_config())
         beta = result.final_coefs.get("DR Temp", 0.0)
@@ -294,7 +295,7 @@ class TestAdjacentZoneProxy:
             f"DR_temp β has wrong sign: {beta:.3f}"
         )
 
-    def test_outdoor_remains_correctly_signed(self):
+    def test_outdoor_remains_correctly_signed(self, bench_metrics, num_regression):
         """outdoor_delta should not flip sign or wildly diverge.
 
         With a frozen-or-recently-unlocked DR_Temp, outdoor may shift
@@ -307,7 +308,7 @@ class TestAdjacentZoneProxy:
         assert od < 0, f"outdoor_delta wrong sign: {od:.3f}"
         assert abs(od) < 1.0, f"outdoor_delta diverged: {od:.3f}"
 
-    def test_comfort_above_80_pct(self):
+    def test_comfort_above_80_pct(self, bench_metrics, num_regression):
         """Comfort holds even with messy aggregate proxy."""
         result = run_full_stack(self._make_config())
         assert result.ctrl_comfort_pct >= 80.0, (
@@ -353,7 +354,7 @@ class TestPurePassiveAdjacent:
             relax_kappa_gate=False,
         )
 
-    def test_passive_zone_stays_frozen(self):
+    def test_passive_zone_stays_frozen(self, bench_metrics, num_regression):
         """Pure-passive zone should remain frozen all 30 days."""
         result = run_full_stack(self._make_config())
         # Check every snapshot — never unlocks
@@ -363,7 +364,7 @@ class TestPurePassiveAdjacent:
                 f"to detect redundancy"
             )
 
-    def test_outdoor_absorbs_passive_coupling(self):
+    def test_outdoor_absorbs_passive_coupling(self, bench_metrics, num_regression):
         """outdoor_delta β may shift to absorb passive contribution.
 
         Without the passive feature, the WLS sees the passive zone's
@@ -377,7 +378,7 @@ class TestPurePassiveAdjacent:
         assert od < 0, f"outdoor_delta wrong sign: {od:.3f}"
         assert abs(od) < 1.0, f"outdoor_delta diverged: {od:.3f}"
 
-    def test_comfort_holds_with_frozen_passive(self):
+    def test_comfort_holds_with_frozen_passive(self, bench_metrics, num_regression):
         """Comfort should not collapse despite frozen passive feature."""
         result = run_full_stack(self._make_config())
         assert result.ctrl_comfort_pct >= 80.0, (
@@ -480,7 +481,7 @@ class TestAnomalyRobustness:
             relax_kappa_gate=True,
         )
 
-    def test_outdoor_survives_baseline_anomalies(self):
+    def test_outdoor_survives_baseline_anomalies(self, bench_metrics, num_regression):
         """outdoor_delta β should not shift dramatically due to anomalies."""
         result_with = run_full_stack(self._make_config(with_window_events=True,
                                                        with_oven_events=True))
@@ -493,7 +494,7 @@ class TestAnomalyRobustness:
             f"due to anomalies (with={od_with:.3f}, without={od_without:.3f})"
         )
 
-    def test_solar_survives_baseline_anomalies(self):
+    def test_solar_survives_baseline_anomalies(self, bench_metrics, num_regression):
         """solar β should not collapse or sign-flip due to anomalies.
 
         Window-open events at 10 AM coincide with rising solar, creating
@@ -518,7 +519,7 @@ class TestAnomalyRobustness:
             f"baseline |{s_without:.3f}|"
         )
 
-    def test_comfort_holds_through_anomalies(self):
+    def test_comfort_holds_through_anomalies(self, bench_metrics, num_regression):
         """Comfort should remain reasonable despite periodic disturbances."""
         result = run_full_stack(self._make_config())
         # Anomalies cause uncontrollable violations during events;
@@ -535,7 +536,7 @@ class TestAnomalyRobustness:
         pytest.param(5.0, id="5min"),
         pytest.param(15.0, id="15min"),
     ])
-    def test_anomaly_coverage_at_tick_rates(self, tick_minutes):
+    def test_anomaly_coverage_at_tick_rates(self, bench_metrics, num_regression, tick_minutes):
         """Tick-rate sweep: outdoor β stable across observation cadences.
 
         At fine ticks (1 min), short events produce many observations

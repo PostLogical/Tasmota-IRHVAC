@@ -41,6 +41,7 @@ from tests.hvac_bench.full_stack_runner import (
     run_full_stack,
     TICK_MINUTES_DEFAULT,
 )
+from tests.hvac_bench.conftest import check_bench_metrics
 from tests.hvac_bench.house_profiles import PROFILES_2R2C
 
 
@@ -155,7 +156,7 @@ class TestWLSvsGreybox:
     ``project_greybox_1r1c_limitation.md``.
     """
 
-    def test_spring_comparison(self):
+    def test_spring_comparison(self, bench_metrics, num_regression):
         """Spring scenario with HP cycling — grey-box should have data."""
         wls = _run_arm("wls_only", n_days=60)
         fused = _run_arm("fused", n_days=60)

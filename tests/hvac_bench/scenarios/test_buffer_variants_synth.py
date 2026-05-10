@@ -17,6 +17,7 @@ import logging
 import pytest
 
 from tests.hvac_bench.adapters import TasmotaPIAdapter
+from tests.hvac_bench.conftest import check_bench_metrics
 from tests.hvac_bench.full_stack_runner import (
     FullStackResult,
     print_full_stack_summary,
@@ -80,7 +81,7 @@ class TestBufferVariantsSynth:
     FIFO/leverage verdict comes from the real-weather sibling, not this one.
     """
 
-    def test_no_variant_diverges(self, synth_variant_results):
+    def test_no_variant_diverges(self, bench_metrics, num_regression, synth_variant_results):
         """Sanity: every (variant, season) finishes with bounded coefs."""
         for vname, by_season in synth_variant_results.items():
             for sname, r in by_season.items():

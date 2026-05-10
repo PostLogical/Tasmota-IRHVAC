@@ -5,6 +5,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from tests.hvac_bench.conftest import check_bench_metrics
+
 from tests.hvac_bench.empirical.forward_selection import (
     DEFAULT_LR_ALPHA,
     N_PARAMS_1R1C,

@@ -22,6 +22,7 @@ import numpy as np
 import pytest
 
 from tests.hvac_bench.identifiability import build_regressor_matrix
+from tests.hvac_bench.conftest import check_bench_metrics
 from tests.hvac_bench.open_loop_runner import (
     OpenLoopConfig,
     make_step_excitation,
@@ -40,7 +41,7 @@ from tests.hvac_bench.residual_diagnostics import (
 
 
 class TestAutocorrelation:
-    def test_white_noise_has_decaying_acf(self):
+    def test_white_noise_has_decaying_acf(self, bench_metrics, num_regression):
         rng = np.random.default_rng(0)
         x = rng.normal(size=2000)
         acf = autocorrelation(x, max_lag=10)
@@ -49,7 +50,7 @@ class TestAutocorrelation:
         for k in range(1, 11):
             assert abs(acf[k]) < 0.1, f"lag {k} ACF = {acf[k]:.3f} too large"
 
-    def test_ar1_has_geometric_decay(self):
+    def test_ar1_has_geometric_decay(self, bench_metrics, num_regression):
         rng = np.random.default_rng(1)
         n = 5000
         phi = 0.6
@@ -64,7 +65,7 @@ class TestAutocorrelation:
                 f"lag {k} ACF {acf[k]:.3f} vs theoretical {theoretical:.3f}"
             )
 
-    def test_constant_series_returns_zero_acf(self):
+    def test_constant_series_returns_zero_acf(self, bench_metrics, num_regression):
         x = np.ones(100)
         acf = autocorrelation(x, max_lag=5)
         # Zero variance after centering → ACF undefined; we return 1, 0, ...
@@ -74,7 +75,7 @@ class TestAutocorrelation:
 
 
 class TestLjungBox:
-    def test_white_noise_passes(self):
+    def test_white_noise_passes(self, bench_metrics, num_regression):
         rng = np.random.default_rng(2)
         x = rng.normal(size=2000)
         Q, p = ljung_box_test(x, n_lags=20)
@@ -82,7 +83,7 @@ class TestLjungBox:
             f"white noise rejected: Q={Q:.2f}, p={p:.4f}"
         )
 
-    def test_ar1_rejected(self):
+    def test_ar1_rejected(self, bench_metrics, num_regression):
         rng = np.random.default_rng(3)
         n = 1000
         phi = 0.5
@@ -94,7 +95,7 @@ class TestLjungBox:
             f"AR(1) not rejected: Q={Q:.2f}, p={p:.4f}"
         )
 
-    def test_tiny_sample_returns_safe_default(self):
+    def test_tiny_sample_returns_safe_default(self, bench_metrics, num_regression):
         # n ≤ n_lags + 1 → no test possible.
         x = np.array([0.1, -0.2, 0.05])
         Q, p = ljung_box_test(x, n_lags=10)
@@ -102,14 +103,14 @@ class TestLjungBox:
 
 
 class TestNormality:
-    def test_gaussian_passes_shapiro(self):
+    def test_gaussian_passes_shapiro(self, bench_metrics, num_regression):
         rng = np.random.default_rng(4)
         x = rng.normal(size=500)
         name, stat, p = normality_test(x)
         assert name == "shapiro-wilk"
         assert p > 0.05, f"gaussian rejected: stat={stat:.4f}, p={p:.4f}"
 
-    def test_uniform_rejected(self):
+    def test_uniform_rejected(self, bench_metrics, num_regression):
         rng = np.random.default_rng(5)
         x = rng.uniform(low=-1, high=1, size=500)
         name, stat, p = normality_test(x)
@@ -117,14 +118,14 @@ class TestNormality:
             f"uniform passed normality: stat={stat:.4f}, p={p:.4f}"
         )
 
-    def test_large_sample_uses_jarque_bera(self):
+    def test_large_sample_uses_jarque_bera(self, bench_metrics, num_regression):
         rng = np.random.default_rng(6)
         x = rng.normal(size=10000)
         name, stat, p = normality_test(x)
         assert name == "jarque-bera"
         assert p > 0.05  # gaussian still passes
 
-    def test_too_few_samples_returns_na(self):
+    def test_too_few_samples_returns_na(self, bench_metrics, num_regression):
         x = np.array([0.1, 0.2])
         name, stat, p = normality_test(x)
         assert name == "n/a"
@@ -186,25 +187,25 @@ class TestProbeResidualsSurfaceMisspecification:
     *trigger*, not the failure.
     """
 
-    def test_residual_count_matches_eligible_obs(self, probe_beta_and_report):
+    def test_residual_count_matches_eligible_obs(self, bench_metrics, num_regression, probe_beta_and_report):
         beta, rep = probe_beta_and_report
         # Should be ~all of the 2880 ticks, minus those filtered out by
         # the room_rate gate.
         assert rep.n_residuals > 1000
 
-    def test_residual_mean_near_zero(self, probe_beta_and_report):
+    def test_residual_mean_near_zero(self, bench_metrics, num_regression, probe_beta_and_report):
         beta, rep = probe_beta_and_report
         # OLS residuals on a regression with intercept have mean exactly
         # 0 by construction. WLS adds weights; mean stays small.
         assert abs(rep.mean) < 0.1
 
-    def test_acf_first_lag_reported(self, probe_beta_and_report):
+    def test_acf_first_lag_reported(self, bench_metrics, num_regression, probe_beta_and_report):
         beta, rep = probe_beta_and_report
         # 21 entries: lag 0..20.
         assert len(rep.autocorrelation) == 21
         assert rep.autocorrelation[0] == pytest.approx(1.0)
 
-    def test_ljung_box_rejects_whiteness(self, probe_beta_and_report):
+    def test_ljung_box_rejects_whiteness(self, bench_metrics, num_regression, probe_beta_and_report):
         # 2R2C wall transients during step switches → autocorrelated
         # residuals → reject whiteness. This is the EXPECTED finding;
         # if it passed, the linear model would be perfectly specified
@@ -213,7 +214,7 @@ class TestProbeResidualsSurfaceMisspecification:
         assert rep.is_white_at_alpha_05 is False
         assert rep.ljung_box_p_value < 0.05
 
-    def test_normality_test_runs(self, probe_beta_and_report):
+    def test_normality_test_runs(self, bench_metrics, num_regression, probe_beta_and_report):
         # Doesn't matter whether it passes or fails — just verifies the
         # test runs without crashing on a real probe's residual scale.
         beta, rep = probe_beta_and_report
@@ -223,7 +224,7 @@ class TestProbeResidualsSurfaceMisspecification:
         )
         assert 0.0 <= rep.normality_p_value <= 1.0
 
-    def test_split_half_stable(self, probe_beta_and_report):
+    def test_split_half_stable(self, bench_metrics, num_regression, probe_beta_and_report):
         # On a 30-day stationary scenario, β should be similar across
         # halves. Loose threshold (50%) — the split-half check is
         # mostly a sanity check; the strong claim is "not wildly
@@ -236,14 +237,14 @@ class TestProbeResidualsSurfaceMisspecification:
             f"between halves — model unstable on stationary data"
         )
 
-    def test_report_has_skew_and_kurtosis(self, probe_beta_and_report):
+    def test_report_has_skew_and_kurtosis(self, bench_metrics, num_regression, probe_beta_and_report):
         beta, rep = probe_beta_and_report
         assert math.isfinite(rep.skewness)
         assert math.isfinite(rep.kurtosis)
 
 
 class TestEmptyObservations:
-    def test_empty_input_returns_safe_report(self):
+    def test_empty_input_returns_safe_report(self, bench_metrics, num_regression):
         rep = residual_diagnostic_report(
             observations=[],
             beta=[0.0, 0.0],

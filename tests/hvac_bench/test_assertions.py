@@ -26,6 +26,7 @@ from tests.hvac_bench.assertions import (
     assert_residuals_white,
     assert_split_half_stable,
 )
+from tests.hvac_bench.conftest import check_bench_metrics
 from tests.hvac_bench.identifiability import (
     IdentifiabilityReport,
     identifiability_report,
@@ -101,26 +102,26 @@ def _make_residual_report(
 
 
 class TestAssertIdentifiable:
-    def test_passes_when_crlb_below_threshold(self):
+    def test_passes_when_crlb_below_threshold(self, bench_metrics, num_regression):
         rep = _make_id_report(crlb=[1e-3, 5e-4])
         assert_identifiable(rep, "outdoor_delta", crlb_max=1e-3)
 
-    def test_fails_when_crlb_above_threshold(self):
+    def test_fails_when_crlb_above_threshold(self, bench_metrics, num_regression):
         rep = _make_id_report(crlb=[1e-3, 1.0])
         with pytest.raises(AssertionError, match="CRLB.*outdoor_delta"):
             assert_identifiable(rep, "outdoor_delta", crlb_max=1e-3)
 
-    def test_fails_when_unidentifiable(self):
+    def test_fails_when_unidentifiable(self, bench_metrics, num_regression):
         rep = _make_id_report(crlb=[float("inf"), 1e-3], rank=1)
         with pytest.raises(AssertionError, match="unidentifiable"):
             assert_identifiable(rep, "intercept", crlb_max=1.0)
 
-    def test_fails_when_feature_missing(self):
+    def test_fails_when_feature_missing(self, bench_metrics, num_regression):
         rep = _make_id_report()
         with pytest.raises(AssertionError, match="not in regressor"):
             assert_identifiable(rep, "Solar Proxy", crlb_max=1.0)
 
-    def test_se_max_bound(self):
+    def test_se_max_bound(self, bench_metrics, num_regression):
         # CRLB = 0.04 → SE = 0.2. Bound 0.1 should fail.
         rep = _make_id_report(crlb=[0.04, 0.04])
         with pytest.raises(AssertionError, match="SE_min"):
@@ -128,29 +129,29 @@ class TestAssertIdentifiable:
         # Bound 0.3 should pass.
         assert_identifiable(rep, "outdoor_delta", se_max=0.3)
 
-    def test_requires_some_bound(self):
+    def test_requires_some_bound(self, bench_metrics, num_regression):
         rep = _make_id_report()
         with pytest.raises(ValueError, match="crlb_max or se_max"):
             assert_identifiable(rep, "outdoor_delta")
 
 
 class TestAssertPeOrder:
-    def test_passes_at_threshold(self):
+    def test_passes_at_threshold(self, bench_metrics, num_regression):
         rep = _make_id_report(rank=3, feature_names=["a", "b", "c"])
         assert_pe_order_at_least(rep, 3)
 
-    def test_fails_below_threshold(self):
+    def test_fails_below_threshold(self, bench_metrics, num_regression):
         rep = _make_id_report(rank=1, feature_names=["a", "b", "c"])
         with pytest.raises(AssertionError, match="PE order 1 < 3"):
             assert_pe_order_at_least(rep, 3)
 
 
 class TestAssertConditionNumber:
-    def test_passes_when_below(self):
+    def test_passes_when_below(self, bench_metrics, num_regression):
         rep = _make_id_report(condition_number=15.0)
         assert_condition_number_below(rep, 30.0)
 
-    def test_fails_when_above(self):
+    def test_fails_when_above(self, bench_metrics, num_regression):
         rep = _make_id_report(condition_number=120.0)
         with pytest.raises(AssertionError, match="condition number 120"):
             assert_condition_number_below(rep, 100.0)
@@ -160,38 +161,38 @@ class TestAssertConditionNumber:
 
 
 class TestAssertResidualsWhite:
-    def test_passes_when_p_above_alpha(self):
+    def test_passes_when_p_above_alpha(self, bench_metrics, num_regression):
         rep = _make_residual_report(ljung_box_p=0.40)
         assert_residuals_white(rep, alpha=0.05)
 
-    def test_fails_when_p_below_alpha(self):
+    def test_fails_when_p_below_alpha(self, bench_metrics, num_regression):
         rep = _make_residual_report(ljung_box_p=0.001)
         with pytest.raises(AssertionError, match="Ljung-Box rejects"):
             assert_residuals_white(rep, alpha=0.05)
 
 
 class TestAssertResidualsNormal:
-    def test_passes_when_p_above_alpha(self):
+    def test_passes_when_p_above_alpha(self, bench_metrics, num_regression):
         rep = _make_residual_report(normality_p=0.30)
         assert_residuals_normal(rep)
 
-    def test_fails_when_p_below_alpha(self):
+    def test_fails_when_p_below_alpha(self, bench_metrics, num_regression):
         rep = _make_residual_report(normality_p=0.001)
         with pytest.raises(AssertionError, match="rejects normality"):
             assert_residuals_normal(rep)
 
 
 class TestAssertSplitHalfStable:
-    def test_passes_when_change_small(self):
+    def test_passes_when_change_small(self, bench_metrics, num_regression):
         rep = _make_residual_report(split_half_max_rel=0.05)
         assert_split_half_stable(rep, max_rel_change=0.10)
 
-    def test_fails_when_change_large(self):
+    def test_fails_when_change_large(self, bench_metrics, num_regression):
         rep = _make_residual_report(split_half_max_rel=0.30)
         with pytest.raises(AssertionError, match="split-half"):
             assert_split_half_stable(rep, max_rel_change=0.10)
 
-    def test_fails_when_not_computed(self):
+    def test_fails_when_not_computed(self, bench_metrics, num_regression):
         rep = _make_residual_report(split_half_max_rel=None)
         with pytest.raises(AssertionError, match="not computed"):
             assert_split_half_stable(rep, max_rel_change=0.10)
@@ -201,18 +202,18 @@ class TestAssertSplitHalfStable:
 
 
 class TestAssertRecoversWithinSe:
-    def test_passes_within_band(self):
+    def test_passes_within_band(self, bench_metrics, num_regression):
         assert_recovers_within_se(
             estimated=0.21, truth=0.20, se=0.01, k=3.0
         )
 
-    def test_fails_outside_band(self):
+    def test_fails_outside_band(self, bench_metrics, num_regression):
         with pytest.raises(AssertionError, match=r"not within 3\.0σ"):
             assert_recovers_within_se(
                 estimated=0.50, truth=0.20, se=0.01, k=3.0
             )
 
-    def test_rejects_zero_se(self):
+    def test_rejects_zero_se(self, bench_metrics, num_regression):
         with pytest.raises(ValueError, match="se must be > 0"):
             assert_recovers_within_se(
                 estimated=0.20, truth=0.20, se=0.0
@@ -220,7 +221,7 @@ class TestAssertRecoversWithinSe:
 
 
 class TestAssertRecoversWithinCrlb:
-    def test_passes_within_band(self):
+    def test_passes_within_band(self, bench_metrics, num_regression):
         rep = _make_id_report(
             feature_names=["intercept", "outdoor_delta"],
             crlb=[1e-3, 1e-4],
@@ -231,7 +232,7 @@ class TestAssertRecoversWithinCrlb:
             feature="outdoor_delta", k=3.0,
         )
 
-    def test_fails_with_estimator_diagnosis_when_gap_huge(self):
+    def test_fails_with_estimator_diagnosis_when_gap_huge(self, bench_metrics, num_regression):
         rep = _make_id_report(crlb=[1e-3, 1e-4])
         with pytest.raises(AssertionError, match="estimator failed"):
             assert_recovers_within_crlb(
@@ -239,7 +240,7 @@ class TestAssertRecoversWithinCrlb:
                 feature="outdoor_delta", k=3.0,
             )
 
-    def test_fails_with_design_diagnosis_when_gap_modest(self):
+    def test_fails_with_design_diagnosis_when_gap_modest(self, bench_metrics, num_regression):
         # CRLB so loose that even modest gap exceeds the band — but only
         # by a small ratio. Diagnosis should be "design tight against truth".
         rep = _make_id_report(crlb=[1e-3, 0.04])
@@ -252,7 +253,7 @@ class TestAssertRecoversWithinCrlb:
                 feature="outdoor_delta", k=3.0,
             )
 
-    def test_fails_when_unidentifiable(self):
+    def test_fails_when_unidentifiable(self, bench_metrics, num_regression):
         rep = _make_id_report(
             feature_names=["intercept", "outdoor_delta"],
             crlb=[1e-3, float("inf")], rank=1,
@@ -311,20 +312,20 @@ def probe_pipeline():
 
 
 class TestEndToEnd:
-    def test_outdoor_delta_identifiable(self, probe_pipeline):
+    def test_outdoor_delta_identifiable(self, bench_metrics, num_regression, probe_pipeline):
         _, id_rep, _ = probe_pipeline
         # On a 30-day probe, β_outdoor SE should be well below 0.1.
         assert_identifiable(id_rep, "outdoor_delta", se_max=0.1)
 
-    def test_pe_order_full(self, probe_pipeline):
+    def test_pe_order_full(self, bench_metrics, num_regression, probe_pipeline):
         _, id_rep, _ = probe_pipeline
         assert_pe_order_at_least(id_rep, 2)
 
-    def test_condition_number_under_30(self, probe_pipeline):
+    def test_condition_number_under_30(self, bench_metrics, num_regression, probe_pipeline):
         _, id_rep, _ = probe_pipeline
         assert_condition_number_below(id_rep, 30.0)
 
-    def test_split_half_stable(self, probe_pipeline):
+    def test_split_half_stable(self, bench_metrics, num_regression, probe_pipeline):
         _, _, res_rep = probe_pipeline
         # Loose threshold — split-half on a misspecified model can shift
         # β by tens of percent when the second half differs in transient
@@ -332,7 +333,7 @@ class TestEndToEnd:
         assert_split_half_stable(res_rep, max_rel_change=0.50)
 
     def test_recovery_assertion_against_open_loop_truth_fails_explicably(
-        self, probe_pipeline
+        self, bench_metrics, num_regression, probe_pipeline
     ):
         # The probe doesn't reach the open-loop asymptote (mass_ratio=8
         # wall lag), so a strict CRLB-based recovery assertion against

@@ -14,6 +14,7 @@ import math
 import pytest
 
 from tests.hvac_bench.adapters import TasmotaPIAdapter
+from tests.hvac_bench.conftest import check_bench_metrics
 from tests.hvac_bench.house_profiles import PROFILES
 from tests.hvac_bench.thermal_model import ThermalModel2R2C as ThermalModel
 from tests.hvac_bench.runner import run_scenario
@@ -173,7 +174,7 @@ def run_with_stove(controller, model, stove, n_ticks, mode="heat",
 class TestTrackedSetpointPhases:
     """Does the tracked setpoint meaningfully differ between burn and idle?"""
 
-    def test_setpoint_differs_burn_vs_idle(self):
+    def test_setpoint_differs_burn_vs_idle(self, bench_metrics, num_regression):
         """HP raw setpoint should be lower during burn (less HP needed)
         and higher during idle (more HP needed).
 
@@ -221,7 +222,7 @@ class TestTrackedSetpointPhases:
 class TestBeforeAfterEstimation:
     """Can we estimate the stove coefficient from before vs during tracking?"""
 
-    def test_before_after_gives_reasonable_coefficient(self):
+    def test_before_after_gives_reasonable_coefficient(self, bench_metrics, num_regression):
         """The difference in raw (pre-quantization) setpoint before and during
         stove operation should approximate the stove's thermal contribution.
 
@@ -269,7 +270,7 @@ class TestBeforeAfterEstimation:
 class TestSessionVsPhaseCoefficient:
     """Compare session-average coefficient with burn/idle phase-aware."""
 
-    def test_phase_aware_is_more_accurate(self):
+    def test_phase_aware_is_more_accurate(self, bench_metrics, num_regression):
         """Phase-aware estimation should better predict HP need during each phase."""
         profile = PROFILES["standard_residential"]
         ctrl = TasmotaPIAdapter({"pi_outdoor_seed_heat": PROFILES["standard_residential"].true_seed})
@@ -323,7 +324,7 @@ class TestSessionVsPhaseCoefficient:
 class TestOutdoorVariation:
     """Does outdoor temp variation invalidate the before/after estimate?"""
 
-    def test_before_after_robust_to_outdoor_change(self):
+    def test_before_after_robust_to_outdoor_change(self, bench_metrics, num_regression):
         """Estimate should be similar even if outdoor temp changes during stove session."""
         profile = PROFILES["standard_residential"]
 
@@ -357,7 +358,7 @@ class TestOutdoorVariation:
 class TestStoveOffResume:
     """When stove stops, does the HP resume with a reasonable setpoint?"""
 
-    def test_hp_resumes_correctly_after_stove(self):
+    def test_hp_resumes_correctly_after_stove(self, bench_metrics, num_regression):
         """After stove session ends, HP should quickly reach a correct setpoint."""
         profile = PROFILES["standard_residential"]
         ctrl = TasmotaPIAdapter({"pi_outdoor_seed_heat": PROFILES["standard_residential"].true_seed})

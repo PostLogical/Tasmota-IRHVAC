@@ -39,6 +39,7 @@ from tests.hvac_bench.full_stack_runner import (
     run_full_stack,
     TICK_MINUTES_DEFAULT,
 )
+from tests.hvac_bench.conftest import check_bench_metrics
 from tests.hvac_bench.house_profiles import PROFILES, PROFILES_2R2C
 from tests.hvac_bench.scenarios._weather_mode import (
     SHOULDER_FALL,
@@ -355,7 +356,7 @@ class TestGreybox2R2CRealCSV:
     flag flip.
     """
 
-    def test_2r2c_dispatch_fires_each_season(self, real_csv_results):
+    def test_2r2c_dispatch_fires_each_season(self, bench_metrics, num_regression, real_csv_results):
         """At ~60 days × 96 ticks/day, the 2R2C gate (≥1500 obs AND ≥14 days)
         must fire in every season for at least one mode. If 2R2C never
         dispatches, the test is degenerate and the rest of the assertions
@@ -374,7 +375,7 @@ class TestGreybox2R2CRealCSV:
         "outside plausible bands. See project_greybox_2r2c_real_csv_finding.md.",
         strict=True,
     )
-    def test_gates_pass_at_least_once_per_season(self, real_csv_results):
+    def test_gates_pass_at_least_once_per_season(self, bench_metrics, num_regression, real_csv_results):
         """The 1R1C floor was 0/N gates passed. The 2R2C upgrade has to
         clear that floor on real weather; otherwise the synthetic-spring
         win at 30/119 was an artifact of clean synth distributions
@@ -386,7 +387,7 @@ class TestGreybox2R2CRealCSV:
                 f"gates — 2R2C wins didn't transfer from synth to real CSV"
             )
 
-    def test_no_arm_diverges_in_outdoor(self, real_csv_results):
+    def test_no_arm_diverges_in_outdoor(self, bench_metrics, num_regression, real_csv_results):
         """Sanity: every (season, mode) ends with a bounded outdoor β."""
         for season, by_mode in real_csv_results.items():
             for mode, r in by_mode.items():
@@ -395,7 +396,7 @@ class TestGreybox2R2CRealCSV:
                     f"out of plausible range"
                 )
 
-    def test_tau_fast_in_plausible_range_when_2r2c(self, real_csv_results):
+    def test_tau_fast_in_plausible_range_when_2r2c(self, bench_metrics, num_regression, real_csv_results):
         """Where 2R2C dispatched, the final τ_fast must land in the plant-ID
         plausible band (5–60 min). Verifies the dual-τ provider feeds
         plant_identifier with sensible numbers — the user-visible point of
@@ -414,7 +415,7 @@ class TestGreybox2R2CRealCSV:
             "non-None τ_fast — dispatch test should have caught this first"
         )
 
-    def test_summary_print(self, real_csv_results):
+    def test_summary_print(self, bench_metrics, num_regression, real_csv_results):
         """Print-only: surface the comparison table for memory updates."""
         _print_summary(real_csv_results)
         _print_diagnostics(real_csv_results)
@@ -468,7 +469,7 @@ class TestGreybox2R2CLitGrounded:
     thermal model, fit quality is directly measurable.
     """
 
-    def test_2r2c_dispatched(self, lit_grounded_results):
+    def test_2r2c_dispatched(self, bench_metrics, num_regression, lit_grounded_results):
         """Sanity: 60 days × 96 ticks/day clears the 2R2C dispatch gates."""
         for season, by_mode in lit_grounded_results.items():
             assert any(r.is_2r2c_dispatched for r in by_mode.values()), (
@@ -488,7 +489,7 @@ class TestGreybox2R2CLitGrounded:
         "recovers truth.",
         strict=True,
     )
-    def test_recovers_ua_c(self, lit_grounded_results):
+    def test_recovers_ua_c(self, bench_metrics, num_regression, lit_grounded_results):
         """Recovered ua_c within 30% of truth (= 0.01 min⁻¹).
 
         ua_c is a free parameter (not pinned by priors) so this is a
@@ -509,7 +510,7 @@ class TestGreybox2R2CLitGrounded:
         "scale being wrong. See test_recovers_ua_c.",
         strict=True,
     )
-    def test_recovers_k_c(self, lit_grounded_results):
+    def test_recovers_k_c(self, bench_metrics, num_regression, lit_grounded_results):
         """Recovered k_c within 30% of truth (= 0.025 min⁻¹). Free param."""
         r = lit_grounded_results["spring"]["fused"]
         s = r.final_greybox_summary
@@ -520,7 +521,7 @@ class TestGreybox2R2CLitGrounded:
             f"k_c={k_c:.5f} vs truth {_LIT_TRUE_K_C} ({100 * rel_err:.0f}% off)"
         )
 
-    def test_recovers_alpha_total(self, lit_grounded_results):
+    def test_recovers_alpha_total(self, bench_metrics, num_regression, lit_grounded_results):
         """Recovered α_total within 50% of truth (= 0.05). Free param.
 
         Looser tolerance than ua_c/k_c because α_total identification is
@@ -538,7 +539,7 @@ class TestGreybox2R2CLitGrounded:
             f"({100 * rel_err:.0f}% off)"
         )
 
-    def test_tau_fast_in_band(self, lit_grounded_results):
+    def test_tau_fast_in_band(self, bench_metrics, num_regression, lit_grounded_results):
         """Final τ_fast in [5, 60] min plausible band."""
         r = lit_grounded_results["spring"]["fused"]
         assert r.final_tau_fast is not None
@@ -546,7 +547,7 @@ class TestGreybox2R2CLitGrounded:
             f"τ_fast={r.final_tau_fast:.1f} min outside [5, 60]"
         )
 
-    def test_tau_slow_in_band(self, lit_grounded_results):
+    def test_tau_slow_in_band(self, bench_metrics, num_regression, lit_grounded_results):
         """Final τ_slow in [60, 3500] min plausible band.
 
         Truth-implied τ_slow with priors: ~1250 min (priors pin k_w=0.02,
@@ -559,7 +560,7 @@ class TestGreybox2R2CLitGrounded:
             f"τ_slow={r.final_tau_slow:.0f} min outside [60, 3500]"
         )
 
-    def test_gates_pass_at_least_once(self, lit_grounded_results):
+    def test_gates_pass_at_least_once(self, bench_metrics, num_regression, lit_grounded_results):
         """At least one batch passes the full gate set on standard_residential
         spring data. This is the headline: with lit-grounded truth + priors,
         does the greybox actually pass its quality gates?"""
@@ -570,7 +571,7 @@ class TestGreybox2R2CLitGrounded:
             f"realistic-weather + known-truth conditions"
         )
 
-    def test_summary_print_lit_grounded(self, lit_grounded_results):
+    def test_summary_print_lit_grounded(self, bench_metrics, num_regression, lit_grounded_results):
         """Print-only: surface the lit-grounded comparison vs truth."""
         print(f"\n{'=' * 90}")
         print("  Lit-Grounded Validation (standard_residential, spring, 60d)")

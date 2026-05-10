@@ -25,6 +25,7 @@ from custom_components.tasmota_irhvac.pi.batch_learning import (
     weighted_least_squares,
 )
 from tests.hvac_bench.house_profiles import PROFILES_2R2C
+from tests.hvac_bench.conftest import check_bench_metrics
 from tests.hvac_bench.open_loop_runner import (
     OpenLoopConfig,
     clip_to_bounds,
@@ -41,7 +42,7 @@ from tests.hvac_bench.open_loop_runner import (
 class TestStepExcitation:
     """Step excitation: square wave between center ± amplitude."""
 
-    def test_alternates_between_two_values(self):
+    def test_alternates_between_two_values(self, bench_metrics, num_regression):
         excite = make_step_excitation(
             center_c=20.0, amplitude_c=2.0, hold_minutes=60.0, tick_minutes=15.0
         )
@@ -52,20 +53,20 @@ class TestStepExcitation:
         assert values[4] == values[5] == values[6] == values[7] == 18.0
         assert values[8] == values[9] == values[10] == values[11] == 22.0
 
-    def test_only_two_distinct_values(self):
+    def test_only_two_distinct_values(self, bench_metrics, num_regression):
         excite = make_step_excitation(
             center_c=20.0, amplitude_c=1.5, hold_minutes=30.0, tick_minutes=15.0
         )
         values = {excite(t) for t in range(200)}
         assert values == {18.5, 21.5}
 
-    def test_rejects_zero_hold(self):
+    def test_rejects_zero_hold(self, bench_metrics, num_regression):
         with pytest.raises(ValueError):
             make_step_excitation(
                 center_c=20.0, amplitude_c=1.0, hold_minutes=0.0
             )
 
-    def test_rejects_negative_amplitude(self):
+    def test_rejects_negative_amplitude(self, bench_metrics, num_regression):
         with pytest.raises(ValueError):
             make_step_excitation(
                 center_c=20.0, amplitude_c=-1.0, hold_minutes=30.0
@@ -75,7 +76,7 @@ class TestStepExcitation:
 class TestPRBSExcitation:
     """PRBS: binary signal honoring minimum hold time, broadband."""
 
-    def test_only_two_distinct_values(self):
+    def test_only_two_distinct_values(self, bench_metrics, num_regression):
         excite = make_prbs_excitation(
             center_c=20.0, amplitude_c=2.0, min_hold_minutes=30.0,
             seed=42, tick_minutes=15.0,
@@ -83,7 +84,7 @@ class TestPRBSExcitation:
         values = {excite(t) for t in range(2880)}  # 30 days at 15 min
         assert values == {18.0, 22.0}
 
-    def test_respects_min_hold_time(self):
+    def test_respects_min_hold_time(self, bench_metrics, num_regression):
         # min_hold = 60 min @ 15 min tick = 4 ticks. So once flipped,
         # the signal must stay constant for at least 4 ticks.
         excite = make_prbs_excitation(
@@ -103,7 +104,7 @@ class TestPRBSExcitation:
                 )
                 run_start = t
 
-    def test_has_switches_in_long_run(self):
+    def test_has_switches_in_long_run(self, bench_metrics, num_regression):
         excite = make_prbs_excitation(
             center_c=20.0, amplitude_c=1.0, min_hold_minutes=15.0,
             seed=0, tick_minutes=15.0,
@@ -114,7 +115,7 @@ class TestPRBSExcitation:
         # in 500 ticks. Loose lower bound to keep deterministic.
         assert switches >= 50, f"too few PRBS switches: {switches}"
 
-    def test_rejects_non_monotonic_ticks(self):
+    def test_rejects_non_monotonic_ticks(self, bench_metrics, num_regression):
         excite = make_prbs_excitation(
             center_c=20.0, amplitude_c=1.0, min_hold_minutes=30.0, seed=1,
         )
@@ -127,7 +128,7 @@ class TestPRBSExcitation:
 class TestMultiSineExcitation:
     """Multi-sine: Schroeder-phased, energy-normalized, bounded."""
 
-    def test_amplitude_bounded(self):
+    def test_amplitude_bounded(self, bench_metrics, num_regression):
         # With Schroeder phasing, peak amplitude ≤ amplitude_c × √M / √M =
         # amplitude_c (in the limit; actual peak is somewhat below).
         excite = make_multisine_excitation(
@@ -144,7 +145,7 @@ class TestMultiSineExcitation:
         sqrt_m = math.sqrt(8)
         assert peak_dev <= 2.0 * sqrt_m + 1e-6
 
-    def test_carries_energy_at_chosen_frequencies(self):
+    def test_carries_energy_at_chosen_frequencies(self, bench_metrics, num_regression):
         # Single-component sine: energy concentrated at one frequency.
         # Verify by checking variance and zero-crossings.
         period_min = 240.0  # 4 hours
@@ -163,7 +164,7 @@ class TestMultiSineExcitation:
         var = sum((v - mean) ** 2 for v in values) / n_ticks
         assert 0.4 < var < 0.6
 
-    def test_rejects_invalid_periods(self):
+    def test_rejects_invalid_periods(self, bench_metrics, num_regression):
         with pytest.raises(ValueError):
             make_multisine_excitation(
                 center_c=20.0, amplitude_c=1.0,
@@ -171,7 +172,7 @@ class TestMultiSineExcitation:
                 period_min_minutes=120.0, period_max_minutes=60.0,  # max < min
             )
 
-    def test_rejects_zero_components(self):
+    def test_rejects_zero_components(self, bench_metrics, num_regression):
         with pytest.raises(ValueError):
             make_multisine_excitation(
                 center_c=20.0, amplitude_c=1.0,
@@ -183,19 +184,19 @@ class TestMultiSineExcitation:
 class TestClipToBounds:
     """Wrapper clamps excitation output to a [min, max] range."""
 
-    def test_clips_above_max(self):
+    def test_clips_above_max(self, bench_metrics, num_regression):
         clipped = clip_to_bounds(
             lambda t: 100.0, min_c=16.0, max_c=30.0
         )
         assert clipped(0) == 30.0
 
-    def test_clips_below_min(self):
+    def test_clips_below_min(self, bench_metrics, num_regression):
         clipped = clip_to_bounds(
             lambda t: -50.0, min_c=16.0, max_c=30.0
         )
         assert clipped(0) == 16.0
 
-    def test_passes_through_in_range(self):
+    def test_passes_through_in_range(self, bench_metrics, num_regression):
         clipped = clip_to_bounds(
             lambda t: 22.5, min_c=16.0, max_c=30.0
         )
@@ -260,7 +261,7 @@ class TestProbeRecoversOutdoorBeta:
         return run_open_loop_probe(config)
 
     def test_true_coefs_outdoor_delta_uses_open_loop_asymptote(
-        self, step_probe_result
+        self, bench_metrics, num_regression, step_probe_result
     ):
         """Regression test for C5: open-loop truth must be the open-loop
         asymptote ``-1/(g·τ_env+1)`` in signed physics-space, NOT
@@ -280,11 +281,11 @@ class TestProbeRecoversOutdoorBeta:
         # Must NOT equal +profile.true_seed (the original buggy value).
         assert actual != profile.true_seed
 
-    def test_observation_count_matches_ticks(self, step_probe_result):
+    def test_observation_count_matches_ticks(self, bench_metrics, num_regression, step_probe_result):
         assert len(step_probe_result.observations) == step_probe_result.n_ticks
         assert step_probe_result.n_ticks == 30 * 24 * 4  # 2880
 
-    def test_observations_have_required_fields(self, step_probe_result):
+    def test_observations_have_required_fields(self, bench_metrics, num_regression, step_probe_result):
         # Every observation must be non-clamped and carry the fields WLS
         # consumes.
         for obs in step_probe_result.observations:
@@ -293,7 +294,7 @@ class TestProbeRecoversOutdoorBeta:
             assert obs.clamped is False
             assert obs.hp_contribution_uncertain is False
 
-    def test_setpoint_trajectory_alternates(self, step_probe_result):
+    def test_setpoint_trajectory_alternates(self, bench_metrics, num_regression, step_probe_result):
         # 6-hour hold @ 15-min ticks = 24 ticks per level.
         traj = step_probe_result.setpoint_trajectory
         # First 24 ticks at one level, next 24 at the other.
@@ -303,7 +304,7 @@ class TestProbeRecoversOutdoorBeta:
         assert second != first
         assert all(t == second for t in traj[24:48])
 
-    def test_beta_outdoor_in_physical_band(self, step_probe_result):
+    def test_beta_outdoor_in_physical_band(self, bench_metrics, num_regression, step_probe_result):
         """WLS on probe data recovers β_outdoor in the physically valid band.
 
         Two algebraic bounds without any output-tuned tolerance:
@@ -336,7 +337,7 @@ class TestProbeRecoversOutdoorBeta:
             f"({-max_plausible:.2f}, 0); probe data is unusable"
         )
 
-    def test_beta_outdoor_differs_from_closed_loop_truth(self, step_probe_result):
+    def test_beta_outdoor_differs_from_closed_loop_truth(self, bench_metrics, num_regression, step_probe_result):
         """Sanity: the open-loop probe DOES produce a different β.
 
         If the open-loop and closed-loop coefficients were equal, the
@@ -366,7 +367,7 @@ class TestProbeRecoversOutdoorBeta:
             f"than open-loop ({open_loop:.4f}) — probe may be coupling back"
         )
 
-    def test_room_rate_filter_admits_observations(self, step_probe_result):
+    def test_room_rate_filter_admits_observations(self, bench_metrics, num_regression, step_probe_result):
         """At 6-hour hold ≫ τ, most ticks are quasi-steady (rate ≈ 0).
 
         The WLS room_rate filter has a default threshold of 0.02 °C/min.
@@ -390,7 +391,7 @@ class TestProbeRecoversOutdoorBeta:
 class TestProbeRunsWithModelInputs:
     """Smoke test: probe with a model input wires raw_readings correctly."""
 
-    def test_runs_with_solar_input(self):
+    def test_runs_with_solar_input(self, bench_metrics, num_regression):
         from tests.hvac_bench.full_stack_runner import ModelInputSpec
 
         excitation = make_step_excitation(
@@ -419,7 +420,7 @@ class TestProbeRunsWithModelInputs:
             assert "sensor.solar_test" in obs.raw_readings
             assert obs.raw_readings["sensor.solar_test"] == 0.5
 
-    def test_runs_with_no_inputs(self):
+    def test_runs_with_no_inputs(self, bench_metrics, num_regression):
         excitation = make_step_excitation(
             center_c=21.0, amplitude_c=1.0, hold_minutes=180.0,
         )

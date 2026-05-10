@@ -53,6 +53,7 @@ from dataclasses import replace
 import pytest
 
 from tests.hvac_bench.kpis import KpiBundle
+from tests.hvac_bench.conftest import check_bench_metrics
 from tests.hvac_bench.reference_scenarios import (
     CANONICAL_SCENARIOS,
     CONTROLLER_FACTORIES,
@@ -113,7 +114,7 @@ def _combined_bound(report: RichardsonReport) -> float:
 @pytest.mark.parametrize("controller_name", sorted({
     c for s in RICHARDSON_SCORES.values() for c in s
 }))
-def test_solution_verification_within_tolerance(scenario_name, controller_name):
+def test_solution_verification_within_tolerance(bench_metrics, num_regression, scenario_name, controller_name):
     """Locked finest-tick value, combined bound, and regime classification.
 
     A failure here means: either the bench's discretization profile has
@@ -168,7 +169,7 @@ def test_solution_verification_within_tolerance(scenario_name, controller_name):
 
 @pytest.mark.study
 @pytest.mark.parametrize("invariant_name", sorted(CONVERGENCE_INVARIANTS.keys()))
-def test_convergence_shape_invariants(invariant_name):
+def test_convergence_shape_invariants(bench_metrics, num_regression, invariant_name):
     """Per-rule asymptotic-regime invariants on specific (scenario × controller × KPI).
 
     Catches kernel/controller changes that flip the regime status of
@@ -198,7 +199,7 @@ def test_convergence_shape_invariants(invariant_name):
 
 
 @pytest.mark.study
-def test_richardson_reports_have_finite_bands():
+def test_richardson_reports_have_finite_bands(bench_metrics, num_regression):
     """All RichardsonReport bands are finite and non-negative.
 
     Cheap sanity check that the sweep doesn't produce NaN bands (which

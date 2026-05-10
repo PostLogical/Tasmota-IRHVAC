@@ -29,6 +29,7 @@ from tests.hvac_bench.reference_scenarios import (
     CONTROLLER_FACTORIES,
     run_reference_scenario,
 )
+from tests.hvac_bench.conftest import check_bench_metrics
 from tests.hvac_bench.reference_scores import (
     DISCRIMINATIVE_INVARIANTS,
     REFERENCE_SCORES,
@@ -50,7 +51,7 @@ def _run(scenario_name: str, controller_name: str):
 
 @pytest.mark.parametrize("scenario_name", sorted(REFERENCE_SCORES.keys()))
 @pytest.mark.parametrize("controller_name", sorted(CONTROLLER_FACTORIES.keys()))
-def test_locked_scores_within_tolerance(scenario_name, controller_name):
+def test_locked_scores_within_tolerance(bench_metrics, num_regression, scenario_name, controller_name):
     """Every KPI of every (scenario × controller) is within locked tolerance.
 
     A failure here means: either the bench changed (intentionally — relock)
@@ -92,7 +93,7 @@ def test_locked_scores_within_tolerance(scenario_name, controller_name):
 
 
 @pytest.mark.parametrize("scenario_name", sorted(CANONICAL_SCENARIOS.keys()))
-def test_naive_bangbang_worse_than_well_tuned_on_comfort(scenario_name):
+def test_naive_bangbang_worse_than_well_tuned_on_comfort(bench_metrics, num_regression, scenario_name):
     """Naive bang-bang must score substantially worse than well-tuned PI on
     ``tdis_tot`` for every canonical scenario.
 

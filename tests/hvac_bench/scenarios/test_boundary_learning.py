@@ -32,6 +32,7 @@ from tests.hvac_bench.full_stack_runner import (
     FullStackConfig,
     run_full_stack,
 )
+from tests.hvac_bench.conftest import check_bench_metrics
 from tests.hvac_bench.scenarios._weather_mode import (
     SPRING_MC_STARTS,
     WeatherMode,
@@ -105,7 +106,7 @@ class TestZeroOffsetBandNarrowing:
     """
 
     @pytest.mark.slow
-    def test_band_narrows_and_learning_improves(self):
+    def test_band_narrows_and_learning_improves(self, bench_metrics, num_regression):
         config = _spring_config(offset=0.0, n_days=21)
         result = run_full_stack(config)
 
@@ -216,7 +217,7 @@ class TestPositiveOffsetBandShift:
     """
 
     @pytest.mark.slow
-    def test_band_shifts_and_comfort_improves(self):
+    def test_band_shifts_and_comfort_improves(self, bench_metrics, num_regression):
         config = _spring_config(offset=1.0, n_days=21)
         result = run_full_stack(config)
 
@@ -289,7 +290,7 @@ class TestLargeOffsetConvergence:
 
     @pytest.mark.slow
     @pytest.mark.parametrize("offset", [2.0, 3.0], ids=["offset_2", "offset_3"])
-    def test_iterative_convergence(self, offset: float):
+    def test_iterative_convergence(self, bench_metrics, num_regression, offset: float):
         config = _spring_config(offset=offset, n_days=45)
         result = run_full_stack(config)
 
@@ -353,7 +354,7 @@ class TestNegativeOffsetConvergence:
     """
 
     @pytest.mark.slow
-    def test_band_shifts_positive(self):
+    def test_band_shifts_positive(self, bench_metrics, num_regression):
         config = _spring_config(offset=-1.0, n_days=30)
         result = run_full_stack(config)
 
@@ -410,7 +411,7 @@ class TestPassiveToProbeEscalation:
     """
 
     @pytest.mark.slow
-    def test_probe_completes(self):
+    def test_probe_completes(self, bench_metrics, num_regression):
         config = _spring_config(
             offset=0.5,
             n_days=30,
@@ -471,7 +472,7 @@ class TestBoundaryParameterSensitivity:
             "wide_margin_0.5",
         ],
     )
-    def test_parameter_effect(self, param_name: str, param_value: float):
+    def test_parameter_effect(self, bench_metrics, num_regression, param_name: str, param_value: float):
         config = _spring_config(offset=0.0, n_days=14)
 
         applied = [False]

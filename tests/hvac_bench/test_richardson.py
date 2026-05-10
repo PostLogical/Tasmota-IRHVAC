@@ -24,6 +24,7 @@ import numpy as np
 import pytest
 
 from tests.hvac_bench.kpis import KpiBundle
+from tests.hvac_bench.conftest import check_bench_metrics
 from tests.hvac_bench.richardson import (
     DEFAULT_RICHARDSON_KPIS,
     REGIME_ORDER_MAX,
@@ -44,7 +45,7 @@ from tests.hvac_bench.richardson import (
 class TestTwoGridExtrapolation:
     """Two grids with the right assumed order recover the limit exactly."""
 
-    def test_first_order_exact_recovery(self):
+    def test_first_order_exact_recovery(self, bench_metrics, num_regression):
         # KPI(h) = 5.0 + 2.0 * h with truth a=5.0, p=1
         h = [30.0, 15.0]
         truth = 5.0
@@ -57,7 +58,7 @@ class TestTwoGridExtrapolation:
         assert rep.monotone_convergence is True
         assert rep.error_band == pytest.approx(slope * h[-1], abs=1e-9)
 
-    def test_second_order_exact_recovery(self):
+    def test_second_order_exact_recovery(self, bench_metrics, num_regression):
         # KPI(h) = 10.0 + 0.5 * h^2 with assumed_order=2 → recover 10.0
         h = [30.0, 10.0]
         truth = 10.0
@@ -68,7 +69,7 @@ class TestTwoGridExtrapolation:
         assert rep.observed_order == 2.0
         assert rep.error_band == pytest.approx(c * h[-1] ** 2, abs=1e-9)
 
-    def test_unsorted_input_handled(self):
+    def test_unsorted_input_handled(self, bench_metrics, num_regression):
         h = [15.0, 30.0]  # finest first → must be sorted internally
         k = [7.0, 9.0]    # KPI at h=15 is finer
         rep = richardson_extrapolate(h, k, assumed_order=1.0, kpi_name="test")
@@ -85,7 +86,7 @@ class TestTwoGridExtrapolation:
 class TestThreeGridOrderRecovery:
     """≥ 3 grids with uniform refinement recover the convergence order."""
 
-    def test_first_order_recovers_p_one(self):
+    def test_first_order_recovers_p_one(self, bench_metrics, num_regression):
         h = [40.0, 20.0, 10.0]  # uniform refinement r=2
         truth = 5.0
         slope = 0.3
@@ -96,7 +97,7 @@ class TestThreeGridOrderRecovery:
         assert rep.fit_method == "three_point_observed_order"
         assert rep.monotone_convergence is True
 
-    def test_second_order_recovers_p_two(self):
+    def test_second_order_recovers_p_two(self, bench_metrics, num_regression):
         h = [40.0, 20.0, 10.0]  # r=2
         truth = -1.5
         c = 0.05
@@ -105,7 +106,7 @@ class TestThreeGridOrderRecovery:
         assert rep.observed_order == pytest.approx(2.0, abs=1e-6)
         assert rep.extrapolated_value == pytest.approx(truth, abs=1e-6)
 
-    def test_fractional_order(self):
+    def test_fractional_order(self, bench_metrics, num_regression):
         h = [27.0, 9.0, 3.0]  # uniform r=3
         truth = 100.0
         c = 1.2
@@ -115,7 +116,7 @@ class TestThreeGridOrderRecovery:
         assert rep.observed_order == pytest.approx(p_true, abs=1e-5)
         assert rep.extrapolated_value == pytest.approx(truth, abs=1e-3)
 
-    def test_assumed_order_overrides_three_point_fit(self):
+    def test_assumed_order_overrides_three_point_fit(self, bench_metrics, num_regression):
         # Force p=1 even with 3 grids → uses two-point branch on finest pair
         h = [40.0, 20.0, 10.0]
         truth = 0.0
@@ -131,7 +132,7 @@ class TestThreeGridOrderRecovery:
 class TestNonUniformRefinement:
     """Non-uniform refinement still recovers p via Brent's method."""
 
-    def test_non_uniform_first_order(self):
+    def test_non_uniform_first_order(self, bench_metrics, num_regression):
         h = [30.0, 10.0, 4.0]  # non-uniform: r1=3, r2=2.5
         truth = 7.0
         slope = 0.5
@@ -141,7 +142,7 @@ class TestNonUniformRefinement:
         assert rep.extrapolated_value == pytest.approx(truth, abs=1e-5)
         assert rep.fit_method == "nonuniform_observed_order"
 
-    def test_non_uniform_second_order(self):
+    def test_non_uniform_second_order(self, bench_metrics, num_regression):
         h = [25.0, 10.0, 2.0]
         truth = -2.0
         c = 0.1
@@ -157,7 +158,7 @@ class TestNonUniformRefinement:
 class TestDegenerateCases:
     """Edge cases must not crash and must produce informative reports."""
 
-    def test_constant_kpi(self):
+    def test_constant_kpi(self, bench_metrics, num_regression):
         h = [30.0, 15.0, 5.0]
         k = [3.14, 3.14, 3.14]
         rep = richardson_extrapolate(h, k, kpi_name="test")
@@ -167,7 +168,7 @@ class TestDegenerateCases:
         assert math.isnan(rep.observed_order)
         assert rep.monotone_convergence is True
 
-    def test_non_monotone_three_grids_falls_back(self):
+    def test_non_monotone_three_grids_falls_back(self, bench_metrics, num_regression):
         # Non-monotone: KPI oscillates as h decreases
         h = [30.0, 15.0, 5.0]
         k = [10.0, 8.0, 9.0]  # delta_coarse=-2, delta_fine=+1 → opposite signs
@@ -176,7 +177,7 @@ class TestDegenerateCases:
         assert math.isnan(rep.observed_order)
         assert rep.monotone_convergence is False
 
-    def test_partially_stalled_three_grids_falls_back(self):
+    def test_partially_stalled_three_grids_falls_back(self, bench_metrics, num_regression):
         # One delta is zero → can't fit p; falls back
         h = [30.0, 15.0, 5.0]
         k = [10.0, 10.0, 9.5]
@@ -184,7 +185,7 @@ class TestDegenerateCases:
         assert rep.fit_method == "fallback_assumed_order_1"
         assert math.isnan(rep.observed_order)
 
-    def test_zero_extrapolated_relative_inf(self):
+    def test_zero_extrapolated_relative_inf(self, bench_metrics, num_regression):
         # KPI∞ = 0 with nonzero error band → relative_error reports inf
         h = [10.0, 5.0]
         k = [3.0, 1.5]  # extrap = (2*1.5 - 3)/1 = 0
@@ -192,7 +193,7 @@ class TestDegenerateCases:
         assert rep.extrapolated_value == 0.0
         assert math.isinf(rep.relative_error)
 
-    def test_zero_extrapolated_zero_band_relative_zero(self):
+    def test_zero_extrapolated_zero_band_relative_zero(self, bench_metrics, num_regression):
         h = [10.0, 5.0]
         k = [0.0, 0.0]
         rep = richardson_extrapolate(h, k, assumed_order=1.0, kpi_name="test")
@@ -204,31 +205,31 @@ class TestDegenerateCases:
 class TestInputValidation:
     """Bad inputs raise informative ValueError."""
 
-    def test_shape_mismatch(self):
+    def test_shape_mismatch(self, bench_metrics, num_regression):
         with pytest.raises(ValueError, match="must align"):
             richardson_extrapolate([10.0, 5.0, 1.0], [3.0, 2.0])
 
-    def test_too_few_grids(self):
+    def test_too_few_grids(self, bench_metrics, num_regression):
         with pytest.raises(ValueError, match="need >= 2"):
             richardson_extrapolate([5.0], [3.0])
 
-    def test_non_finite_tick_rates(self):
+    def test_non_finite_tick_rates(self, bench_metrics, num_regression):
         with pytest.raises(ValueError, match="finite and positive"):
             richardson_extrapolate([10.0, float("nan")], [3.0, 2.0])
 
-    def test_zero_tick_rate(self):
+    def test_zero_tick_rate(self, bench_metrics, num_regression):
         with pytest.raises(ValueError, match="finite and positive"):
             richardson_extrapolate([10.0, 0.0], [3.0, 2.0])
 
-    def test_negative_tick_rate(self):
+    def test_negative_tick_rate(self, bench_metrics, num_regression):
         with pytest.raises(ValueError, match="finite and positive"):
             richardson_extrapolate([10.0, -5.0], [3.0, 2.0])
 
-    def test_non_finite_kpi(self):
+    def test_non_finite_kpi(self, bench_metrics, num_regression):
         with pytest.raises(ValueError, match="finite"):
             richardson_extrapolate([10.0, 5.0], [3.0, float("inf")])
 
-    def test_duplicate_tick_rates(self):
+    def test_duplicate_tick_rates(self, bench_metrics, num_regression):
         with pytest.raises(ValueError, match="distinct"):
             richardson_extrapolate([10.0, 10.0], [3.0, 3.5])
 
@@ -254,7 +255,7 @@ def _bundle(tick_minutes: float, *, tdis: float, ener: float, peak: float,
 class TestBundleSweep:
     """``kpi_richardson_sweep`` walks every default KPI."""
 
-    def test_sweep_extrapolates_each_default_kpi(self):
+    def test_sweep_extrapolates_each_default_kpi(self, bench_metrics, num_regression):
         bundles = {
             30.0: _bundle(30.0, tdis=2.0, ener=6.0, peak=0.30,
                           cold=0.5, warm=0.0, sp_ch=20, n_ticks=144),
@@ -269,7 +270,7 @@ class TestBundleSweep:
             assert isinstance(reports[name], RichardsonReport)
             assert reports[name].kpi_name == name
 
-    def test_sweep_custom_kpi_names(self):
+    def test_sweep_custom_kpi_names(self, bench_metrics, num_regression):
         bundles = {
             10.0: _bundle(10.0, tdis=1.0, ener=2.0, peak=0.1,
                           cold=0.0, warm=0.0, sp_ch=10, n_ticks=144),
@@ -281,7 +282,7 @@ class TestBundleSweep:
         )
         assert list(reports.keys()) == ["tdis_tot"]
 
-    def test_sweep_too_few_grids(self):
+    def test_sweep_too_few_grids(self, bench_metrics, num_regression):
         bundles = {
             15.0: _bundle(15.0, tdis=1.0, ener=2.0, peak=0.1,
                           cold=0.0, warm=0.0, sp_ch=10, n_ticks=288),
@@ -289,7 +290,7 @@ class TestBundleSweep:
         with pytest.raises(ValueError, match="need >= 2 tick rates"):
             kpi_richardson_sweep(bundles)
 
-    def test_sweep_missing_kpi_raises(self):
+    def test_sweep_missing_kpi_raises(self, bench_metrics, num_regression):
         bundles = {
             10.0: _bundle(10.0, tdis=1.0, ener=2.0, peak=0.1,
                           cold=0.0, warm=0.0, sp_ch=10, n_ticks=144),
@@ -306,7 +307,7 @@ class TestBundleSweep:
 class TestRegimeClassifier:
     """Asymptotic-regime classification for Roache GCI safety-factor selection."""
 
-    def test_clean_asymptotic_data_in_regime(self):
+    def test_clean_asymptotic_data_in_regime(self, bench_metrics, num_regression):
         # KPI(h) = 5 + 0.5·h^1.5 — clean asymptotic
         h = [40.0, 20.0, 10.0]
         truth = 5.0
@@ -319,14 +320,14 @@ class TestRegimeClassifier:
         # GCI bounds the actual error generously
         assert rep.gci >= rep.error_band
 
-    def test_non_monotone_not_in_regime(self):
+    def test_non_monotone_not_in_regime(self, bench_metrics, num_regression):
         h = [30.0, 15.0, 5.0]
         k = [10.0, 8.0, 9.0]  # sign-flip in deltas
         rep = richardson_extrapolate(h, k, kpi_name="test")
         assert rep.in_asymptotic_regime is False
         assert rep.safety_factor == ROACHE_FS_NON_ASYMPTOTIC
 
-    def test_order_outside_physical_range_not_in_regime(self):
+    def test_order_outside_physical_range_not_in_regime(self, bench_metrics, num_regression):
         # Construct a sequence with observed_order > REGIME_ORDER_MAX
         # (very steep convergence dominated by the coarsest grid).
         h = [30.0, 15.0, 5.0]
@@ -339,7 +340,7 @@ class TestRegimeClassifier:
         assert rep.in_asymptotic_regime is False
         assert rep.safety_factor == ROACHE_FS_NON_ASYMPTOTIC
 
-    def test_two_grid_assumed_order_not_in_regime(self):
+    def test_two_grid_assumed_order_not_in_regime(self, bench_metrics, num_regression):
         # Only 2 grids → fit_method is "two_point_assumed_order"; the
         # fitted p is not data-derived so we can't claim asymptotic regime.
         # Roache 1998 §5.5 explicitly recommends Fs=3.0 for 2-grid studies.
@@ -349,7 +350,7 @@ class TestRegimeClassifier:
         assert rep.in_asymptotic_regime is False
         assert rep.safety_factor == ROACHE_FS_NON_ASYMPTOTIC
 
-    def test_constant_kpi_not_in_regime(self):
+    def test_constant_kpi_not_in_regime(self, bench_metrics, num_regression):
         h = [30.0, 15.0, 5.0]
         k = [3.14, 3.14, 3.14]
         rep = richardson_extrapolate(h, k, kpi_name="test")
@@ -359,7 +360,7 @@ class TestRegimeClassifier:
         assert rep.safety_factor == ROACHE_FS_NON_ASYMPTOTIC
         assert rep.gci == 0.0  # but error band is genuinely zero
 
-    def test_gci_uses_correct_safety_factor(self):
+    def test_gci_uses_correct_safety_factor(self, bench_metrics, num_regression):
         # Asymptotic case → Fs = 1.25
         h = [40.0, 20.0, 10.0]
         c = 0.5
@@ -367,7 +368,7 @@ class TestRegimeClassifier:
         rep = richardson_extrapolate(h, k, kpi_name="test")
         assert rep.gci == pytest.approx(rep.error_band * ROACHE_FS_ASYMPTOTIC, abs=1e-9)
 
-    def test_regime_constants_sensible(self):
+    def test_regime_constants_sensible(self, bench_metrics, num_regression):
         # Sanity: regime thresholds bracket the typical first/second-order
         # range expected for reasonable convergence schemes.
         assert 0 < REGIME_ORDER_MIN < 1.0 < 2.0 < REGIME_ORDER_MAX
@@ -379,19 +380,19 @@ class TestRegimeClassifier:
 class TestTickRateSpread:
     """``tick_rate_spread`` returns max - min across the sweep."""
 
-    def test_spread_returns_max_minus_min(self):
+    def test_spread_returns_max_minus_min(self, bench_metrics, num_regression):
         rep = richardson_extrapolate(
             [30.0, 15.0, 5.0], [10.0, 7.0, 5.5], kpi_name="test"
         )
         assert tick_rate_spread(rep) == pytest.approx(4.5, abs=1e-9)
 
-    def test_spread_zero_for_constant(self):
+    def test_spread_zero_for_constant(self, bench_metrics, num_regression):
         rep = richardson_extrapolate(
             [30.0, 15.0, 5.0], [3.0, 3.0, 3.0], kpi_name="test"
         )
         assert tick_rate_spread(rep) == 0.0
 
-    def test_spread_works_for_non_monotone(self):
+    def test_spread_works_for_non_monotone(self, bench_metrics, num_regression):
         rep = richardson_extrapolate(
             [30.0, 15.0, 5.0], [5.0, 8.0, 6.0], kpi_name="test"
         )
@@ -401,7 +402,7 @@ class TestTickRateSpread:
 class TestFormatTable:
     """Smoke test on the reporting helper."""
 
-    def test_format_runs_without_crashing(self):
+    def test_format_runs_without_crashing(self, bench_metrics, num_regression):
         bundles = {
             30.0: _bundle(30.0, tdis=2.0, ener=6.0, peak=0.30,
                           cold=0.5, warm=0.0, sp_ch=20, n_ticks=144),

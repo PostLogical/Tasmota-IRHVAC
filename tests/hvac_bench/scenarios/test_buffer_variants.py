@@ -35,6 +35,7 @@ from custom_components.tasmota_irhvac.pi.buffer_policies import (
     SlidingWindowPolicy,
 )
 from tests.hvac_bench.adapters import TasmotaPIAdapter
+from tests.hvac_bench.conftest import check_bench_metrics
 from tests.hvac_bench.full_stack_runner import (
     FullStackResult,
     print_full_stack_summary,
@@ -393,7 +394,7 @@ class TestBufferVariants:
     Re-run this study only when revisiting buffer policy.
     """
 
-    def test_no_variant_diverges(self, variant_results):
+    def test_no_variant_diverges(self, bench_metrics, num_regression, variant_results):
         """Sanity: every (variant, season) finishes with bounded coefs."""
         for vname, by_season in variant_results.items():
             for sname, r in by_season.items():

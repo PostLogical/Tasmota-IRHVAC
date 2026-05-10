@@ -32,6 +32,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.hvac_bench.conftest import check_bench_metrics
+
 from tests.hvac_bench.empirical.data_loader import (
     apply_default_exclusions,
     load_condenser_a_zone,

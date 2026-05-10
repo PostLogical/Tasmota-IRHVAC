@@ -59,6 +59,7 @@ from tests.hvac_bench.full_stack_runner import (
     diurnal_solar,
     run_full_stack,
 )
+from tests.hvac_bench.conftest import check_bench_metrics
 from tests.hvac_bench.house_profiles import (
     FUJITSU_HYPERHEAT_CAPACITY,
     PROFILES_2R2C,
@@ -151,7 +152,7 @@ class TestWrongSeedsConvergence:
             relax_kappa_gate=True,
         )
 
-    def test_integral_compensates_early(self):
+    def test_integral_compensates_early(self, bench_metrics, num_regression):
         """Day 1: integral must be working to compensate wrong FF.
 
         Controller-behavior test (PI integrator absorbing the steady-state
@@ -171,7 +172,7 @@ class TestWrongSeedsConvergence:
             f"got avg |integral|={avg_integral:.2f}"
         )
 
-    def test_batch_wls_runs(self):
+    def test_batch_wls_runs(self, bench_metrics, num_regression):
         """Week 1: batch WLS should have run multiple cycles."""
         config = self._make_config(n_days=7)
         result = run_full_stack(config)
@@ -181,7 +182,7 @@ class TestWrongSeedsConvergence:
             f"Expected ≥10 batch cycles in 7 days, got {result.n_batches}"
         )
 
-    def test_outdoor_delta_stabilizes(self):
+    def test_outdoor_delta_stabilizes(self, bench_metrics, num_regression):
         """Month 1: outdoor_delta should stabilize (low batch-to-batch change)."""
         config = self._make_config(n_days=30)
         result = run_full_stack(config)
@@ -196,7 +197,7 @@ class TestWrongSeedsConvergence:
                 f"in last 5 batches (values: {[f'{v:.4f}' for v in late_ods]})"
             )
 
-    def test_integral_rms_decreases(self):
+    def test_integral_rms_decreases(self, bench_metrics, num_regression):
         """Month 1: integral RMS in last week should be < first week."""
         config = self._make_config(n_days=30)
         result = run_full_stack(config)
@@ -209,7 +210,7 @@ class TestWrongSeedsConvergence:
                 f"last week={last_week:.3f}"
             )
 
-    def test_comfort_does_not_degrade(self):
+    def test_comfort_does_not_degrade(self, bench_metrics, num_regression):
         """Learning should not make comfort worse over time."""
         config = self._make_config(n_days=30)
         result = run_full_stack(config)
@@ -223,7 +224,7 @@ class TestWrongSeedsConvergence:
                 f"last week={last_week_mae:.3f}"
             )
 
-    def test_ff_fraction_increases(self):
+    def test_ff_fraction_increases(self, bench_metrics, num_regression):
         """FF should carry more of the load as learning progresses."""
         config = self._make_config(n_days=30)
         result = run_full_stack(config)
@@ -237,7 +238,7 @@ class TestWrongSeedsConvergence:
                 f"last week={last_week_ff:.2%}"
             )
 
-    def test_covariance_does_not_collapse(self):
+    def test_covariance_does_not_collapse(self, bench_metrics, num_regression):
         """RLS covariance trace should not collapse to zero."""
         config = self._make_config(n_days=30)
         result = run_full_stack(config)
@@ -248,7 +249,7 @@ class TestWrongSeedsConvergence:
                 f"Covariance collapsed: min tr(P)={min_trace:.2e}"
             )
 
-    def test_no_long_violation_streaks(self):
+    def test_no_long_violation_streaks(self, bench_metrics, num_regression):
         """No more than 5 hours of consecutive violations.
 
         With intentionally wrong seeds, the cold start produces a long
@@ -312,7 +313,7 @@ class TestBunkroomSlowLearner:
             relax_kappa_gate=True,
         )
 
-    def test_no_integral_runaway(self):
+    def test_no_integral_runaway(self, bench_metrics, num_regression):
         """Integral must stay bounded over 30 days."""
         config = self._make_config(n_days=30)
         result = run_full_stack(config)
@@ -322,7 +323,7 @@ class TestBunkroomSlowLearner:
             f"Integral runaway: max |integral|={max_integral:.1f}"
         )
 
-    def test_convergence_slower_than_living_room(self):
+    def test_convergence_slower_than_living_room(self, bench_metrics, num_regression):
         """Bunkroom should converge but potentially slower."""
         config = self._make_config(n_days=30)
         result = run_full_stack(config)
@@ -332,7 +333,7 @@ class TestBunkroomSlowLearner:
             f"Expected ≥50 batch cycles in 30 days, got {result.n_batches}"
         )
 
-    def test_outdoor_delta_bounded(self):
+    def test_outdoor_delta_bounded(self, bench_metrics, num_regression):
         """outdoor_delta should not diverge."""
         config = self._make_config(n_days=30)
         result = run_full_stack(config)
@@ -343,7 +344,7 @@ class TestBunkroomSlowLearner:
             f"outdoor_delta diverged: {od:.3f}"
         )
 
-    def test_comfort_above_80_pct(self):
+    def test_comfort_above_80_pct(self, bench_metrics, num_regression):
         """Room should be within deadband ≥80% of the time."""
         config = self._make_config(n_days=30)
         result = run_full_stack(config)
@@ -353,7 +354,7 @@ class TestBunkroomSlowLearner:
             f"(ctrl={result.ctrl_violations}, unctrl={result.unctrl_violations})"
         )
 
-    def test_no_runaway_overshoot(self):
+    def test_no_runaway_overshoot(self, bench_metrics, num_regression):
         """Controllable warm violations should be minority — no FF sign errors."""
         config = self._make_config(n_days=30)
         result = run_full_stack(config)
@@ -386,7 +387,7 @@ class TestQFeedbackConvergence:
     """
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
-    def test_reversals_decrease_over_time(self, profile_name):
+    def test_reversals_decrease_over_time(self, bench_metrics, num_regression, profile_name):
         """Reversals/week should decrease as q-feedback converges."""
         profile = QUICK_PROFILES[profile_name]
         config = FullStackConfig(
@@ -412,7 +413,7 @@ class TestQFeedbackConvergence:
             )
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
-    def test_ff_offset_stabilizes(self, profile_name):
+    def test_ff_offset_stabilizes(self, bench_metrics, num_regression, profile_name):
         """FF offset should stabilize (low variance) by week 3."""
         profile = QUICK_PROFILES[profile_name]
         config = FullStackConfig(
@@ -534,7 +535,7 @@ class TestConvergenceToTruth:
         }
 
     @pytest.mark.parametrize("seed_factor", _SEED_FACTORS)
-    def test_coefficient_converges(self, seed_factor, seed_results):
+    def test_coefficient_converges(self, bench_metrics, num_regression, seed_factor, seed_results):
         """FF coefficient should stabilize regardless of initial seed error."""
         result = seed_results[seed_factor]
 
@@ -551,7 +552,7 @@ class TestConvergenceToTruth:
 
     @pytest.mark.parametrize("seed_factor", _SEED_FACTORS)
     def test_all_seeds_converge_to_same_value(
-        self, seed_factor, seed_results, baseline_result,
+        self, bench_metrics, num_regression, seed_factor, seed_results, baseline_result,
     ):
         """All seed factors should converge to approximately the same
         final coefficient, since the ground-truth physics is identical.
@@ -566,7 +567,7 @@ class TestConvergenceToTruth:
             f"baseline={baseline_od:.4f}, diff={abs(od - baseline_od):.4f}"
         )
 
-    def test_worse_seeds_take_longer(self, seed_results):
+    def test_worse_seeds_take_longer(self, bench_metrics, num_regression, seed_results):
         """More wrong seeds should take more batch cycles to converge."""
         first_stable_for: dict[float, int | None] = {}
         for factor in (1.0, 2.0, 3.0):
@@ -596,7 +597,7 @@ class TestConvergenceToTruth:
 class TestDisturbanceRejection:
     """Inject a sensor anomaly and verify recovery."""
 
-    def test_sensor_grab_recovery(self):
+    def test_sensor_grab_recovery(self, bench_metrics, num_regression):
         """Simulate sensor grabbed for battery change (+8°C for 4 ticks).
 
         CUSUM should detect it, and the system should recover quickly.
@@ -776,7 +777,7 @@ class TestStagedModelInputRollout:
             relax_kappa_gate=False,  # let κ gating work naturally
         )
 
-    def test_features_start_frozen(self):
+    def test_features_start_frozen(self, bench_metrics, num_regression):
         """Model input features (indices 2+) should start frozen."""
         config = self._make_config(n_days=2)
         result = run_full_stack(config)
@@ -791,7 +792,7 @@ class TestStagedModelInputRollout:
                         f"{name} should start frozen"
                     )
 
-    def test_outdoor_delta_learns_first(self):
+    def test_outdoor_delta_learns_first(self, bench_metrics, num_regression):
         """outdoor_delta (base feature, never frozen) should converge first."""
         config = self._make_config(n_days=30)
         result = run_full_stack(config)
@@ -805,7 +806,7 @@ class TestStagedModelInputRollout:
                 f"outdoor_delta not stabilizing early: range={od_range:.4f}"
             )
 
-    def test_unlock_does_not_destabilize_outdoor(self):
+    def test_unlock_does_not_destabilize_outdoor(self, bench_metrics, num_regression):
         """When a feature unlocks, outdoor_delta should not jump."""
         config = self._make_config(n_days=30)
         result = run_full_stack(config)
@@ -827,7 +828,7 @@ class TestStagedModelInputRollout:
                     )
 
     @pytest.mark.slow
-    def test_unlock_jump_bound_holds_across_winters(self):
+    def test_unlock_jump_bound_holds_across_winters(self, bench_metrics, num_regression):
         """MC sanity-check: 0.3 unlock-jump bound across 3 winter starts.
 
         ``test_unlock_does_not_destabilize_outdoor`` currently runs against
@@ -864,7 +865,7 @@ class TestStagedModelInputRollout:
             f"{[f'{j:.3f}' for j in per_run_max]}"
         )
 
-    def test_no_integral_runaway_during_unlocks(self):
+    def test_no_integral_runaway_during_unlocks(self, bench_metrics, num_regression):
         """Integral should stay bounded through all feature unlocks."""
         config = self._make_config(n_days=30)
         result = run_full_stack(config)
@@ -874,7 +875,7 @@ class TestStagedModelInputRollout:
             f"Integral runaway during staged unlocks: max={max_integral:.1f}"
         )
 
-    def test_ff_fraction_increases_with_unlocks(self):
+    def test_ff_fraction_increases_with_unlocks(self, bench_metrics, num_regression):
         """FF fraction should increase as more features unlock and learn."""
         config = self._make_config(n_days=30)
         result = run_full_stack(config)
@@ -888,7 +889,7 @@ class TestStagedModelInputRollout:
                 f"week 3={third_week:.2%}"
             )
 
-    def test_comfort_maintained_through_unlocks(self):
+    def test_comfort_maintained_through_unlocks(self, bench_metrics, num_regression):
         """Comfort should stay ≥75% even with staged unlocks."""
         config = self._make_config(n_days=30)
         result = run_full_stack(config)
@@ -943,7 +944,7 @@ class TestRecoveryFromBadStates:
             relax_kappa_gate=True,
         )
 
-    def test_recovery_from_sign_flip(self):
+    def test_recovery_from_sign_flip(self, bench_metrics, num_regression):
         """If outdoor_delta flips sign, batch WLS should correct it.
 
         Simulate by starting with a positive outdoor_delta seed (wrong
@@ -970,7 +971,7 @@ class TestRecoveryFromBadStates:
             f"Controllable comfort collapsed after sign flip: {result.ctrl_comfort_pct:.1f}%"
         )
 
-    def test_recovery_from_large_integral_windup(self):
+    def test_recovery_from_large_integral_windup(self, bench_metrics, num_regression):
         """System should recover from a large initial integral error.
 
         Simulate by injecting a massive disturbance early that winds
@@ -1008,7 +1009,7 @@ class TestRecoveryFromBadStates:
                 f"Comfort not recovered in last week: {last_week_comfort:.1f}%"
             )
 
-    def test_wrong_sign_seed_all_profiles(self):
+    def test_wrong_sign_seed_all_profiles(self, bench_metrics, num_regression):
         """All profiles should recover from a wrong-sign outdoor seed."""
         for profile_name in ["living_room", "bunkroom"]:
             profile = PROFILES_2R2C[profile_name]
@@ -1041,7 +1042,7 @@ class TestRealWeatherReplay:
         (SUMMER, "cool", 24.0),
     ], ids=["winter_heat", "spring_heat", "summer_cool"])
     def test_no_divergence(
-        self, window: WeatherWindow, mode: str, desired: float
+        self, bench_metrics, num_regression, window: WeatherWindow, mode: str, desired: float
     ):
         """Learning should not diverge under real weather."""
         outdoor_fn, solar_fn, _ = windowed_real_weather(
@@ -1139,7 +1140,7 @@ class TestMultiYearStability:
     factor, P-matrix, or anything that could affect long-horizon behavior.
     """
 
-    def test_one_year_no_divergence(self, _multi_year_result):
+    def test_one_year_no_divergence(self, bench_metrics, num_regression, _multi_year_result):
         """365-day run: coefficients bounded, no integral runaway."""
         result = _multi_year_result
 
@@ -1162,7 +1163,7 @@ class TestMultiYearStability:
                 f"outdoor_delta unstable in last 30 days: range={od_range:.4f}"
             )
 
-    def test_one_year_comfort_stable(self, _multi_year_result):
+    def test_one_year_comfort_stable(self, bench_metrics, num_regression, _multi_year_result):
         """Monthly MAE should not grow over the year."""
         result = _multi_year_result
 

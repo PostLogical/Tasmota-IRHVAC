@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+
+from tests.hvac_bench.conftest import check_bench_metrics
 from scipy.linalg import expm
 
 from tests.hvac_bench.empirical.rc_model import (
