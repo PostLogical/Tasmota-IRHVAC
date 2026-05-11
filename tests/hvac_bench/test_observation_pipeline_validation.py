@@ -7,8 +7,6 @@ the learning system depends on must be realistic.
 
 from __future__ import annotations
 
-import time as _time
-
 from tests.hvac_bench.adapters import TasmotaPIAdapter
 from tests.hvac_bench.conftest import check_bench_metrics
 from tests.hvac_bench.full_stack_runner import (
@@ -74,12 +72,7 @@ def _run_and_collect_observations(outdoor_base: float, n_days: int = 7,
         _mock_states["sensor.solar_proxy"] = ms
         pi._hass.states.get = lambda eid, _s=_mock_states: _s.get(eid)
 
-        original = _time.monotonic
-        _time.monotonic = lambda: adapter._sim_clock
-        try:
-            adapter._loop.run_until_complete(pi._pi_tick())
-        finally:
-            _time.monotonic = original
+        adapter.run_pi_tick_sim_coherent()
 
         model.step(hp_setpoint=float(pi._hp_setpoint), dt_minutes=tick_min,
                    tick=tick, solar_proxy=solar_val, mode="heat")

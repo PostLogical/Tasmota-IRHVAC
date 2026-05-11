@@ -8,7 +8,6 @@ learning system validation.
 from __future__ import annotations
 
 import math
-import time as _time
 from collections import Counter
 
 import pytest
@@ -86,12 +85,7 @@ def _run_with_tick_interval(tick_min: float, n_days: int = 14) -> dict:
         _mock_states["sensor.solar_proxy"] = ms
         pi._hass.states.get = lambda eid, _s=_mock_states: _s.get(eid)
 
-        original = _time.monotonic
-        _time.monotonic = lambda: adapter._sim_clock
-        try:
-            adapter._loop.run_until_complete(pi._pi_tick())
-        finally:
-            _time.monotonic = original
+        adapter.run_pi_tick_sim_coherent()
 
         hp_setpoint = float(pi._hp_setpoint)
         model.step(hp_setpoint=hp_setpoint, dt_minutes=tick_min,
@@ -273,12 +267,7 @@ class TestObservationDataQuality:
             _mock_states["sensor.solar_proxy"] = ms
             pi._hass.states.get = lambda eid, _s=_mock_states: _s.get(eid)
 
-            original = _time.monotonic
-            _time.monotonic = lambda: adapter._sim_clock
-            try:
-                adapter._loop.run_until_complete(pi._pi_tick())
-            finally:
-                _time.monotonic = original
+            adapter.run_pi_tick_sim_coherent()
 
             model.step(hp_setpoint=float(pi._hp_setpoint), dt_minutes=tick_min,
                        tick=tick, solar_proxy=solar_val, mode="heat")

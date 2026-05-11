@@ -134,6 +134,29 @@ class TasmotaPIAdapter:
 
         return float(self._pi._hp_setpoint)
 
+    def run_pi_tick_sim_coherent(self) -> None:
+        """Run one ``pi._pi_tick()`` with wall-clock frozen to sim time.
+
+        Use when a test needs per-tick state inspection that the high-level
+        ``tick()`` API doesn't expose (custom buffer reads, mid-tick state
+        injection, etc.) and so has to run its own outer loop.
+
+        Why this exists:
+        - ``self._pi._monotonic`` is already sim-coherent (injected at
+          construction; see __init__).
+        - But the controller also calls ``time.time()`` directly for the
+          hour-of-day features (sin_hour / cos_hour). Without
+          ``freeze_time``, those reach the real wall clock and the
+          features jitter between runs, perturbing eligibility filters
+          and buffer counts. The convention is freezegun for wall-clock
+          + explicit seam for monotonic (PIController.__init__ docstring
+          spells this out). This helper packages both halves so direct
+          ``pi._pi_tick()`` callers don't have to remember either.
+        """
+        sim_dt = _SIM_EPOCH + timedelta(seconds=self._sim_clock)
+        with freeze_time(sim_dt):
+            self._loop.run_until_complete(self._pi._pi_tick())
+
     def set_desired_temp(self, temp_c):
         self._pi._desired_temp = temp_c
 
