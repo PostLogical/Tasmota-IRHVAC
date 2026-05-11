@@ -219,13 +219,19 @@ class TestWindowConstants:
         assert TRAIN_WINDOW.end <= RECORDER_GAP.start
         assert RECORDER_GAP.end <= VALIDATE_WINDOW.start
 
-    def test_train_window_is_18_days(self) -> None:
+    def test_train_window_is_18_days(self, bench_metrics, num_regression) -> None:
         delta = TRAIN_WINDOW.end - TRAIN_WINDOW.start
-        assert 17.5 <= delta.total_seconds() / 86400.0 <= 18.5
+        days = delta.total_seconds() / 86400.0
+        assert 17.5 <= days <= 18.5
+        bench_metrics["days"] = float(days)
+        check_bench_metrics(num_regression, bench_metrics)
 
-    def test_validate_window_is_8p5_days(self) -> None:
+    def test_validate_window_is_8p5_days(self, bench_metrics, num_regression) -> None:
         delta = VALIDATE_WINDOW.end - VALIDATE_WINDOW.start
-        assert 8.0 <= delta.total_seconds() / 86400.0 <= 9.0
+        days = delta.total_seconds() / 86400.0
+        assert 8.0 <= days <= 9.0
+        bench_metrics["days"] = float(days)
+        check_bench_metrics(num_regression, bench_metrics)
 
 
 # ── Integration: load real bundle ────────────────────────────────────────
@@ -245,10 +251,12 @@ class TestLoadCondenserAZone:
         # Allow some non-uniformity at gap boundaries; 5min should dominate
         assert pd.Timedelta(minutes=5) in diffs
 
-    def test_load_living_room_row_count_matches_bundle(self) -> None:
+    def test_load_living_room_row_count_matches_bundle(self, bench_metrics, num_regression) -> None:
         t = load_condenser_a_zone(BUNDLE_PATH, "living_room")
         # README documents 12,036 rows
         assert t.n_rows == 12036
+        bench_metrics["n_rows"] = int(t.n_rows)
+        check_bench_metrics(num_regression, bench_metrics)
 
     def test_load_includes_required_signals(self) -> None:
         t = load_condenser_a_zone(BUNDLE_PATH, "living_room")
@@ -362,13 +370,15 @@ class TestSliceWindow:
         assert (t.df.index >= VALIDATE_WINDOW.start).all()
         assert (t.df.index < VALIDATE_WINDOW.end).all()
 
-    def test_train_window_row_count_in_expected_range(self) -> None:
+    def test_train_window_row_count_in_expected_range(self, bench_metrics, num_regression) -> None:
         # 18 days × 24 h × 12 (5-min) = 5184 rows max
         t = slice_window(
             load_condenser_a_zone(BUNDLE_PATH, "living_room"),
             TRAIN_WINDOW,
         )
         assert 5000 <= t.n_rows <= 5300
+        bench_metrics["n_rows"] = int(t.n_rows)
+        check_bench_metrics(num_regression, bench_metrics)
 
     def test_slice_preserves_derived_columns(self) -> None:
         t = slice_window(
