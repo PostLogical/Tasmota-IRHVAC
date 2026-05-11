@@ -127,6 +127,16 @@ class TestObservationRecording:
         print(f"  GB buffer: {gb['total']} obs (hp_on={gb['hp_on']}, hp_off={gb['hp_off']})")
         print(f"  RLS obs count: {stats['rls_obs_count']}")
 
+        bench_metrics["wls_total"] = wls["total"]
+        bench_metrics["wls_normal"] = wls["normal"]
+        bench_metrics["wls_no_output"] = wls["no_output"]
+        bench_metrics["wls_uncertain"] = wls["uncertain"]
+        bench_metrics["gb_total"] = gb["total"]
+        bench_metrics["gb_hp_on"] = gb["hp_on"]
+        bench_metrics["gb_hp_off"] = gb["hp_off"]
+        bench_metrics["rls_obs_count"] = stats["rls_obs_count"]
+        check_bench_metrics(num_regression, bench_metrics)
+
         # Should have recorded observations
         assert wls["total"] > 0, "No WLS observations recorded"
         assert gb["total"] > 0, "No grey-box observations recorded"
@@ -155,6 +165,12 @@ class TestObservationRecording:
         print(f"  GB buffer: {gb['total']} obs (hp_on={gb['hp_on']}, hp_off={gb['hp_off']})")
         print(f"  RLS obs count: {stats['rls_obs_count']}")
 
+        bench_metrics["wls_total"] = wls["total"]
+        bench_metrics["wls_no_output"] = wls["no_output"]
+        bench_metrics["gb_hp_off"] = gb["hp_off"]
+        bench_metrics["gb_hp_on"] = gb["hp_on"]
+        check_bench_metrics(num_regression, bench_metrics)
+
         # Should have both HP-on and HP-off observations
         assert wls["no_output"] > 0 or gb["hp_off"] > 0, (
             "No HP-off observations in spring — HP cycling not detected"
@@ -175,12 +191,19 @@ class TestObservationRecording:
             # In winter this should be rare
             # (but not zero — transients during setpoint changes)
 
+        bench_metrics["wls_total"] = wls["total"]
+        bench_metrics["wls_uncertain"] = wls["uncertain"]
+        check_bench_metrics(num_regression, bench_metrics)
+
     def test_no_output_observations_have_null_setpoint(self, bench_metrics, num_regression):
         """no_output observations should have hp_setpoint=None."""
         stats = _run_and_collect_observations(
             outdoor_base=14.0, n_days=7, solar_gain=0.02,
         )
         wls = stats["wls"]
+        bench_metrics["wls_no_output"] = wls["no_output"]
+        bench_metrics["wls_hp_setpoint_none"] = wls["hp_setpoint_none"]
+        check_bench_metrics(num_regression, bench_metrics)
         assert wls["no_output"] == wls["hp_setpoint_none"], (
             f"no_output ({wls['no_output']}) != hp_setpoint=None ({wls['hp_setpoint_none']})"
         )
@@ -200,3 +223,8 @@ class TestObservationRecording:
             print(f"  HP-off: {off_pct:.1f}%")
             # Grey-box needs >=10% HP-off for gates to pass
             # In spring with warm outdoor + solar, should get some
+
+        bench_metrics["gb_total"] = gb["total"]
+        bench_metrics["gb_hp_on"] = gb["hp_on"]
+        bench_metrics["gb_hp_off"] = gb["hp_off"]
+        check_bench_metrics(num_regression, bench_metrics)
