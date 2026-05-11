@@ -24,23 +24,29 @@ class TestCumulatedPeriodogramShape:
         assert result.upper_band.size == n_freq
         assert result.lower_band.size == n_freq
 
-    def test_cumulated_starts_above_zero_ends_at_one(self) -> None:
+    def test_cumulated_starts_above_zero_ends_at_one(self, bench_metrics, num_regression) -> None:
         rng = np.random.default_rng(1)
         r = rng.standard_normal(500)
         result = cumulated_periodogram(r)
         assert result.cumulated_power[0] > 0
         np.testing.assert_allclose(result.cumulated_power[-1], 1.0, atol=1e-12)
+        bench_metrics["cp_start"] = float(result.cumulated_power[0])
+        bench_metrics["cp_end"] = float(result.cumulated_power[-1])
+        check_bench_metrics(num_regression, bench_metrics)
 
-    def test_diagonal_increases_to_one(self) -> None:
+    def test_diagonal_increases_to_one(self, bench_metrics, num_regression) -> None:
         rng = np.random.default_rng(2)
         r = rng.standard_normal(400)
         result = cumulated_periodogram(r)
         assert (np.diff(result.diagonal) > 0).all()
         np.testing.assert_allclose(result.diagonal[-1], 1.0, atol=1e-12)
+        bench_metrics["diagonal_end"] = float(result.diagonal[-1])
+        bench_metrics["diagonal_start"] = float(result.diagonal[0])
+        check_bench_metrics(num_regression, bench_metrics)
 
 
 class TestKSBand:
-    def test_band_width_scales_inverse_sqrt_n(self) -> None:
+    def test_band_width_scales_inverse_sqrt_n(self, bench_metrics, num_regression) -> None:
         rng = np.random.default_rng(3)
         # Larger n → tighter band.
         r1 = rng.standard_normal(100)
@@ -51,6 +57,10 @@ class TestKSBand:
         band_width_1 = cp1.upper_band[10] - cp1.lower_band[10]
         band_width_2 = cp2.upper_band[10] - cp2.lower_band[10]
         assert band_width_1 > band_width_2
+        bench_metrics["band_width_n100"] = float(band_width_1)
+        bench_metrics["band_width_n10000"] = float(band_width_2)
+        bench_metrics["ratio"] = float(band_width_1 / band_width_2)
+        check_bench_metrics(num_regression, bench_metrics)
 
     def test_unknown_alpha_raises(self) -> None:
         rng = np.random.default_rng(4)
@@ -60,7 +70,7 @@ class TestKSBand:
 
 
 class TestWhiteNoiseInBand:
-    def test_white_noise_typically_inside_band_at_alpha_05(self) -> None:
+    def test_white_noise_typically_inside_band_at_alpha_05(self, bench_metrics, num_regression) -> None:
         # Repeated draws of white Gaussian; at α=0.05, P(false reject) ≤ 5%.
         # 10 draws — at most one should fail. (Probabilistic; deterministic via seed.)
         rng = np.random.default_rng(2026)
@@ -71,8 +81,10 @@ class TestWhiteNoiseInBand:
             if cp.inside_band:
                 n_pass += 1
         assert n_pass >= 8, f"only {n_pass}/10 inside band; suspicious"
+        bench_metrics["n_pass"] = n_pass
+        check_bench_metrics(num_regression, bench_metrics)
 
-    def test_n_outside_zero_when_white(self) -> None:
+    def test_n_outside_zero_when_white(self, bench_metrics, num_regression) -> None:
         rng = np.random.default_rng(11)
         r = rng.standard_normal(2000)
         cp = cumulated_periodogram(r, ks_alpha=0.05)
@@ -80,10 +92,14 @@ class TestWhiteNoiseInBand:
         assert cp.n_outside == 0
         assert cp.max_excess == 0.0
         assert cp.nCPBES == 0.0
+        bench_metrics["n_outside"] = int(cp.n_outside)
+        bench_metrics["max_excess"] = float(cp.max_excess)
+        bench_metrics["nCPBES"] = float(cp.nCPBES)
+        check_bench_metrics(num_regression, bench_metrics)
 
 
 class TestColoredNoiseFails:
-    def test_low_pass_filtered_noise_fails_band(self) -> None:
+    def test_low_pass_filtered_noise_fails_band(self, bench_metrics, num_regression) -> None:
         # Strongly autocorrelated (low-pass) signal — CP should bow toward
         # one extreme and exit the band.
         rng = np.random.default_rng(7)
@@ -98,6 +114,10 @@ class TestColoredNoiseFails:
         assert not cp.inside_band
         assert cp.n_outside > 0
         assert cp.nCPBES > 0
+        bench_metrics["n_outside"] = int(cp.n_outside)
+        bench_metrics["max_excess"] = float(cp.max_excess)
+        bench_metrics["nCPBES"] = float(cp.nCPBES)
+        check_bench_metrics(num_regression, bench_metrics)
 
 
 class TestInputValidation:
