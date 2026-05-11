@@ -77,12 +77,17 @@ def test_locked_scores_within_tolerance(bench_metrics, num_regression, scenario_
         if kpi_name not in observed:
             failures.append(f"{kpi_name}: missing from KPI bundle (controller produced no value)")
             continue
+        # Record the observed KPI for regression detection alongside the
+        # locked-tolerance assertion below.
+        if isinstance(observed[kpi_name], (int, float)):
+            bench_metrics[kpi_name] = observed[kpi_name]
         if not exp.passes(observed[kpi_name]):
             failures.append(
                 f"{kpi_name}: observed={observed[kpi_name]}, "
                 f"expected={exp.expected}±{exp.abs_tolerance} "
                 f"(delta={observed[kpi_name] - exp.expected:+.4f})"
             )
+    check_bench_metrics(num_regression, bench_metrics)
     assert not failures, (
         f"{scenario_name} / {controller_name} drifted from locked scores:\n  "
         + "\n  ".join(failures)
@@ -122,6 +127,10 @@ def test_naive_bangbang_worse_than_well_tuned_on_comfort(bench_metrics, num_regr
     )
 
     ratio = naive_v / well_tuned_v
+    bench_metrics["naive_v"] = naive_v
+    bench_metrics["well_tuned_v"] = well_tuned_v
+    bench_metrics["ratio"] = ratio
+    check_bench_metrics(num_regression, bench_metrics)
     assert ratio >= min_ratio, (
         f"{scenario_name}: naive/well_tuned {metric} ratio={ratio:.2f} "
         f"(naive={naive_v}, well_tuned={well_tuned_v}); "

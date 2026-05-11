@@ -142,6 +142,9 @@ def test_solution_verification_within_tolerance(bench_metrics, num_regression, s
         observed_bound = _combined_bound(rep)
         observed_regime = rep.in_asymptotic_regime
 
+        bench_metrics[f"{kpi_name}__value"] = observed_value
+        bench_metrics[f"{kpi_name}__bound"] = observed_bound
+
         if not exp.passes_value(observed_value):
             failures.append(
                 f"{kpi_name}: value={observed_value:.4f} at h={rep.tick_rates_minutes[-1]}min "
@@ -158,6 +161,7 @@ def test_solution_verification_within_tolerance(bench_metrics, num_regression, s
                 f"(expected {exp.expected_in_regime}); "
                 f"order={rep.observed_order:.2f} ({rep.fit_method})"
             )
+    check_bench_metrics(num_regression, bench_metrics)
     assert not failures, (
         f"{scenario_name} / {controller_name} drifted from locked solution-verification scores:\n  "
         + "\n  ".join(failures)
@@ -187,6 +191,10 @@ def test_convergence_shape_invariants(bench_metrics, num_regression, invariant_n
         print(f"\n{invariant_name} ({rule['scenario']}/{rule['controller']}/{rule['kpi']}):")
         print(format_richardson_table(reports))
 
+    bench_metrics["observed_order"] = rep.observed_order
+    bench_metrics["finest_value"] = rep.kpi_values[-1]
+    bench_metrics["gci"] = rep.gci
+    check_bench_metrics(num_regression, bench_metrics)
     if rule.get("must_be_in_regime", False):
         assert rep.in_asymptotic_regime, (
             f"{invariant_name}: expected asymptotic regime, got non-asymptotic; "
@@ -218,3 +226,6 @@ def test_richardson_reports_have_finite_bands(bench_metrics, num_regression):
         assert tick_rate_spread(rep) >= 0.0, (
             f"{name}: spread < 0 (max < min?!)"
         )
+        bench_metrics[f"{name}__error_band"] = rep.error_band
+        bench_metrics[f"{name}__gci"] = rep.gci
+    check_bench_metrics(num_regression, bench_metrics)

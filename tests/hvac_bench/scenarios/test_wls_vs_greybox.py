@@ -188,6 +188,22 @@ class TestWLSvsGreybox:
             f = fused.coef_trajectory[i].get("outdoor_delta", 0)
             print(f"  Batch {i + 1:3d}: WLS={w:>8.4f}  Fused={f:>8.4f}")
 
+        bench_metrics["wls_comfort"] = wls.comfort
+        bench_metrics["fused_comfort"] = fused.comfort
+        bench_metrics["wls_integral_rms"] = wls.integral_rms
+        bench_metrics["fused_integral_rms"] = fused.integral_rms
+        bench_metrics["wls_od_error"] = wls.od_error
+        bench_metrics["fused_od_error"] = fused.od_error
+        bench_metrics["wls_solar_error"] = wls.solar_error
+        bench_metrics["fused_solar_error"] = fused.solar_error
+        bench_metrics["wls_final_outdoor_beta"] = wls.final_outdoor_beta
+        bench_metrics["fused_final_outdoor_beta"] = fused.final_outdoor_beta
+        bench_metrics["wls_final_solar_beta"] = wls.final_solar_beta
+        bench_metrics["fused_final_solar_beta"] = fused.final_solar_beta
+        bench_metrics["wls_gb_gates_passed"] = wls.gb_gates_passed
+        bench_metrics["fused_gb_gates_passed"] = fused.gb_gates_passed
+        check_bench_metrics(num_regression, bench_metrics)
+
         # Sanity
         assert wls.comfort > 50.0
         assert fused.comfort > 50.0

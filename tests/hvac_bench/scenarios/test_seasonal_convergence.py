@@ -426,13 +426,16 @@ class TestSeasonalConvergence:
         """Sanity: every season's final coefficients must be bounded."""
         for name, r in seasonal_results.items():
             od = r.final_coefs.get("outdoor_delta", 0.0)
+            solar = r.final_coefs.get("Solar Proxy", 0.0)
+            bench_metrics[f"{name}__outdoor_delta"] = od
+            bench_metrics[f"{name}__solar"] = solar
             assert -2.0 < od < 0.0, (
                 f"{name}: outdoor_delta out of plausible range: {od:.4f}"
             )
-            solar = r.final_coefs.get("Solar Proxy", 0.0)
             assert -5.0 < solar < 1.0, (
                 f"{name}: Solar Proxy out of plausible range: {solar:.4f}"
             )
+        check_bench_metrics(num_regression, bench_metrics)
 
     def test_cross_season_outdoor_agreement(self, bench_metrics, num_regression, seasonal_results):
         """outdoor_delta should land in the same place across seasons.
@@ -444,6 +447,8 @@ class TestSeasonalConvergence:
         ods = [r.final_coefs.get("outdoor_delta", 0.0)
                for r in seasonal_results.values()]
         spread = max(ods) - min(ods)
+        bench_metrics["spread"] = spread
+        check_bench_metrics(num_regression, bench_metrics)
         assert spread < 0.10, (
             f"outdoor_delta differs across seasons: spread={spread:.4f} "
             f"(values: {[f'{v:.4f}' for v in ods]}). "
@@ -463,6 +468,8 @@ class TestSeasonalConvergence:
         solars = [r.final_coefs.get("Solar Proxy", 0.0)
                   for r in seasonal_results.values()]
         spread = max(solars) - min(solars)
+        bench_metrics["spread"] = spread
+        check_bench_metrics(num_regression, bench_metrics)
         assert spread < 0.8, (
             f"Solar Proxy differs across seasons: spread={spread:.4f} "
             f"(values: {[f'{v:.4f}' for v in solars]})"
@@ -480,7 +487,11 @@ class TestSeasonalConvergence:
             n_stable = _batches_to_stable(
                 r.coef_trajectory, "outdoor_delta", final_od, tol=0.05
             )
+            bench_metrics[f"{name}__batches_to_stable"] = (
+                n_stable if n_stable is not None else -1
+            )
             assert n_stable is not None, (
                 f"{name}: outdoor_delta never stabilized within 0.05 of "
                 f"final value over {len(r.coef_trajectory)} batches"
             )
+        check_bench_metrics(num_regression, bench_metrics)

@@ -87,5 +87,10 @@ class TestBufferVariantsSynth:
             for sname, r in by_season.items():
                 od = r.final_coefs.get("outdoor_delta", 0.0)
                 solar = r.final_coefs.get("Solar Proxy", 0.0)
+                # Flat-namespaced key per (variant, season) so all combos
+                # land in one CSV row.
+                bench_metrics[f"{vname}__{sname}__outdoor_delta"] = od
+                bench_metrics[f"{vname}__{sname}__solar"] = solar
                 assert -2.0 < od < 0.0, f"{vname}/{sname}: outdoor_delta={od:.4f}"
                 assert -5.0 < solar < 1.0, f"{vname}/{sname}: solar={solar:.4f}"
+        check_bench_metrics(num_regression, bench_metrics)
