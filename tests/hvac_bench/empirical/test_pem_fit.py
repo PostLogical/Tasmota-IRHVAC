@@ -163,19 +163,25 @@ class TestBounds:
 
 
 class TestComputeCV:
-    def test_constant_values_zero_cv(self) -> None:
-        assert _compute_cv(np.array([5.0, 5.0, 5.0])) == 0.0
+    def test_constant_values_zero_cv(self, bench_metrics, num_regression) -> None:
+        cv = _compute_cv(np.array([5.0, 5.0, 5.0]))
+        assert cv == 0.0
+        bench_metrics["cv"] = float(cv)
+        check_bench_metrics(num_regression, bench_metrics)
 
     def test_zero_mean_returns_inf(self) -> None:
         assert _compute_cv(np.array([0.0, 0.0])) == float("inf")
 
-    def test_known_cv(self) -> None:
+    def test_known_cv(self, bench_metrics, num_regression) -> None:
         # mean=10, std=1 → CV=0.1
+        cv = _compute_cv(np.array([9.0, 10.0, 11.0]))
         np.testing.assert_allclose(
-            _compute_cv(np.array([9.0, 10.0, 11.0])),
+            cv,
             np.std([9.0, 10.0, 11.0]) / 10.0,
             rtol=1e-10,
         )
+        bench_metrics["cv"] = float(cv)
+        check_bench_metrics(num_regression, bench_metrics)
 
 
 class TestAtBound:
@@ -233,7 +239,7 @@ class TestFit1R1C:
         assert result.n_obs == 500
         assert isinstance(result.best.params, FitParams1R1C)
 
-    def test_recovers_tau_within_factor_of_2_on_clean_synthetic(self) -> None:
+    def test_recovers_tau_within_factor_of_2_on_clean_synthetic(self, bench_metrics, num_regression) -> None:
         # Clean low-noise synthetic: PEM should recover tau within ~factor-of-2.
         # Tighter recovery is sensitive to optimizer settings; this is a sanity bound.
         truth = FitParams1R1C(
@@ -252,6 +258,10 @@ class TestFit1R1C:
         assert 0.5 < ratio < 2.0, (
             f"recovered tau={result.best.params.tau_s/3600:.1f}h vs truth=20h"
         )
+        bench_metrics["tau_h"] = float(result.best.params.tau_s / 3600.0)
+        bench_metrics["ratio"] = float(ratio)
+        bench_metrics["log_likelihood"] = float(result.best.log_likelihood)
+        check_bench_metrics(num_regression, bench_metrics)
 
     def test_records_cv_when_multiple_restarts_succeed(self) -> None:
         truth = FitParams1R1C(
@@ -291,7 +301,7 @@ class TestFit1R1C:
             "sigma_v",
         }
 
-    def test_handles_all_invalid_data(self) -> None:
+    def test_handles_all_invalid_data(self, bench_metrics, num_regression) -> None:
         # All-invalid mask: optimizer still runs but log-likelihood is 0
         # for any params (no observations to score).
         T = 200
@@ -302,6 +312,9 @@ class TestFit1R1C:
         assert result.n_obs == 0
         # All restarts produce ll=0.0 (no observations); best is one of them.
         assert result.best.log_likelihood == 0.0
+        bench_metrics["n_obs"] = int(result.n_obs)
+        bench_metrics["log_likelihood"] = float(result.best.log_likelihood)
+        check_bench_metrics(num_regression, bench_metrics)
 
     def test_practically_identifiable_uses_threshold(self) -> None:
         # Construct a FitResult by hand and verify the threshold logic.
