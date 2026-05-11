@@ -76,12 +76,12 @@ def _make_imc_controller(profile: HouseProfile):
     return ctrl
 
 
-def _run_pair(profile, initial, outdoor, desired, n_ticks, mode,
-              outdoor_schedule=None, desired_schedule=None):
+def _run_pair(profile, initial, outdoor, desired, duration_minutes, mode,
+              outdoor_minute_schedule=None, desired_minute_schedule=None):
     """Run both flat and IMC controllers, return (flat_metrics, imc_metrics)."""
     final_desired = desired
-    if desired_schedule:
-        for _, temp in sorted(desired_schedule.items()):
+    if desired_minute_schedule:
+        for _, temp in sorted(desired_minute_schedule.items()):
             final_desired = temp
 
     results = {}
@@ -90,9 +90,9 @@ def _run_pair(profile, initial, outdoor, desired, n_ticks, mode,
         ctrl.set_desired_temp(desired)
         model = ThermalModel(profile=profile, initial_temp=initial,
                              outdoor_temp=outdoor)
-        history = run_scenario(ctrl, model, n_ticks=n_ticks, mode=mode,
-                               outdoor_schedule=outdoor_schedule,
-                               desired_schedule=desired_schedule)
+        history = run_scenario(ctrl, model, duration_minutes=duration_minutes, mode=mode,
+                               outdoor_minute_schedule=outdoor_minute_schedule,
+                               desired_minute_schedule=desired_minute_schedule)
         results[label] = compute_all_metrics(history, desired=final_desired)
 
     return results["flat"], results["imc"]
@@ -113,7 +113,7 @@ class TestIMCNoRegression:
     def test_cold_start_bounded(self, bench_metrics, num_regression, profile_name):
         profile = QUICK_PROFILES[profile_name]
         flat, imc = _run_pair(profile, initial=17.0, outdoor=2.0,
-                              desired=20.5, n_ticks=32, mode="heat")
+                              desired=20.5, duration_minutes=8 * 60, mode="heat")
         _record_imc_pair(bench_metrics, flat, imc, profile_name=profile_name, scenario="cold_start_bounded")
         check_bench_metrics(num_regression, bench_metrics)
 
@@ -122,8 +122,8 @@ class TestIMCNoRegression:
         profile = QUICK_PROFILES[profile_name]
         flat, imc = _run_pair(
             profile, initial=20.5, outdoor=10.0, desired=20.5,
-            n_ticks=32, mode="heat",
-            outdoor_schedule=lambda t: max(-5.0, 10.0 - t * 1.25),
+            duration_minutes=8 * 60, mode="heat",
+            outdoor_minute_schedule=lambda m: max(-5.0, 10.0 - m * (5.0 / 60.0)),
         )
         _record_imc_pair(bench_metrics, flat, imc, profile_name=profile_name, scenario="cold_snap_bounded")
         check_bench_metrics(num_regression, bench_metrics)
@@ -132,7 +132,7 @@ class TestIMCNoRegression:
     def test_steady_state_bounded(self, bench_metrics, num_regression, profile_name):
         profile = QUICK_PROFILES[profile_name]
         flat, imc = _run_pair(profile, initial=20.5, outdoor=5.0,
-                              desired=20.5, n_ticks=48, mode="heat")
+                              desired=20.5, duration_minutes=12 * 60, mode="heat")
         _record_imc_pair(bench_metrics, flat, imc, profile_name=profile_name, scenario="steady_state_bounded")
         check_bench_metrics(num_regression, bench_metrics)
 
@@ -140,7 +140,7 @@ class TestIMCNoRegression:
     def test_cooling_bounded(self, bench_metrics, num_regression, profile_name):
         profile = QUICK_PROFILES[profile_name]
         flat, imc = _run_pair(profile, initial=28.0, outdoor=32.0,
-                              desired=24.0, n_ticks=32, mode="cool")
+                              desired=24.0, duration_minutes=8 * 60, mode="cool")
         _record_imc_pair(bench_metrics, flat, imc, profile_name=profile_name, scenario="cooling_bounded")
         check_bench_metrics(num_regression, bench_metrics)
 
@@ -164,14 +164,19 @@ class TestIMCImprovesSlowProfiles:
     """
 
     SCENARIOS = [
-        ("cold_start", dict(initial=17.0, outdoor=2.0, desired=20.5, n_ticks=32, mode="heat")),
-        ("setpoint_step", dict(initial=20.5, outdoor=5.0, desired=20.5, n_ticks=32, mode="heat",
-                               desired_schedule={10: 22.5})),
-        ("cold_snap", dict(initial=20.5, outdoor=10.0, desired=20.5, n_ticks=32, mode="heat",
-                           outdoor_schedule=lambda t: max(-5.0, 10.0 - t * 1.25))),
-        ("ramp_dist", dict(initial=20.5, outdoor=5.0, desired=20.5, n_ticks=32, mode="heat",
-                           outdoor_schedule=lambda t: 5.0 - t * 0.25)),
-        ("warm_start", dict(initial=28.0, outdoor=32.0, desired=24.0, n_ticks=32, mode="cool")),
+        ("cold_start", dict(initial=17.0, outdoor=2.0, desired=20.5,
+                            duration_minutes=8 * 60, mode="heat")),
+        ("setpoint_step", dict(initial=20.5, outdoor=5.0, desired=20.5,
+                               duration_minutes=8 * 60, mode="heat",
+                               desired_minute_schedule={150: 22.5})),
+        ("cold_snap", dict(initial=20.5, outdoor=10.0, desired=20.5,
+                           duration_minutes=8 * 60, mode="heat",
+                           outdoor_minute_schedule=lambda m: max(-5.0, 10.0 - m * (5.0 / 60.0)))),
+        ("ramp_dist", dict(initial=20.5, outdoor=5.0, desired=20.5,
+                           duration_minutes=8 * 60, mode="heat",
+                           outdoor_minute_schedule=lambda m: 5.0 - m * (1.0 / 60.0))),
+        ("warm_start", dict(initial=28.0, outdoor=32.0, desired=24.0,
+                            duration_minutes=8 * 60, mode="cool")),
     ]
 
     @pytest.mark.parametrize("scenario_name,kwargs", SCENARIOS, ids=[s[0] for s in SCENARIOS])
@@ -196,7 +201,7 @@ class TestIMCImprovesSlowProfiles:
         """
         profile = QUICK_PROFILES["well_insulated"]
         flat, imc = _run_pair(profile, initial=28.0, outdoor=32.0,
-                              desired=24.0, n_ticks=32, mode="cool")
+                              desired=24.0, duration_minutes=8 * 60, mode="cool")
         pct = (1 - imc["itae"] / flat["itae"]) * 100 if flat["itae"] > 0 else 0
         print(f"\n  well_insulated cooling: flat ITAE={flat['itae']:.1f}, "
               f"IMC={imc['itae']:.1f} ({pct:.0f}% reduction)")
@@ -267,15 +272,21 @@ class TestIMCAggregate:
     """
 
     SCENARIOS = [
-        ("cold_start", dict(initial=17.0, outdoor=2.0, desired=20.5, n_ticks=32, mode="heat")),
-        ("cold_snap", dict(initial=20.5, outdoor=10.0, desired=20.5, n_ticks=32, mode="heat",
-                           outdoor_schedule=lambda t: max(-5.0, 10.0 - t * 1.25))),
-        ("setpoint_up", dict(initial=20.5, outdoor=5.0, desired=20.5, n_ticks=32, mode="heat",
-                             desired_schedule={10: 22.5})),
-        ("steady_state", dict(initial=20.5, outdoor=5.0, desired=20.5, n_ticks=48, mode="heat")),
-        ("ramp_dist", dict(initial=20.5, outdoor=5.0, desired=20.5, n_ticks=32, mode="heat",
-                           outdoor_schedule=lambda t: 5.0 - t * 0.25)),
-        ("warm_start", dict(initial=28.0, outdoor=32.0, desired=24.0, n_ticks=32, mode="cool")),
+        ("cold_start", dict(initial=17.0, outdoor=2.0, desired=20.5,
+                            duration_minutes=8 * 60, mode="heat")),
+        ("cold_snap", dict(initial=20.5, outdoor=10.0, desired=20.5,
+                           duration_minutes=8 * 60, mode="heat",
+                           outdoor_minute_schedule=lambda m: max(-5.0, 10.0 - m * (5.0 / 60.0)))),
+        ("setpoint_up", dict(initial=20.5, outdoor=5.0, desired=20.5,
+                             duration_minutes=8 * 60, mode="heat",
+                             desired_minute_schedule={150: 22.5})),
+        ("steady_state", dict(initial=20.5, outdoor=5.0, desired=20.5,
+                              duration_minutes=12 * 60, mode="heat")),
+        ("ramp_dist", dict(initial=20.5, outdoor=5.0, desired=20.5,
+                           duration_minutes=8 * 60, mode="heat",
+                           outdoor_minute_schedule=lambda m: 5.0 - m * (1.0 / 60.0))),
+        ("warm_start", dict(initial=28.0, outdoor=32.0, desired=24.0,
+                            duration_minutes=8 * 60, mode="cool")),
     ]
 
     def test_aggregate_no_regression(self, bench_metrics, num_regression):

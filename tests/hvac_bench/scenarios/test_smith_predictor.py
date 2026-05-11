@@ -102,12 +102,12 @@ def _make_smith_mismatched(profile: HouseProfile, tau_factor: float = 1.0,
     })
 
 
-def _run_pair(profile, initial, outdoor, desired, n_ticks, mode,
-              outdoor_schedule=None, desired_schedule=None):
+def _run_pair(profile, initial, outdoor, desired, duration_minutes, mode,
+              outdoor_minute_schedule=None, desired_minute_schedule=None):
     """Run IMC-only and Smith+IMC controllers, return (imc_metrics, smith_metrics)."""
     final_desired = desired
-    if desired_schedule:
-        for _, temp in sorted(desired_schedule.items()):
+    if desired_minute_schedule:
+        for _, temp in sorted(desired_minute_schedule.items()):
             final_desired = temp
 
     results = {}
@@ -116,9 +116,9 @@ def _run_pair(profile, initial, outdoor, desired, n_ticks, mode,
         ctrl.set_desired_temp(desired)
         model = ThermalModel(profile=profile, initial_temp=initial,
                              outdoor_temp=outdoor, hp_lag_minutes=HP_LAG)
-        history = run_scenario(ctrl, model, n_ticks=n_ticks, mode=mode,
-                               outdoor_schedule=outdoor_schedule,
-                               desired_schedule=desired_schedule)
+        history = run_scenario(ctrl, model, duration_minutes=duration_minutes, mode=mode,
+                               outdoor_minute_schedule=outdoor_minute_schedule,
+                               desired_minute_schedule=desired_minute_schedule)
         results[label] = compute_all_metrics(history, desired=final_desired)
 
     return results["imc"], results["smith"]
@@ -141,17 +141,18 @@ class TestSmithNoRegression:
     def test_cold_start_bounded(self, bench_metrics, num_regression, profile_name):
         profile = QUICK_PROFILES[profile_name]
         imc, smith = _run_pair(profile, initial=17.0, outdoor=2.0,
-                               desired=20.5, n_ticks=48, mode="heat")
+                               desired=20.5, duration_minutes=12 * 60, mode="heat")
         _record_pair(bench_metrics, imc, smith, profile_name=profile_name, scenario="cold_start_bounded")
         check_bench_metrics(num_regression, bench_metrics)
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
     def test_cold_snap_bounded(self, bench_metrics, num_regression, profile_name):
         profile = QUICK_PROFILES[profile_name]
+        # Outdoor drops from 10°C, ramping -5°C/h (was 1.25°C per 15-min tick), floor -5°C.
         imc, smith = _run_pair(
             profile, initial=20.5, outdoor=10.0, desired=20.5,
-            n_ticks=48, mode="heat",
-            outdoor_schedule=lambda t: max(-5.0, 10.0 - t * 1.25),
+            duration_minutes=12 * 60, mode="heat",
+            outdoor_minute_schedule=lambda m: max(-5.0, 10.0 - m * (5.0 / 60.0)),
         )
         _record_pair(bench_metrics, imc, smith, profile_name=profile_name, scenario="cold_snap_bounded")
         check_bench_metrics(num_regression, bench_metrics)
@@ -159,10 +160,11 @@ class TestSmithNoRegression:
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
     def test_setpoint_change_bounded(self, bench_metrics, num_regression, profile_name):
         profile = QUICK_PROFILES[profile_name]
+        # Setpoint bump at minute 150 (was tick 10 at 15-min cadence).
         imc, smith = _run_pair(
             profile, initial=20.5, outdoor=5.0, desired=20.5,
-            n_ticks=48, mode="heat",
-            desired_schedule={10: 22.5},
+            duration_minutes=12 * 60, mode="heat",
+            desired_minute_schedule={150: 22.5},
         )
         _record_pair(bench_metrics, imc, smith, profile_name=profile_name, scenario="setpoint_change_bounded")
         check_bench_metrics(num_regression, bench_metrics)
@@ -171,7 +173,7 @@ class TestSmithNoRegression:
     def test_cooling_bounded(self, bench_metrics, num_regression, profile_name):
         profile = QUICK_PROFILES[profile_name]
         imc, smith = _run_pair(profile, initial=28.0, outdoor=32.0,
-                               desired=24.0, n_ticks=48, mode="cool")
+                               desired=24.0, duration_minutes=12 * 60, mode="cool")
         _record_pair(bench_metrics, imc, smith, profile_name=profile_name, scenario="cooling_bounded")
         check_bench_metrics(num_regression, bench_metrics)
 
@@ -191,7 +193,7 @@ class TestSmithImprovesSlowProfiles:
         """Smith should reduce overshoot on cold start for slow profiles."""
         profile = QUICK_PROFILES["well_insulated"]
         imc, smith = _run_pair(profile, initial=17.0, outdoor=2.0,
-                               desired=20.5, n_ticks=48, mode="heat")
+                               desired=20.5, duration_minutes=12 * 60, mode="heat")
         print(f"\n  well_insulated cold_start: IMC overshoot={imc['overshoot']:.2f}°C, "
               f"Smith={smith['overshoot']:.2f}°C")
         # Smith should not make overshoot significantly worse
@@ -204,12 +206,13 @@ class TestSmithImprovesSlowProfiles:
         profile = QUICK_PROFILES["well_insulated"]
         imc, smith = _run_pair(
             profile, initial=20.5, outdoor=5.0, desired=20.5,
-            n_ticks=48, mode="heat",
-            desired_schedule={10: 22.5},
+            duration_minutes=12 * 60, mode="heat",
+            desired_minute_schedule={150: 22.5},
         )
         print(f"\n  well_insulated setpoint_change: IMC settling={imc['settling_time']}, "
               f"Smith={smith['settling_time']}")
-        # Bounded: Smith shouldn't make settling dramatically worse
+        # Bounded: Smith shouldn't make settling dramatically worse.
+        # Fallbacks were "48 ticks at 15-min" = 720 min; preserve wall-clock semantics.
         imc_settle = imc["settling_time"] if imc["settling_time"] is not None else 48
         smith_settle = smith["settling_time"] if smith["settling_time"] is not None else 48
         assert smith_settle <= imc_settle + 5
@@ -221,8 +224,8 @@ class TestSmithImprovesSlowProfiles:
         profile = QUICK_PROFILES["well_insulated"]
         imc, smith = _run_pair(
             profile, initial=20.5, outdoor=10.0, desired=20.5,
-            n_ticks=48, mode="heat",
-            outdoor_schedule=lambda t: max(-5.0, 10.0 - t * 1.25),
+            duration_minutes=12 * 60, mode="heat",
+            outdoor_minute_schedule=lambda m: max(-5.0, 10.0 - m * (5.0 / 60.0)),
         )
         print(f"\n  well_insulated cold_snap: IMC ITAE={imc['itae']:.1f}, "
               f"Smith={smith['itae']:.1f}")
@@ -242,7 +245,7 @@ class TestSmithNeutralOnFastProfiles:
         """Smith should not significantly hurt drafty bungalow."""
         profile = QUICK_PROFILES["drafty_bungalow"]
         imc, smith = _run_pair(profile, initial=17.0, outdoor=2.0,
-                               desired=20.5, n_ticks=48, mode="heat")
+                               desired=20.5, duration_minutes=12 * 60, mode="heat")
         pct_change = ((smith["itae"] - imc["itae"]) / imc["itae"] * 100
                       if imc["itae"] > 0 else 0)
         print(f"\n  drafty_bungalow cold_start: IMC ITAE={imc['itae']:.1f}, "
@@ -258,7 +261,7 @@ class TestSmithNeutralOnFastProfiles:
         model = ThermalModel(profile=profile, initial_temp=17.0,
                              outdoor_temp=2.0, hp_lag_minutes=HP_LAG)
 
-        history = run_scenario(ctrl, model, n_ticks=32, mode="heat")
+        history = run_scenario(ctrl, model, duration_minutes=8 * 60, mode="heat")
         max_smith = max(abs(h.get("smith_correction", 0.0)) for h in history)
         # FOPDT peak correction bound (Åström §7.3):
         #   |correction| ≤ k_eff × ΔSP_max × (1 - e^(-L/τ_fast))
@@ -289,7 +292,7 @@ class TestSmithRobustness:
         ctrl.set_desired_temp(20.5)
         model = ThermalModel(profile=profile, initial_temp=17.0,
                              outdoor_temp=2.0, hp_lag_minutes=HP_LAG)
-        history = run_scenario(ctrl, model, n_ticks=48, mode="heat")
+        history = run_scenario(ctrl, model, duration_minutes=12 * 60, mode="heat")
         metrics = compute_all_metrics(history, desired=20.5)
 
         print(f"\n  τ mismatch {tau_factor:.0%}: ITAE={metrics['itae']:.1f}, "
@@ -307,7 +310,7 @@ class TestSmithRobustness:
         ctrl.set_desired_temp(20.5)
         model = ThermalModel(profile=profile, initial_temp=17.0,
                              outdoor_temp=2.0, hp_lag_minutes=HP_LAG)
-        history = run_scenario(ctrl, model, n_ticks=48, mode="heat")
+        history = run_scenario(ctrl, model, duration_minutes=12 * 60, mode="heat")
         metrics = compute_all_metrics(history, desired=20.5)
 
         print(f"\n  L mismatch {lag_factor:.0%}: ITAE={metrics['itae']:.1f}, "
@@ -323,7 +326,7 @@ class TestSmithRobustness:
         ctrl.set_desired_temp(20.5)
         model = ThermalModel(profile=profile, initial_temp=17.0,
                              outdoor_temp=2.0, hp_lag_minutes=HP_LAG)
-        history = run_scenario(ctrl, model, n_ticks=48, mode="heat")
+        history = run_scenario(ctrl, model, duration_minutes=12 * 60, mode="heat")
         metrics = compute_all_metrics(history, desired=20.5)
 
         print(f"\n  Combined mismatch (τ×1.5, L×0.5): ITAE={metrics['itae']:.1f}, "
@@ -346,7 +349,7 @@ class TestSmithModelBehavior:
         model = ThermalModel(profile=profile, initial_temp=20.5,
                              outdoor_temp=5.0, hp_lag_minutes=HP_LAG)
 
-        history = run_scenario(ctrl, model, n_ticks=48, mode="heat")
+        history = run_scenario(ctrl, model, duration_minutes=12 * 60, mode="heat")
         # After settling, correction should be near zero
         late_corrections = [abs(h.get("smith_correction", 0.0))
                            for h in history[-10:]]
@@ -366,7 +369,7 @@ class TestSmithModelBehavior:
         model = ThermalModel(profile=profile, initial_temp=17.0,
                              outdoor_temp=2.0, hp_lag_minutes=HP_LAG)
 
-        history = run_scenario(ctrl, model, n_ticks=32, mode="heat")
+        history = run_scenario(ctrl, model, duration_minutes=8 * 60, mode="heat")
         # During recovery (ticks 2-10), correction should be nonzero
         recovery_corrections = [abs(h.get("smith_correction", 0.0))
                                for h in history[2:10]]
@@ -382,7 +385,7 @@ class TestSmithModelBehavior:
         model = ThermalModel(profile=profile, initial_temp=17.0,
                              outdoor_temp=5.0, hp_lag_minutes=HP_LAG)
 
-        history = run_scenario(ctrl, model, n_ticks=64, mode="heat")
+        history = run_scenario(ctrl, model, duration_minutes=16 * 60, mode="heat")
         early_max = max(abs(h.get("smith_correction", 0.0)) for h in history[:16])
         late_avg = sum(abs(h.get("smith_correction", 0.0))
                        for h in history[-10:]) / 10
@@ -403,17 +406,17 @@ class TestSmithAggregate:
 
     SCENARIOS = [
         ("cold_start", dict(initial=17.0, outdoor=2.0, desired=20.5,
-                            n_ticks=48, mode="heat")),
+                            duration_minutes=12 * 60, mode="heat")),
         ("cold_snap", dict(initial=20.5, outdoor=10.0, desired=20.5,
-                           n_ticks=48, mode="heat",
-                           outdoor_schedule=lambda t: max(-5.0, 10.0 - t * 1.25))),
+                           duration_minutes=12 * 60, mode="heat",
+                           outdoor_minute_schedule=lambda m: max(-5.0, 10.0 - m * (5.0 / 60.0)))),
         ("setpoint_up", dict(initial=20.5, outdoor=5.0, desired=20.5,
-                             n_ticks=48, mode="heat",
-                             desired_schedule={10: 22.5})),
+                             duration_minutes=12 * 60, mode="heat",
+                             desired_minute_schedule={150: 22.5})),
         ("steady_state", dict(initial=20.5, outdoor=5.0, desired=20.5,
-                              n_ticks=48, mode="heat")),
+                              duration_minutes=12 * 60, mode="heat")),
         ("warm_start", dict(initial=28.0, outdoor=32.0, desired=24.0,
-                            n_ticks=48, mode="cool")),
+                            duration_minutes=12 * 60, mode="cool")),
     ]
 
     def test_aggregate_report(self, bench_metrics, num_regression):
@@ -460,7 +463,7 @@ def _run_hold_comparison(profile, hold_seconds, smith, **scenario_kwargs):
     desired = scenario_kwargs["desired"]
     ctrl.set_desired_temp(desired)
     final_desired = desired
-    ds = scenario_kwargs.get("desired_schedule")
+    ds = scenario_kwargs.get("desired_minute_schedule")
     if ds:
         for _, temp in sorted(ds.items()):
             final_desired = temp
@@ -470,10 +473,10 @@ def _run_hold_comparison(profile, hold_seconds, smith, **scenario_kwargs):
                          outdoor_temp=scenario_kwargs["outdoor"],
                          hp_lag_minutes=HP_LAG)
     history = run_scenario(ctrl, model,
-                           n_ticks=scenario_kwargs["n_ticks"],
+                           duration_minutes=scenario_kwargs["duration_minutes"],
                            mode=scenario_kwargs["mode"],
-                           desired_schedule=ds,
-                           outdoor_schedule=scenario_kwargs.get("outdoor_schedule"))
+                           desired_minute_schedule=ds,
+                           outdoor_minute_schedule=scenario_kwargs.get("outdoor_minute_schedule"))
     return compute_all_metrics(history, desired=final_desired)
 
 
@@ -486,11 +489,12 @@ class TestHoldTimerReduction:
     """
 
     STEADY = dict(initial=20.5, outdoor=5.0, desired=20.5,
-                  n_ticks=48, mode="heat")
+                  duration_minutes=12 * 60, mode="heat")
     COLD_START = dict(initial=17.0, outdoor=2.0, desired=20.5,
-                      n_ticks=48, mode="heat")
+                      duration_minutes=12 * 60, mode="heat")
     SETPOINT_UP = dict(initial=20.5, outdoor=5.0, desired=20.5,
-                       n_ticks=48, mode="heat", desired_schedule={10: 22.5})
+                       duration_minutes=12 * 60, mode="heat",
+                       desired_minute_schedule={150: 22.5})
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
     def test_reduced_hold_no_catastrophic_regression(self, bench_metrics, num_regression, profile_name):
