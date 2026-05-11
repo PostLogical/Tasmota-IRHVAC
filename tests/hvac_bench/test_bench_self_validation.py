@@ -100,11 +100,14 @@ def test_wall_time_spans_sim_duration(bench_metrics, num_regression):
 
     buf = controller.pi._observation_buffer_heat.get_all()
     times = [o.wall_time for o in buf if o.wall_time > 0]
+    bench_metrics["n_observations"] = len(times)
+    span_seconds = max(times) - min(times)
+    bench_metrics["wall_time_span_seconds"] = span_seconds
+    check_bench_metrics(num_regression, bench_metrics)
     assert len(times) >= 30, (
         f"observation buffer too sparse for the test ({len(times)} obs); "
         "scenario should have populated the buffer"
     )
-    span_seconds = max(times) - min(times)
     # Allow a generous floor: 1-day sim should produce ~86400s span; require
     # ≥80000s to leave room for tick-boundary edge cases. A wall-clock-leaked
     # bench would produce a span on the order of milliseconds.
@@ -141,17 +144,23 @@ def test_tod_features_cover_diurnal_cycle(bench_metrics, num_regression):
         s, c = tod_features(o.wall_time)
         sins.append(s)
         coss.append(c)
+    sin_range = max(sins) - min(sins)
+    cos_range = max(coss) - min(coss)
+    bench_metrics["n_observations"] = len(sins)
+    bench_metrics["sin_range"] = sin_range
+    bench_metrics["cos_range"] = cos_range
+    check_bench_metrics(num_regression, bench_metrics)
     assert len(sins) >= 30, "buffer too sparse for coverage check"
 
     # Over a full 24h, sin and cos each traverse [-1, +1] — span ≥ 1.5
     # leaves room for tick-boundary truncation. Constant features (the leak
     # signature) would produce span ≪ 0.1.
-    assert max(sins) - min(sins) >= 1.5, (
-        f"sin_hour range too narrow ({max(sins) - min(sins):.3f}); "
+    assert sin_range >= 1.5, (
+        f"sin_hour range too narrow ({sin_range:.3f}); "
         f"expected ≥1.5 over 24h. ToD features may be stuck at near-constant."
     )
-    assert max(coss) - min(coss) >= 1.5, (
-        f"cos_hour range too narrow ({max(coss) - min(coss):.3f}); "
+    assert cos_range >= 1.5, (
+        f"cos_hour range too narrow ({cos_range:.3f}); "
         f"expected ≥1.5 over 24h. ToD features may be stuck at near-constant."
     )
 
@@ -179,6 +188,8 @@ def test_run_reference_scenario_does_not_mutate_canonical_specs(bench_metrics, n
     controller = make_well_tuned_for_scenario(scenario)
     run_reference_scenario(controller, scenario)
 
+    bench_metrics["n_model_inputs"] = len(scenario.model_inputs)
+    check_bench_metrics(num_regression, bench_metrics)
     for mi, pre_effect, pre_ff in zip(
         scenario.model_inputs, pre_run_effects, pre_run_ff_coefs, strict=True
     ):
@@ -226,6 +237,12 @@ def test_kpis_consistent_across_cadence(bench_metrics, num_regression):
 
     max_tdis = max(tdis_values.values())
     spread = max(tdis_values.values()) - min(tdis_values.values())
+    bench_metrics["tdis_5min"] = tdis_values[5.0]
+    bench_metrics["tdis_15min"] = tdis_values[15.0]
+    bench_metrics["tdis_30min"] = tdis_values[30.0]
+    bench_metrics["max_tdis"] = max_tdis
+    bench_metrics["spread"] = spread
+    check_bench_metrics(num_regression, bench_metrics)
 
     # Ceiling: 1.5 K·h covers the current 5-min worst (~1.07) plus margin.
     assert max_tdis < 1.5, (

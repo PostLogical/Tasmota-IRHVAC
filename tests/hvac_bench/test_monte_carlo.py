@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+from .conftest import check_bench_metrics
 from .full_stack_runner import FullStackConfig
 from .house_profiles import PROFILES_2R2C
 from .monte_carlo import MonteCarloConfig, MonteCarloResult, run_monte_carlo
@@ -58,6 +59,11 @@ def test_seed_scale_factors_actually_scale_outdoor_seed(bench_metrics, num_regre
     )
 
     captured = _capture_per_run_overrides(mc)
+    bench_metrics["n_runs"] = len(captured)
+    bench_metrics["heat_seed_0"] = captured[0].get("pi_outdoor_seed_heat")
+    bench_metrics["heat_seed_1"] = captured[1].get("pi_outdoor_seed_heat")
+    bench_metrics["heat_seed_2"] = captured[2].get("pi_outdoor_seed_heat")
+    check_bench_metrics(num_regression, bench_metrics)
 
     assert len(captured) == 3
     expected = profile.true_seed
@@ -87,6 +93,10 @@ def test_seed_scale_factors_respect_explicit_pi_override(bench_metrics, num_regr
     )
 
     captured = _capture_per_run_overrides(mc)
+    bench_metrics["n_runs"] = len(captured)
+    bench_metrics["heat_seed_0"] = captured[0]["pi_outdoor_seed_heat"]
+    bench_metrics["heat_seed_1"] = captured[1]["pi_outdoor_seed_heat"]
+    check_bench_metrics(num_regression, bench_metrics)
 
     for overrides in captured:
         assert overrides["pi_outdoor_seed_heat"] == 99.9

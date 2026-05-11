@@ -193,6 +193,14 @@ class TestTickIntervalSensitivity:
                   f"{r['mae']:>8.3f} {r['setpoint_changes']:>7d} {r['od_final']:>8.4f} "
                   f"{r['wls_obs']:>8d} {r['mean_room_rate']:>10.5f}")
 
+        for tick_min, r in sorted(results.items()):
+            tag = f"{int(tick_min)}m"
+            bench_metrics[f"comfort_{tag}"] = r["comfort"]
+            bench_metrics[f"od_final_{tag}"] = r["od_final"]
+            bench_metrics[f"mae_{tag}"] = r["mae"]
+            bench_metrics[f"setpoint_changes_{tag}"] = r["setpoint_changes"]
+        check_bench_metrics(num_regression, bench_metrics)
+
         # Key invariants: 10m and 30m should be close to 15m reference.
         # 5m excluded — PI overcorrection is expected at that rate.
         ref = results[15.0]
@@ -308,6 +316,17 @@ class TestObservationDataQuality:
         print(f"  room_rate: mean={rate_mean:.5f}, |rate| mean={rate_abs_mean:.5f}")
         print(f"  WLS target (sp-room): mean={target_mean:.2f}, std={target_std:.2f}")
 
+        bench_metrics["n_observations"] = len(obs_list)
+        bench_metrics["od_mean"] = od_mean
+        bench_metrics["od_std"] = od_std
+        bench_metrics["od_min"] = od_min
+        bench_metrics["od_max"] = od_max
+        bench_metrics["rate_mean"] = rate_mean
+        bench_metrics["rate_abs_mean"] = rate_abs_mean
+        bench_metrics["target_mean"] = target_mean
+        bench_metrics["target_std"] = target_std
+        check_bench_metrics(num_regression, bench_metrics)
+
         # Sanity checks
         # outdoor_delta should have diversity (weather fronts + diurnal)
         assert od_std > 2.0, (
@@ -349,6 +368,11 @@ class TestObservationDataQuality:
         n_ticks = result["n_ticks"]
         change_rate = result["setpoint_changes"] / n_ticks
         print(f"  Change rate: {change_rate:.3f} per tick ({change_rate*4:.1f}/hr)")
+
+        bench_metrics["setpoint_changes"] = result["setpoint_changes"]
+        bench_metrics["change_rate"] = change_rate
+        bench_metrics["n_distinct_sp"] = len(result["sp_distribution"])
+        check_bench_metrics(num_regression, bench_metrics)
 
         # Should change roughly 0.5-5 times per hour
         # (too frequent = oscillating, too rare = stuck)

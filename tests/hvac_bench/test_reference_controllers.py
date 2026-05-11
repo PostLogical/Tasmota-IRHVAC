@@ -35,6 +35,8 @@ class TestNaiveBangBang:
         c.set_desired_temp(20.0)
         sp = c.tick(room_temp_c=18.0, outdoor_temp_c=-5.0,
                     dt_seconds=900, model_inputs=None)
+        bench_metrics["sp"] = sp
+        check_bench_metrics(num_regression, bench_metrics)
         assert sp == 30.0
 
     def test_heat_above_band_drops_to_min(self, bench_metrics, num_regression):
@@ -44,6 +46,8 @@ class TestNaiveBangBang:
         c.set_desired_temp(20.0)
         # First push room hot
         c.tick(room_temp_c=22.0, outdoor_temp_c=-5.0, dt_seconds=900)
+        bench_metrics["sp"] = c.hp_setpoint
+        check_bench_metrics(num_regression, bench_metrics)
         assert c.hp_setpoint == 16.0
 
     def test_heat_inside_band_holds(self, bench_metrics, num_regression):
@@ -56,6 +60,8 @@ class TestNaiveBangBang:
         c.tick(room_temp_c=18.0, outdoor_temp_c=-5.0, dt_seconds=900)
         # Then within hysteresis: room=20.3 (|err|=0.3 < 0.5)
         sp = c.tick(room_temp_c=20.3, outdoor_temp_c=-5.0, dt_seconds=900)
+        bench_metrics["sp"] = sp
+        check_bench_metrics(num_regression, bench_metrics)
         assert sp == 30.0  # held
 
     def test_cool_above_band_pulls_down(self, bench_metrics, num_regression):
@@ -63,18 +69,28 @@ class TestNaiveBangBang:
         c.set_mode("cool")
         c.set_desired_temp(24.0)
         sp = c.tick(room_temp_c=27.0, outdoor_temp_c=35.0, dt_seconds=900)
+        bench_metrics["sp"] = sp
+        check_bench_metrics(num_regression, bench_metrics)
         assert sp == 16.0
 
     def test_set_mode_resets_setpoint(self, bench_metrics, num_regression):
         c = NaiveBangBangController(min_temp=16.0, max_temp=30.0)
         c.set_mode("heat")
-        assert c.hp_setpoint == 30.0
+        heat_sp = c.hp_setpoint
         c.set_mode("cool")
-        assert c.hp_setpoint == 16.0
+        cool_sp = c.hp_setpoint
+        bench_metrics["heat_sp"] = heat_sp
+        bench_metrics["cool_sp"] = cool_sp
+        check_bench_metrics(num_regression, bench_metrics)
+        assert heat_sp == 30.0
+        assert cool_sp == 16.0
 
     def test_get_state_returns_required_keys(self, bench_metrics, num_regression):
         c = NaiveBangBangController(min_temp=16.0, max_temp=30.0)
         s = c.get_state()
+        bench_metrics["integral"] = s["integral"]
+        bench_metrics["ff_offset"] = s["ff_offset"]
+        check_bench_metrics(num_regression, bench_metrics)
         assert "integral" in s
         assert "ff_offset" in s
         assert s["integral"] == 0.0
@@ -105,12 +121,18 @@ class TestWellTunedPI:
         from tests.hvac_bench.house_profiles import PROFILES_2R2C
         profile = PROFILES_2R2C["living_room"]
         c = make_well_tuned_pi("living_room", mode="heat")
+        bench_metrics["seed_heat"] = c.adapter._config["pi_outdoor_seed_heat"]
+        bench_metrics["true_seed"] = profile.true_seed
+        check_bench_metrics(num_regression, bench_metrics)
         assert c.adapter._config["pi_outdoor_seed_heat"] == profile.true_seed
 
     def test_outdoor_seed_matches_profile_truth_cool(self, bench_metrics, num_regression):
         from tests.hvac_bench.house_profiles import PROFILES_2R2C
         profile = PROFILES_2R2C["living_room"]
         c = make_well_tuned_pi("living_room", mode="cool")
+        bench_metrics["seed_cool"] = c.adapter._config["pi_outdoor_seed_cool"]
+        bench_metrics["true_seed"] = profile.true_seed
+        check_bench_metrics(num_regression, bench_metrics)
         # cool seed override goes into pi_outdoor_seed_cool
         assert c.adapter._config["pi_outdoor_seed_cool"] == profile.true_seed
 
@@ -124,6 +146,9 @@ class TestWellTunedPI:
         )
         c = make_well_tuned_pi("living_room", mode="heat", model_inputs=[mi])
         configured = c.adapter._config["pi_model_inputs"]
+        bench_metrics["n_inputs"] = len(configured)
+        bench_metrics["seed_heat"] = configured[0]["seed_heat"]
+        check_bench_metrics(num_regression, bench_metrics)
         assert len(configured) == 1
         assert configured[0]["seed_heat"] == -2.5
 
@@ -152,20 +177,24 @@ class TestProductionPI:
         assert c.adapter._config["pi_plant_id_enabled"] is True
 
     def test_default_seeds_not_truth(self, bench_metrics, num_regression):
-        # Without seed_with_truth, the conftest default seed (0.25) is
-        # left in place. bunkroom's true_seed (~0.235) differs, so a
-        # default-seeded production controller on bunkroom must show
-        # 0.25 (conftest default), not bunkroom.true_seed.
         from tests.hvac_bench.house_profiles import PROFILES_2R2C
         profile = PROFILES_2R2C["bunkroom"]
-        assert profile.true_seed != 0.25, "test premise broken: profile truth equals conftest default"
         c = make_production_pi("bunkroom", mode="heat")
+        bench_metrics["true_seed"] = profile.true_seed
+        bench_metrics["configured_seed"] = c.adapter._config["pi_outdoor_seed_heat"]
+        check_bench_metrics(num_regression, bench_metrics)
+        # Without seed_with_truth, the conftest default seed (0.25) is
+        # left in place.
+        assert profile.true_seed != 0.25, "test premise broken: profile truth equals conftest default"
         assert c.adapter._config["pi_outdoor_seed_heat"] == 0.25
 
     def test_seed_with_truth_overrides(self, bench_metrics, num_regression):
         from tests.hvac_bench.house_profiles import PROFILES_2R2C
         profile = PROFILES_2R2C["living_room"]
         c = make_production_pi("living_room", mode="heat", seed_with_truth=True)
+        bench_metrics["seed_heat"] = c.adapter._config["pi_outdoor_seed_heat"]
+        bench_metrics["true_seed"] = profile.true_seed
+        check_bench_metrics(num_regression, bench_metrics)
         assert c.adapter._config["pi_outdoor_seed_heat"] == profile.true_seed
 
     def test_batch_update_invokes_run_batch_analysis(self, bench_metrics, num_regression):
@@ -211,6 +240,9 @@ class TestCrossControllerBehavior:
         wt.set_desired_temp(20.0)
         wt_sp = wt.tick(cold_room, outdoor, dt)
 
+        bench_metrics["bb_sp"] = bb_sp
+        bench_metrics["wt_sp"] = wt_sp
+        check_bench_metrics(num_regression, bench_metrics)
         # Bang-bang rails; PI does not rail at this small offset.
         assert bb_sp == 30.0
         assert wt_sp != 30.0  # PI does not rail at -2°C error
