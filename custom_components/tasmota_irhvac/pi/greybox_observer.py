@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import logging
 import math
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, TYPE_CHECKING
 
@@ -291,7 +292,10 @@ def _compute_dt_median_min(eligible: list[Observation]) -> float | None:
     if not dts:
         return None
     # Modal dt — robust to occasional gaps from missed observations.
-    return max(set(dts), key=dts.count)
+    # Counter.most_common breaks count ties by first-encountered order,
+    # which is deterministic; ``max(set(...), key=...)`` would tie-break
+    # by set iteration order, which depends on PYTHONHASHSEED.
+    return Counter(dts).most_common(1)[0][0]
 
 
 def _fit_greybox_1r1c(
@@ -583,7 +587,9 @@ def _fit_greybox_2r2c(
     # Cache the typical dt so the matrix-exponential cost is paid once per
     # parameter eval, not once per observation.
     nonzero_dts = [d for d in dt_min if d > 0]
-    typical_dt = (max(set(nonzero_dts), key=nonzero_dts.count)
+    # Use Counter.most_common for deterministic tiebreaking (see
+    # ``_estimate_median_dt_minutes`` comment for the PYTHONHASHSEED reason).
+    typical_dt = (Counter(nonzero_dts).most_common(1)[0][0]
                   if nonzero_dts else 0.0)
 
     # Parameter packing — Stage A operational regime fit.

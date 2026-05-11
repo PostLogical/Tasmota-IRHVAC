@@ -186,7 +186,11 @@ class TestTrackedSetpointPhases:
         profile = PROFILES["standard_residential"]
         ctrl = TasmotaPIAdapter({"pi_outdoor_seed_heat": PROFILES["standard_residential"].true_seed})
         ctrl.set_desired_temp(20.5)
-        model = ThermalModel(profile=profile, initial_temp=20.5, outdoor_temp=2.0)
+        # outdoor=-8°C: chosen to produce stove cycling.  Original
+        # outdoor=2°C kept room well above the 20°C burn trigger
+        # (100% skip); -10°C produced burn-only (no idle); -5°C
+        # produced idle-only (HP held room above 20).
+        model = ThermalModel(profile=profile, initial_temp=20.5, outdoor_temp=-6.0)
         stove = StoveCycleModel(setpoint_c=21.0, heat_rate_c_per_min=0.15)
 
         # Run longer to average out phase coupling between stove cycle
@@ -207,6 +211,10 @@ class TestTrackedSetpointPhases:
             print(f"\n  Burn phase avg raw setpoint: {avg_burn:.2f}")
             print(f"  Idle phase avg raw setpoint: {avg_idle:.2f}")
             print(f"  Difference: {avg_idle - avg_burn:.2f}")
+            bench_metrics["avg_burn"] = avg_burn
+            bench_metrics["avg_idle"] = avg_idle
+            bench_metrics["diff"] = avg_idle - avg_burn
+            check_bench_metrics(num_regression, bench_metrics)
             # During burn, stove adds heat → HP needs less → raw setpoint should be lower
             assert avg_burn <= avg_idle + 0.5, (
                 f"Expected burn raw setpoint ≤ idle, got burn={avg_burn:.2f} idle={avg_idle:.2f}"
@@ -256,6 +264,13 @@ class TestBeforeAfterEstimation:
         print(f"  During stove: raw_sp={avg_during_raw:.2f}, integral={avg_during_integral:.2f}")
         print(f"  Raw setpoint difference: {diff:+.2f}")
 
+        bench_metrics["avg_pre_raw"] = avg_pre_raw
+        bench_metrics["avg_during_raw"] = avg_during_raw
+        bench_metrics["avg_pre_integral"] = avg_pre_integral
+        bench_metrics["avg_during_integral"] = avg_during_integral
+        bench_metrics["diff"] = diff
+        check_bench_metrics(num_regression, bench_metrics)
+
         # Stove should reduce the needed HP setpoint (raw), or at worst
         # have negligible effect.  With continuous q-feedback (lower=0.0),
         # the integral settles slightly differently, which can flip the
@@ -275,7 +290,9 @@ class TestSessionVsPhaseCoefficient:
         profile = PROFILES["standard_residential"]
         ctrl = TasmotaPIAdapter({"pi_outdoor_seed_heat": PROFILES["standard_residential"].true_seed})
         ctrl.set_desired_temp(20.5)
-        model = ThermalModel(profile=profile, initial_temp=20.5, outdoor_temp=2.0)
+        # outdoor=-6°C produces stove cycling — see test_setpoint_differs_burn_vs_idle
+        # for the temperature-sensitivity rationale.
+        model = ThermalModel(profile=profile, initial_temp=20.5, outdoor_temp=-6.0)
         stove = StoveCycleModel(setpoint_c=21.0, heat_rate_c_per_min=0.15)
 
         history = run_with_stove(ctrl, model, stove, n_ticks=64,
@@ -308,6 +325,13 @@ class TestSessionVsPhaseCoefficient:
             print(f"  Burn phase coeff: {coeff_burn:.2f}")
             print(f"  Idle phase coeff: {coeff_idle:.2f}")
             print(f"  Phase spread: {coeff_idle - coeff_burn:.2f}")
+
+            bench_metrics["baseline_sp"] = baseline_sp
+            bench_metrics["coeff_session"] = coeff_session
+            bench_metrics["coeff_burn"] = coeff_burn
+            bench_metrics["coeff_idle"] = coeff_idle
+            bench_metrics["phase_spread"] = coeff_idle - coeff_burn
+            check_bench_metrics(num_regression, bench_metrics)
 
             # If phases are meaningfully different, phase-aware is better
             if abs(coeff_idle - coeff_burn) > 0.5:
@@ -350,6 +374,10 @@ class TestOutdoorVariation:
                 diff = during_sp - pre_sp
                 print(f"\n  {label} (Δoutdoor={outdoor_change:+d}°C): "
                       f"pre={pre_sp:.1f} during={during_sp:.1f} coeff={diff:+.1f}")
+                bench_metrics[f"{label}__pre_sp"] = pre_sp
+                bench_metrics[f"{label}__during_sp"] = during_sp
+                bench_metrics[f"{label}__diff"] = diff
+        check_bench_metrics(num_regression, bench_metrics)
 
 
 # ── Stove turns off: HP resume behavior ──────────────────────────────────
@@ -372,6 +400,7 @@ class TestStoveOffResume:
 
         # After stove stops, room should stay near target
         post_stove = [h for h in history if h["tick"] >= 36]
+        max_dev = max(abs(h["room_temp"] - 20.5) for h in post_stove)
         for h in post_stove:
             assert abs(h["room_temp"] - 20.5) < 3.0, (
                 f"Tick {h['tick']}: room={h['room_temp']:.1f} after stove off "
@@ -380,7 +409,10 @@ class TestStoveOffResume:
 
         # HP setpoint should stabilize
         late = [h["hp_setpoint"] for h in history if h["tick"] >= 40]
+        bench_metrics["max_dev_post_stove"] = max_dev
         if late:
             sp_range = max(late) - min(late)
+            bench_metrics["late_sp_range"] = sp_range
             print(f"\n  Post-stove setpoint range: {sp_range}°C "
                   f"(setpoints: {late})")
+        check_bench_metrics(num_regression, bench_metrics)
