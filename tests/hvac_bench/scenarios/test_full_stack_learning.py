@@ -153,20 +153,14 @@ class TestWrongSeedsConvergence:
         )
 
     def test_integral_compensates_early(self, bench_metrics, num_regression):
-        """Day 1: integral must be working to compensate wrong FF.
-
-        Controller-behavior test (PI integrator absorbing the steady-state
-        error from wrong FF), not learning. Opted to synth so the
-        disturbance is stationary — real weather shifts the FF target as
-        outdoor varies, which doesn't test what this assertion claims.
-        See ``feedback_synthetic_vs_real_bench.md``.
-        """
+        """Day 1: integral must be working to compensate wrong FF."""
         config = self._make_config(n_days=2, weather="synth")
         result = run_full_stack(config)
 
-        # With wrong seeds, integral should be nonzero
         late_integrals = [abs(h["integral"]) for h in result.history[-20:]]
         avg_integral = sum(late_integrals) / len(late_integrals)
+        bench_metrics["avg_integral"] = avg_integral
+        check_bench_metrics(num_regression, bench_metrics)
         assert avg_integral > 0.5, (
             f"Integral should be compensating for wrong seeds, "
             f"got avg |integral|={avg_integral:.2f}"
@@ -176,8 +170,8 @@ class TestWrongSeedsConvergence:
         """Week 1: batch WLS should have run multiple cycles."""
         config = self._make_config(n_days=7)
         result = run_full_stack(config)
-
-        # 7 days × 2 batches/day = 14 expected
+        bench_metrics["n_batches"] = result.n_batches
+        check_bench_metrics(num_regression, bench_metrics)
         assert result.n_batches >= 10, (
             f"Expected ≥10 batch cycles in 7 days, got {result.n_batches}"
         )
@@ -187,11 +181,13 @@ class TestWrongSeedsConvergence:
         config = self._make_config(n_days=30)
         result = run_full_stack(config)
 
-        # Last 5 batch snapshots should show small changes
         if len(result.coef_trajectory) >= 10:
             late_ods = [snap.get("outdoor_delta", 0)
                         for snap in result.coef_trajectory[-5:]]
             od_range = max(late_ods) - min(late_ods)
+            bench_metrics["od_range_late_5"] = od_range
+            bench_metrics["final_outdoor_delta"] = result.final_coefs.get("outdoor_delta", 0.0)
+            check_bench_metrics(num_regression, bench_metrics)
             assert od_range < 0.1, (
                 f"outdoor_delta not stabilized: range={od_range:.4f} "
                 f"in last 5 batches (values: {[f'{v:.4f}' for v in late_ods]})"
@@ -205,6 +201,9 @@ class TestWrongSeedsConvergence:
         if len(result.daily_integral_rms) >= 14:
             first_week = sum(result.daily_integral_rms[:7]) / 7
             last_week = sum(result.daily_integral_rms[-7:]) / 7
+            bench_metrics["first_week_rms"] = first_week
+            bench_metrics["last_week_rms"] = last_week
+            check_bench_metrics(num_regression, bench_metrics)
             assert last_week < first_week * 1.1, (
                 f"Integral RMS should decrease: week 1={first_week:.3f}, "
                 f"last week={last_week:.3f}"
@@ -218,7 +217,9 @@ class TestWrongSeedsConvergence:
         if len(result.daily_mae) >= 14:
             first_week_mae = sum(result.daily_mae[:7]) / 7
             last_week_mae = sum(result.daily_mae[-7:]) / 7
-            # Last week should not be dramatically worse
+            bench_metrics["first_week_mae"] = first_week_mae
+            bench_metrics["last_week_mae"] = last_week_mae
+            check_bench_metrics(num_regression, bench_metrics)
             assert last_week_mae < first_week_mae * 1.5 + 0.05, (
                 f"Comfort degrading: week 1 MAE={first_week_mae:.3f}, "
                 f"last week={last_week_mae:.3f}"
@@ -232,7 +233,9 @@ class TestWrongSeedsConvergence:
         if len(result.daily_ff_fraction) >= 14:
             first_week_ff = sum(result.daily_ff_fraction[:7]) / 7
             last_week_ff = sum(result.daily_ff_fraction[-7:]) / 7
-            # FF fraction should increase (or at least not collapse)
+            bench_metrics["first_week_ff"] = first_week_ff
+            bench_metrics["last_week_ff"] = last_week_ff
+            check_bench_metrics(num_regression, bench_metrics)
             assert last_week_ff >= first_week_ff * 0.8, (
                 f"FF fraction declining: week 1={first_week_ff:.2%}, "
                 f"last week={last_week_ff:.2%}"
@@ -245,6 +248,8 @@ class TestWrongSeedsConvergence:
 
         if result.batch_covariance_trace:
             min_trace = min(result.batch_covariance_trace)
+            bench_metrics["min_trace"] = min_trace
+            check_bench_metrics(num_regression, bench_metrics)
             assert min_trace > 1e-6, (
                 f"Covariance collapsed: min tr(P)={min_trace:.2e}"
             )
@@ -265,7 +270,8 @@ class TestWrongSeedsConvergence:
         """
         config = self._make_config(n_days=30, weather="synth")
         result = run_full_stack(config)
-
+        bench_metrics["longest_violation_streak"] = result.longest_violation_streak
+        check_bench_metrics(num_regression, bench_metrics)
         # 20 ticks = 5 hours — generous for wrong-seed cold start
         assert result.longest_violation_streak <= 20, (
             f"Violation streak too long: {result.longest_violation_streak} "
@@ -319,6 +325,8 @@ class TestBunkroomSlowLearner:
         result = run_full_stack(config)
 
         max_integral = max(abs(h["integral"]) for h in result.history)
+        bench_metrics["max_integral"] = max_integral
+        check_bench_metrics(num_regression, bench_metrics)
         assert max_integral < 50, (
             f"Integral runaway: max |integral|={max_integral:.1f}"
         )
@@ -327,8 +335,8 @@ class TestBunkroomSlowLearner:
         """Bunkroom should converge but potentially slower."""
         config = self._make_config(n_days=30)
         result = run_full_stack(config)
-
-        # Should have run many batch cycles
+        bench_metrics["n_batches"] = result.n_batches
+        check_bench_metrics(num_regression, bench_metrics)
         assert result.n_batches >= 50, (
             f"Expected ≥50 batch cycles in 30 days, got {result.n_batches}"
         )
@@ -337,9 +345,9 @@ class TestBunkroomSlowLearner:
         """outdoor_delta should not diverge."""
         config = self._make_config(n_days=30)
         result = run_full_stack(config)
-
         od = result.final_coefs.get("outdoor_delta", 0)
-        # Should be in a reasonable range (true is ~0.29 for bunkroom)
+        bench_metrics["outdoor_delta"] = od
+        check_bench_metrics(num_regression, bench_metrics)
         assert abs(od) < 2.0, (
             f"outdoor_delta diverged: {od:.3f}"
         )
@@ -348,7 +356,10 @@ class TestBunkroomSlowLearner:
         """Room should be within deadband ≥80% of the time."""
         config = self._make_config(n_days=30)
         result = run_full_stack(config)
-
+        bench_metrics["ctrl_comfort_pct"] = result.ctrl_comfort_pct
+        bench_metrics["ctrl_violations"] = result.ctrl_violations
+        bench_metrics["unctrl_violations"] = result.unctrl_violations
+        check_bench_metrics(num_regression, bench_metrics)
         assert result.ctrl_comfort_pct >= 80.0, (
             f"Controllable comfort only {result.ctrl_comfort_pct:.1f}% "
             f"(ctrl={result.ctrl_violations}, unctrl={result.unctrl_violations})"
@@ -358,13 +369,11 @@ class TestBunkroomSlowLearner:
         """Controllable warm violations should be minority — no FF sign errors."""
         config = self._make_config(n_days=30)
         result = run_full_stack(config)
-
-        # With well-sized HP, some warm overshoot is normal during recovery.
-        # But controllable warm violations (HP active + room too warm) would
-        # indicate wrong FF sign or integral windup.
+        bench_metrics["ctrl_violations"] = result.ctrl_violations
+        bench_metrics["warm_violations"] = result.warm_violations
+        bench_metrics["unctrl_violations"] = result.unctrl_violations
+        check_bench_metrics(num_regression, bench_metrics)
         if result.ctrl_violations > 10:
-            # Warm ctrl violations shouldn't dominate — that would mean
-            # the controller is actively pushing the room too hot.
             ctrl_warm = result.warm_violations - result.unctrl_violations
             ctrl_cold = result.ctrl_violations - max(0, ctrl_warm)
             assert ctrl_warm <= result.ctrl_violations * 0.6, (
@@ -405,8 +414,9 @@ class TestQFeedbackConvergence:
         if len(result.weekly_reversals) >= 3:
             total = sum(result.weekly_reversals[:3])
             avg = total / 3.0
-            # Average reversals per week should stay bounded.
-            # Well-tuned PI with q-feedback: typically 8-15/week.
+            bench_metrics["profile"] = profile_name
+            bench_metrics["avg_reversals_per_week"] = avg
+            check_bench_metrics(num_regression, bench_metrics)
             assert avg < 20, (
                 f"{profile_name}: average reversals {avg:.1f}/week "
                 f"(weekly: {result.weekly_reversals[:3]})"
@@ -436,7 +446,10 @@ class TestQFeedbackConvergence:
                      for h in result.history[14 * tpd:21 * tpd]]
             w1_std = _std(w1_ff)
             w3_std = _std(w3_ff)
-            # Allow week 3 to be up to 50% worse (weather drift varies)
+            bench_metrics["profile"] = profile_name
+            bench_metrics["w1_std"] = w1_std
+            bench_metrics["w3_std"] = w3_std
+            check_bench_metrics(num_regression, bench_metrics)
             assert w3_std <= w1_std * 1.5 + 0.1, (
                 f"{profile_name}: FF std increased from "
                 f"week 1={w1_std:.3f} to week 3={w3_std:.3f}"
@@ -539,11 +552,13 @@ class TestConvergenceToTruth:
         """FF coefficient should stabilize regardless of initial seed error."""
         result = seed_results[seed_factor]
 
-        # Coefficient should stabilize: low variance in last 10 batch snapshots
         if len(result.coef_trajectory) >= 15:
             late_ods = [snap.get("outdoor_delta", 0)
                         for snap in result.coef_trajectory[-10:]]
             od_std = _std(late_ods)
+            bench_metrics["seed_factor"] = seed_factor
+            bench_metrics["od_std"] = od_std
+            check_bench_metrics(num_regression, bench_metrics)
             assert od_std < 0.05, (
                 f"seed_factor={seed_factor}: outdoor_delta not converged, "
                 f"std={od_std:.4f} in last 10 batches "
@@ -558,10 +573,13 @@ class TestConvergenceToTruth:
         final coefficient, since the ground-truth physics is identical.
         """
         result = seed_results[seed_factor]
-
-        # Final outdoor_delta should be within 0.1 of baseline
         od = result.final_coefs.get("outdoor_delta", 0)
         baseline_od = baseline_result.final_coefs.get("outdoor_delta", 0)
+        bench_metrics["seed_factor"] = seed_factor
+        bench_metrics["od"] = od
+        bench_metrics["baseline_od"] = baseline_od
+        bench_metrics["diff"] = abs(od - baseline_od)
+        check_bench_metrics(num_regression, bench_metrics)
         assert abs(od - baseline_od) < 0.1, (
             f"seed_factor={seed_factor}: converged to {od:.4f}, "
             f"baseline={baseline_od:.4f}, diff={abs(od - baseline_od):.4f}"
@@ -572,7 +590,6 @@ class TestConvergenceToTruth:
         first_stable_for: dict[float, int | None] = {}
         for factor in (1.0, 2.0, 3.0):
             result = seed_results[factor]
-            # Measure when coefficient first stabilizes within 0.05 of final
             final_od = result.final_coefs.get("outdoor_delta", 0)
             first_stable: int | None = None
             for i, snap in enumerate(result.coef_trajectory):
@@ -583,7 +600,10 @@ class TestConvergenceToTruth:
             first_stable_for[factor] = first_stable
 
         print(f"\n  Convergence speed: {first_stable_for}")
-        # 3× wrong should not converge faster than 1× (correct seeds)
+        bench_metrics["stable_1x"] = first_stable_for[1.0] if first_stable_for[1.0] is not None else -1
+        bench_metrics["stable_2x"] = first_stable_for[2.0] if first_stable_for[2.0] is not None else -1
+        bench_metrics["stable_3x"] = first_stable_for[3.0] if first_stable_for[3.0] is not None else -1
+        check_bench_metrics(num_regression, bench_metrics)
         if first_stable_for[1.0] is not None and first_stable_for[3.0] is not None:
             assert first_stable_for[3.0] >= first_stable_for[1.0], (
                 f"3× wrong seeds converged faster ({first_stable_for[3.0]}) "
@@ -622,20 +642,23 @@ class TestDisturbanceRejection:
         )
         result = run_full_stack(config)
 
-        # System should recover: error in last day should be reasonable
         tpd = int(24 * 60 / config.tick_minutes)
         last_day_errors = [abs(h["room_temp"] - 20.5)
                            for h in result.history[-tpd:]]
         last_day_mae = sum(last_day_errors) / len(last_day_errors)
+
+        last_day_integrals = [abs(h["integral"])
+                              for h in result.history[-tpd:]]
+        max_late_integral = max(last_day_integrals)
+
+        bench_metrics["last_day_mae"] = last_day_mae
+        bench_metrics["max_late_integral"] = max_late_integral
+        check_bench_metrics(num_regression, bench_metrics)
+
         assert last_day_mae < 1.0, (
             f"System didn't recover from sensor grab: "
             f"last day MAE={last_day_mae:.3f}"
         )
-
-        # Integral should not have wound up permanently
-        last_day_integrals = [abs(h["integral"])
-                              for h in result.history[-tpd:]]
-        max_late_integral = max(last_day_integrals)
         assert max_late_integral < 30, (
             f"Integral wound up after sensor grab: "
             f"max |integral|={max_late_integral:.1f}"
@@ -781,7 +804,8 @@ class TestStagedModelInputRollout:
         """Model input features (indices 2+) should start frozen."""
         config = self._make_config(n_days=2)
         result = run_full_stack(config)
-
+        bench_metrics["n_snapshots"] = len(result.coef_trajectory)
+        check_bench_metrics(num_regression, bench_metrics)
         # First batch snapshot should show model inputs frozen
         if result.coef_trajectory:
             snap = result.coef_trajectory[0]
@@ -797,11 +821,12 @@ class TestStagedModelInputRollout:
         config = self._make_config(n_days=30)
         result = run_full_stack(config)
 
-        # outdoor_delta should stabilize early (first 10 batches)
         if len(result.coef_trajectory) >= 15:
             early_ods = [snap.get("outdoor_delta", 0)
                          for snap in result.coef_trajectory[5:15]]
             od_range = max(early_ods) - min(early_ods)
+            bench_metrics["od_range_early"] = od_range
+            check_bench_metrics(num_regression, bench_metrics)
             assert od_range < 0.2, (
                 f"outdoor_delta not stabilizing early: range={od_range:.4f}"
             )
@@ -810,7 +835,7 @@ class TestStagedModelInputRollout:
         """When a feature unlocks, outdoor_delta should not jump."""
         config = self._make_config(n_days=30)
         result = run_full_stack(config)
-
+        max_unlock_jump = 0.0
         # Find batches where a feature unfroze
         for i in range(1, len(result.coef_trajectory)):
             prev = result.coef_trajectory[i - 1]
@@ -819,13 +844,15 @@ class TestStagedModelInputRollout:
                 was_frozen = prev.get(f"{name}_frozen", True)
                 now_frozen = curr.get(f"{name}_frozen", True)
                 if was_frozen and not now_frozen:
-                    # Feature just unlocked — check outdoor_delta stability
                     od_prev = prev.get("outdoor_delta", 0)
                     od_curr = curr.get("outdoor_delta", 0)
+                    max_unlock_jump = max(max_unlock_jump, abs(od_curr - od_prev))
                     assert abs(od_curr - od_prev) < 0.3, (
                         f"outdoor_delta jumped {od_prev:.4f} → {od_curr:.4f} "
                         f"when {name} unlocked at batch {i}"
                     )
+        bench_metrics["max_unlock_jump"] = max_unlock_jump
+        check_bench_metrics(num_regression, bench_metrics)
 
     @pytest.mark.slow
     def test_unlock_jump_bound_holds_across_winters(self, bench_metrics, num_regression):
@@ -859,6 +886,8 @@ class TestStagedModelInputRollout:
             per_run_max.append(run_max)
         per_run_max.sort()
         median = per_run_max[len(per_run_max) // 2]
+        bench_metrics["median_unlock_jump"] = median
+        check_bench_metrics(num_regression, bench_metrics)
         assert median < 0.3, (
             f"Median worst unlock-jump across {len(per_run_max)} winter "
             f"starts: {median:.4f} (bound 0.3); per-run worst-jumps: "
@@ -871,6 +900,8 @@ class TestStagedModelInputRollout:
         result = run_full_stack(config)
 
         max_integral = max(abs(h["integral"]) for h in result.history)
+        bench_metrics["max_integral"] = max_integral
+        check_bench_metrics(num_regression, bench_metrics)
         assert max_integral < 50, (
             f"Integral runaway during staged unlocks: max={max_integral:.1f}"
         )
@@ -883,7 +914,9 @@ class TestStagedModelInputRollout:
         if len(result.daily_ff_fraction) >= 21:
             first_week = sum(result.daily_ff_fraction[:7]) / 7
             third_week = sum(result.daily_ff_fraction[14:21]) / 7
-            # FF fraction should not collapse
+            bench_metrics["first_week"] = first_week
+            bench_metrics["third_week"] = third_week
+            check_bench_metrics(num_regression, bench_metrics)
             assert third_week >= first_week * 0.7, (
                 f"FF fraction collapsed: week 1={first_week:.2%}, "
                 f"week 3={third_week:.2%}"
@@ -893,7 +926,8 @@ class TestStagedModelInputRollout:
         """Comfort should stay ≥75% even with staged unlocks."""
         config = self._make_config(n_days=30)
         result = run_full_stack(config)
-
+        bench_metrics["ctrl_comfort_pct"] = result.ctrl_comfort_pct
+        check_bench_metrics(num_regression, bench_metrics)
         assert result.ctrl_comfort_pct >= 75.0, (
             f"Controllable comfort too low during staged rollout: "
             f"{result.ctrl_comfort_pct:.1f}%"
@@ -960,13 +994,13 @@ class TestRecoveryFromBadStates:
         )
         result = run_full_stack(config)
 
-        # outdoor_delta should end up negative (correct sign)
         od = result.final_coefs.get("outdoor_delta", 0)
+        bench_metrics["outdoor_delta"] = od
+        bench_metrics["ctrl_comfort_pct"] = result.ctrl_comfort_pct
+        check_bench_metrics(num_regression, bench_metrics)
         assert od < 0, (
             f"outdoor_delta still wrong sign after 30 days: {od:.4f}"
         )
-
-        # System should still be functional — controllable comfort > 70%
         assert result.ctrl_comfort_pct >= 70.0, (
             f"Controllable comfort collapsed after sign flip: {result.ctrl_comfort_pct:.1f}%"
         )
@@ -991,23 +1025,24 @@ class TestRecoveryFromBadStates:
         )
         result = run_full_stack(config)
 
-        # Integral should recover — last week's integral RMS should be
-        # much lower than the peak
         if len(result.daily_integral_rms) >= 7:
             peak_irms = max(result.daily_integral_rms[:3])
             last_week_irms = sum(result.daily_integral_rms[-7:]) / 7
+            bench_metrics["peak_irms"] = peak_irms
+            bench_metrics["last_week_irms"] = last_week_irms
             if peak_irms > 1.0:
                 assert last_week_irms < peak_irms * 0.8, (
                     f"Integral not recovering: peak={peak_irms:.2f}, "
                     f"last week avg={last_week_irms:.2f}"
                 )
 
-        # Comfort in last week should be reasonable
         if len(result.daily_comfort_pct) >= 7:
             last_week_comfort = sum(result.daily_comfort_pct[-7:]) / 7
+            bench_metrics["last_week_comfort"] = last_week_comfort
             assert last_week_comfort >= 80.0, (
                 f"Comfort not recovered in last week: {last_week_comfort:.1f}%"
             )
+        check_bench_metrics(num_regression, bench_metrics)
 
     def test_wrong_sign_seed_all_profiles(self, bench_metrics, num_regression):
         """All profiles should recover from a wrong-sign outdoor seed."""
@@ -1021,12 +1056,12 @@ class TestRecoveryFromBadStates:
                 },
             )
             result = run_full_stack(config)
-
-            # Should have corrected sign
             od = result.final_coefs.get("outdoor_delta", 0)
+            bench_metrics[f"{profile_name}_outdoor_delta"] = od
             assert od < 0, (
                 f"{profile_name}: outdoor_delta still wrong sign: {od:.4f}"
             )
+        check_bench_metrics(num_regression, bench_metrics)
 
 
 class TestRealWeatherReplay:

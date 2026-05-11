@@ -190,6 +190,9 @@ class TestDirectActiveSource:
     def test_stove_unlocks_within_30d(self, bench_metrics, num_regression):
         """Stove model input should unlock by day 30."""
         result = run_full_stack(self._make_config())
+        bench_metrics["final_stove_beta"] = result.final_coefs.get("Pellet Stove", 0.0)
+        bench_metrics["n_batches"] = result.n_batches
+        check_bench_metrics(num_regression, bench_metrics)
         if result.coef_trajectory:
             final = result.coef_trajectory[-1]
             assert final.get("Pellet Stove_frozen", True) is False, (
@@ -214,22 +217,21 @@ class TestDirectActiveSource:
         """Stove β should reach at least 50% of true magnitude."""
         result = run_full_stack(self._make_config())
         beta = result.final_coefs.get("Pellet Stove", 0.0)
+        bench_metrics["stove_beta"] = beta
+        check_bench_metrics(num_regression, bench_metrics)
         # True is -3.0; require |β| ≥ 1.5 (half-magnitude, correct sign)
         assert beta < -1.5, (
             f"Stove β only {beta:.3f}, expected ≤ -1.5 (true -3.0)"
         )
 
     def test_stove_does_not_destabilize_outdoor(self, bench_metrics, num_regression):
-        """outdoor_delta should converge near the regression-sign truth.
-
-        The runner stores profile.true_seed (positive) under
-        true_coefs["outdoor_delta"], but the regression learns the
-        negative-signed β (outdoor_delta = outdoor - desired, colder
-        outdoor → more HP needed → β < 0).  Compare against -true_seed.
-        """
+        """outdoor_delta should converge near the regression-sign truth."""
         result = run_full_stack(self._make_config())
         od = result.final_coefs.get("outdoor_delta", 0.0)
         expected = -PROFILES_2R2C["living_room"].true_seed
+        bench_metrics["outdoor_delta"] = od
+        bench_metrics["expected"] = expected
+        check_bench_metrics(num_regression, bench_metrics)
         assert abs(od - expected) < 0.1, (
             f"outdoor_delta diverged: {od:.3f} vs expected {expected:.3f}"
         )
@@ -237,6 +239,8 @@ class TestDirectActiveSource:
     def test_comfort_above_85_pct(self, bench_metrics, num_regression):
         """Comfort should exceed 85% with active-source FF."""
         result = run_full_stack(self._make_config())
+        bench_metrics["ctrl_comfort_pct"] = result.ctrl_comfort_pct
+        check_bench_metrics(num_regression, bench_metrics)
         assert result.ctrl_comfort_pct >= 85.0, (
             f"Controllable comfort only {result.ctrl_comfort_pct:.1f}%"
         )
@@ -281,6 +285,9 @@ class TestAdjacentZoneProxy:
     def test_dr_temp_unlocks_within_30d(self, bench_metrics, num_regression):
         """DR_temp should unlock once oil/cooking events accumulate."""
         result = run_full_stack(self._make_config())
+        bench_metrics["dr_temp_beta"] = result.final_coefs.get("DR Temp", 0.0)
+        bench_metrics["n_batches"] = result.n_batches
+        check_bench_metrics(num_regression, bench_metrics)
         if result.coef_trajectory:
             final = result.coef_trajectory[-1]
             assert final.get("DR Temp_frozen", True) is False, (
@@ -291,26 +298,26 @@ class TestAdjacentZoneProxy:
         """β should be negative (warmer DR → less HP needed in LR)."""
         result = run_full_stack(self._make_config())
         beta = result.final_coefs.get("DR Temp", 0.0)
+        bench_metrics["dr_temp_beta"] = beta
+        check_bench_metrics(num_regression, bench_metrics)
         assert beta < 0, (
             f"DR_temp β has wrong sign: {beta:.3f}"
         )
 
     def test_outdoor_remains_correctly_signed(self, bench_metrics, num_regression):
-        """outdoor_delta should not flip sign or wildly diverge.
-
-        With a frozen-or-recently-unlocked DR_Temp, outdoor may shift
-        slightly to absorb the unmodeled adjacent-zone contribution
-        until DR_Temp's β catches up.  Just check correct sign and
-        bounded magnitude.
-        """
+        """outdoor_delta should not flip sign or wildly diverge."""
         result = run_full_stack(self._make_config())
         od = result.final_coefs.get("outdoor_delta", 0.0)
+        bench_metrics["outdoor_delta"] = od
+        check_bench_metrics(num_regression, bench_metrics)
         assert od < 0, f"outdoor_delta wrong sign: {od:.3f}"
         assert abs(od) < 1.0, f"outdoor_delta diverged: {od:.3f}"
 
     def test_comfort_above_80_pct(self, bench_metrics, num_regression):
         """Comfort holds even with messy aggregate proxy."""
         result = run_full_stack(self._make_config())
+        bench_metrics["ctrl_comfort_pct"] = result.ctrl_comfort_pct
+        check_bench_metrics(num_regression, bench_metrics)
         assert result.ctrl_comfort_pct >= 80.0, (
             f"Controllable comfort only {result.ctrl_comfort_pct:.1f}%"
         )
@@ -357,6 +364,8 @@ class TestPurePassiveAdjacent:
     def test_passive_zone_stays_frozen(self, bench_metrics, num_regression):
         """Pure-passive zone should remain frozen all 30 days."""
         result = run_full_stack(self._make_config())
+        bench_metrics["n_snapshots"] = len(result.coef_trajectory)
+        check_bench_metrics(num_regression, bench_metrics)
         # Check every snapshot — never unlocks
         for i, snap in enumerate(result.coef_trajectory):
             assert snap.get("Passive Zone_frozen", False) is True, (
@@ -365,22 +374,19 @@ class TestPurePassiveAdjacent:
             )
 
     def test_outdoor_absorbs_passive_coupling(self, bench_metrics, num_regression):
-        """outdoor_delta β may shift to absorb passive contribution.
-
-        Without the passive feature, the WLS sees the passive zone's
-        outdoor-coupled heat-loss contribution as additional outdoor
-        sensitivity.  β_outdoor may end up slightly more negative
-        than the pure-thermal-model truth.  We just require it stays
-        in a reasonable range and the correct sign.
-        """
+        """outdoor_delta β may shift to absorb passive contribution."""
         result = run_full_stack(self._make_config())
         od = result.final_coefs.get("outdoor_delta", 0.0)
+        bench_metrics["outdoor_delta"] = od
+        check_bench_metrics(num_regression, bench_metrics)
         assert od < 0, f"outdoor_delta wrong sign: {od:.3f}"
         assert abs(od) < 1.0, f"outdoor_delta diverged: {od:.3f}"
 
     def test_comfort_holds_with_frozen_passive(self, bench_metrics, num_regression):
         """Comfort should not collapse despite frozen passive feature."""
         result = run_full_stack(self._make_config())
+        bench_metrics["ctrl_comfort_pct"] = result.ctrl_comfort_pct
+        check_bench_metrics(num_regression, bench_metrics)
         assert result.ctrl_comfort_pct >= 80.0, (
             f"Controllable comfort only {result.ctrl_comfort_pct:.1f}%"
         )
@@ -492,6 +498,10 @@ class TestAnomalyRobustness:
                                                           with_oven_events=False))
         od_with = result_with.final_coefs.get("outdoor_delta", 0.0)
         od_without = result_without.final_coefs.get("outdoor_delta", 0.0)
+        bench_metrics["od_with"] = od_with
+        bench_metrics["od_without"] = od_without
+        bench_metrics["shift"] = abs(od_with - od_without)
+        check_bench_metrics(num_regression, bench_metrics)
         assert abs(od_with - od_without) < 0.1, (
             f"outdoor_delta shifted by {abs(od_with - od_without):.3f} "
             f"due to anomalies (with={od_with:.3f}, without={od_without:.3f})"
@@ -516,6 +526,9 @@ class TestAnomalyRobustness:
                                                           with_oven_events=False))
         s_with = result_with.final_coefs.get("Solar Proxy", 0.0)
         s_without = result_without.final_coefs.get("Solar Proxy", 0.0)
+        bench_metrics["s_with"] = s_with
+        bench_metrics["s_without"] = s_without
+        check_bench_metrics(num_regression, bench_metrics)
         assert s_with < 0, f"Solar β sign-flipped under anomalies: {s_with:.3f}"
         assert abs(s_with) >= 0.5 * abs(s_without), (
             f"Solar β collapsed: |{s_with:.3f}| < 50% of "
@@ -525,6 +538,8 @@ class TestAnomalyRobustness:
     def test_comfort_holds_through_anomalies(self, bench_metrics, num_regression):
         """Comfort should remain reasonable despite periodic disturbances."""
         result = run_full_stack(self._make_config())
+        bench_metrics["ctrl_comfort_pct"] = result.ctrl_comfort_pct
+        check_bench_metrics(num_regression, bench_metrics)
         # Anomalies cause uncontrollable violations during events;
         # require ctrl_comfort_pct still ≥ 75%
         assert result.ctrl_comfort_pct >= 75.0, (
@@ -552,6 +567,9 @@ class TestAnomalyRobustness:
         config = self._make_config(n_days=14, tick_minutes=tick_minutes)
         result = run_full_stack(config)
         od = result.final_coefs.get("outdoor_delta", 0.0)
+        bench_metrics["tick_minutes"] = tick_minutes
+        bench_metrics["outdoor_delta"] = od
+        check_bench_metrics(num_regression, bench_metrics)
         # Coarse test: outdoor should not flip sign or wildly diverge
         assert od < 0, f"outdoor_delta wrong sign at {tick_minutes}min: {od:.3f}"
         assert abs(od) < 1.0, (

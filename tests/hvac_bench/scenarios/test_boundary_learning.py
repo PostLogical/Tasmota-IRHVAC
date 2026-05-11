@@ -110,6 +110,12 @@ class TestZeroOffsetBandNarrowing:
         config = _spring_config(offset=0.0, n_days=21)
         result = run_full_stack(config)
 
+        bench_metrics["final_cal_min"] = result.final_cal_min
+        bench_metrics["final_cal_max"] = result.final_cal_max
+        bench_metrics["boundary_updates"] = result.boundary_updates
+        bench_metrics["observation_yield_pct"] = result.observation_yield_pct
+        bench_metrics["ctrl_comfort_pct"] = result.ctrl_comfort_pct
+
         # -- Boundary convergence --
         band_width = result.final_cal_max - result.final_cal_min
         assert band_width < 4.0, (
@@ -200,6 +206,10 @@ class TestZeroOffsetBandNarrowing:
         synth_result = run_full_stack(_spring_config(
             offset=0.0, n_days=21, weather="synth",
         ))
+        bench_metrics["synth_worst_undershoot"] = synth_result.worst_undershoot
+        bench_metrics["early_trace"] = early
+        bench_metrics["late_trace"] = late
+        check_bench_metrics(num_regression, bench_metrics)
         assert synth_result.worst_undershoot < 2.0, (
             f"No major undershoot during learning, "
             f"got {synth_result.worst_undershoot:.2f}"
@@ -220,6 +230,11 @@ class TestPositiveOffsetBandShift:
     def test_band_shifts_and_comfort_improves(self, bench_metrics, num_regression):
         config = _spring_config(offset=1.0, n_days=21)
         result = run_full_stack(config)
+
+        bench_metrics["final_cal_min"] = result.final_cal_min
+        bench_metrics["final_cal_max"] = result.final_cal_max
+        bench_metrics["observation_yield_pct"] = result.observation_yield_pct
+        bench_metrics["ctrl_comfort_pct"] = result.ctrl_comfort_pct
 
         # -- Boundary convergence --
         assert result.final_cal_max < 2.0, (
@@ -268,6 +283,10 @@ class TestPositiveOffsetBandShift:
         assert result.ctrl_comfort_pct >= 65.0, (
             f"Comfort maintained, got {result.ctrl_comfort_pct:.1f}%"
         )
+        bench_metrics["mc_median_ratio"] = (
+            ratios[len(ratios) // 2] if ratios else 0.0
+        )
+        check_bench_metrics(num_regression, bench_metrics)
 
 
 # ── Scenario 3: Large offset -- iterative convergence ────────────────────
@@ -293,6 +312,15 @@ class TestLargeOffsetConvergence:
     def test_iterative_convergence(self, bench_metrics, num_regression, offset: float):
         config = _spring_config(offset=offset, n_days=45)
         result = run_full_stack(config)
+
+        bench_metrics["offset"] = offset
+        bench_metrics["final_cal_min"] = result.final_cal_min
+        bench_metrics["final_cal_max"] = result.final_cal_max
+        bench_metrics["boundary_updates"] = result.boundary_updates
+        bench_metrics["observation_yield_pct"] = result.observation_yield_pct
+        if result.daily_integral_rms:
+            bench_metrics["max_daily_integral_rms"] = max(result.daily_integral_rms)
+        check_bench_metrics(num_regression, bench_metrics)
 
         # -- Boundary convergence --
         assert result.boundary_updates >= 3, (
@@ -357,6 +385,13 @@ class TestNegativeOffsetConvergence:
     def test_band_shifts_positive(self, bench_metrics, num_regression):
         config = _spring_config(offset=-1.0, n_days=30)
         result = run_full_stack(config)
+
+        bench_metrics["final_cal_min"] = result.final_cal_min
+        bench_metrics["final_cal_max"] = result.final_cal_max
+        bench_metrics["boundary_updates"] = result.boundary_updates
+        bench_metrics["observation_yield_pct"] = result.observation_yield_pct
+        bench_metrics["ctrl_comfort_pct"] = result.ctrl_comfort_pct
+        check_bench_metrics(num_regression, bench_metrics)
 
         # -- Boundary convergence --
         band_center = (result.final_cal_min + result.final_cal_max) / 2
@@ -430,6 +465,11 @@ class TestPassiveToProbeEscalation:
             checkpoints=[Checkpoint(interval_days=10, callback=_track_probe)],
         )
 
+        bench_metrics["probes_completed"] = probes_completed[0]
+        bench_metrics["ctrl_comfort_pct"] = result.ctrl_comfort_pct
+        bench_metrics["observation_yield_pct"] = result.observation_yield_pct
+        check_bench_metrics(num_regression, bench_metrics)
+
         # -- Probes completed --
         assert probes_completed[0] >= 1, (
             f"Active probe should complete at least once, "
@@ -489,6 +529,15 @@ class TestBoundaryParameterSensitivity:
 
         # -- Band narrowed from initial --
         band_width = result.final_cal_max - result.final_cal_min
+
+        bench_metrics["param_value"] = param_value
+        bench_metrics["band_width"] = band_width
+        bench_metrics["final_cal_min"] = result.final_cal_min
+        bench_metrics["final_cal_max"] = result.final_cal_max
+        bench_metrics["boundary_updates"] = result.boundary_updates
+        bench_metrics["ctrl_comfort_pct"] = result.ctrl_comfort_pct
+        check_bench_metrics(num_regression, bench_metrics)
+
         assert band_width < 4.0, (
             f"{param_name}={param_value}: band should narrow, got {band_width:.2f}"
         )

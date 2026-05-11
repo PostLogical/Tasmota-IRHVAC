@@ -362,6 +362,10 @@ class TestGreybox2R2CRealCSV:
         dispatches, the test is degenerate and the rest of the assertions
         say nothing about the upgrade."""
         for season, by_mode in real_csv_results.items():
+            for mode, r in by_mode.items():
+                bench_metrics[f"{season}__{mode}__n_2r2c_batches"] = r.n_2r2c_batches
+        check_bench_metrics(num_regression, bench_metrics)
+        for season, by_mode in real_csv_results.items():
             assert any(r.is_2r2c_dispatched for r in by_mode.values()), (
                 f"{season}: 2R2C never dispatched in any mode "
                 f"(60d × 96 ticks should easily clear the ≥1500 obs and "
@@ -382,6 +386,11 @@ class TestGreybox2R2CRealCSV:
         (the precedent in feedback_synthetic_vs_real_bench.md)."""
         for season, by_mode in real_csv_results.items():
             r = by_mode["fused"]
+            bench_metrics[f"{season}__fused__gb_gates_passed"] = r.gb_gates_passed
+            bench_metrics[f"{season}__fused__gb_total_batches"] = r.gb_total_batches
+        check_bench_metrics(num_regression, bench_metrics)
+        for season, by_mode in real_csv_results.items():
+            r = by_mode["fused"]
             assert r.gb_gates_passed > 0, (
                 f"{season}: fused arm passed 0/{r.gb_total_batches} grey-box "
                 f"gates — 2R2C wins didn't transfer from synth to real CSV"
@@ -389,6 +398,11 @@ class TestGreybox2R2CRealCSV:
 
     def test_no_arm_diverges_in_outdoor(self, bench_metrics, num_regression, real_csv_results):
         """Sanity: every (season, mode) ends with a bounded outdoor β."""
+        for season, by_mode in real_csv_results.items():
+            for mode, r in by_mode.items():
+                bench_metrics[f"{season}__{mode}__outdoor_beta"] = r.final_outdoor_beta
+                bench_metrics[f"{season}__{mode}__solar_beta"] = r.final_solar_beta
+        check_bench_metrics(num_regression, bench_metrics)
         for season, by_mode in real_csv_results.items():
             for mode, r in by_mode.items():
                 assert -2.0 < r.final_outdoor_beta < 0.0, (
@@ -406,10 +420,12 @@ class TestGreybox2R2CRealCSV:
             for mode, r in by_mode.items():
                 if r.is_2r2c_dispatched and r.final_tau_fast is not None:
                     any_checked = True
+                    bench_metrics[f"{season}__{mode}__tau_fast"] = r.final_tau_fast
                     assert 5.0 <= r.final_tau_fast <= 60.0, (
                         f"{season}/{mode}: final τ_fast={r.final_tau_fast:.1f} "
                         f"min outside plausible range (5–60)"
                     )
+        check_bench_metrics(num_regression, bench_metrics)
         assert any_checked, (
             "No (season, mode) combination ever dispatched 2R2C with a "
             "non-None τ_fast — dispatch test should have caught this first"
@@ -472,6 +488,10 @@ class TestGreybox2R2CLitGrounded:
     def test_2r2c_dispatched(self, bench_metrics, num_regression, lit_grounded_results):
         """Sanity: 60 days × 96 ticks/day clears the 2R2C dispatch gates."""
         for season, by_mode in lit_grounded_results.items():
+            for mode, r in by_mode.items():
+                bench_metrics[f"{season}__{mode}__n_2r2c_batches"] = r.n_2r2c_batches
+        check_bench_metrics(num_regression, bench_metrics)
+        for season, by_mode in lit_grounded_results.items():
             assert any(r.is_2r2c_dispatched for r in by_mode.values()), (
                 f"{season}: 2R2C never dispatched — dispatch logic regression?"
             )
@@ -500,6 +520,9 @@ class TestGreybox2R2CLitGrounded:
         assert s is not None and s["is_2r2c"], "no 2R2C summary captured"
         ua_c = s["ua_c"]
         rel_err = abs(ua_c - _LIT_TRUE_UA_C) / _LIT_TRUE_UA_C
+        bench_metrics["ua_c"] = ua_c
+        bench_metrics["rel_err"] = rel_err
+        check_bench_metrics(num_regression, bench_metrics)
         assert rel_err < 0.30, (
             f"ua_c={ua_c:.5f} vs truth {_LIT_TRUE_UA_C} ({100 * rel_err:.0f}% off)"
         )
@@ -517,6 +540,9 @@ class TestGreybox2R2CLitGrounded:
         assert s is not None and s["is_2r2c"]
         k_c = s["k_c"]
         rel_err = abs(k_c - _LIT_TRUE_K_C) / _LIT_TRUE_K_C
+        bench_metrics["k_c"] = k_c
+        bench_metrics["rel_err"] = rel_err
+        check_bench_metrics(num_regression, bench_metrics)
         assert rel_err < 0.30, (
             f"k_c={k_c:.5f} vs truth {_LIT_TRUE_K_C} ({100 * rel_err:.0f}% off)"
         )
@@ -534,6 +560,9 @@ class TestGreybox2R2CLitGrounded:
         assert s is not None and s["is_2r2c"]
         alpha_c = s["alpha_c"]
         rel_err = abs(alpha_c - _LIT_TRUE_ALPHA_TOTAL) / _LIT_TRUE_ALPHA_TOTAL
+        bench_metrics["alpha_c"] = alpha_c
+        bench_metrics["rel_err"] = rel_err
+        check_bench_metrics(num_regression, bench_metrics)
         assert rel_err < 0.50, (
             f"α_total={alpha_c:.5f} vs truth {_LIT_TRUE_ALPHA_TOTAL} "
             f"({100 * rel_err:.0f}% off)"
@@ -543,6 +572,8 @@ class TestGreybox2R2CLitGrounded:
         """Final τ_fast in [5, 60] min plausible band."""
         r = lit_grounded_results["spring"]["fused"]
         assert r.final_tau_fast is not None
+        bench_metrics["tau_fast"] = r.final_tau_fast
+        check_bench_metrics(num_regression, bench_metrics)
         assert 5.0 <= r.final_tau_fast <= 60.0, (
             f"τ_fast={r.final_tau_fast:.1f} min outside [5, 60]"
         )
@@ -556,6 +587,8 @@ class TestGreybox2R2CLitGrounded:
         """
         r = lit_grounded_results["spring"]["fused"]
         assert r.final_tau_slow is not None
+        bench_metrics["tau_slow"] = r.final_tau_slow
+        check_bench_metrics(num_regression, bench_metrics)
         assert 60.0 <= r.final_tau_slow <= 3500.0, (
             f"τ_slow={r.final_tau_slow:.0f} min outside [60, 3500]"
         )
@@ -565,6 +598,9 @@ class TestGreybox2R2CLitGrounded:
         spring data. This is the headline: with lit-grounded truth + priors,
         does the greybox actually pass its quality gates?"""
         r = lit_grounded_results["spring"]["fused"]
+        bench_metrics["gb_gates_passed"] = r.gb_gates_passed
+        bench_metrics["gb_total_batches"] = r.gb_total_batches
+        check_bench_metrics(num_regression, bench_metrics)
         assert r.gb_gates_passed > 0, (
             f"0/{r.gb_total_batches} batches passed gates on lit-grounded "
             f"profile — greybox doesn't deliver usable bridge under "
