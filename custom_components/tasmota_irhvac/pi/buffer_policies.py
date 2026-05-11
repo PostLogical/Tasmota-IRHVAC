@@ -653,7 +653,13 @@ class SlevPolicy:
 
     name = "slev"
 
-    def __init__(self, alpha: float = 0.5, seed: int | None = None) -> None:
+    def __init__(self, alpha: float = 0.5, seed: int | None = 0) -> None:
+        # seed=0 (not None): SLEV admission is pseudo-random across
+        # observations within a buffer (the policy exists to break the
+        # deterministic top-N leverage bias), but the draw sequence must
+        # be reproducible across processes. ``random.Random(None)`` seeds
+        # from os.urandom — different per process — which propagates
+        # non-determinism into buffer composition, WLS β, FF, and integral.
         if not 0.0 <= alpha <= 1.0:
             raise ValueError(f"alpha must be in [0, 1]; got {alpha}")
         self.alpha = alpha
