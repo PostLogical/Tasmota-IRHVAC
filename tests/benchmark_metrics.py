@@ -8,17 +8,49 @@ error, outdoor, rls_obs_count.
 import math
 
 
-def compute_itae(history, deadband=0.5):
-    """Integral Time-weighted Absolute Error, deadband-adjusted.
+def _derive_tick_minutes(history):
+    """Derive the wall-clock minutes-per-tick from history entries.
 
-    Ignores errors within the deadband since those are caused by 1°C
-    quantization, not controller failure. Weights later errors more
-    heavily to penalize sustained deviations.
+    History entries should carry a ``"minute"`` field (added 2026-05-10
+    when the bench moved to wall-clock metrics).  Falls back to 15.0
+    for legacy callers that haven't populated ``minute`` yet.
     """
+    if len(history) >= 2 and "minute" in history[0] and "minute" in history[1]:
+        dt = history[1]["minute"] - history[0]["minute"]
+        if dt > 0:
+            return dt
+    return 15.0
+
+
+def _entry_minute(h, tick_minutes):
+    """Wall-clock minute of a history entry, with legacy fallback."""
+    if "minute" in h:
+        return h["minute"]
+    return h["tick"] * tick_minutes
+
+
+def compute_itae(history, deadband=0.5):
+    """Integral Time-weighted Absolute Error, in degree·minutes².
+
+    Discrete approximation of ``∫ t |e(t)| dt`` (Åström/Hägglund §3),
+    where ``t`` is wall-clock minutes from start.  Deadband-adjusted:
+    ignores errors within the deadband since those are caused by 1°C
+    quantization, not controller failure.
+
+    Cadence-invariant: same wall-clock-duration scenario produces
+    matching ITAE values at any tick cadence (modulo discretization
+    error that decreases as cadence shrinks).  Pre-2026-05-10 the
+    weighting used tick *index* instead of minutes, making ITAE values
+    incomparable across cadences (5× ticks ≈ 24× weight inflation).
+    """
+    if not history:
+        return 0.0
+    tick_minutes = _derive_tick_minutes(history)
     itae = 0.0
     for h in history:
         effective_error = max(0.0, abs(h["error"]) - deadband)
-        itae += h["tick"] * effective_error
+        t = _entry_minute(h, tick_minutes)
+        itae += t * effective_error * tick_minutes
     return itae
 
 
@@ -33,23 +65,30 @@ def compute_overshoot(history, desired=None):
 
 
 def compute_settling_time(history, deadband=0.5):
-    """First tick after which |error| stays within deadband for the remainder.
+    """First wall-clock minute after which ``|error|`` stays within
+    deadband for the remainder of the run.
 
-    Returns None if the system never settles.
+    Returns None if the system never settles, 0.0 if always within
+    deadband.  Pre-2026-05-10 returned a tick index (cadence-coupled);
+    now returns minutes for cadence-portable comparison.
     """
     if not history:
         return None
-    # Walk backwards to find last tick outside deadband
-    last_outside = -1
-    for h in reversed(history):
-        if abs(h["error"]) >= deadband:
-            last_outside = h["tick"]
+    tick_minutes = _derive_tick_minutes(history)
+    # Walk backwards, find last entry outside deadband.
+    last_outside_idx = -1
+    for i in range(len(history) - 1, -1, -1):
+        if abs(history[i]["error"]) >= deadband:
+            last_outside_idx = i
             break
-    if last_outside == -1:
-        return 0  # Always within deadband
-    if last_outside == history[-1]["tick"]:
+    if last_outside_idx == -1:
+        return 0.0  # Always within deadband
+    if last_outside_idx == len(history) - 1:
         return None  # Never settled
-    return last_outside + 1
+    # Settling time = wall-clock minute of the next entry (when system
+    # was first within deadband and stayed there).
+    next_h = history[last_outside_idx + 1]
+    return _entry_minute(next_h, tick_minutes)
 
 
 def count_reversals(history):
@@ -90,8 +129,12 @@ def compute_integral_rms(history):
 def compute_comfort_violations(history, threshold=1.0):
     """Count ticks where room is 1°C+ below desired (too cold).
 
-    Returns (violation_ticks, max_consecutive, max_undershoot).
-    Each tick represents 15 minutes of real time.
+    Returns (violation_ticks, max_consecutive, max_undershoot).  Counts
+    are in tick units (cadence-dependent — 1 tick = ``tick_minutes``
+    of real time, configurable via ``constants.TICK_MINUTES_DEFAULT`` /
+    ``--tick-minutes``).  For cadence-portable comparison divide by
+    total tick count for fraction, or use ``violation_minutes =
+    violation_ticks * tick_minutes`` if a wall-clock figure is needed.
     """
     if not history:
         return 0, 0, 0.0

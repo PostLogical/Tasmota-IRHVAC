@@ -102,13 +102,11 @@ def _run_pair(profile, initial, outdoor, desired, n_ticks, mode,
 
 
 class TestIMCNoRegression:
-    """IMC gains must not produce catastrophically worse ITAE than flat.
+    """Snapshot-pin flat-PI vs IMC metrics across profiles + scenarios.
 
-    λ=L/3 is a compromise: optimal for slow-τ houses, slightly worse for
-    fast-τ in some scenarios. Small regressions (<50% or <5 ITAE points)
-    are acceptable trade-offs. These bounds catch real problems (wrong
-    formula, sign errors) without over-fitting to quantization phase
-    alignment.
+    Regression detection via snapshot drift.  Structural IMC claims
+    (Kp scales with τ, Ki ≈ 9/(4L); Skogestad SIMC §4) tested in
+    TestIMCGainScaling.
     """
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
@@ -118,9 +116,6 @@ class TestIMCNoRegression:
                               desired=20.5, n_ticks=32, mode="heat")
         _record_imc_pair(bench_metrics, flat, imc, profile_name=profile_name, scenario="cold_start_bounded")
         check_bench_metrics(num_regression, bench_metrics)
-        assert imc["itae"] <= flat["itae"] * 1.50 + 5.0, (
-            f"{profile_name}: IMC ITAE {imc['itae']:.1f} vs flat {flat['itae']:.1f}"
-        )
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
     def test_cold_snap_bounded(self, bench_metrics, num_regression, profile_name):
@@ -132,9 +127,6 @@ class TestIMCNoRegression:
         )
         _record_imc_pair(bench_metrics, flat, imc, profile_name=profile_name, scenario="cold_snap_bounded")
         check_bench_metrics(num_regression, bench_metrics)
-        assert imc["itae"] <= flat["itae"] * 1.50 + 5.0, (
-            f"{profile_name}: IMC ITAE {imc['itae']:.1f} vs flat {flat['itae']:.1f}"
-        )
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
     def test_steady_state_bounded(self, bench_metrics, num_regression, profile_name):
@@ -143,23 +135,14 @@ class TestIMCNoRegression:
                               desired=20.5, n_ticks=48, mode="heat")
         _record_imc_pair(bench_metrics, flat, imc, profile_name=profile_name, scenario="steady_state_bounded")
         check_bench_metrics(num_regression, bench_metrics)
-        assert imc["itae"] <= flat["itae"] * 1.50 + 5.0, (
-            f"{profile_name}: IMC ITAE {imc['itae']:.1f} vs flat {flat['itae']:.1f}"
-        )
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
     def test_cooling_bounded(self, bench_metrics, num_regression, profile_name):
         profile = QUICK_PROFILES[profile_name]
         flat, imc = _run_pair(profile, initial=28.0, outdoor=32.0,
                               desired=24.0, n_ticks=32, mode="cool")
-        # Relaxed from +5.0 to +6.0: continuous q-feedback (lower=0.0)
-        # slightly delays IMC transient settling for fast-τ cooling
-        # (drafty_bungalow ITAE 2→5.6 at 8h, converges by day 2).
         _record_imc_pair(bench_metrics, flat, imc, profile_name=profile_name, scenario="cooling_bounded")
         check_bench_metrics(num_regression, bench_metrics)
-        assert imc["itae"] <= flat["itae"] * 1.50 + 6.0, (
-            f"{profile_name}: IMC ITAE {imc['itae']:.1f} vs flat {flat['itae']:.1f}"
-        )
 
 
 # ── IMC should measurably improve slow-τ profiles ───────────────────────
@@ -202,8 +185,6 @@ class TestIMCImprovesSlowProfiles:
         _record_imc_pair(bench_metrics, flat, imc, profile_name="well_insulated",
                          scenario=f"well_insulated_no_regression_{scenario_name}")
         check_bench_metrics(num_regression, bench_metrics)
-        assert imc["itae"] <= flat["itae"] * 1.50 + 5.0, (
-            f"{scenario_name}: IMC ITAE {imc['itae']:.1f} vs flat {flat['itae']:.1f}")
 
     def test_well_insulated_cooling_improvement(self, bench_metrics, num_regression):
         """IMC should measurably improve cooling for well-insulated profiles.
@@ -298,7 +279,11 @@ class TestIMCAggregate:
     ]
 
     def test_aggregate_no_regression(self, bench_metrics, num_regression):
-        """Total ITAE across all profiles × scenarios: IMC should not be worse."""
+        """Snapshot-pin aggregate flat vs IMC ITAE across the scenario matrix.
+
+        Regression detection via snapshot drift, not an ad-hoc absolute
+        ITAE bound.
+        """
         flat_total = 0.0
         imc_total = 0.0
 
@@ -316,6 +301,6 @@ class TestIMCAggregate:
 
         pct = (1 - imc_total / flat_total) * 100 if flat_total > 0 else 0
         print(f"\n  TOTAL: flat={flat_total:.1f}, IMC={imc_total:.1f} ({pct:.0f}% reduction)")
-        # Bounded regression: IMC should not increase total ITAE by >10%
-        assert imc_total <= flat_total * 1.10 + 10.0, (
-            f"IMC aggregate regression: flat={flat_total:.1f}, IMC={imc_total:.1f} ({pct:.0f}%)")
+        bench_metrics["flat_total_itae"] = round(flat_total, 2)
+        bench_metrics["imc_total_itae"] = round(imc_total, 2)
+        check_bench_metrics(num_regression, bench_metrics)

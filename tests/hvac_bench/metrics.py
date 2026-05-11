@@ -23,24 +23,35 @@ def compute_energy_metrics(history):
     """Compute energy-related metrics from history with COP data.
 
     History entries should include 'cumulative_kwh' and 'cop' fields
-    (added by the benchmark runner when COP model is active).
+    (added by the benchmark runner when COP model is active), plus
+    ``"minute"`` for cadence-invariant degree-hours computation.
+
+    Pre-2026-05-10 the degree-hours sum hardcoded ``dt_hours = 15/60``,
+    making ``kwh_per_degree_hour`` cadence-coupled.  The fix derives
+    ``tick_minutes`` from history (or falls back to 15-min legacy).
     """
     if not history:
         return {"total_kwh": 0.0, "avg_cop": 0.0, "kwh_per_degree_hour": 0.0}
 
     total_kwh = history[-1].get("cumulative_kwh", 0.0)
 
-    # Average COP (weighted by energy input)
+    # Average COP (uniform mean over active ticks, not energy-weighted —
+    # docstring above said "weighted by energy input" but the code is
+    # uniform; preserving existing behavior, just documenting).
     cops = [h.get("cop", 0) for h in history if h.get("cop", 0) > 0]
     avg_cop = sum(cops) / len(cops) if cops else 0.0
 
-    # Comfort-normalized energy: kWh per degree-hour maintained
-    # (degree-hours = sum of |desired - outdoor| * dt_hours)
-    degree_hours = 0.0
-    for h in history:
-        dt_hours = 15.0 / 60.0  # assume 15-min ticks
-        degree_hours += abs(h.get("desired", 20) - h.get("outdoor", 5)) * dt_hours
-
+    # Comfort-normalized energy: kWh per degree-hour maintained.
+    # tick_minutes derived from history when available; else legacy 15.
+    if len(history) >= 2 and "minute" in history[0] and "minute" in history[1]:
+        tick_minutes = history[1]["minute"] - history[0]["minute"]
+    else:
+        tick_minutes = 15.0
+    dt_hours = tick_minutes / 60.0
+    degree_hours = sum(
+        abs(h.get("desired", 20) - h.get("outdoor", 5)) * dt_hours
+        for h in history
+    )
     kwh_per_dh = total_kwh / degree_hours if degree_hours > 0 else 0.0
 
     return {

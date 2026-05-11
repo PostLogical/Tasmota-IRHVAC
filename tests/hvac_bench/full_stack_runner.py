@@ -882,6 +882,7 @@ def run_full_stack(
         oc = getattr(pi, "_last_observation_context", None)
         history.append({
             "tick": tick,
+            "minute": tick * config.tick_minutes,
             "room_temp": model.room_temp,
             "sensor_reading": sensor_reading,
             "hp_setpoint": hp_setpoint,
