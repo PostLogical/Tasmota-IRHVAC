@@ -125,7 +125,7 @@ class TestBuild1R1C:
         ss = build_1r1c(self._params(), dt=300.0)
         np.testing.assert_array_equal(ss.H, np.array([[1.0]]))
 
-    def test_steady_state_matches_analytical_with_zero_solar(self) -> None:
+    def test_steady_state_matches_analytical_with_zero_solar(self, bench_metrics, num_regression) -> None:
         # At steady state with no solar and constant inputs:
         # T_i_ss = T_o + R · q_scale · q_heat.
         # τ = RC = 1e5 s; iterate ~10τ to get within 1e-4 of steady state.
@@ -141,6 +141,9 @@ class TestBuild1R1C:
         ss_T = x.item()
         expected = T_o + p.R * p.q_scale * q_heat
         np.testing.assert_allclose(ss_T, expected, rtol=1e-3)
+        bench_metrics["ss_T"] = float(ss_T)
+        bench_metrics["expected"] = float(expected)
+        check_bench_metrics(num_regression, bench_metrics)
 
     def test_invalid_params_raises(self) -> None:
         with pytest.raises(ValueError):
@@ -182,7 +185,7 @@ class TestBuild2R2C:
         ss = build_2r2c(self._params(), dt=300.0)
         np.testing.assert_array_equal(ss.H, np.array([[1.0, 0.0]]))
 
-    def test_steady_state_matches_thermal_circuit(self) -> None:
+    def test_steady_state_matches_thermal_circuit(self, bench_metrics, num_regression) -> None:
         # 2R2C steady state with q_heat and outdoor:
         # T_i_ss = T_o + (R_ie + R_ea) · q_scale · q_heat
         # T_e_ss = T_o + R_ea · q_scale · q_heat
@@ -204,8 +207,11 @@ class TestBuild2R2C:
         expected_wall = T_o + p.R_ea * p.q_scale * q_heat
         np.testing.assert_allclose(T_i_ss, expected_air, rtol=1e-3)
         np.testing.assert_allclose(T_e_ss, expected_wall, rtol=1e-3)
+        bench_metrics["T_i_ss"] = float(T_i_ss)
+        bench_metrics["T_e_ss"] = float(T_e_ss)
+        check_bench_metrics(num_regression, bench_metrics)
 
-    def test_solar_split_wall_dominates_when_fraction_one(self) -> None:
+    def test_solar_split_wall_dominates_when_fraction_one(self, bench_metrics, num_regression) -> None:
         # With wall_solar_fraction=1, continuous B_c[0,2]=0. Discrete B_d[0,2]
         # picks up an O(dt·A[0,1]) bleed-through from the wall via coupling.
         # At dt=60s with the test params, separation is ~100×; verify >50×.
@@ -213,12 +219,16 @@ class TestBuild2R2C:
         ss = build_2r2c(p, dt=60.0)
         ratio = abs(ss.B[1, 2]) / max(abs(ss.B[0, 2]), 1e-30)
         assert ratio > 50
+        bench_metrics["ratio"] = float(ratio)
+        check_bench_metrics(num_regression, bench_metrics)
 
-    def test_solar_split_air_dominates_when_fraction_zero(self) -> None:
+    def test_solar_split_air_dominates_when_fraction_zero(self, bench_metrics, num_regression) -> None:
         p = self._params(wall_solar_fraction=0.0)
         ss = build_2r2c(p, dt=60.0)
         ratio = abs(ss.B[0, 2]) / max(abs(ss.B[1, 2]), 1e-30)
         assert ratio > 50
+        bench_metrics["ratio"] = float(ratio)
+        check_bench_metrics(num_regression, bench_metrics)
 
     def test_solar_split_bleed_vanishes_at_small_dt(self) -> None:
         # At dt → 0, B_d → dt * B_c, so bleed-through ratio improves.
@@ -261,7 +271,7 @@ class TestKalmanLogLikelihood:
         ll = kalman_log_likelihood(ss, obs, u, valid, P0=np.array([[0.01]]))
         assert np.isfinite(ll)
 
-    def test_likelihood_lower_with_larger_sigma_v_under_clean_data(self) -> None:
+    def test_likelihood_lower_with_larger_sigma_v_under_clean_data(self, bench_metrics, num_regression) -> None:
         # With clean data, larger sigma_v means worse likelihood.
         rng = np.random.default_rng(123)
         T = 200
@@ -275,6 +285,9 @@ class TestKalmanLogLikelihood:
             self._trivial_ss(2.0), obs, u, valid, P0=np.array([[0.01]])
         )
         assert ll_tight > ll_loose
+        bench_metrics["ll_tight"] = float(ll_tight)
+        bench_metrics["ll_loose"] = float(ll_loose)
+        check_bench_metrics(num_regression, bench_metrics)
 
     def test_no_valid_returns_zero(self) -> None:
         ss = self._trivial_ss()
@@ -294,7 +307,7 @@ class TestKalmanLogLikelihood:
         ll = kalman_log_likelihood(ss, obs, u, valid, P0=np.array([[0.01]]))
         assert np.isfinite(ll)
 
-    def test_more_valid_observations_yield_higher_likelihood(self) -> None:
+    def test_more_valid_observations_yield_higher_likelihood(self, bench_metrics, num_regression) -> None:
         # Same data, different valid masks; more valid → larger sum.
         rng = np.random.default_rng(7)
         T = 200
@@ -308,6 +321,9 @@ class TestKalmanLogLikelihood:
         half[:T // 2] = True
         ll_half = kalman_log_likelihood(ss, obs, u, half, P0=np.array([[0.01]]))
         assert ll_full > ll_half
+        bench_metrics["ll_full"] = float(ll_full)
+        bench_metrics["ll_half"] = float(ll_half)
+        check_bench_metrics(num_regression, bench_metrics)
 
     def test_shape_mismatch_raises(self) -> None:
         ss = self._trivial_ss()
@@ -319,7 +335,7 @@ class TestKalmanLogLikelihood:
                 np.ones(10, dtype=bool),
             )
 
-    def test_recovers_known_tau_via_grid_search(self) -> None:
+    def test_recovers_known_tau_via_grid_search(self, bench_metrics, num_regression) -> None:
         # Synthetic data from a known 1R1C with no process noise; grid-search
         # over tau to find the maximum likelihood; verify the maximum is at
         # the truth bin (within grid resolution).
@@ -365,6 +381,9 @@ class TestKalmanLogLikelihood:
         argmax = int(np.argmax(lls))
         # Best should be at index 2 (the true tau)
         assert argmax == 2, f"argmax={argmax}, lls={lls}"
+        bench_metrics["argmax"] = argmax
+        bench_metrics["ll_at_truth"] = float(lls[2])
+        check_bench_metrics(num_regression, bench_metrics)
 
 
 # ── Innovation series ────────────────────────────────────────────────────
