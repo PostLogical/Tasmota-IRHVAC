@@ -126,6 +126,8 @@ class TestSyntheticExcitationPOC:
 
     def test_canonical_truth_recovers_at_least_close_classification(
         self,
+        bench_metrics,
+        num_regression,
         canonical_credibility: ZoneCredibility,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
@@ -146,8 +148,17 @@ class TestSyntheticExcitationPOC:
             f"got '{canonical_credibility.classification}', expected good/close"
         )
 
+        _class_rank = {"good": 0, "close": 1, "poor": 2}
+        bench_metrics["class_rank"] = _class_rank[canonical_credibility.classification]
+        bench_metrics["train_rmse_c"] = canonical_credibility.train_rmse_c
+        if canonical_credibility.validate_rmse_c is not None:
+            bench_metrics["val_rmse_c"] = canonical_credibility.validate_rmse_c
+        check_bench_metrics(num_regression, bench_metrics)
+
     def test_canonical_recovers_tau_within_factor_of_2(
         self,
+        bench_metrics,
+        num_regression,
         canonical_credibility: ZoneCredibility,
     ) -> None:
         """Recovered τ should be within a factor of 2 of truth (80h)."""
@@ -157,6 +168,10 @@ class TestSyntheticExcitationPOC:
             f"τ recovery off: truth={_TAU_S/3600:.1f}h, "
             f"recovered={recovered.tau_s/3600:.1f}h (ratio={ratio:.2f})"
         )
+
+        bench_metrics["tau_h"] = recovered.tau_s / 3600.0
+        bench_metrics["tau_ratio"] = ratio
+        check_bench_metrics(num_regression, bench_metrics)
 
     @pytest.fixture(scope="class")
     def beta_solar_sweep(self) -> dict[float, ZoneCredibility]:
@@ -190,6 +205,8 @@ class TestSyntheticExcitationPOC:
 
     def test_beta_solar_recovery_tracks_truth(
         self,
+        bench_metrics,
+        num_regression,
         beta_solar_sweep: dict[float, ZoneCredibility],
         capsys: pytest.CaptureFixture[str],
     ) -> None:
@@ -216,6 +233,16 @@ class TestSyntheticExcitationPOC:
                 f"solar_scale recovery off at truth={truth_solar}: "
                 f"recovered={recovered:.3f}, ratio={ratio:.2f}"
             )
+
+        _class_rank = {"good": 0, "close": 1, "poor": 2}
+        for truth_solar, cred in beta_solar_sweep.items():
+            recovered = cred.train_result.fit_1r1c.best.params.solar_scale
+            bench_metrics[f"truth_{truth_solar}__recovered"] = recovered
+            bench_metrics[f"truth_{truth_solar}__ratio"] = recovered / truth_solar
+            bench_metrics[f"truth_{truth_solar}__class_rank"] = _class_rank[
+                cred.classification
+            ]
+        check_bench_metrics(num_regression, bench_metrics)
 
 
 # ── Tier 1.3b — Bundle excitation realism check ─────────────────────────
@@ -270,6 +297,8 @@ class TestBundleExcitationRealism:
 
     def test_canonical_classification_recorded(
         self,
+        bench_metrics,
+        num_regression,
         canonical_credibility: ZoneCredibility,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
@@ -295,6 +324,17 @@ class TestBundleExcitationRealism:
             )
         # Shape-only — verdict comparison is the deliverable, captured in stdout.
         assert canonical_credibility.classification in {"good", "close", "poor"}
+
+        _class_rank = {"good": 0, "close": 1, "poor": 2}
+        recovered = canonical_credibility.train_result.fit_1r1c.best.params
+        bench_metrics["class_rank"] = _class_rank[canonical_credibility.classification]
+        bench_metrics["train_rmse_c"] = canonical_credibility.train_rmse_c
+        if canonical_credibility.validate_rmse_c is not None:
+            bench_metrics["val_rmse_c"] = canonical_credibility.validate_rmse_c
+        bench_metrics["tau_h"] = recovered.tau_s / 3600.0
+        bench_metrics["q_scale"] = recovered.q_scale
+        bench_metrics["solar_scale"] = recovered.solar_scale
+        check_bench_metrics(num_regression, bench_metrics)
 
     @pytest.fixture(scope="class")
     def beta_solar_sweep(
@@ -326,6 +366,8 @@ class TestBundleExcitationRealism:
 
     def test_records_beta_solar_sweep(
         self,
+        bench_metrics,
+        num_regression,
         beta_solar_sweep: dict[float, ZoneCredibility],
         capsys: pytest.CaptureFixture[str],
     ) -> None:
@@ -346,3 +388,12 @@ class TestBundleExcitationRealism:
                 )
         # Recording test only — no assertions on specific verdict shape.
         # The 1.3a sweep test enforces tracking; 1.3b is observational.
+        _class_rank = {"good": 0, "close": 1, "poor": 2}
+        for truth_solar, cred in beta_solar_sweep.items():
+            recovered = cred.train_result.fit_1r1c.best.params.solar_scale
+            bench_metrics[f"truth_{truth_solar}__recovered"] = recovered
+            bench_metrics[f"truth_{truth_solar}__ratio"] = recovered / truth_solar
+            bench_metrics[f"truth_{truth_solar}__class_rank"] = _class_rank[
+                cred.classification
+            ]
+        check_bench_metrics(num_regression, bench_metrics)

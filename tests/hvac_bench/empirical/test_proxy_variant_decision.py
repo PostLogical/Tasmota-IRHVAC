@@ -47,6 +47,8 @@ class TestProxyVariantDiscrimination:
 
     def test_variants_complete_with_valid_envelopes(
         self,
+        bench_metrics,
+        num_regression,
         envelope_constant: CredibilityEnvelope,
         envelope_modulated: CredibilityEnvelope,
     ) -> None:
@@ -54,8 +56,21 @@ class TestProxyVariantDiscrimination:
             assert env.overall_classification in {"good", "close", "poor"}
             assert set(env.zones) == {"living_room", "dining_room", "bunkroom"}
 
+        _class_rank = {"good": 0, "close": 1, "poor": 2}
+        for label, env in (
+            ("constant", envelope_constant),
+            ("setpoint_modulated", envelope_modulated),
+        ):
+            bench_metrics[f"{label}__overall_class_rank"] = _class_rank[
+                env.overall_classification
+            ]
+            bench_metrics[f"{label}__n_zones"] = len(env.zones)
+        check_bench_metrics(num_regression, bench_metrics)
+
     def test_records_variant_comparison(
         self,
+        bench_metrics,
+        num_regression,
         envelope_constant: CredibilityEnvelope,
         envelope_modulated: CredibilityEnvelope,
         capsys: pytest.CaptureFixture[str],
@@ -90,3 +105,27 @@ class TestProxyVariantDiscrimination:
                 f"overall: constant={envelope_constant.overall_classification} "
                 f"vs setpoint_modulated={envelope_modulated.overall_classification}"
             )
+
+        _class_rank = {"good": 0, "close": 1, "poor": 2}
+        for name in envelope_constant.zones:
+            for label, env in (
+                ("constant", envelope_constant),
+                ("setpoint_modulated", envelope_modulated),
+            ):
+                z = env.zones[name]
+                f1 = z.train_result.fit_1r1c.best.params
+                id_1 = z.train_result.identifiability_1r1c
+                bench_metrics[f"{name}__{label}__tau_h"] = f1.tau_s / 3600.0
+                bench_metrics[f"{name}__{label}__q_scale"] = f1.q_scale
+                bench_metrics[f"{name}__{label}__n_at_bound"] = id_1.n_at_bound
+                bench_metrics[f"{name}__{label}__n_failed_cv"] = id_1.n_failed_cv
+                bench_metrics[f"{name}__{label}__class_rank"] = _class_rank[
+                    z.classification
+                ]
+        bench_metrics["constant__overall_class_rank"] = _class_rank[
+            envelope_constant.overall_classification
+        ]
+        bench_metrics["setpoint_modulated__overall_class_rank"] = _class_rank[
+            envelope_modulated.overall_classification
+        ]
+        check_bench_metrics(num_regression, bench_metrics)

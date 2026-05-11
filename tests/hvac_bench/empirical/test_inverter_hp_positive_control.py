@@ -102,6 +102,8 @@ class TestInverterHPLinearizationAudit:
 
     def test_records_inverter_hp_verdicts(
         self,
+        bench_metrics,
+        num_regression,
         credibility_constant: ZoneCredibility,
         credibility_modulated: ZoneCredibility,
         capsys: pytest.CaptureFixture[str],
@@ -158,3 +160,21 @@ class TestInverterHPLinearizationAudit:
 
         for cred in (credibility_constant, credibility_modulated):
             assert cred.classification in {"good", "close", "poor"}
+
+        _class_rank = {"good": 0, "close": 1, "poor": 2}
+        for label, cred in (
+            ("constant", credibility_constant),
+            ("setpoint_modulated", credibility_modulated),
+        ):
+            f1 = cred.train_result.fit_1r1c.best.params
+            id_1 = cred.train_result.identifiability_1r1c
+            bench_metrics[f"{label}__tau_h"] = f1.tau_s / 3600.0
+            bench_metrics[f"{label}__q_scale"] = f1.q_scale
+            bench_metrics[f"{label}__solar_scale"] = f1.solar_scale
+            bench_metrics[f"{label}__n_at_bound"] = id_1.n_at_bound
+            bench_metrics[f"{label}__n_failed_cv"] = id_1.n_failed_cv
+            bench_metrics[f"{label}__train_rmse_c"] = cred.train_rmse_c
+            if cred.validate_rmse_c is not None:
+                bench_metrics[f"{label}__val_rmse_c"] = cred.validate_rmse_c
+            bench_metrics[f"{label}__class_rank"] = _class_rank[cred.classification]
+        check_bench_metrics(num_regression, bench_metrics)
