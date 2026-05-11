@@ -48,6 +48,9 @@ class TestStepExcitation:
         )
         # 60-min hold at 15-min ticks = 4 ticks per level.
         values = [excite(t) for t in range(16)]
+        bench_metrics["high_value"] = values[0]
+        bench_metrics["low_value"] = values[4]
+        check_bench_metrics(num_regression, bench_metrics)
         # First 4 ticks at +amplitude, next 4 at -amplitude, etc.
         assert values[0] == values[1] == values[2] == values[3] == 22.0
         assert values[4] == values[5] == values[6] == values[7] == 18.0
@@ -58,6 +61,10 @@ class TestStepExcitation:
             center_c=20.0, amplitude_c=1.5, hold_minutes=30.0, tick_minutes=15.0
         )
         values = {excite(t) for t in range(200)}
+        bench_metrics["n_distinct"] = len(values)
+        bench_metrics["min_value"] = min(values)
+        bench_metrics["max_value"] = max(values)
+        check_bench_metrics(num_regression, bench_metrics)
         assert values == {18.5, 21.5}
 
     def test_rejects_zero_hold(self, bench_metrics, num_regression):
@@ -76,12 +83,16 @@ class TestStepExcitation:
 class TestPRBSExcitation:
     """PRBS: binary signal honoring minimum hold time, broadband."""
 
-    def test_only_two_distinct_values(self, bench_metrics, num_regression):
+    def test_prbs_only_two_distinct_values(self, bench_metrics, num_regression):
         excite = make_prbs_excitation(
             center_c=20.0, amplitude_c=2.0, min_hold_minutes=30.0,
             seed=42, tick_minutes=15.0,
         )
         values = {excite(t) for t in range(2880)}  # 30 days at 15 min
+        bench_metrics["n_distinct"] = len(values)
+        bench_metrics["min_value"] = min(values)
+        bench_metrics["max_value"] = max(values)
+        check_bench_metrics(num_regression, bench_metrics)
         assert values == {18.0, 22.0}
 
     def test_respects_min_hold_time(self, bench_metrics, num_regression):
@@ -95,14 +106,18 @@ class TestPRBSExcitation:
         # Find every flip; the run preceding each flip must be ≥ 4 ticks.
         # (Run length BEFORE a flip = ticks since the previous flip.)
         run_start = 0
+        min_run = None
         for t in range(1, len(values)):
             if values[t] != values[t - 1]:
                 run_length = t - run_start
+                min_run = run_length if min_run is None else min(min_run, run_length)
                 assert run_length >= 4, (
                     f"PRBS run length {run_length} < min_hold_ticks=4 "
                     f"at flip tick {t}"
                 )
                 run_start = t
+        bench_metrics["min_run_length"] = min_run if min_run is not None else 0
+        check_bench_metrics(num_regression, bench_metrics)
 
     def test_has_switches_in_long_run(self, bench_metrics, num_regression):
         excite = make_prbs_excitation(
@@ -111,6 +126,8 @@ class TestPRBSExcitation:
         )
         values = [excite(t) for t in range(500)]
         switches = sum(1 for t in range(1, 500) if values[t] != values[t - 1])
+        bench_metrics["n_switches"] = switches
+        check_bench_metrics(num_regression, bench_metrics)
         # With 50% switch probability and min_hold=1, expect ~125 switches
         # in 500 ticks. Loose lower bound to keep deterministic.
         assert switches >= 50, f"too few PRBS switches: {switches}"
@@ -139,6 +156,8 @@ class TestMultiSineExcitation:
         )
         values = [excite(t) for t in range(10000)]
         peak_dev = max(abs(v - 20.0) for v in values)
+        bench_metrics["peak_dev"] = peak_dev
+        check_bench_metrics(num_regression, bench_metrics)
         # Crest factor for Schroeder multi-sine is theoretically ~√2 above
         # RMS, but for small M the bound is loose. Assert peak dev ≤
         # amplitude × √M (conservative upper bound).
@@ -162,6 +181,9 @@ class TestMultiSineExcitation:
         # normalized by sqrt(M=1) = 1).
         mean = sum(values) / n_ticks
         var = sum((v - mean) ** 2 for v in values) / n_ticks
+        bench_metrics["mean"] = mean
+        bench_metrics["variance"] = var
+        check_bench_metrics(num_regression, bench_metrics)
         assert 0.4 < var < 0.6
 
     def test_rejects_invalid_periods(self, bench_metrics, num_regression):
@@ -188,18 +210,24 @@ class TestClipToBounds:
         clipped = clip_to_bounds(
             lambda t: 100.0, min_c=16.0, max_c=30.0
         )
+        bench_metrics["output"] = clipped(0)
+        check_bench_metrics(num_regression, bench_metrics)
         assert clipped(0) == 30.0
 
     def test_clips_below_min(self, bench_metrics, num_regression):
         clipped = clip_to_bounds(
             lambda t: -50.0, min_c=16.0, max_c=30.0
         )
+        bench_metrics["output"] = clipped(0)
+        check_bench_metrics(num_regression, bench_metrics)
         assert clipped(0) == 16.0
 
     def test_passes_through_in_range(self, bench_metrics, num_regression):
         clipped = clip_to_bounds(
             lambda t: 22.5, min_c=16.0, max_c=30.0
         )
+        bench_metrics["output"] = clipped(0)
+        check_bench_metrics(num_regression, bench_metrics)
         assert clipped(0) == 22.5
 
 
@@ -272,6 +300,9 @@ class TestProbeRecoversOutdoorBeta:
         profile = PROFILES_2R2C["living_room"]
         expected = -1.0 / (profile.hp_gain * profile.tau_env + 1.0)
         actual = step_probe_result.true_coefs["outdoor_delta"]
+        bench_metrics["actual_true_coef"] = actual
+        bench_metrics["expected_asymptote"] = expected
+        check_bench_metrics(num_regression, bench_metrics)
         assert actual == pytest.approx(expected), (
             f"open-loop true_coefs['outdoor_delta']={actual:.4f} "
             f"expected {expected:.4f} = -1/(g·τ_env+1)"
@@ -282,10 +313,18 @@ class TestProbeRecoversOutdoorBeta:
         assert actual != profile.true_seed
 
     def test_observation_count_matches_ticks(self, bench_metrics, num_regression, step_probe_result):
+        bench_metrics["n_observations"] = len(step_probe_result.observations)
+        bench_metrics["n_ticks"] = step_probe_result.n_ticks
+        check_bench_metrics(num_regression, bench_metrics)
         assert len(step_probe_result.observations) == step_probe_result.n_ticks
         assert step_probe_result.n_ticks == 30 * 24 * 4  # 2880
 
     def test_observations_have_required_fields(self, bench_metrics, num_regression, step_probe_result):
+        n_clamped = sum(1 for o in step_probe_result.observations if o.clamped)
+        n_uncertain = sum(1 for o in step_probe_result.observations if o.hp_contribution_uncertain)
+        bench_metrics["n_clamped"] = n_clamped
+        bench_metrics["n_uncertain"] = n_uncertain
+        check_bench_metrics(num_regression, bench_metrics)
         # Every observation must be non-clamped and carry the fields WLS
         # consumes.
         for obs in step_probe_result.observations:
@@ -299,8 +338,11 @@ class TestProbeRecoversOutdoorBeta:
         traj = step_probe_result.setpoint_trajectory
         # First 24 ticks at one level, next 24 at the other.
         first = traj[0]
-        assert all(t == first for t in traj[:24])
         second = traj[24]
+        bench_metrics["first_value"] = first
+        bench_metrics["second_value"] = second
+        check_bench_metrics(num_regression, bench_metrics)
+        assert all(t == first for t in traj[:24])
         assert second != first
         assert all(t == second for t in traj[24:48])
 
@@ -330,6 +372,8 @@ class TestProbeRecoversOutdoorBeta:
         )
         assert result is not None, "WLS returned None on 30-day probe"
         beta_outdoor = result.beta_batch[1]
+        bench_metrics["beta_outdoor"] = beta_outdoor
+        check_bench_metrics(num_regression, bench_metrics)
         profile = PROFILES_2R2C["living_room"]
         max_plausible = 1.0 / profile.hp_gain
         assert -max_plausible < beta_outdoor < 0.0, (
@@ -362,6 +406,10 @@ class TestProbeRecoversOutdoorBeta:
         closed_loop = -1.0 / g_tau
         gap_to_open = abs(beta_outdoor - open_loop)
         gap_to_closed = abs(beta_outdoor - closed_loop)
+        bench_metrics["beta_outdoor"] = beta_outdoor
+        bench_metrics["gap_to_open"] = gap_to_open
+        bench_metrics["gap_to_closed"] = gap_to_closed
+        check_bench_metrics(num_regression, bench_metrics)
         assert gap_to_open < gap_to_closed, (
             f"β={beta_outdoor:.4f} closer to closed-loop ({closed_loop:.4f}) "
             f"than open-loop ({open_loop:.4f}) — probe may be coupling back"
@@ -382,6 +430,9 @@ class TestProbeRecoversOutdoorBeta:
         # Loosely: at least 50% of observations should be quasi-steady.
         # The first ~τ minutes after each switch are transient.
         pass_pct = 100.0 * passed / len(step_probe_result.observations)
+        bench_metrics["pass_pct"] = pass_pct
+        bench_metrics["n_passed"] = passed
+        check_bench_metrics(num_regression, bench_metrics)
         assert pass_pct > 50.0, (
             f"only {pass_pct:.0f}% of obs passed room_rate filter — "
             f"step hold may be too short for the profile τ"
@@ -415,6 +466,8 @@ class TestProbeRunsWithModelInputs:
             ],
         )
         result = run_open_loop_probe(config)
+        bench_metrics["n_observations"] = len(result.observations)
+        check_bench_metrics(num_regression, bench_metrics)
         # Every observation should carry the solar reading in raw_readings.
         for obs in result.observations:
             assert "sensor.solar_test" in obs.raw_readings
@@ -431,6 +484,8 @@ class TestProbeRunsWithModelInputs:
             tick_minutes=15.0,
         )
         result = run_open_loop_probe(config)
+        bench_metrics["n_ticks"] = result.n_ticks
+        check_bench_metrics(num_regression, bench_metrics)
         assert result.n_ticks == 96  # 1 day at 15 min
         for obs in result.observations:
             assert obs.raw_readings == {}

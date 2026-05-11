@@ -85,6 +85,8 @@ class TestSummarizePostFillEdgeCases:
             result, bias_tols={"outdoor_delta": 0.05},
             std_tols={"outdoor_delta": 0.03},
         )
+        bench_metrics["n_entries"] = len(out)
+        check_bench_metrics(num_regression, bench_metrics)
         assert out == {}
 
     def test_buffer_never_fills_returns_nan_metrics(self, bench_metrics, num_regression):
@@ -98,8 +100,11 @@ class TestSummarizePostFillEdgeCases:
             result, bias_tols={"outdoor_delta": 0.05},
             std_tols={"outdoor_delta": 0.03},
         )
-        assert "outdoor_delta" in out
         pf = out["outdoor_delta"]
+        # bias/std are NaN — filtered by check_bench_metrics; record n_entries
+        bench_metrics["n_entries"] = len(out)
+        check_bench_metrics(num_regression, bench_metrics)
+        assert "outdoor_delta" in out
         assert pf.fill_day is None
         assert math.isnan(pf.bias)
         assert math.isnan(pf.std)
@@ -126,6 +131,11 @@ class TestSummarizePostFillMetrics:
             std_tols={"outdoor_delta": 0.03},
         )
         pf = out["outdoor_delta"]
+        bench_metrics["fill_day"] = pf.fill_day
+        bench_metrics["bias"] = pf.bias
+        bench_metrics["std"] = pf.std
+        bench_metrics["drift_per_day"] = pf.drift_per_day
+        check_bench_metrics(num_regression, bench_metrics)
         assert pf.fill_day == 5
         assert pf.bias == pytest.approx(0.07, abs=1e-9)
         assert pf.std == 0.0
@@ -147,6 +157,9 @@ class TestSummarizePostFillMetrics:
             std_tols={"outdoor_delta": 0.03},
         )
         pf = out["outdoor_delta"]
+        bench_metrics["bias"] = pf.bias
+        bench_metrics["std"] = pf.std
+        check_bench_metrics(num_regression, bench_metrics)
         assert pf.converges is True
 
     def test_drift_slope_matches_synthetic_linear_trajectory(self, bench_metrics, num_regression):
@@ -168,10 +181,9 @@ class TestSummarizePostFillMetrics:
             std_tols={"outdoor_delta": 1.0},
         )
         pf = out["outdoor_delta"]
+        bench_metrics["drift_per_day"] = pf.drift_per_day
+        check_bench_metrics(num_regression, bench_metrics)
         assert pf.drift_per_day == 0.005
-        # End is at day 29.5: β = -0.25 + 0.005 * 29.5 = -0.1025
-        # Start (fill point): β = -0.25
-        # |end - truth| = 0.1475, |start - truth| = 0 → not improving (worse).
         assert pf.improves is False
 
     def test_improves_flag_picks_up_convergence_to_truth(self, bench_metrics, num_regression):
@@ -192,6 +204,9 @@ class TestSummarizePostFillMetrics:
             std_tols={"outdoor_delta": 0.10},
         )
         pf = out["outdoor_delta"]
+        bench_metrics["drift_per_day"] = pf.drift_per_day
+        bench_metrics["bias"] = pf.bias
+        check_bench_metrics(num_regression, bench_metrics)
         # |β_end − truth| = |(-0.20 - 0.049) - (-0.25)| = 0.001
         # |β_fill − truth| = |(-0.20) - (-0.25)| = 0.05
         # Strictly closer at end → improves.

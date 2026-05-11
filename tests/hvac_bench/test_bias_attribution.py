@@ -68,10 +68,16 @@ class TestBothArmsRun:
         # output for the comparison to be meaningful.
         cl = living_room_attribution.closed_loop.beta
         ol = living_room_attribution.open_loop.beta
+        bench_metrics["cl_beta_outdoor"] = cl["outdoor_delta"]
+        bench_metrics["ol_beta_outdoor"] = ol["outdoor_delta"]
+        check_bench_metrics(num_regression, bench_metrics)
         assert "outdoor_delta" in cl, f"closed-loop missing outdoor_delta: {cl}"
         assert "outdoor_delta" in ol, f"open-loop missing outdoor_delta: {ol}"
 
     def test_betas_are_finite(self, bench_metrics, num_regression, living_room_attribution):
+        bench_metrics["n_cl_features"] = len(living_room_attribution.closed_loop.beta)
+        bench_metrics["n_ol_features"] = len(living_room_attribution.open_loop.beta)
+        check_bench_metrics(num_regression, bench_metrics)
         for arm_name, arm in [
             ("closed_loop", living_room_attribution.closed_loop),
             ("open_loop", living_room_attribution.open_loop),
@@ -84,20 +90,23 @@ class TestBothArmsRun:
     def test_open_loop_identifiability_attached(self, bench_metrics, num_regression, living_room_attribution):
         # Open-loop arm must carry the IdentifiabilityReport from Phase 1b.
         ol_id = living_room_attribution.open_loop.identifiability
-        assert ol_id.n_observations > 1000  # 30-day probe yields plenty
-        assert ol_id.rank >= 2  # intercept + outdoor_delta identifiable
-        assert ol_id.std_err_lower_bound[
-            ol_id.feature_names.index("outdoor_delta")
-        ] < 0.1
+        outdoor_idx = ol_id.feature_names.index("outdoor_delta")
+        bench_metrics["ol_n_observations"] = ol_id.n_observations
+        bench_metrics["ol_rank"] = ol_id.rank
+        bench_metrics["ol_se_outdoor"] = float(ol_id.std_err_lower_bound[outdoor_idx])
+        check_bench_metrics(num_regression, bench_metrics)
+        assert ol_id.n_observations > 1000
+        assert ol_id.rank >= 2
+        assert ol_id.std_err_lower_bound[outdoor_idx] < 0.1
 
     def test_closed_loop_identifiability_attached(self, bench_metrics, num_regression, living_room_attribution):
         # Phase 1e: closed-loop arm now carries a real identifiability
         # report (built from a snapshot of the production WLS buffer at
         # the last tick), not the empty placeholder Phase 1c had.
         cl_id = living_room_attribution.closed_loop.identifiability
-        # The closed-loop buffer fills up to its DEFAULT_DIVERSITY_BUFFER_SIZE
-        # (~2000) over 30 days; the eligible-after-filter count is somewhat
-        # smaller but still substantial.
+        bench_metrics["cl_n_observations"] = cl_id.n_observations
+        bench_metrics["cl_rank"] = cl_id.rank
+        check_bench_metrics(num_regression, bench_metrics)
         assert cl_id.n_observations > 100, (
             f"closed-loop buffer snapshot too small: {cl_id.n_observations}"
         )
@@ -107,9 +116,13 @@ class TestBothArmsRun:
         # Phase 1e: both arms carry Phase 1d residual reports.
         cl_res = living_room_attribution.closed_loop.residuals
         ol_res = living_room_attribution.open_loop.residuals
+        bench_metrics["cl_n_residuals"] = cl_res.n_residuals
+        bench_metrics["ol_n_residuals"] = ol_res.n_residuals
+        bench_metrics["cl_n_acf_lags"] = len(cl_res.autocorrelation)
+        bench_metrics["ol_n_acf_lags"] = len(ol_res.autocorrelation)
+        check_bench_metrics(num_regression, bench_metrics)
         assert cl_res.n_residuals > 0
         assert ol_res.n_residuals > 0
-        # Both reports include autocorrelation and Ljung-Box numbers.
         assert len(cl_res.autocorrelation) > 0
         assert len(ol_res.autocorrelation) > 0
 
@@ -135,12 +148,13 @@ class TestClosedLoopBiasIsNonzero:
         bias = living_room_attribution.closed_loop_bias["outdoor_delta"]
         # Print the report to stderr so it lands in test logs.
         print(format_bias_report(living_room_attribution))
-        # Lower bound: the bias is at least 5× the open-loop CRLB-derived
-        # standard error. If it were within the SE band, we couldn't
-        # claim a real difference.
         ol_id = living_room_attribution.open_loop.identifiability
         outdoor_idx = ol_id.feature_names.index("outdoor_delta")
         ol_se = ol_id.std_err_lower_bound[outdoor_idx]
+        bench_metrics["bias"] = bias
+        bench_metrics["ol_se"] = float(ol_se)
+        bench_metrics["bias_over_se"] = abs(bias) / ol_se
+        check_bench_metrics(num_regression, bench_metrics)
         assert abs(bias) > 5 * ol_se, (
             f"closed-loop bias |{bias:.4f}| is within 5σ of open-loop "
             f"SE ({ol_se:.4f}) — gap is not statistically resolvable; "
@@ -148,11 +162,9 @@ class TestClosedLoopBiasIsNonzero:
         )
 
     def test_both_betas_in_physical_band(self, bench_metrics, num_regression, living_room_attribution):
-        # Both estimators must produce physically plausible β, otherwise
-        # the gap is meaningless. Living_room g·τ = 4 → asymptotic
-        # closed-loop FF coefficient ≈ -0.25, open-loop ≈ -0.20.
-        # Allow ±50% as a wide physical band to absorb finite-time
-        # convergence and wall-mode lag.
+        bench_metrics["cl_beta_outdoor"] = living_room_attribution.closed_loop.beta["outdoor_delta"]
+        bench_metrics["ol_beta_outdoor"] = living_room_attribution.open_loop.beta["outdoor_delta"]
+        check_bench_metrics(num_regression, bench_metrics)
         for arm_name, arm in [
             ("closed_loop", living_room_attribution.closed_loop),
             ("open_loop", living_room_attribution.open_loop),
@@ -187,6 +199,11 @@ class TestBiasDirectionMatchesLiterature:
         profile = PROFILES_2R2C["living_room"]
         analytical_cl = -1.0 / (profile.hp_gain * profile.tau_env)
         analytical_ol = -1.0 / (profile.hp_gain * profile.tau_env + 1.0)
+        bench_metrics["cl_beta"] = cl
+        bench_metrics["ol_beta"] = ol
+        bench_metrics["analytical_cl"] = analytical_cl
+        bench_metrics["analytical_ol"] = analytical_ol
+        check_bench_metrics(num_regression, bench_metrics)
         assert cl < ol, (
             f"closed-loop β ({cl:.4f}) not more negative than open-loop "
             f"({ol:.4f}); literature predicts cl < ol "

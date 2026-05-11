@@ -45,8 +45,10 @@ class TestAutocorrelation:
         rng = np.random.default_rng(0)
         x = rng.normal(size=2000)
         acf = autocorrelation(x, max_lag=10)
+        bench_metrics["acf_0"] = float(acf[0])
+        bench_metrics["acf_max_abs_lag_1_10"] = float(max(abs(c) for c in acf[1:11]))
+        check_bench_metrics(num_regression, bench_metrics)
         assert acf[0] == pytest.approx(1.0, abs=1e-12)
-        # Lag-k ACF ~ N(0, 1/n) → |acf[k]| should be small.
         for k in range(1, 11):
             assert abs(acf[k]) < 0.1, f"lag {k} ACF = {acf[k]:.3f} too large"
 
@@ -58,7 +60,9 @@ class TestAutocorrelation:
         for t in range(1, n):
             x[t] = phi * x[t - 1] + rng.normal()
         acf = autocorrelation(x, max_lag=5)
-        # AR(1) with parameter φ has theoretical ACF[k] = φ^k.
+        bench_metrics["acf_lag1"] = float(acf[1])
+        bench_metrics["acf_lag5"] = float(acf[5])
+        check_bench_metrics(num_regression, bench_metrics)
         for k in range(1, 6):
             theoretical = phi ** k
             assert abs(acf[k] - theoretical) < 0.05, (
@@ -68,7 +72,9 @@ class TestAutocorrelation:
     def test_constant_series_returns_zero_acf(self, bench_metrics, num_regression):
         x = np.ones(100)
         acf = autocorrelation(x, max_lag=5)
-        # Zero variance after centering → ACF undefined; we return 1, 0, ...
+        bench_metrics["acf_0"] = float(acf[0])
+        bench_metrics["acf_1"] = float(acf[1])
+        check_bench_metrics(num_regression, bench_metrics)
         assert acf[0] == pytest.approx(1.0)
         for k in range(1, 6):
             assert acf[k] == 0.0
@@ -79,6 +85,9 @@ class TestLjungBox:
         rng = np.random.default_rng(2)
         x = rng.normal(size=2000)
         Q, p = ljung_box_test(x, n_lags=20)
+        bench_metrics["Q"] = Q
+        bench_metrics["p"] = p
+        check_bench_metrics(num_regression, bench_metrics)
         assert p > 0.05, (
             f"white noise rejected: Q={Q:.2f}, p={p:.4f}"
         )
@@ -91,6 +100,9 @@ class TestLjungBox:
         for t in range(1, n):
             x[t] = phi * x[t - 1] + rng.normal()
         Q, p = ljung_box_test(x, n_lags=10)
+        bench_metrics["Q"] = Q
+        bench_metrics["p"] = p
+        check_bench_metrics(num_regression, bench_metrics)
         assert p < 0.001, (
             f"AR(1) not rejected: Q={Q:.2f}, p={p:.4f}"
         )
@@ -99,6 +111,9 @@ class TestLjungBox:
         # n ≤ n_lags + 1 → no test possible.
         x = np.array([0.1, -0.2, 0.05])
         Q, p = ljung_box_test(x, n_lags=10)
+        bench_metrics["Q"] = Q
+        bench_metrics["p"] = p
+        check_bench_metrics(num_regression, bench_metrics)
         assert (Q, p) == (0.0, 1.0)
 
 
@@ -107,6 +122,9 @@ class TestNormality:
         rng = np.random.default_rng(4)
         x = rng.normal(size=500)
         name, stat, p = normality_test(x)
+        bench_metrics["stat"] = float(stat)
+        bench_metrics["p"] = float(p)
+        check_bench_metrics(num_regression, bench_metrics)
         assert name == "shapiro-wilk"
         assert p > 0.05, f"gaussian rejected: stat={stat:.4f}, p={p:.4f}"
 
@@ -114,6 +132,9 @@ class TestNormality:
         rng = np.random.default_rng(5)
         x = rng.uniform(low=-1, high=1, size=500)
         name, stat, p = normality_test(x)
+        bench_metrics["stat"] = float(stat)
+        bench_metrics["p"] = float(p)
+        check_bench_metrics(num_regression, bench_metrics)
         assert p < 0.01, (
             f"uniform passed normality: stat={stat:.4f}, p={p:.4f}"
         )
@@ -122,12 +143,17 @@ class TestNormality:
         rng = np.random.default_rng(6)
         x = rng.normal(size=10000)
         name, stat, p = normality_test(x)
+        bench_metrics["stat"] = float(stat)
+        bench_metrics["p"] = float(p)
+        check_bench_metrics(num_regression, bench_metrics)
         assert name == "jarque-bera"
-        assert p > 0.05  # gaussian still passes
+        assert p > 0.05
 
     def test_too_few_samples_returns_na(self, bench_metrics, num_regression):
         x = np.array([0.1, 0.2])
         name, stat, p = normality_test(x)
+        # name "n/a" — record nothing numeric; call helper for consistency
+        check_bench_metrics(num_regression, bench_metrics)
         assert name == "n/a"
 
 
@@ -189,35 +215,39 @@ class TestProbeResidualsSurfaceMisspecification:
 
     def test_residual_count_matches_eligible_obs(self, bench_metrics, num_regression, probe_beta_and_report):
         beta, rep = probe_beta_and_report
-        # Should be ~all of the 2880 ticks, minus those filtered out by
-        # the room_rate gate.
+        bench_metrics["n_residuals"] = rep.n_residuals
+        check_bench_metrics(num_regression, bench_metrics)
         assert rep.n_residuals > 1000
 
     def test_residual_mean_near_zero(self, bench_metrics, num_regression, probe_beta_and_report):
         beta, rep = probe_beta_and_report
-        # OLS residuals on a regression with intercept have mean exactly
-        # 0 by construction. WLS adds weights; mean stays small.
+        bench_metrics["mean"] = rep.mean
+        bench_metrics["std"] = rep.std
+        check_bench_metrics(num_regression, bench_metrics)
         assert abs(rep.mean) < 0.1
 
     def test_acf_first_lag_reported(self, bench_metrics, num_regression, probe_beta_and_report):
         beta, rep = probe_beta_and_report
-        # 21 entries: lag 0..20.
+        bench_metrics["n_acf_lags"] = len(rep.autocorrelation)
+        bench_metrics["acf_lag_0"] = rep.autocorrelation[0]
+        bench_metrics["acf_lag_1"] = rep.autocorrelation[1]
+        check_bench_metrics(num_regression, bench_metrics)
         assert len(rep.autocorrelation) == 21
         assert rep.autocorrelation[0] == pytest.approx(1.0)
 
     def test_ljung_box_rejects_whiteness(self, bench_metrics, num_regression, probe_beta_and_report):
-        # 2R2C wall transients during step switches → autocorrelated
-        # residuals → reject whiteness. This is the EXPECTED finding;
-        # if it passed, the linear model would be perfectly specified
-        # for 2R2C dynamics (it isn't).
         beta, rep = probe_beta_and_report
+        bench_metrics["ljung_box_statistic"] = rep.ljung_box_statistic
+        bench_metrics["ljung_box_p_value"] = rep.ljung_box_p_value
+        check_bench_metrics(num_regression, bench_metrics)
         assert rep.is_white_at_alpha_05 is False
         assert rep.ljung_box_p_value < 0.05
 
     def test_normality_test_runs(self, bench_metrics, num_regression, probe_beta_and_report):
-        # Doesn't matter whether it passes or fails — just verifies the
-        # test runs without crashing on a real probe's residual scale.
         beta, rep = probe_beta_and_report
+        bench_metrics["normality_statistic"] = rep.normality_statistic
+        bench_metrics["normality_p_value"] = rep.normality_p_value
+        check_bench_metrics(num_regression, bench_metrics)
         assert rep.normality_test_name in ("shapiro-wilk", "jarque-bera")
         assert math.isfinite(rep.normality_statistic) or math.isnan(
             rep.normality_statistic
@@ -225,12 +255,9 @@ class TestProbeResidualsSurfaceMisspecification:
         assert 0.0 <= rep.normality_p_value <= 1.0
 
     def test_split_half_stable(self, bench_metrics, num_regression, probe_beta_and_report):
-        # On a 30-day stationary scenario, β should be similar across
-        # halves. Loose threshold (50%) — the split-half check is
-        # mostly a sanity check; the strong claim is "not wildly
-        # different", not "identical". Stricter values would justify
-        # treating split-half as a tightening tool.
         beta, rep = probe_beta_and_report
+        bench_metrics["split_half_max_rel_change"] = rep.split_half_max_rel_change
+        check_bench_metrics(num_regression, bench_metrics)
         assert rep.split_half_max_rel_change is not None
         assert rep.split_half_max_rel_change < 0.50, (
             f"split-half β changed by {rep.split_half_max_rel_change:.1%} "
@@ -239,6 +266,9 @@ class TestProbeResidualsSurfaceMisspecification:
 
     def test_report_has_skew_and_kurtosis(self, bench_metrics, num_regression, probe_beta_and_report):
         beta, rep = probe_beta_and_report
+        bench_metrics["skewness"] = rep.skewness
+        bench_metrics["kurtosis"] = rep.kurtosis
+        check_bench_metrics(num_regression, bench_metrics)
         assert math.isfinite(rep.skewness)
         assert math.isfinite(rep.kurtosis)
 
@@ -251,7 +281,9 @@ class TestEmptyObservations:
             feature_order=["intercept", "outdoor_delta"],
             model_inputs=None,
         )
+        bench_metrics["n_residuals"] = rep.n_residuals
+        check_bench_metrics(num_regression, bench_metrics)
         assert rep.n_residuals == 0
-        assert rep.is_white_at_alpha_05 is True  # vacuous pass
+        assert rep.is_white_at_alpha_05 is True
         assert rep.is_normal_at_alpha_05 is True
         assert rep.split_half_max_rel_change is None

@@ -42,6 +42,10 @@ class TestFisherInformation:
     def test_unit_weights_recover_ols_form(self, bench_metrics, num_regression):
         X = np.array([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
         fim = fisher_information(X, weights=None, sigma2=1.0)
+        bench_metrics["fim_00"] = float(fim[0, 0])
+        bench_metrics["fim_01"] = float(fim[0, 1])
+        bench_metrics["fim_11"] = float(fim[1, 1])
+        check_bench_metrics(num_regression, bench_metrics)
         # X.T @ X = [[2, 1], [1, 2]] for this X.
         np.testing.assert_allclose(fim, np.array([[2.0, 1.0], [1.0, 2.0]]))
 
@@ -49,6 +53,9 @@ class TestFisherInformation:
         X = np.array([[1.0], [1.0], [1.0]])
         fim_unit = fisher_information(X, sigma2=1.0)
         fim_quad = fisher_information(X, sigma2=4.0)
+        bench_metrics["fim_unit_00"] = float(fim_unit[0, 0])
+        bench_metrics["fim_quad_00"] = float(fim_quad[0, 0])
+        check_bench_metrics(num_regression, bench_metrics)
         # FIM ∝ 1/σ². Quadrupling σ² → 1/4 of FIM.
         np.testing.assert_allclose(fim_quad, fim_unit / 4.0)
 
@@ -56,6 +63,11 @@ class TestFisherInformation:
         # Columns are orthogonal but not unit-normalized.
         X = np.array([[1.0, 2.0], [-1.0, 2.0], [1.0, -2.0], [-1.0, -2.0]])
         fim = fisher_information(X)
+        bench_metrics["fim_01"] = float(fim[0, 1])
+        bench_metrics["fim_10"] = float(fim[1, 0])
+        bench_metrics["fim_00"] = float(fim[0, 0])
+        bench_metrics["fim_11"] = float(fim[1, 1])
+        check_bench_metrics(num_regression, bench_metrics)
         # Off-diagonal Cov(col1, col2) = 0 by orthogonality.
         assert abs(fim[0, 1]) < 1e-12
         assert abs(fim[1, 0]) < 1e-12
@@ -64,6 +76,9 @@ class TestFisherInformation:
         X = np.array([[1.0, 0.0], [0.0, 1.0]])
         w = np.array([2.0, 3.0])
         fim = fisher_information(X, weights=w, sigma2=1.0)
+        bench_metrics["fim_00"] = float(fim[0, 0])
+        bench_metrics["fim_11"] = float(fim[1, 1])
+        check_bench_metrics(num_regression, bench_metrics)
         # FIM = X^T diag(w) X = diag(w) for the identity-like X above.
         np.testing.assert_allclose(fim, np.diag([2.0, 3.0]))
 
@@ -84,12 +99,19 @@ class TestCrlbDiagonal:
     def test_diagonal_fim_inverts_elementwise(self, bench_metrics, num_regression):
         fim = np.diag([4.0, 9.0, 16.0])
         crlb = crlb_diagonal(fim)
+        bench_metrics["crlb_0"] = float(crlb[0])
+        bench_metrics["crlb_1"] = float(crlb[1])
+        bench_metrics["crlb_2"] = float(crlb[2])
+        check_bench_metrics(num_regression, bench_metrics)
         np.testing.assert_allclose(crlb, [0.25, 1.0 / 9.0, 1.0 / 16.0])
 
     def test_singular_fim_marks_unidentifiable(self, bench_metrics, num_regression):
         # Rank-1 FIM: only one direction is identified.
         fim = np.array([[1.0, 1.0], [1.0, 1.0]])
         crlb = crlb_diagonal(fim)
+        # inf values filtered out by check_bench_metrics; nothing
+        # meaningful to record here, but call for consistency.
+        check_bench_metrics(num_regression, bench_metrics)
         # The null direction couples both parameters → both should be inf.
         assert math.isinf(crlb[0])
         assert math.isinf(crlb[1])
@@ -98,6 +120,9 @@ class TestCrlbDiagonal:
         # Non-trivial 2x2 PD matrix.
         fim = np.array([[2.0, 0.5], [0.5, 3.0]])
         crlb = crlb_diagonal(fim)
+        bench_metrics["crlb_0"] = float(crlb[0])
+        bench_metrics["crlb_1"] = float(crlb[1])
+        check_bench_metrics(num_regression, bench_metrics)
         assert all(math.isfinite(c) and c > 0 for c in crlb)
         # Verify against direct inv: for [[a,b],[c,d]], inv diag = [d, a]/det
         det = 2.0 * 3.0 - 0.5 * 0.5
@@ -116,6 +141,9 @@ class TestPeDiagnostics:
     def test_identity_matrix_unstandardized_full_rank(self, bench_metrics, num_regression):
         X = np.eye(3)
         d = pe_diagnostics(X, standardize=False)
+        bench_metrics["rank"] = d["rank"]
+        bench_metrics["condition_number"] = d["condition_number"]
+        check_bench_metrics(num_regression, bench_metrics)
         assert d["rank"] == 3
         assert d["condition_number"] == pytest.approx(1.0, abs=1e-10)
 
@@ -126,6 +154,8 @@ class TestPeDiagnostics:
         # no constant column to anchor the intercept.
         X = np.eye(3)
         d = pe_diagnostics(X, standardize=True)
+        bench_metrics["rank"] = d["rank"]
+        check_bench_metrics(num_regression, bench_metrics)
         assert d["rank"] == 2
 
     def test_constant_column_preserved_under_standardize(self, bench_metrics, num_regression):
@@ -133,20 +163,29 @@ class TestPeDiagnostics:
         # mean-centered, so it still contributes a rank-1 direction.
         X = np.array([[1.0, 2.0], [1.0, 4.0], [1.0, 6.0]])
         d = pe_diagnostics(X, standardize=True)
+        bench_metrics["rank"] = d["rank"]
+        check_bench_metrics(num_regression, bench_metrics)
         assert d["rank"] == 2
 
     def test_constant_column_drops_rank_when_matrix_is_all_constant(self, bench_metrics, num_regression):
         # All rows identical → both columns constant → rank 1 either way.
         X = np.array([[1.0, 2.0], [1.0, 2.0], [1.0, 2.0]])
         d_unstd = pe_diagnostics(X, standardize=False)
-        assert d_unstd["rank"] == 1
         d_std = pe_diagnostics(X, standardize=True)
+        bench_metrics["rank_unstd"] = d_unstd["rank"]
+        bench_metrics["rank_std"] = d_std["rank"]
+        check_bench_metrics(num_regression, bench_metrics)
+        assert d_unstd["rank"] == 1
         # Standardize preserves both constant columns → still rank 1.
         assert d_std["rank"] == 1
 
     def test_near_collinear_blows_up_condition(self, bench_metrics, num_regression):
         X = np.array([[1.0, 1.0], [1.0, 1.0 + 1e-9], [2.0, 2.0]])
         d = pe_diagnostics(X, standardize=False)
+        # condition_number can be astronomically large; record but the
+        # exact value depends on numerical precision so use loose tolerance.
+        bench_metrics["rank"] = d["rank"]
+        check_bench_metrics(num_regression, bench_metrics)
         assert d["condition_number"] > 1e6
 
     def test_weights_reweight_singular_values(self, bench_metrics, num_regression):
@@ -154,6 +193,11 @@ class TestPeDiagnostics:
         # standardize=False so weight effect is visible at the SV level.
         d_eq = pe_diagnostics(X, weights=np.array([1.0, 1.0]), standardize=False)
         d_asym = pe_diagnostics(X, weights=np.array([1.0, 4.0]), standardize=False)
+        bench_metrics["eq_largest_sv"] = d_eq["largest_singular_value"]
+        bench_metrics["asym_largest_sv"] = d_asym["largest_singular_value"]
+        bench_metrics["eq_smallest_sv"] = d_eq["smallest_singular_value"]
+        bench_metrics["asym_smallest_sv"] = d_asym["smallest_singular_value"]
+        check_bench_metrics(num_regression, bench_metrics)
         assert d_asym["largest_singular_value"] > d_eq["largest_singular_value"]
         assert d_asym["smallest_singular_value"] == pytest.approx(
             d_eq["smallest_singular_value"], abs=1e-10
@@ -162,6 +206,8 @@ class TestPeDiagnostics:
     def test_empty_matrix(self, bench_metrics, num_regression):
         X = np.zeros((0, 3))
         d = pe_diagnostics(X)
+        bench_metrics["rank"] = d["rank"]
+        check_bench_metrics(num_regression, bench_metrics)
         assert d["rank"] == 0
         assert math.isinf(d["condition_number"])
 
@@ -172,6 +218,8 @@ class TestEstimateSigma2:
         beta = np.array([1.0, 2.0])
         y = X @ beta  # no noise
         s2 = estimate_sigma2_from_residuals(y, X, beta)
+        bench_metrics["sigma2"] = float(s2)
+        check_bench_metrics(num_regression, bench_metrics)
         assert s2 == pytest.approx(0.0, abs=1e-12)
 
     def test_recovers_noise_variance(self, bench_metrics, num_regression):
@@ -183,6 +231,8 @@ class TestEstimateSigma2:
         y = X @ beta + rng.normal(scale=sigma_true, size=n)
         beta_hat, *_ = np.linalg.lstsq(X, y, rcond=None)
         s2_hat = estimate_sigma2_from_residuals(y, X, beta_hat)
+        bench_metrics["sigma2_hat"] = float(s2_hat)
+        check_bench_metrics(num_regression, bench_metrics)
         # Within ~10% with n=1000.
         assert abs(s2_hat - sigma_true**2) / sigma_true**2 < 0.10
 
@@ -190,8 +240,11 @@ class TestEstimateSigma2:
         X = np.array([[1.0]])
         beta = np.array([1.0])
         y = np.array([1.0])
+        s2 = estimate_sigma2_from_residuals(y, X, beta)
+        bench_metrics["sigma2"] = float(s2)
+        check_bench_metrics(num_regression, bench_metrics)
         # n=1, p=1 → dof = 0.
-        assert estimate_sigma2_from_residuals(y, X, beta) == 0.0
+        assert s2 == 0.0
 
 
 # ── End-to-end probe → identifiability_report ─────────────────────────
@@ -231,6 +284,11 @@ class TestIdentifiabilityReportFromProbe:
             feature_order=["intercept", "outdoor_delta"],
             model_inputs=None,
         )
+        bench_metrics["rank"] = rep.rank
+        bench_metrics["pe_order"] = rep.pe_order
+        bench_metrics["n_features"] = rep.n_features
+        bench_metrics["n_observations"] = rep.n_observations
+        check_bench_metrics(num_regression, bench_metrics)
         # 2-parameter design must be PE order ≥ 2 to be identifiable.
         assert rep.rank == 2
         assert rep.pe_order == 2
@@ -244,6 +302,11 @@ class TestIdentifiabilityReportFromProbe:
             feature_order=["intercept", "outdoor_delta"],
             model_inputs=None,
         )
+        bench_metrics["crlb_intercept"] = float(rep.crlb[0])
+        bench_metrics["crlb_outdoor"] = float(rep.crlb[1])
+        bench_metrics["se_intercept"] = float(rep.std_err_lower_bound[0])
+        bench_metrics["se_outdoor"] = float(rep.std_err_lower_bound[1])
+        check_bench_metrics(num_regression, bench_metrics)
         assert all(math.isfinite(c) and c > 0 for c in rep.crlb)
         assert all(math.isfinite(s) for s in rep.std_err_lower_bound)
 
@@ -259,10 +322,8 @@ class TestIdentifiabilityReportFromProbe:
             sigma2=0.05**2,
         )
         outdoor_idx = rep.feature_names.index("outdoor_delta")
-        # Truth is around -0.20 (open-loop) or -0.25 (closed-loop). Lower
-        # bound on SE should be much smaller — at least one order of
-        # magnitude — so the estimator could in principle distinguish
-        # the two.
+        bench_metrics["se_outdoor_with_known_sigma"] = float(rep.std_err_lower_bound[outdoor_idx])
+        check_bench_metrics(num_regression, bench_metrics)
         assert rep.std_err_lower_bound[outdoor_idx] < 0.02
 
     def test_condition_number_reasonable(self, bench_metrics, num_regression, probe_observations):
@@ -273,6 +334,8 @@ class TestIdentifiabilityReportFromProbe:
             feature_order=["intercept", "outdoor_delta"],
             model_inputs=None,
         )
+        bench_metrics["condition_number"] = rep.condition_number
+        check_bench_metrics(num_regression, bench_metrics)
         # Belsley (1980) calls κ > 30 "moderately collinear" and κ > 100
         # "strongly collinear". For a clean 2-parameter probe with
         # diurnal outdoor we expect well below 30.
@@ -301,12 +364,15 @@ class TestIdentifiabilityReportFromProbe:
             sigma2=None,
             beta=beta_hat.tolist(),
         )
+        y_var = float(((y - y.mean()) ** 2).mean())
+        sensor_noise_var = 0.05 ** 2
+        bench_metrics["sigma2"] = rep.sigma2
+        bench_metrics["y_var"] = y_var
+        check_bench_metrics(num_regression, bench_metrics)
         assert rep.sigma2_was_estimated is True
         # Plausible band: residual variance > sensor noise (model is
         # not perfect) but bounded above by the y variance (model is
         # better than nothing).
-        y_var = float(((y - y.mean()) ** 2).mean())
-        sensor_noise_var = 0.05 ** 2
         assert sensor_noise_var < rep.sigma2 < y_var, (
             f"sigma2 {rep.sigma2:.4f} out of plausible band "
             f"({sensor_noise_var:.4f}, {y_var:.4f})"
@@ -320,8 +386,11 @@ class TestIdentifiabilityReportFromProbe:
             model_inputs=None,
         )
         intercept_idx = rep.feature_names.index("intercept")
-        assert rep.feature_variance[intercept_idx] == pytest.approx(0.0, abs=1e-12)
         outdoor_idx = rep.feature_names.index("outdoor_delta")
+        bench_metrics["var_intercept"] = float(rep.feature_variance[intercept_idx])
+        bench_metrics["var_outdoor"] = float(rep.feature_variance[outdoor_idx])
+        check_bench_metrics(num_regression, bench_metrics)
+        assert rep.feature_variance[intercept_idx] == pytest.approx(0.0, abs=1e-12)
         assert rep.feature_variance[outdoor_idx] > 1.0  # diurnal swing of ±8°C
 
 
@@ -334,6 +403,9 @@ class TestEmptyObservations:
             feature_order=["intercept", "outdoor_delta"],
             model_inputs=None,
         )
+        bench_metrics["n_observations"] = rep.n_observations
+        bench_metrics["rank"] = rep.rank
+        check_bench_metrics(num_regression, bench_metrics)
         assert rep.n_observations == 0
         assert rep.rank == 0
         assert all(math.isinf(c) for c in rep.crlb)
@@ -368,6 +440,11 @@ class TestRegressorMatrixMatchesWLS:
             detect_lag=False,
         )
         assert result is not None
+        beta_diff = abs(beta_np[1] - result.beta_batch[1])
+        bench_metrics["beta_outdoor_np"] = float(beta_np[1])
+        bench_metrics["beta_outdoor_prod"] = float(result.beta_batch[1])
+        bench_metrics["beta_diff"] = float(beta_diff)
+        check_bench_metrics(num_regression, bench_metrics)
         # The production path adds ridge + column scaling, so they won't
         # be bit-identical, but β_outdoor should agree to ~1e-3.
-        assert abs(beta_np[1] - result.beta_batch[1]) < 1e-3
+        assert beta_diff < 1e-3
