@@ -57,13 +57,19 @@ class TestClassificationAggregation:
 
 
 class TestOneStepRmse:
-    def test_constant_zero_innovations_zero_rmse(self) -> None:
-        assert _one_step_rmse(np.zeros(100)) == 0.0
+    def test_constant_zero_innovations_zero_rmse(self, bench_metrics, num_regression) -> None:
+        rmse = _one_step_rmse(np.zeros(100))
+        assert rmse == 0.0
+        bench_metrics["rmse"] = float(rmse)
+        check_bench_metrics(num_regression, bench_metrics)
 
-    def test_handles_nans(self) -> None:
+    def test_handles_nans(self, bench_metrics, num_regression) -> None:
         innov = np.array([1.0, 2.0, np.nan, np.nan, 1.0])
         # RMSE over valid: sqrt((1+4+1)/3) = sqrt(2)
-        np.testing.assert_allclose(_one_step_rmse(innov), np.sqrt(2.0), rtol=1e-10)
+        rmse = _one_step_rmse(innov)
+        np.testing.assert_allclose(rmse, np.sqrt(2.0), rtol=1e-10)
+        bench_metrics["rmse"] = float(rmse)
+        check_bench_metrics(num_regression, bench_metrics)
 
     def test_all_nan_returns_nan(self) -> None:
         assert np.isnan(_one_step_rmse(np.full(10, np.nan)))
@@ -197,25 +203,35 @@ class TestEndToEndOnBundle:
         return run_phase4_lite(BUNDLE_PATH, n_restarts=3, seed=0)
 
     def test_returns_three_fit_target_zones(
-        self, envelope: CredibilityEnvelope
+        self, bench_metrics, num_regression, envelope: CredibilityEnvelope
     ) -> None:
         assert set(envelope.zones) == {"living_room", "dining_room", "bunkroom"}
+        bench_metrics["n_zones"] = len(envelope.zones)
+        check_bench_metrics(num_regression, bench_metrics)
 
     def test_overall_classification_is_a_known_value(
-        self, envelope: CredibilityEnvelope
+        self, bench_metrics, num_regression, envelope: CredibilityEnvelope
     ) -> None:
         assert envelope.overall_classification in {"good", "close", "poor"}
+        _rank = {"good": 0, "close": 1, "poor": 2}
+        bench_metrics["overall_class_rank"] = _rank[envelope.overall_classification]
+        check_bench_metrics(num_regression, bench_metrics)
 
     def test_each_zone_has_a_selected_model(
-        self, envelope: CredibilityEnvelope
+        self, bench_metrics, num_regression, envelope: CredibilityEnvelope
     ) -> None:
-        for z in envelope.zones.values():
+        _model = {"1R1C": 0, "2R2C": 1}
+        for name, z in envelope.zones.items():
             assert z.train_result.selected_model in {"1R1C", "2R2C"}
+            bench_metrics[f"{name}__model_rank"] = _model[z.train_result.selected_model]
+        check_bench_metrics(num_regression, bench_metrics)
 
-    def test_train_rmse_finite(self, envelope: CredibilityEnvelope) -> None:
-        for z in envelope.zones.values():
+    def test_train_rmse_finite(self, bench_metrics, num_regression, envelope: CredibilityEnvelope) -> None:
+        for name, z in envelope.zones.items():
             assert np.isfinite(z.train_rmse_c)
             assert z.train_rmse_c < 5.0  # sanity: shouldn't be wildly off
+            bench_metrics[f"{name}__train_rmse_c"] = float(z.train_rmse_c)
+        check_bench_metrics(num_regression, bench_metrics)
 
     def test_summary_mentions_each_zone(
         self, envelope: CredibilityEnvelope

@@ -57,20 +57,26 @@ class TestMakeOpenLoopInputs:
         unique_sps = sorted(set(df["hp_setpoint_c"]))
         assert unique_sps == [20.0, 22.0]
 
-    def test_outdoor_diurnal_oscillation(self) -> None:
+    def test_outdoor_diurnal_oscillation(self, bench_metrics, num_regression) -> None:
         # 24-h period at 5-min ticks = 288 steps; cover 2 cycles to detect cycling
         df = make_open_loop_inputs(n_steps=576)
         outdoor = df["outdoor_temp_c_om"].to_numpy()
         # Span should be roughly 2 × diurnal_amp (default 8°C → span ≥ 14°C)
         assert outdoor.max() - outdoor.min() > 14.0
+        bench_metrics["outdoor_span"] = float(outdoor.max() - outdoor.min())
+        bench_metrics["outdoor_mean"] = float(outdoor.mean())
+        check_bench_metrics(num_regression, bench_metrics)
 
-    def test_solar_zero_at_night_positive_at_noon(self) -> None:
+    def test_solar_zero_at_night_positive_at_noon(self, bench_metrics, num_regression) -> None:
         df = make_open_loop_inputs(n_steps=288)  # 24 hours
         sw = df["shortwave_w_m2"]
         # Hour 0 (midnight) should be zero
         assert sw.iloc[0] == 0.0
         # Hour 12 (noon, step 144) should be positive
         assert sw.iloc[144] > 100.0
+        bench_metrics["sw_midnight"] = float(sw.iloc[0])
+        bench_metrics["sw_noon"] = float(sw.iloc[144])
+        check_bench_metrics(num_regression, bench_metrics)
 
     def test_q_heat_zero_when_inactive(self) -> None:
         # PRBS produces both states; verify q_heat = 0 on inactive rows.
@@ -84,13 +90,15 @@ class TestMakeOpenLoopInputs:
         active_rows = df[df["hp_active"]]
         assert (active_rows["q_heat_proxy_w"] == 2500.0).all()
 
-    def test_prbs_duty_cycle_approximates_target(self) -> None:
+    def test_prbs_duty_cycle_approximates_target(self, bench_metrics, num_regression) -> None:
         # On a long sequence, mean hp_active should approximate the target duty cycle.
         df = make_open_loop_inputs(n_steps=10000, seed=42, prbs_duty_cycle=0.65)
         observed_duty = df["hp_active"].mean()
         assert abs(observed_duty - 0.65) < 0.05, (
             f"observed duty {observed_duty:.3f} differs from target 0.65 by > 0.05"
         )
+        bench_metrics["observed_duty"] = float(observed_duty)
+        check_bench_metrics(num_regression, bench_metrics)
 
     def test_prbs_produces_both_states(self) -> None:
         # PRBS must include transitions; not get stuck on or off.
@@ -98,7 +106,7 @@ class TestMakeOpenLoopInputs:
         unique = set(df["hp_active"].unique())
         assert unique == {True, False}, f"PRBS stuck in single state: {unique}"
 
-    def test_prbs_average_dwell_approximates_period(self) -> None:
+    def test_prbs_average_dwell_approximates_period(self, bench_metrics, num_regression) -> None:
         # Mean on-dwell should approximate prbs_avg_period_steps.
         df = make_open_loop_inputs(
             n_steps=20000, seed=123, prbs_avg_period_steps=12, prbs_duty_cycle=0.65
@@ -118,6 +126,9 @@ class TestMakeOpenLoopInputs:
             assert 8 < mean_dwell < 18, (
                 f"mean on-dwell {mean_dwell:.1f} far from target ~12 steps"
             )
+            bench_metrics["mean_dwell"] = mean_dwell
+            bench_metrics["n_pairs"] = int(n_pairs)
+            check_bench_metrics(num_regression, bench_metrics)
 
     def test_n_steps_parametrizes_length(self) -> None:
         df = make_open_loop_inputs(n_steps=42)
@@ -132,7 +143,7 @@ class TestSimulate1R1CRoomTemp:
         assert (room.index == inputs.index).all()
         assert len(room) == 100
 
-    def test_zero_inputs_yield_decay_to_zero(self) -> None:
+    def test_zero_inputs_yield_decay_to_zero(self, bench_metrics, num_regression) -> None:
         # Outdoor=0, q_heat=0, solar=0 → room decays from initial_temp toward 0
         idx = pd.date_range("2026-01-01", periods=500, freq="5min", tz="UTC")
         zeros = pd.DataFrame(
@@ -151,6 +162,9 @@ class TestSimulate1R1CRoomTemp:
         steps_per_3tau = int(3 * params.tau_seconds / 300.0)
         assert abs(room.iloc[steps_per_3tau]) < 2.0
         assert room.iloc[0] > 15.0  # close to initial
+        bench_metrics["room_initial"] = float(room.iloc[0])
+        bench_metrics["room_at_3tau"] = float(room.iloc[steps_per_3tau])
+        check_bench_metrics(num_regression, bench_metrics)
 
     def test_deterministic_with_seed(self) -> None:
         inputs = make_open_loop_inputs(n_steps=50, seed=7)
@@ -251,7 +265,7 @@ class TestSimulateInverterHPRoomTemp:
         assert (hp_active.index == inputs.index).all()
         assert len(room) == 200
 
-    def test_hp_active_emerges_from_physics_not_prbs(self) -> None:
+    def test_hp_active_emerges_from_physics_not_prbs(self, bench_metrics, num_regression) -> None:
         # PRBS in inputs.hp_active should be ignored — physics decides.
         inputs = make_open_loop_inputs(n_steps=200, seed=0)
         room, hp_active = simulate_inverter_hp_room_temp(
@@ -261,9 +275,12 @@ class TestSimulateInverterHPRoomTemp:
         # HP should be active most of the time when the simulator is running.
         assert hp_active.dtype == bool or hp_active.dtype == object
         # On heating regime, HP active ≫ 50%
-        assert float(hp_active.astype(int).mean()) > 0.5
+        active_fraction = float(hp_active.astype(int).mean())
+        assert active_fraction > 0.5
+        bench_metrics["active_fraction"] = active_fraction
+        check_bench_metrics(num_regression, bench_metrics)
 
-    def test_room_tracks_setpoint_when_hp_can_keep_up(self) -> None:
+    def test_room_tracks_setpoint_when_hp_can_keep_up(self, bench_metrics, num_regression) -> None:
         # In mild conditions with no solar, room should hover near setpoint.
         idx = pd.date_range("2026-01-01", periods=600, freq="5min", tz="UTC")
         steady = pd.DataFrame(
@@ -280,8 +297,11 @@ class TestSimulateInverterHPRoomTemp:
         )
         # After ample time at setpoint=20, room should sit near 20
         assert abs(room.iloc[-1] - 20.0) < 0.5
+        bench_metrics["room_final"] = float(room.iloc[-1])
+        bench_metrics["setpoint_error"] = float(abs(room.iloc[-1] - 20.0))
+        check_bench_metrics(num_regression, bench_metrics)
 
-    def test_capacity_curve_zeroes_below_cutoff(self) -> None:
+    def test_capacity_curve_zeroes_below_cutoff(self, bench_metrics, num_regression) -> None:
         # FUJITSU_HYPERHEAT_CAPACITY has cutoff at -32°C. Below that, HP
         # cannot heat at all — room should drift toward outdoor.
         idx = pd.date_range("2026-01-01", periods=400, freq="5min", tz="UTC")
@@ -300,6 +320,10 @@ class TestSimulateInverterHPRoomTemp:
         # τ=80h, dt=5min×400=33h ≈ 0.41τ; room drops by (1-exp(-0.41))×55=18°C
         # i.e. lands around 20 - 18 ≈ 2°C. Cutoff means HP can't fight decay.
         assert room.iloc[-1] < room.iloc[0] - 5.0
+        bench_metrics["room_initial"] = float(room.iloc[0])
+        bench_metrics["room_final"] = float(room.iloc[-1])
+        bench_metrics["drop"] = float(room.iloc[0] - room.iloc[-1])
+        check_bench_metrics(num_regression, bench_metrics)
 
     def test_deterministic_with_seed(self) -> None:
         inputs = make_open_loop_inputs(n_steps=100, seed=3)
@@ -338,7 +362,7 @@ class TestMakeInverterHPZoneTelemetry:
         unique = sorted(zt.df["q_heat_proxy_w"].unique().tolist())
         assert unique == pytest.approx([0.0, 1500.0])
 
-    def test_setpoint_modulated_proxy_carries_modulation(self) -> None:
+    def test_setpoint_modulated_proxy_carries_modulation(self, bench_metrics, num_regression) -> None:
         zt = make_inverter_hp_zone_telemetry(
             profile=_INVERTER_PROFILE, n_steps=600,
             nominal_capacity_w=1500.0, proxy_variant="setpoint_modulated",
@@ -353,3 +377,7 @@ class TestMakeInverterHPZoneTelemetry:
         assert (active_proxy > 0).mean() > 0.5  # majority modulated, some clipped
         assert active_proxy.std() > 0.0  # not pinned at any single value
         assert active_proxy.max() <= 1500.0 + 1e-9
+        bench_metrics["positive_fraction"] = float((active_proxy > 0).mean())
+        bench_metrics["proxy_std"] = float(active_proxy.std())
+        bench_metrics["proxy_max"] = float(active_proxy.max())
+        check_bench_metrics(num_regression, bench_metrics)
