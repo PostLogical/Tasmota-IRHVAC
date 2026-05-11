@@ -262,7 +262,7 @@ class _FakeBenchEntity(_PITestEntityRoomTempMixin):
 
     def __init__(self, config, head_calibration_bounds=None,
                  *, kappa_threshold=DEFAULT_KAPPA_THRESHOLD,
-                 monotonic=None):
+                 monotonic=None, skip_tick_output=True):
         from custom_components.tasmota_irhvac.pi.pi_controller import PIController
 
         # Hand-rolled hass fake exposing only the bench-active controller
@@ -288,7 +288,15 @@ class _FakeBenchEntity(_PITestEntityRoomTempMixin):
         self._attr_min_temp = self._min_temp
         self._attr_max_temp = self._max_temp
 
-        pi_kwargs = {"kappa_threshold": kappa_threshold}
+        pi_kwargs = {
+            "kappa_threshold": kappa_threshold,
+            # Default-True for bench: full_stack runs don't read the
+            # TickOutput dispatcher payload, and constructing one per
+            # tick (buffer snapshots + leverage scores) is the dominant
+            # hot path post-freezegun-fix.  Override to False only when
+            # a test asserts on tick_output / coordinator state.
+            "skip_tick_output": skip_tick_output,
+        }
         if monotonic is not None:
             pi_kwargs["monotonic"] = monotonic
         self._pi = PIController(self, config, **pi_kwargs)

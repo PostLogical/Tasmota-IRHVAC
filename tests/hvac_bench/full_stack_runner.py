@@ -669,399 +669,409 @@ def run_full_stack(
 
     # ── Main loop ────────────────────────────────────────────────────
 
-    for tick in range(n_ticks):
-        dt_seconds = tick_min * 60.0
 
-        # Update outdoor temp
-        model.outdoor_temp = outdoor_fn(tick)
+    # Single freeze_time context for the whole tick loop. freezegun
+    # __enter__ hashes every sys.modules entry — O(N_modules) per call.
+    # Per-tick context entry was the dominant cost in long full_stack
+    # runs (e.g. 14,400 ticks at 3-min × 30 days). Use the factory's
+    # move_to() per tick instead (see below).
+    _initial_sim_dt = _SIM_EPOCH + timedelta(seconds=adapter._sim_clock)
+    _freezer = freeze_time(_initial_sim_dt)
+    _frozen = _freezer.start()
+    try:
+        for tick in range(n_ticks):
+            dt_seconds = tick_min * 60.0
 
-        # Compute model input values.  Each input role injects heat through
-        # the physical pathway it represents, per Madsen & Holst (1995) and
-        # ASHRAE Handbook of Fundamentals (2021) Ch. 18:
-        #   - "solar"        → 30% air / 70% wall split (radiation through
-        #                      windows, partly absorbed by interior mass)
-        #   - "heat_source"  → 30% air / 70% wall split (radiant stove,
-        #                      ASHRAE convective fraction 0.3-0.5)
-        #   - "adjacent_zone"→ 100% wall (party-wall conduction; heat must
-        #                      pass through wall mass before reaching air)
-        #   - "other"        → 30% air / 70% wall (default split)
-        # The wall node feeds the air node via the existing tau_couple
-        # dynamics, producing realistic lag and damping.
-        input_values: dict[str, float] = {}
-        solar_proxy_value = 0.0
-        q_air_extra = 0.0
-        q_wall_extra = 0.0
-        for mi in config.model_inputs:
-            val = mi.schedule(tick) if mi.schedule is not None else 0.0
-            input_values[mi.name] = val
-            if mi.input_role == "solar":
-                # Solar handled inside model.step via the 2R2C split.
-                solar_proxy_value += val
-                continue
-            # Heat transfer scales with the FEATURE that drives β.  For
-            # delta_from_room inputs, the schedule reports absolute °C —
-            # convert to delta against current room temp before applying
-            # the per-unit heat rate.
-            feature_val = val - model.room_temp if mi.delta_from_room else val
-            q_total = mi.true_thermal_effect * feature_val
-            if mi.input_role == "adjacent_zone":
-                # Party-wall coupling: all heat enters at the wall node.
-                q_wall_extra += q_total
-            else:
-                # heat_source / other: ASHRAE 30/70 convective/radiative.
-                q_air_extra += q_total * 0.3
-                q_wall_extra += q_total * 0.7
+            # Update outdoor temp
+            model.outdoor_temp = outdoor_fn(tick)
 
-        # Apply disturbances
-        room_temp_offset = 0.0
-        if tick in disturbance_map:
-            for d in disturbance_map[tick]:
-                if d.field == "room_temp_offset":
-                    room_temp_offset = d.value
-                elif d.field in input_values:
-                    input_values[d.field] = d.value
-                    # Update solar_proxy if the disturbance overrides it
-                    for mi in config.model_inputs:
-                        if mi.name == d.field and mi.input_role == "solar":
-                            solar_proxy_value = d.value
+            # Compute model input values.  Each input role injects heat through
+            # the physical pathway it represents, per Madsen & Holst (1995) and
+            # ASHRAE Handbook of Fundamentals (2021) Ch. 18:
+            #   - "solar"        → 30% air / 70% wall split (radiation through
+            #                      windows, partly absorbed by interior mass)
+            #   - "heat_source"  → 30% air / 70% wall split (radiant stove,
+            #                      ASHRAE convective fraction 0.3-0.5)
+            #   - "adjacent_zone"→ 100% wall (party-wall conduction; heat must
+            #                      pass through wall mass before reaching air)
+            #   - "other"        → 30% air / 70% wall (default split)
+            # The wall node feeds the air node via the existing tau_couple
+            # dynamics, producing realistic lag and damping.
+            input_values: dict[str, float] = {}
+            solar_proxy_value = 0.0
+            q_air_extra = 0.0
+            q_wall_extra = 0.0
+            for mi in config.model_inputs:
+                val = mi.schedule(tick) if mi.schedule is not None else 0.0
+                input_values[mi.name] = val
+                if mi.input_role == "solar":
+                    # Solar handled inside model.step via the 2R2C split.
+                    solar_proxy_value += val
+                    continue
+                # Heat transfer scales with the FEATURE that drives β.  For
+                # delta_from_room inputs, the schedule reports absolute °C —
+                # convert to delta against current room temp before applying
+                # the per-unit heat rate.
+                feature_val = val - model.room_temp if mi.delta_from_room else val
+                q_total = mi.true_thermal_effect * feature_val
+                if mi.input_role == "adjacent_zone":
+                    # Party-wall coupling: all heat enters at the wall node.
+                    q_wall_extra += q_total
+                else:
+                    # heat_source / other: ASHRAE 30/70 convective/radiative.
+                    q_air_extra += q_total * 0.3
+                    q_wall_extra += q_total * 0.7
 
-        # Non-solar heat enters through model.step() below — no direct
-        # room_temp injection (would bypass wall-node dynamics).
+            # Apply disturbances
+            room_temp_offset = 0.0
+            if tick in disturbance_map:
+                for d in disturbance_map[tick]:
+                    if d.field == "room_temp_offset":
+                        room_temp_offset = d.value
+                    elif d.field in input_values:
+                        input_values[d.field] = d.value
+                        # Update solar_proxy if the disturbance overrides it
+                        for mi in config.model_inputs:
+                            if mi.name == d.field and mi.input_role == "solar":
+                                solar_proxy_value = d.value
 
-        # Read sensor (with optional disturbance offset)
-        sensor_reading = model.read_sensor() + room_temp_offset
+            # Non-solar heat enters through model.step() below — no direct
+            # room_temp injection (would bypass wall-node dynamics).
 
-        # Controller tick
-        adapter._sim_clock += dt_seconds
-        adapter._entity._attr_current_temperature = sensor_reading
-        pi._inputs.outdoor_temp = model.outdoor_temp
+            # Read sensor (with optional disturbance offset)
+            sensor_reading = model.read_sensor() + room_temp_offset
 
-        # Update model input entity states via the bench's MockStates registry.
-        # delta_from_room inputs need a temperature unit advertised so the
-        # controller's model_input_manager converts the absolute reading
-        # into a delta against current room.
-        for mi in config.model_inputs:
-            val = input_values[mi.name]
-            unit = "°C" if mi.delta_from_room else None
-            adapter.mock_states.set(mi.entity_id, val, unit)
+            # Controller tick
+            adapter._sim_clock += dt_seconds
+            adapter._entity._attr_current_temperature = sensor_reading
+            pi._inputs.outdoor_temp = model.outdoor_temp
 
-        # Sim-time wall clock via freezegun (patches `time.time()`,
-        # `datetime.now()`, and `dt_util.utcnow()`). Sim-time monotonic flows
-        # through PIController's constructor-injected `monotonic=lambda:
-        # adapter._sim_clock` (set inside TasmotaPIAdapter.__init__) — no global
-        # `time.monotonic` patching required.
-        _sim_dt = _SIM_EPOCH + timedelta(seconds=adapter._sim_clock)
-        with freeze_time(_sim_dt):
+            # Update model input entity states via the bench's MockStates registry.
+            # delta_from_room inputs need a temperature unit advertised so the
+            # controller's model_input_manager converts the absolute reading
+            # into a delta against current room.
+            for mi in config.model_inputs:
+                val = input_values[mi.name]
+                unit = "°C" if mi.delta_from_room else None
+                adapter.mock_states.set(mi.entity_id, val, unit)
+
+            # Sim-time wall clock: shift the outer freeze via the factory.
+            # move_to() is O(1) — no module-hash invalidation. The outer
+            # context (set before the loop) does the one-time patch setup.
+            _sim_dt = _SIM_EPOCH + timedelta(seconds=adapter._sim_clock)
+            _frozen.move_to(_sim_dt)
             adapter._loop.run_until_complete(pi._pi_tick())
 
-        hp_setpoint = float(pi._hp_setpoint)
+            hp_setpoint = float(pi._hp_setpoint)
 
-        # Zone model classification: mirror production logic
-        delta = sensor_reading - hp_setpoint
-        is_heating = (config.mode == "heat")
-        cal_min = (pi._head_calibration_min_heat if is_heating
-                   else pi._head_calibration_min_cool)
-        cal_max = (pi._head_calibration_max_heat if is_heating
-                   else pi._head_calibration_max_cool)
-        if is_heating:
-            _hp_on = delta < cal_min
-            _hp_off = delta > cal_max
-        else:
-            _hp_on = delta > cal_max
-            _hp_off = delta < cal_min
-        if _hp_on:
-            ticks_hp_on += 1
-            hp_state = "on"
-        elif _hp_off:
-            ticks_hp_off += 1
-            hp_state = "off"
-        else:
-            ticks_uncertain += 1
-            hp_state = "uncertain"
+            # Zone model classification: mirror production logic
+            delta = sensor_reading - hp_setpoint
+            is_heating = (config.mode == "heat")
+            cal_min = (pi._head_calibration_min_heat if is_heating
+                    else pi._head_calibration_min_cool)
+            cal_max = (pi._head_calibration_max_heat if is_heating
+                    else pi._head_calibration_max_cool)
+            if is_heating:
+                _hp_on = delta < cal_min
+                _hp_off = delta > cal_max
+            else:
+                _hp_on = delta > cal_max
+                _hp_off = delta < cal_min
+            if _hp_on:
+                ticks_hp_on += 1
+                hp_state = "on"
+            elif _hp_off:
+                ticks_hp_off += 1
+                hp_state = "off"
+            else:
+                ticks_uncertain += 1
+                hp_state = "uncertain"
 
-        # Advance thermal model.  All heat sources enter through the
-        # 2R2C air/wall split (solar inside the model; non-solar via
-        # q_air_extra / q_wall_extra computed above).
-        model.step(
-            hp_setpoint=hp_setpoint,
-            dt_minutes=tick_min,
-            solar_proxy=solar_proxy_value,
-            q_air_extra=q_air_extra,
-            q_wall_extra=q_wall_extra,
-            tick=tick,
-            mode=config.mode,
-        )
+            # Advance thermal model.  All heat sources enter through the
+            # 2R2C air/wall split (solar inside the model; non-solar via
+            # q_air_extra / q_wall_extra computed above).
+            model.step(
+                hp_setpoint=hp_setpoint,
+                dt_minutes=tick_min,
+                solar_proxy=solar_proxy_value,
+                q_air_extra=q_air_extra,
+                q_wall_extra=q_wall_extra,
+                tick=tick,
+                mode=config.mode,
+            )
 
-        # Metrics
-        error = config.desired_c - model.room_temp
-        abs_error = abs(error)
-        integral_sq_sum += pi._pi_integral ** 2
-        day_integral_sq += pi._pi_integral ** 2
+            # Metrics
+            error = config.desired_c - model.room_temp
+            abs_error = abs(error)
+            integral_sq_sum += pi._pi_integral ** 2
+            day_integral_sq += pi._pi_integral ** 2
 
-        deadband_error = max(0, abs_error - DEADBAND)
-        t_hours = (tick % ticks_per_day) * tick_min / 60.0  # day-relative
-        day_itae += t_hours * deadband_error
-        total_itae += tick * tick_min * deadband_error  # absolute
+            deadband_error = max(0, abs_error - DEADBAND)
+            t_hours = (tick % ticks_per_day) * tick_min / 60.0  # day-relative
+            day_itae += t_hours * deadband_error
+            total_itae += tick * tick_min * deadband_error  # absolute
 
-        # HP idle: setpoint at or below room (heat) or at/above room (cool)
-        # means HP is not outputting — any error is uncontrollable.
-        if config.mode == "cool":
-            hp_idle = hp_setpoint >= model.room_temp
-        else:
-            hp_idle = hp_setpoint <= model.room_temp
+            # HP idle: setpoint at or below room (heat) or at/above room (cool)
+            # means HP is not outputting — any error is uncontrollable.
+            if config.mode == "cool":
+                hp_idle = hp_setpoint >= model.room_temp
+            else:
+                hp_idle = hp_setpoint <= model.room_temp
 
-        is_violation = abs_error > DEADBAND
-        if is_violation:
-            total_violations += 1
-            day_violations += 1
-            cur_violation_streak += 1
-            if cur_violation_streak > longest_violation_streak:
-                longest_violation_streak = cur_violation_streak
-            if hp_idle:
-                unctrl_violations += 1
-                day_unctrl_viols += 1
-                # HP idle resets controllable streak: a violation the HP
-                # can't act on doesn't extend "how long was the controller
-                # stuck violating".
+            is_violation = abs_error > DEADBAND
+            if is_violation:
+                total_violations += 1
+                day_violations += 1
+                cur_violation_streak += 1
+                if cur_violation_streak > longest_violation_streak:
+                    longest_violation_streak = cur_violation_streak
+                if hp_idle:
+                    unctrl_violations += 1
+                    day_unctrl_viols += 1
+                    # HP idle resets controllable streak: a violation the HP
+                    # can't act on doesn't extend "how long was the controller
+                    # stuck violating".
+                    cur_ctrl_violation_streak = 0
+                else:
+                    ctrl_violations += 1
+                    day_ctrl_viols += 1
+                    cur_ctrl_violation_streak += 1
+                    if cur_ctrl_violation_streak > ctrl_longest_violation_streak:
+                        ctrl_longest_violation_streak = cur_ctrl_violation_streak
+                # Asymmetric: cold vs warm
+                if error > 0:  # error = desired - room, positive = room too cold
+                    cold_violations += 1
+                    day_cold_viols += 1
+                    if error > worst_undershoot:
+                        worst_undershoot = error
+                    if not hp_idle and error > ctrl_worst_undershoot:
+                        ctrl_worst_undershoot = error
+                else:
+                    warm_violations += 1
+                    day_warm_viols += 1
+                    if -error > worst_overshoot:
+                        worst_overshoot = -error
+                    if not hp_idle and -error > ctrl_worst_overshoot:
+                        ctrl_worst_overshoot = -error
+                # HP capacity-limited: HP active and pinned at its pushing limit
+                # (max in heat, min in cool) while still violating — outdoor has
+                # exceeded what the HP can deliver.
+                at_capacity_limit = (
+                    hp_setpoint >= pi._max_temp_c if config.mode == "heat"
+                    else hp_setpoint <= pi._min_temp_c
+                )
+                if not hp_idle and at_capacity_limit:
+                    hp_capacity_violations += 1
+                    cur_hp_capacity_streak += 1
+                    if cur_hp_capacity_streak > longest_hp_capacity_streak:
+                        longest_hp_capacity_streak = cur_hp_capacity_streak
+                    signed_err = model.room_temp - config.desired_c
+                    if abs(signed_err) > abs(worst_hp_capacity_error):
+                        worst_hp_capacity_error = signed_err
+                else:
+                    cur_hp_capacity_streak = 0
+            else:
+                cur_violation_streak = 0
                 cur_ctrl_violation_streak = 0
-            else:
-                ctrl_violations += 1
-                day_ctrl_viols += 1
-                cur_ctrl_violation_streak += 1
-                if cur_ctrl_violation_streak > ctrl_longest_violation_streak:
-                    ctrl_longest_violation_streak = cur_ctrl_violation_streak
-            # Asymmetric: cold vs warm
-            if error > 0:  # error = desired - room, positive = room too cold
-                cold_violations += 1
-                day_cold_viols += 1
-                if error > worst_undershoot:
-                    worst_undershoot = error
-                if not hp_idle and error > ctrl_worst_undershoot:
-                    ctrl_worst_undershoot = error
-            else:
-                warm_violations += 1
-                day_warm_viols += 1
-                if -error > worst_overshoot:
-                    worst_overshoot = -error
-                if not hp_idle and -error > ctrl_worst_overshoot:
-                    ctrl_worst_overshoot = -error
-            # HP capacity-limited: HP active and pinned at its pushing limit
-            # (max in heat, min in cool) while still violating — outdoor has
-            # exceeded what the HP can deliver.
-            at_capacity_limit = (
-                hp_setpoint >= pi._max_temp_c if config.mode == "heat"
-                else hp_setpoint <= pi._min_temp_c
-            )
-            if not hp_idle and at_capacity_limit:
-                hp_capacity_violations += 1
-                cur_hp_capacity_streak += 1
-                if cur_hp_capacity_streak > longest_hp_capacity_streak:
-                    longest_hp_capacity_streak = cur_hp_capacity_streak
-                signed_err = model.room_temp - config.desired_c
-                if abs(signed_err) > abs(worst_hp_capacity_error):
-                    worst_hp_capacity_error = signed_err
-            else:
                 cur_hp_capacity_streak = 0
-        else:
-            cur_violation_streak = 0
-            cur_ctrl_violation_streak = 0
-            cur_hp_capacity_streak = 0
 
-        # FF fraction: |FF| / (|FF| + |integral|)
-        ff_abs = abs(pi._ff_offset)
-        int_abs = abs(pi._pi_integral)
-        denom = ff_abs + int_abs
-        day_ff_sum += ff_abs
-        day_ff_plus_int_sum += denom
+            # FF fraction: |FF| / (|FF| + |integral|)
+            ff_abs = abs(pi._ff_offset)
+            int_abs = abs(pi._pi_integral)
+            denom = ff_abs + int_abs
+            day_ff_sum += ff_abs
+            day_ff_plus_int_sum += denom
 
-        # Saturation: at min or max setpoint
-        if hp_setpoint <= pi._min_temp_c or hp_setpoint >= pi._max_temp_c:
-            day_saturated += 1
+            # Saturation: at min or max setpoint
+            if hp_setpoint <= pi._min_temp_c or hp_setpoint >= pi._max_temp_c:
+                day_saturated += 1
 
-        # Record history
-        oc = getattr(pi, "_last_observation_context", None)
-        history.append({
-            "tick": tick,
-            "minute": tick * config.tick_minutes,
-            "room_temp": model.room_temp,
-            "sensor_reading": sensor_reading,
-            "hp_setpoint": hp_setpoint,
-            "hp_state": hp_state,
-            "integral": pi._pi_integral,
-            "ff_offset": pi._ff_offset,
-            "ff_fraction": ff_abs / denom if denom > 0 else 0.0,
-            "error": error,
-            "outdoor": model.outdoor_temp,
-            "d_term": getattr(pi, "_pi_d_filtered", 0.0),
-            "rls_obs_count": pi._rls_heat.observation_count,
-            "obs_admitted": oc.admitted if oc is not None else None,
-            "obs_score": oc.score if oc is not None else None,
-            "obs_evicted_ts": oc.evicted_timestamp if oc is not None else None,
-            "obs_min_incumbent_score": oc.min_incumbent_score if oc is not None else None,
-            "obs_rejection_reason": oc.rejection_reason if oc is not None else None,
-            **{f"input_{mi.name}": input_values[mi.name]
-               for mi in config.model_inputs},
-        })
+            # Record history
+            oc = getattr(pi, "_last_observation_context", None)
+            history.append({
+                "tick": tick,
+                "minute": tick * config.tick_minutes,
+                "room_temp": model.room_temp,
+                "sensor_reading": sensor_reading,
+                "hp_setpoint": hp_setpoint,
+                "hp_state": hp_state,
+                "integral": pi._pi_integral,
+                "ff_offset": pi._ff_offset,
+                "ff_fraction": ff_abs / denom if denom > 0 else 0.0,
+                "error": error,
+                "outdoor": model.outdoor_temp,
+                "d_term": getattr(pi, "_pi_d_filtered", 0.0),
+                "rls_obs_count": pi._rls_heat.observation_count,
+                "obs_admitted": oc.admitted if oc is not None else None,
+                "obs_score": oc.score if oc is not None else None,
+                "obs_evicted_ts": oc.evicted_timestamp if oc is not None else None,
+                "obs_min_incumbent_score": oc.min_incumbent_score if oc is not None else None,
+                "obs_rejection_reason": oc.rejection_reason if oc is not None else None,
+                **{f"input_{mi.name}": input_values[mi.name]
+                for mi in config.model_inputs},
+            })
 
-        # Trigger batch WLS at intervals
-        if tick > 0 and tick % batch_interval_ticks == 0:
-            pi._run_batch_analysis()
-            batch_count += 1
+            # Trigger batch WLS at intervals
+            if tick > 0 and tick % batch_interval_ticks == 0:
+                pi._run_batch_analysis()
+                batch_count += 1
 
-            if config.batch_callback is not None:
-                config.batch_callback(batch_count, pi)
+                if config.batch_callback is not None:
+                    config.batch_callback(batch_count, pi)
 
-            # Snapshot coefficients
-            _snapshot_coefs(pi, batch_count, config.model_inputs,
-                            true_coefs, coef_trajectory)
+                # Snapshot coefficients
+                _snapshot_coefs(pi, batch_count, config.model_inputs,
+                                true_coefs, coef_trajectory)
 
-            # κ and covariance trace at batch time
-            rls = pi._rls_heat
-            p_diag = rls.get_covariance_diagonal()
-            batch_covariance_trace.append(sum(p_diag))
-            kappa = pi._cached_kappa
-            batch_kappa.append(kappa if kappa is not None else float("inf"))
+                # κ and covariance trace at batch time
+                rls = pi._rls_heat
+                p_diag = rls.get_covariance_diagonal()
+                batch_covariance_trace.append(sum(p_diag))
+                kappa = pi._cached_kappa
+                batch_kappa.append(kappa if kappa is not None else float("inf"))
 
-            # WLS standard errors (per-coefficient σ̂) at batch time —
-            # tr(WLS covariance) = Σ σ̂² is the batch-side analog of tr(P)
-            # and the right CRLB-aligned learning-quality metric since
-            # online RLS was removed.
-            batch_result = pi._last_batch_result
-            if batch_result is not None and batch_result.beta_std_err:
-                batch_std_err_trajectory.append(list(batch_result.beta_std_err))
-            else:
-                batch_std_err_trajectory.append([])
+                # WLS standard errors (per-coefficient σ̂) at batch time —
+                # tr(WLS covariance) = Σ σ̂² is the batch-side analog of tr(P)
+                # and the right CRLB-aligned learning-quality metric since
+                # online RLS was removed.
+                batch_result = pi._last_batch_result
+                if batch_result is not None and batch_result.beta_std_err:
+                    batch_std_err_trajectory.append(list(batch_result.beta_std_err))
+                else:
+                    batch_std_err_trajectory.append([])
 
-            # Check convergence
-            if batches_to_converge is None:
-                snap = coef_trajectory[-1]
-                converged = all(
-                    abs(snap.get(name, 0) - true_val) <= 0.3
-                    for name, true_val in true_coefs.items()
-                    if name in snap and not snap.get(f"{name}_frozen", True)
-                )
-                if converged:
-                    batches_to_converge = batch_count
+                # Check convergence
+                if batches_to_converge is None:
+                    snap = coef_trajectory[-1]
+                    converged = all(
+                        abs(snap.get(name, 0) - true_val) <= 0.3
+                        for name, true_val in true_coefs.items()
+                        if name in snap and not snap.get(f"{name}_frozen", True)
+                    )
+                    if converged:
+                        batches_to_converge = batch_count
 
-        # End-of-day rollup
-        if (tick + 1) % ticks_per_day == 0 and tick > 0:
-            day_slice = history[day_start_tick:tick + 1]
-            day_len = len(day_slice)
-            day_errors = [abs(h["room_temp"] - config.desired_c)
-                          for h in day_slice]
+            # End-of-day rollup
+            if (tick + 1) % ticks_per_day == 0 and tick > 0:
+                day_slice = history[day_start_tick:tick + 1]
+                day_len = len(day_slice)
+                day_errors = [abs(h["room_temp"] - config.desired_c)
+                            for h in day_slice]
 
-            daily_itae.append(day_itae)
-            daily_violations.append(day_violations)
-            daily_reversals.append(count_reversals(day_slice))
-            daily_mae.append(sum(day_errors) / day_len)
-            daily_integral_rms.append(
-                math.sqrt(day_integral_sq / ticks_per_day)
-            )
-
-            # Comfort (total and controllable-only)
-            in_deadband = sum(1 for e in day_errors if e <= DEADBAND)
-            daily_comfort_pct.append(in_deadband / day_len * 100.0)
-            ctrl_ticks = day_len - day_unctrl_viols
-            ctrl_in_band = ctrl_ticks - day_ctrl_viols
-            daily_ctrl_comfort_pct.append(
-                ctrl_in_band / ctrl_ticks * 100.0 if ctrl_ticks > 0 else 100.0
-            )
-            daily_cold_violations.append(day_cold_viols)
-            daily_warm_violations.append(day_warm_viols)
-
-            # Learning
-            daily_ff_fraction.append(
-                day_ff_sum / day_ff_plus_int_sum
-                if day_ff_plus_int_sum > 0 else 0.0
-            )
-            rls = pi._rls_heat
-            p_diag = rls.get_covariance_diagonal()
-            daily_covariance_trace.append(sum(p_diag))
-            buf = pi._observation_buffer_heat
-            buf_max = getattr(buf, "_max_size", 500)
-            daily_buffer_utilization.append(
-                len(buf) / buf_max if buf_max > 0 else 0.0
-            )
-
-            # Equipment
-            daily_setpoint_limited_pct.append(day_saturated / day_len * 100.0)
-            daily_rapid_sp_changes.append(
-                _count_rapid_sp_changes(day_slice, tick_min)
-            )
-            total_rapid_sp_changes += daily_rapid_sp_changes[-1]
-
-            # Reset accumulators
-            day_itae = 0.0
-            day_violations = 0
-            day_cold_viols = 0
-            day_warm_viols = 0
-            day_ctrl_viols = 0
-            day_unctrl_viols = 0
-            day_integral_sq = 0.0
-            day_ff_sum = 0.0
-            day_ff_plus_int_sum = 0.0
-            day_saturated = 0
-            day_start_tick = tick + 1
-
-        # Checkpoints
-        current_day = tick // ticks_per_day
-        for cp in checkpoints:
-            cp_interval_ticks = cp.interval_days * ticks_per_day
-            if (tick + 1) % cp_interval_ticks == 0 and tick > 0:
-                # Build period metrics (since last checkpoint)
-                period_slice = history[last_checkpoint_tick:tick + 1]
-                period_errors = [abs(h["room_temp"] - config.desired_c)
-                                 for h in period_slice]
-                period_viols = sum(1 for e in period_errors if e > DEADBAND)
-                period_itae_val = sum(
-                    (i * tick_min / 60.0) * max(0, e - DEADBAND)
-                    for i, e in enumerate(period_errors)
+                daily_itae.append(day_itae)
+                daily_violations.append(day_violations)
+                daily_reversals.append(count_reversals(day_slice))
+                daily_mae.append(sum(day_errors) / day_len)
+                daily_integral_rms.append(
+                    math.sqrt(day_integral_sq / ticks_per_day)
                 )
 
-                # Current coefficients
-                current_coefs, current_errors = _get_coef_state(
-                    pi, config.model_inputs, true_coefs
+                # Comfort (total and controllable-only)
+                in_deadband = sum(1 for e in day_errors if e <= DEADBAND)
+                daily_comfort_pct.append(in_deadband / day_len * 100.0)
+                ctrl_ticks = day_len - day_unctrl_viols
+                ctrl_in_band = ctrl_ticks - day_ctrl_viols
+                daily_ctrl_comfort_pct.append(
+                    ctrl_in_band / ctrl_ticks * 100.0 if ctrl_ticks > 0 else 100.0
+                )
+                daily_cold_violations.append(day_cold_viols)
+                daily_warm_violations.append(day_warm_viols)
+
+                # Learning
+                daily_ff_fraction.append(
+                    day_ff_sum / day_ff_plus_int_sum
+                    if day_ff_plus_int_sum > 0 else 0.0
+                )
+                rls = pi._rls_heat
+                p_diag = rls.get_covariance_diagonal()
+                daily_covariance_trace.append(sum(p_diag))
+                buf = pi._observation_buffer_heat
+                buf_max = getattr(buf, "_max_size", 500)
+                daily_buffer_utilization.append(
+                    len(buf) / buf_max if buf_max > 0 else 0.0
                 )
 
-                # Learning state for checkpoint
-                rls_cp = pi._rls_heat
-                p_diag_cp = rls_cp.get_covariance_diagonal()
-                ff_a = abs(pi._ff_offset)
-                int_a = abs(pi._pi_integral)
-                denom_cp = ff_a + int_a
-                buf_cp = pi._observation_buffer_heat
-                buf_max_cp = getattr(buf_cp, "_max_size", 500)
-
-                state = CheckpointState(
-                    tick=tick,
-                    day=current_day,
-                    elapsed_days=(tick + 1) * tick_min / (60.0 * 24.0),
-                    history=history,
-                    coef_trajectory=coef_trajectory,
-                    current_coefs=current_coefs,
-                    true_coefs=true_coefs,
-                    coef_errors=current_errors,
-                    integral_rms=math.sqrt(
-                        integral_sq_sum / (tick + 1)
-                    ),
-                    batch_count=batch_count,
-                    batches_to_converge=batches_to_converge,
-                    period_itae=period_itae_val,
-                    period_violations=period_viols,
-                    period_reversals=count_reversals(period_slice),
-                    period_mae=(sum(period_errors) / len(period_errors)
-                                if period_errors else 0.0),
-                    total_itae=total_itae,
-                    total_violations=total_violations,
-                    ff_fraction=ff_a / denom_cp if denom_cp > 0 else 0.0,
-                    covariance_trace=sum(p_diag_cp),
-                    buffer_utilization=(
-                        len(buf_cp) / buf_max_cp if buf_max_cp > 0 else 0.0
-                    ),
-                    pi=pi,
+                # Equipment
+                daily_setpoint_limited_pct.append(day_saturated / day_len * 100.0)
+                daily_rapid_sp_changes.append(
+                    _count_rapid_sp_changes(day_slice, tick_min)
                 )
-                cp.callback(state)
-                last_checkpoint_tick = tick + 1
+                total_rapid_sp_changes += daily_rapid_sp_changes[-1]
+
+                # Reset accumulators
+                day_itae = 0.0
+                day_violations = 0
+                day_cold_viols = 0
+                day_warm_viols = 0
+                day_ctrl_viols = 0
+                day_unctrl_viols = 0
+                day_integral_sq = 0.0
+                day_ff_sum = 0.0
+                day_ff_plus_int_sum = 0.0
+                day_saturated = 0
+                day_start_tick = tick + 1
+
+            # Checkpoints
+            current_day = tick // ticks_per_day
+            for cp in checkpoints:
+                cp_interval_ticks = cp.interval_days * ticks_per_day
+                if (tick + 1) % cp_interval_ticks == 0 and tick > 0:
+                    # Build period metrics (since last checkpoint)
+                    period_slice = history[last_checkpoint_tick:tick + 1]
+                    period_errors = [abs(h["room_temp"] - config.desired_c)
+                                    for h in period_slice]
+                    period_viols = sum(1 for e in period_errors if e > DEADBAND)
+                    period_itae_val = sum(
+                        (i * tick_min / 60.0) * max(0, e - DEADBAND)
+                        for i, e in enumerate(period_errors)
+                    )
+
+                    # Current coefficients
+                    current_coefs, current_errors = _get_coef_state(
+                        pi, config.model_inputs, true_coefs
+                    )
+
+                    # Learning state for checkpoint
+                    rls_cp = pi._rls_heat
+                    p_diag_cp = rls_cp.get_covariance_diagonal()
+                    ff_a = abs(pi._ff_offset)
+                    int_a = abs(pi._pi_integral)
+                    denom_cp = ff_a + int_a
+                    buf_cp = pi._observation_buffer_heat
+                    buf_max_cp = getattr(buf_cp, "_max_size", 500)
+
+                    state = CheckpointState(
+                        tick=tick,
+                        day=current_day,
+                        elapsed_days=(tick + 1) * tick_min / (60.0 * 24.0),
+                        history=history,
+                        coef_trajectory=coef_trajectory,
+                        current_coefs=current_coefs,
+                        true_coefs=true_coefs,
+                        coef_errors=current_errors,
+                        integral_rms=math.sqrt(
+                            integral_sq_sum / (tick + 1)
+                        ),
+                        batch_count=batch_count,
+                        batches_to_converge=batches_to_converge,
+                        period_itae=period_itae_val,
+                        period_violations=period_viols,
+                        period_reversals=count_reversals(period_slice),
+                        period_mae=(sum(period_errors) / len(period_errors)
+                                    if period_errors else 0.0),
+                        total_itae=total_itae,
+                        total_violations=total_violations,
+                        ff_fraction=ff_a / denom_cp if denom_cp > 0 else 0.0,
+                        covariance_trace=sum(p_diag_cp),
+                        buffer_utilization=(
+                            len(buf_cp) / buf_max_cp if buf_max_cp > 0 else 0.0
+                        ),
+                        pi=pi,
+                    )
+                    cp.callback(state)
+                    last_checkpoint_tick = tick + 1
+    finally:
+        _freezer.stop()
 
     # ── Final results ────────────────────────────────────────────────
 

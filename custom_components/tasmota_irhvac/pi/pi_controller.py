@@ -248,6 +248,7 @@ class PIController:
         *,
         kappa_threshold: float = DEFAULT_KAPPA_THRESHOLD,
         monotonic: Callable[[], float] = time.monotonic,
+        skip_tick_output: bool = False,
     ) -> None:
         """Initialize PI controller.
 
@@ -266,10 +267,19 @@ class PIController:
                 ``pi._monotonic`` post-construction; do NOT use module-level
                 ``mock.patch("time.monotonic")`` — those patches don't reach
                 the controller's bound callable.
+            skip_tick_output: Bench-only seam.  When True, ``fire_dispatcher``
+                returns immediately without constructing a ``TickOutput`` or
+                publishing via the coordinator.  TickOutput construction is
+                hot (per-tick buffer-snapshot leverage scores etc.); long
+                full_stack bench runs don't read it, and skipping reclaims
+                substantial wall time at fine cadences.  Production should
+                always leave this False — it disables the observability
+                surface that the HA dispatcher / event log consume.
         """
         self._entity = entity
         self._kappa_threshold: float = float(kappa_threshold)
         self._monotonic: Callable[[], float] = monotonic
+        self._skip_tick_output: bool = bool(skip_tick_output)
         self._log_prefix: str = ""  # set in async_added when entity_id is known
 
         # Convert entity temp limits to °C for internal PI math
@@ -3262,7 +3272,14 @@ class PIController:
         still called from many places that semantically mean "notify
         downstream that tick state changed." Could be renamed to
         `publish_tick` in a future cleanup.
+
+        When ``skip_tick_output=True`` (bench-only), return immediately —
+        ``_build_tick_output()`` is hot (per-tick buffer snapshots,
+        leverage-score recomputation) and bench full_stack runs don't
+        consume the resulting TickOutput.  Production always builds.
         """
+        if self._skip_tick_output:
+            return
         # Build typed tick output before notifying consumers — listeners
         # reading `last_tick` or `coordinator.data` must see post-tick state.
         self._last_tick = self._build_tick_output()
