@@ -7,6 +7,7 @@ controller performance at the 5th/95th percentile, not just the mean.
 import pytest
 
 from tests.hvac_bench.adapters import TasmotaPIAdapter
+from tests.hvac_bench.conftest import check_bench_metrics
 from tests.hvac_bench.house_profiles import QUICK_PROFILES
 from tests.hvac_bench.thermal_model import ThermalModel2R2C as ThermalModel
 from tests.hvac_bench.runner import run_scenario
@@ -38,7 +39,7 @@ class TestColdStartMonteCarlo:
     """Cold start with noise: verify 95th percentile performance."""
 
     @pytest.mark.parametrize("profile_name", ["standard_residential"])
-    def test_cold_start_95th_pct(self, profile_name):
+    def test_cold_start_95th_pct(self, bench_metrics, num_regression, profile_name):
         """95th percentile ITAE should be bounded."""
         profile = QUICK_PROFILES[profile_name]
         itaes = []
@@ -63,6 +64,10 @@ class TestColdStartMonteCarlo:
         assert p95 < p50 * 3.0, (
             f"95th percentile ITAE ({p95:.1f}) is >3x median ({p50:.1f})"
         )
+        bench_metrics["p50_itae"] = float(p50)
+        bench_metrics["p95_itae"] = float(p95)
+        bench_metrics["ratio"] = float(p95 / p50) if p50 else 0.0
+        check_bench_metrics(num_regression, bench_metrics)
 
 
 # ── Steady State Limit Cycle Probability ──────────────────────────────────
@@ -72,7 +77,7 @@ class TestSteadyStateLimitCycleProbability:
     """Steady state with noise: what fraction of runs show limit cycles?"""
 
     @pytest.mark.parametrize("profile_name", ["standard_residential"])
-    def test_limit_cycle_probability(self, profile_name):
+    def test_limit_cycle_probability(self, bench_metrics, num_regression, profile_name):
         """Less than 20% of runs should have >3 reversals after settling."""
         profile = QUICK_PROFILES[profile_name]
         cycle_runs = 0
@@ -110,6 +115,9 @@ class TestSteadyStateLimitCycleProbability:
         # expected (fast air response → setpoint bounces between adjacent
         # integers). Only flag persistent multi-degree oscillation (>8 reversals).
         assert pct < 30, f"{pct:.0f}% of runs had limit cycles (>30% threshold)"
+        bench_metrics["cycle_pct"] = float(pct)
+        bench_metrics["cycle_runs"] = int(cycle_runs)
+        check_bench_metrics(num_regression, bench_metrics)
 
 
 # ── Cold Snap Monte Carlo ────────────────────────────────────────────────
@@ -119,7 +127,7 @@ class TestColdSnapMonteCarlo:
     """Cold snap with noise: verify comfort violations at 95th percentile."""
 
     @pytest.mark.parametrize("profile_name", ["standard_residential"])
-    def test_cold_snap_comfort(self, profile_name):
+    def test_cold_snap_comfort(self, bench_metrics, num_regression, profile_name):
         profile = QUICK_PROFILES[profile_name]
         cold_ticks_list = []
 
@@ -146,3 +154,6 @@ class TestColdSnapMonteCarlo:
 
         # 95th percentile shouldn't be drastically worse
         assert p95 < 12, f"95th percentile cold ticks ({p95}) too high"
+        bench_metrics["p50_cold_ticks"] = int(p50)
+        bench_metrics["p95_cold_ticks"] = int(p95)
+        check_bench_metrics(num_regression, bench_metrics)
