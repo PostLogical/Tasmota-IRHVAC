@@ -37,6 +37,7 @@ import pytest
 
 from tests.hvac_bench.disturbances import Disturbance as ThermalDisturbance
 from tests.hvac_bench.conftest import check_bench_metrics
+from tests.hvac_bench.constants import TICK_MINUTES_DEFAULT
 from tests.hvac_bench.full_stack_runner import (
     FullStackConfig,
     ModelInputSpec,
@@ -181,7 +182,7 @@ class TestDirectActiveSource:
                     input_role="heat_source",
                     _true_ff_coef=-3.0,
                     seed_heat=0.0,
-                    schedule=make_pellet_stove_schedule(15.0),
+                    schedule=make_pellet_stove_schedule(TICK_MINUTES_DEFAULT),
                 ),
             ],
             relax_kappa_gate=True,
@@ -275,7 +276,7 @@ class TestAdjacentZoneProxy:
                     input_role="adjacent_zone",
                     _true_ff_coef=-0.4,  # moderate party-wall coupling
                     seed_heat=0.0,
-                    schedule=make_dr_temp_schedule(15.0),
+                    schedule=make_dr_temp_schedule(TICK_MINUTES_DEFAULT),
                     delta_from_room=True,
                 ),
             ],
@@ -352,7 +353,7 @@ class TestPurePassiveAdjacent:
                     input_role="adjacent_zone",
                     _true_ff_coef=-0.2,
                     seed_heat=0.0,
-                    schedule=make_passive_zone_schedule(15.0),
+                    schedule=make_passive_zone_schedule(TICK_MINUTES_DEFAULT),
                     delta_from_room=True,
                 ),
             ],
