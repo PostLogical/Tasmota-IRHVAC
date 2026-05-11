@@ -89,34 +89,46 @@ class StoveCycleModel:
 # ── Enhanced Run with Stove ───────────────────────────────────────────────
 
 
-def run_with_stove(controller, model, stove, n_ticks, mode="heat",
-                   outdoor_schedule=None, stove_on_ticks=(0, None),
-                   tick_interval_min=15.0):
+def run_with_stove(controller, model, stove, duration_minutes, mode="heat",
+                   outdoor_minute_schedule=None, stove_on_minutes=(0, None),
+                   tick_interval_min=None):
     """Run simulation with stove cycling.
 
     Args:
-        stove_on_ticks: (start, end) ticks when stove thermostat is on.
-            None for end means stays on.
+        duration_minutes: total simulated wall-clock duration.
+        outdoor_minute_schedule: callable(minute) -> outdoor_temp.
+        stove_on_minutes: (start_min, end_min) wall-clock when stove
+            thermostat is on. None for end means stays on.
+        tick_interval_min: minutes per tick.  Defaults to
+            TICK_MINUTES_DEFAULT (honors --tick-minutes).
 
     Returns:
         history list with additional stove fields.
     """
+    from tests.hvac_bench.constants import TICK_MINUTES_DEFAULT
+    if tick_interval_min is None:
+        tick_interval_min = TICK_MINUTES_DEFAULT
     dt_seconds = tick_interval_min * 60.0
+    n_ticks = int(round(duration_minutes / tick_interval_min))
     controller.set_mode(mode)
 
     history = []
-    stove_start, stove_end = stove_on_ticks
+    stove_start_min, stove_end_min = stove_on_minutes
 
     for tick in range(n_ticks):
+        minute = tick * tick_interval_min
         # Outdoor schedule
-        if outdoor_schedule is not None:
-            if callable(outdoor_schedule):
-                model.outdoor_temp = outdoor_schedule(tick)
+        if outdoor_minute_schedule is not None:
+            if callable(outdoor_minute_schedule):
+                model.outdoor_temp = outdoor_minute_schedule(minute)
 
-        # Stove on/off schedule
-        if tick == stove_start:
+        # Stove on/off schedule: fire on the tick that contains the
+        # transition minute (was `tick == stove_start` at fixed cadence).
+        if stove_start_min is not None and \
+                stove_start_min <= minute < stove_start_min + tick_interval_min:
             stove.turn_on()
-        if stove_end is not None and tick == stove_end:
+        if stove_end_min is not None and \
+                stove_end_min <= minute < stove_end_min + tick_interval_min:
             stove.turn_off()
 
         # Read sensor
@@ -150,6 +162,7 @@ def run_with_stove(controller, model, stove, n_ticks, mode="heat",
 
         history.append({
             "tick": tick,
+            "minute": minute,
             "room_temp": model.room_temp,
             "sensor_reading": sensor_reading,
             "desired": desired,
@@ -195,14 +208,16 @@ class TestTrackedSetpointPhases:
 
         # Run longer to average out phase coupling between stove cycle
         # and HP limit cycle (both respond to same temperature signal).
-        history = run_with_stove(ctrl, model, stove, n_ticks=96,
-                                 stove_on_ticks=(4, None))
+        history = run_with_stove(ctrl, model, stove,
+                                 duration_minutes=24 * 60,
+                                 stove_on_minutes=(60, None))
 
-        # Collect raw setpoints during settled stove operation (after tick 32)
+        # Collect raw setpoints during settled stove operation (8h+ wall-clock;
+        # was tick > 32 at 15-min cadence = minute > 480).
         burn_setpoints = [h["raw_setpoint"] for h in history
-                         if h["tick"] > 32 and h["stove_burning"]]
+                         if h["minute"] > 480 and h["stove_burning"]]
         idle_setpoints = [h["raw_setpoint"] for h in history
-                         if h["tick"] > 32 and not h["stove_burning"]
+                         if h["minute"] > 480 and not h["stove_burning"]
                          and h["stove_thermostat_on"]]
 
         if burn_setpoints and idle_setpoints:
@@ -244,18 +259,19 @@ class TestBeforeAfterEstimation:
         model = ThermalModel(profile=profile, initial_temp=20.5, outdoor_temp=2.0)
         stove = StoveCycleModel(setpoint_c=21.0, heat_rate_c_per_min=0.15)
 
-        # Phase 1: HP active, no stove (ticks 0-15)
-        # Phase 2: Stove on, HP still computing (ticks 16-47)
-        history = run_with_stove(ctrl, model, stove, n_ticks=48,
-                                 stove_on_ticks=(16, None))
+        # Phase 1: HP active, no stove (0–240 min wall-clock)
+        # Phase 2: Stove on, HP still computing (240+ min wall-clock)
+        history = run_with_stove(ctrl, model, stove,
+                                 duration_minutes=12 * 60,
+                                 stove_on_minutes=(240, None))
 
-        # Capture HP state before stove (use raw setpoint)
-        pre_stove = [h for h in history if 12 <= h["tick"] <= 15]
+        # Capture HP state before stove (was ticks 12-15 at 15-min = min 180-225).
+        pre_stove = [h for h in history if 180 <= h["minute"] <= 225]
         avg_pre_raw = sum(h["raw_setpoint"] for h in pre_stove) / len(pre_stove)
         avg_pre_integral = sum(h["integral"] for h in pre_stove) / len(pre_stove)
 
-        # Capture HP tracked state during stove (settled period)
-        during_stove = [h for h in history if 32 <= h["tick"] <= 47]
+        # Capture HP tracked state during stove (was ticks 32-47 = min 480-705).
+        during_stove = [h for h in history if 480 <= h["minute"] <= 705]
         avg_during_raw = sum(h["raw_setpoint"] for h in during_stove) / len(during_stove)
         avg_during_integral = sum(h["integral"] for h in during_stove) / len(during_stove)
 
@@ -295,21 +311,22 @@ class TestSessionVsPhaseCoefficient:
         model = ThermalModel(profile=profile, initial_temp=20.5, outdoor_temp=-6.0)
         stove = StoveCycleModel(setpoint_c=21.0, heat_rate_c_per_min=0.15)
 
-        history = run_with_stove(ctrl, model, stove, n_ticks=64,
-                                 stove_on_ticks=(8, None))
+        history = run_with_stove(ctrl, model, stove,
+                                 duration_minutes=16 * 60,
+                                 stove_on_minutes=(120, None))
 
-        # Pre-stove baseline
-        pre = [h for h in history if 4 <= h["tick"] <= 7]
+        # Pre-stove baseline (was ticks 4-7 at 15-min = min 60-105).
+        pre = [h for h in history if 60 <= h["minute"] <= 105]
         baseline_sp = sum(h["hp_setpoint"] for h in pre) / len(pre)
 
-        # Phase-aware during stove (after settling)
+        # Phase-aware during stove (after settling, was tick > 24 = min > 360).
         burn_sp = [h["hp_setpoint"] for h in history
-                   if h["tick"] > 24 and h["stove_burning"]]
+                   if h["minute"] > 360 and h["stove_burning"]]
         idle_sp = [h["hp_setpoint"] for h in history
-                   if h["tick"] > 24 and not h["stove_burning"]
+                   if h["minute"] > 360 and not h["stove_burning"]
                    and h["stove_thermostat_on"]]
         all_sp = [h["hp_setpoint"] for h in history
-                  if h["tick"] > 24 and h["stove_thermostat_on"]]
+                  if h["minute"] > 360 and h["stove_thermostat_on"]]
 
         if burn_sp and idle_sp and all_sp:
             avg_burn = sum(burn_sp) / len(burn_sp)
@@ -358,15 +375,18 @@ class TestOutdoorVariation:
             model = ThermalModel(profile=profile, initial_temp=20.5, outdoor_temp=5.0)
             stove = StoveCycleModel(setpoint_c=21.0, heat_rate_c_per_min=0.15)
 
-            def outdoor(tick, change=outdoor_change):
-                return 5.0 + (tick / 48.0) * change
+            # Outdoor ramps over the full 720-min run (was 48-tick at 15-min).
+            def outdoor(minute, change=outdoor_change):
+                return 5.0 + (minute / (12 * 60)) * change
 
-            history = run_with_stove(ctrl, model, stove, n_ticks=48,
-                                     stove_on_ticks=(16, None),
-                                     outdoor_schedule=outdoor)
+            history = run_with_stove(ctrl, model, stove,
+                                     duration_minutes=12 * 60,
+                                     stove_on_minutes=(240, None),
+                                     outdoor_minute_schedule=outdoor)
 
-            pre = [h for h in history if 12 <= h["tick"] <= 15]
-            during = [h for h in history if 32 <= h["tick"] <= 47]
+            # Was ticks 12-15 (min 180-225), ticks 32-47 (min 480-705).
+            pre = [h for h in history if 180 <= h["minute"] <= 225]
+            during = [h for h in history if 480 <= h["minute"] <= 705]
 
             if pre and during:
                 pre_sp = sum(h["hp_setpoint"] for h in pre) / len(pre)
@@ -394,21 +414,22 @@ class TestStoveOffResume:
         model = ThermalModel(profile=profile, initial_temp=20.5, outdoor_temp=2.0)
         stove = StoveCycleModel(setpoint_c=21.0, heat_rate_c_per_min=0.15)
 
-        # Stove on ticks 8-31, off at tick 32, HP resumes
-        history = run_with_stove(ctrl, model, stove, n_ticks=48,
-                                 stove_on_ticks=(8, 32))
+        # Stove on min 120-480, off at min 480, HP resumes
+        history = run_with_stove(ctrl, model, stove,
+                                 duration_minutes=12 * 60,
+                                 stove_on_minutes=(120, 480))
 
-        # After stove stops, room should stay near target
-        post_stove = [h for h in history if h["tick"] >= 36]
+        # After stove stops, room should stay near target (was tick >= 36 = min >= 540).
+        post_stove = [h for h in history if h["minute"] >= 540]
         max_dev = max(abs(h["room_temp"] - 20.5) for h in post_stove)
         for h in post_stove:
             assert abs(h["room_temp"] - 20.5) < 3.0, (
-                f"Tick {h['tick']}: room={h['room_temp']:.1f} after stove off "
+                f"min {h['minute']}: room={h['room_temp']:.1f} after stove off "
                 f"(HP setpoint={h['hp_setpoint']})"
             )
 
-        # HP setpoint should stabilize
-        late = [h["hp_setpoint"] for h in history if h["tick"] >= 40]
+        # HP setpoint should stabilize (was tick >= 40 = min >= 600).
+        late = [h["hp_setpoint"] for h in history if h["minute"] >= 600]
         bench_metrics["max_dev_post_stove"] = max_dev
         if late:
             sp_range = max(late) - min(late)
