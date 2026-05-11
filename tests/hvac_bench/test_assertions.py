@@ -314,19 +314,29 @@ def probe_pipeline():
 class TestEndToEnd:
     def test_outdoor_delta_identifiable(self, bench_metrics, num_regression, probe_pipeline):
         _, id_rep, _ = probe_pipeline
+        outdoor_idx = id_rep.feature_names.index("outdoor_delta")
+        bench_metrics["se_outdoor_delta"] = id_rep.std_err_lower_bound[outdoor_idx]
+        check_bench_metrics(num_regression, bench_metrics)
         # On a 30-day probe, β_outdoor SE should be well below 0.1.
         assert_identifiable(id_rep, "outdoor_delta", se_max=0.1)
 
     def test_pe_order_full(self, bench_metrics, num_regression, probe_pipeline):
         _, id_rep, _ = probe_pipeline
+        bench_metrics["pe_order"] = id_rep.pe_order
+        bench_metrics["rank"] = id_rep.rank
+        check_bench_metrics(num_regression, bench_metrics)
         assert_pe_order_at_least(id_rep, 2)
 
     def test_condition_number_under_30(self, bench_metrics, num_regression, probe_pipeline):
         _, id_rep, _ = probe_pipeline
+        bench_metrics["condition_number"] = id_rep.condition_number
+        check_bench_metrics(num_regression, bench_metrics)
         assert_condition_number_below(id_rep, 30.0)
 
     def test_split_half_stable(self, bench_metrics, num_regression, probe_pipeline):
         _, _, res_rep = probe_pipeline
+        bench_metrics["split_half_max_rel_change"] = res_rep.split_half_max_rel_change
+        check_bench_metrics(num_regression, bench_metrics)
         # Loose threshold — split-half on a misspecified model can shift
         # β by tens of percent when the second half differs in transient
         # composition. The harness still admits the reasonable case.

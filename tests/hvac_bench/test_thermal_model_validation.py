@@ -46,6 +46,8 @@ class TestFreeDecay:
                 f"during free decay"
             )
             prev = model.room_temp
+        bench_metrics["final_room_temp"] = model.room_temp
+        check_bench_metrics(num_regression, bench_metrics)
         assert abs(model.room_temp - 5.0) < SS_TOL, (
             f"Room didn't converge to outdoor: {model.room_temp:.3f} vs 5.0"
         )
@@ -64,6 +66,8 @@ class TestFreeDecay:
         )
         for tick in range(500):
             model.step(hp_setpoint=0.0, dt_minutes=15.0, mode="heat", tick=tick)
+        bench_metrics["final_room_temp"] = model.room_temp
+        check_bench_metrics(num_regression, bench_metrics)
         # 2R2C has wall thermal mass — allow wider tolerance
         assert abs(model.room_temp - 5.0) < 1.0, (
             f"2R2C room didn't approach outdoor: {model.room_temp:.3f} vs 5.0"
@@ -89,6 +93,9 @@ class TestFreeDecay:
 
         expected_fraction = math.exp(-1.0)  # ~0.368
         actual_fraction = (model.room_temp - T_out) / (T_init - T_out)
+        bench_metrics["fraction_after_tau"] = actual_fraction
+        bench_metrics["final_room_temp"] = model.room_temp
+        check_bench_metrics(num_regression, bench_metrics)
         assert abs(actual_fraction - expected_fraction) < 0.05, (
             f"1R1C after one τ_env ({tau} min): fraction={actual_fraction:.3f}, "
             f"expected {expected_fraction:.3f}"
@@ -113,6 +120,10 @@ class TestFreeDecay:
             m1.step(hp_setpoint=0.0, dt_minutes=15.0, mode="heat", tick=tick)
             m2.step(hp_setpoint=0.0, dt_minutes=15.0, mode="heat", tick=tick)
 
+        bench_metrics["m1_final_temp"] = m1.room_temp
+        bench_metrics["m2_final_temp"] = m2.room_temp
+        bench_metrics["temp_gap"] = m2.room_temp - m1.room_temp
+        check_bench_metrics(num_regression, bench_metrics)
         # 2R2C should be warmer (wall slows decay)
         assert m2.room_temp > m1.room_temp, (
             f"2R2C ({m2.room_temp:.3f}) should be warmer than "
@@ -140,6 +151,9 @@ class TestHPSteadyState:
         g = profile.hp_gain
         # Analytical equilibrium (with HP always on, room < sp)
         t_eq = (T_out / tau + g * sp) / (1.0 / tau + g)
+        bench_metrics["final_room_temp"] = model.room_temp
+        bench_metrics["t_eq_analytical"] = t_eq
+        check_bench_metrics(num_regression, bench_metrics)
         assert abs(model.room_temp - t_eq) < SS_TOL, (
             f"1R1C didn't converge to analytical equilibrium: "
             f"{model.room_temp:.3f} vs {t_eq:.3f}"
@@ -164,6 +178,9 @@ class TestHPSteadyState:
         tau = profile.tau_env
         g = profile.hp_gain
         t_eq = (T_out / tau + g * sp) / (1.0 / tau + g)
+        bench_metrics["final_room_temp"] = model.room_temp
+        bench_metrics["t_eq_analytical"] = t_eq
+        check_bench_metrics(num_regression, bench_metrics)
         assert abs(model.room_temp - t_eq) < SS_TOL, (
             f"2R2C didn't converge to 1R1C analytical equilibrium: "
             f"{model.room_temp:.3f} vs {t_eq:.3f}"
@@ -188,14 +205,17 @@ class TestHPSteadyState:
         for tick in range(2000):
             model.step(hp_setpoint=sp, dt_minutes=15.0, mode="heat", tick=tick)
 
-        # Room should never exceed setpoint
-        assert model.room_temp < sp + 0.01, (
-            f"Room exceeded setpoint: {model.room_temp:.3f} > {sp}"
-        )
         # Analytical equilibrium (HP always on) for outdoor=0:
         tau = profile.tau_env
         g = profile.hp_gain
         t_eq_always_on = (0.0 / tau + g * sp) / (1.0 / tau + g)
+        bench_metrics["final_room_temp"] = model.room_temp
+        bench_metrics["t_eq_always_on"] = t_eq_always_on
+        check_bench_metrics(num_regression, bench_metrics)
+        # Room should never exceed setpoint
+        assert model.room_temp < sp + 0.01, (
+            f"Room exceeded setpoint: {model.room_temp:.3f} > {sp}"
+        )
         # Room should be between outdoor and the always-on equilibrium
         assert model.room_temp > 0.0, "Room dropped to outdoor temp"
         assert model.room_temp <= t_eq_always_on + 0.1, (
@@ -234,6 +254,10 @@ class TestHPCycling:
 
         total = hp_on_ticks + hp_off_ticks
         off_pct = 100.0 * hp_off_ticks / total
+        bench_metrics["hp_off_ticks"] = hp_off_ticks
+        bench_metrics["hp_on_ticks"] = hp_on_ticks
+        bench_metrics["off_pct"] = off_pct
+        check_bench_metrics(num_regression, bench_metrics)
         assert hp_off_ticks > 0, "HP never cycled off despite strong solar + warm outdoor"
         assert hp_on_ticks > 0, "HP never cycled on (something is very wrong)"
         assert off_pct > 5.0, (
@@ -252,6 +276,8 @@ class TestHPCycling:
             assert model.room_temp < 22.0, (
                 f"Room exceeded setpoint in deep cold: {model.room_temp:.3f}"
             )
+        bench_metrics["final_room_temp"] = model.room_temp
+        check_bench_metrics(num_regression, bench_metrics)
 
 
 class TestSolarEffect:
@@ -267,6 +293,8 @@ class TestSolarEffect:
         )
         model.step(hp_setpoint=0.0, dt_minutes=15.0, solar_proxy=1.0,
                     mode="heat", tick=0)
+        bench_metrics["room_temp_after_solar"] = model.room_temp
+        check_bench_metrics(num_regression, bench_metrics)
         assert model.room_temp > 18.0, (
             f"Solar didn't warm room: {model.room_temp:.3f}"
         )
@@ -288,6 +316,10 @@ class TestSolarEffect:
                              solar_proxy=0.5, mode="heat", tick=tick)
             model_no_solar.step(hp_setpoint=22.0, dt_minutes=15.0,
                                 solar_proxy=0.5, mode="heat", tick=tick)
+        bench_metrics["solar_room_temp"] = model_solar.room_temp
+        bench_metrics["no_solar_room_temp"] = model_no_solar.room_temp
+        bench_metrics["solar_gain_temp"] = model_solar.room_temp - model_no_solar.room_temp
+        check_bench_metrics(num_regression, bench_metrics)
         assert model_solar.room_temp > model_no_solar.room_temp, (
             f"Solar model ({model_solar.room_temp:.3f}) not warmer than "
             f"no-solar ({model_no_solar.room_temp:.3f})"
@@ -316,12 +348,16 @@ class TestStepResponse:
             model.step(hp_setpoint=22.0, dt_minutes=15.0, mode="heat", tick=tick)
             min_temp = min(min_temp, model.room_temp)
 
+        new_ss = model.room_temp
+        bench_metrics["initial_ss"] = ss_temp
+        bench_metrics["min_temp"] = min_temp
+        bench_metrics["new_ss"] = new_ss
+        check_bench_metrics(num_regression, bench_metrics)
         # Room should have dipped below previous steady state
         assert min_temp < ss_temp - 0.5, (
             f"Room didn't respond to cold snap: min={min_temp:.3f} vs ss={ss_temp:.3f}"
         )
         # But should recover to new (lower) steady state
-        new_ss = model.room_temp
         assert new_ss < ss_temp, "New SS should be lower with colder outdoor"
         # Should have stabilized (last few ticks nearly constant)
         assert abs(model.room_temp - new_ss) < 0.01
@@ -348,6 +384,10 @@ class TestCrossModelAgreement:
             m1.step(hp_setpoint=sp, dt_minutes=15.0, mode="heat", tick=tick)
             m2.step(hp_setpoint=sp, dt_minutes=15.0, mode="heat", tick=tick)
 
+        bench_metrics["m1_final"] = m1.room_temp
+        bench_metrics["m2_final"] = m2.room_temp
+        bench_metrics["gap"] = abs(m1.room_temp - m2.room_temp)
+        check_bench_metrics(num_regression, bench_metrics)
         assert abs(m1.room_temp - m2.room_temp) < SS_TOL, (
             f"Models disagree at steady state: 1R1C={m1.room_temp:.3f} "
             f"2R2C={m2.room_temp:.3f}"
@@ -373,6 +413,10 @@ class TestCrossModelAgreement:
             model.step(hp_setpoint=22.0, dt_minutes=15.0, mode="heat", tick=tick)
             temps.append(model.room_temp)
         temp_range = max(temps) - min(temps)
+        bench_metrics["profile_name"] = profile_name
+        bench_metrics["final_room_temp"] = model.room_temp
+        bench_metrics["temp_range"] = temp_range
+        check_bench_metrics(num_regression, bench_metrics)
         assert temp_range < 0.01, (
             f"Profile {profile_name} not converged: range={temp_range:.4f}"
         )
@@ -390,6 +434,10 @@ class TestHPCapacityCurve:
     def test_heating_anchor_points(self, bench_metrics, num_regression):
         """Curve passes through the three named anchors."""
         c = HPCapacityCurve()
+        bench_metrics["design_factor"] = c.factor(c.heating_design_t, "heat")
+        bench_metrics["rated_factor"] = c.factor(c.heating_rated_t, "heat")
+        bench_metrics["mild_factor"] = c.factor(c.heating_mild_t, "heat")
+        check_bench_metrics(num_regression, bench_metrics)
         assert c.factor(c.heating_design_t, "heat") == 0.0
         assert c.factor(c.heating_rated_t, "heat") == pytest.approx(1.0)
         assert c.factor(c.heating_mild_t, "heat") == pytest.approx(c.heating_mild_factor)
@@ -397,18 +445,25 @@ class TestHPCapacityCurve:
     def test_heating_clamps_below_design(self, bench_metrics, num_regression):
         """Below design temp, capacity stays at zero (HP can't run)."""
         c = HPCapacityCurve()
+        bench_metrics["factor_minus30"] = c.factor(-30.0, "heat")
+        bench_metrics["factor_minus100"] = c.factor(-100.0, "heat")
+        check_bench_metrics(num_regression, bench_metrics)
         assert c.factor(-30.0, "heat") == 0.0
         assert c.factor(-100.0, "heat") == 0.0
 
     def test_heating_clamps_above_mild(self, bench_metrics, num_regression):
         """Above the mild knee, factor saturates at mild_factor."""
         c = HPCapacityCurve()
+        bench_metrics["factor_40c"] = c.factor(40.0, "heat")
+        check_bench_metrics(num_regression, bench_metrics)
         assert c.factor(40.0, "heat") == pytest.approx(c.heating_mild_factor)
 
     def test_heating_linear_below_rated(self, bench_metrics, num_regression):
         """Halfway between design and rated → 50% capacity."""
         c = HPCapacityCurve(heating_design_t=-15.0, heating_rated_t=7.0)
         midpoint = (-15.0 + 7.0) / 2  # -4°C
+        bench_metrics["midpoint_factor"] = c.factor(midpoint, "heat")
+        check_bench_metrics(num_regression, bench_metrics)
         assert c.factor(midpoint, "heat") == pytest.approx(0.5)
 
     def test_heating_linear_above_rated(self, bench_metrics, num_regression):
@@ -417,11 +472,17 @@ class TestHPCapacityCurve:
                              heating_mild_factor=1.15)
         midpoint = (7.0 + 20.0) / 2  # 13.5°C
         expected = 1.0 + 0.5 * (1.15 - 1.0)
+        bench_metrics["midpoint_factor"] = c.factor(midpoint, "heat")
+        check_bench_metrics(num_regression, bench_metrics)
         assert c.factor(midpoint, "heat") == pytest.approx(expected)
 
     def test_cooling_anchor_points(self, bench_metrics, num_regression):
         """Cooling mirrors heating with reversed slope."""
         c = HPCapacityCurve()
+        bench_metrics["design_factor"] = c.factor(c.cooling_design_t, "cool")
+        bench_metrics["rated_factor"] = c.factor(c.cooling_rated_t, "cool")
+        bench_metrics["mild_factor"] = c.factor(c.cooling_mild_t, "cool")
+        check_bench_metrics(num_regression, bench_metrics)
         assert c.factor(c.cooling_design_t, "cool") == 0.0
         assert c.factor(c.cooling_rated_t, "cool") == pytest.approx(1.0)
         assert c.factor(c.cooling_mild_t, "cool") == pytest.approx(c.cooling_mild_factor)
@@ -429,17 +490,23 @@ class TestHPCapacityCurve:
     def test_cooling_clamps_above_design(self, bench_metrics, num_regression):
         """Above cooling design temp (extreme heat), factor is zero."""
         c = HPCapacityCurve()
+        bench_metrics["factor_60c"] = c.factor(60.0, "cool")
+        check_bench_metrics(num_regression, bench_metrics)
         assert c.factor(60.0, "cool") == 0.0
 
     def test_cooling_clamps_below_mild(self, bench_metrics, num_regression):
         """Below cooling mild knee, factor saturates at mild_factor."""
         c = HPCapacityCurve()
+        bench_metrics["factor_0c"] = c.factor(0.0, "cool")
+        check_bench_metrics(num_regression, bench_metrics)
         assert c.factor(0.0, "cool") == pytest.approx(c.cooling_mild_factor)
 
     def test_cooling_linear_above_rated(self, bench_metrics, num_regression):
         """Halfway between cooling rated and design → 50% capacity."""
         c = HPCapacityCurve(cooling_rated_t=35.0, cooling_design_t=46.0)
         midpoint = (35.0 + 46.0) / 2  # 40.5°C
+        bench_metrics["midpoint_factor"] = c.factor(midpoint, "cool")
+        check_bench_metrics(num_regression, bench_metrics)
         assert c.factor(midpoint, "cool") == pytest.approx(0.5)
 
     def test_cooling_linear_below_rated(self, bench_metrics, num_regression):
@@ -448,12 +515,17 @@ class TestHPCapacityCurve:
                              cooling_mild_factor=1.15)
         midpoint = (18.0 + 35.0) / 2  # 26.5°C
         expected = 1.15 + 0.5 * (1.0 - 1.15)
+        bench_metrics["midpoint_factor"] = c.factor(midpoint, "cool")
+        check_bench_metrics(num_regression, bench_metrics)
         assert c.factor(midpoint, "cool") == pytest.approx(expected)
 
     def test_cold_climate_curve_holds_capacity_below_minus_15(self, bench_metrics, num_regression):
         """CCASHP curve still delivers >0 capacity at -15°C unlike standard."""
-        assert STANDARD_HP_CAPACITY.factor(-15.0, "heat") == 0.0
         cc = COLD_CLIMATE_HP_CAPACITY.factor(-15.0, "heat")
+        bench_metrics["standard_factor"] = STANDARD_HP_CAPACITY.factor(-15.0, "heat")
+        bench_metrics["cold_climate_factor"] = cc
+        check_bench_metrics(num_regression, bench_metrics)
+        assert STANDARD_HP_CAPACITY.factor(-15.0, "heat") == 0.0
         assert 0.25 < cc < 0.50, (
             f"CCASHP at -15°C should retain ~30% capacity, got {cc:.3f}"
         )
@@ -477,6 +549,9 @@ class TestHPCapacityCurve:
         for tick in range(2000):
             m_no_cap.step(hp_setpoint=25.0, dt_minutes=15.0, mode="heat", tick=tick)
             m_cap.step(hp_setpoint=25.0, dt_minutes=15.0, mode="heat", tick=tick)
+        bench_metrics["no_cap_temp"] = m_no_cap.room_temp
+        bench_metrics["cap_temp"] = m_cap.room_temp
+        check_bench_metrics(num_regression, bench_metrics)
         assert abs(m_cap.room_temp - m_no_cap.room_temp) < SS_TOL, (
             f"At rated_t, capacity=1.0 should match fixed-gain: "
             f"no_cap={m_no_cap.room_temp:.3f} cap={m_cap.room_temp:.3f}"
@@ -497,6 +572,10 @@ class TestHPCapacityCurve:
         for tick in range(500):
             m_no_cap.step(hp_setpoint=23.0, dt_minutes=15.0, mode="heat", tick=tick)
             m_cap.step(hp_setpoint=23.0, dt_minutes=15.0, mode="heat", tick=tick)
+        bench_metrics["no_cap_temp"] = m_no_cap.room_temp
+        bench_metrics["cap_temp"] = m_cap.room_temp
+        bench_metrics["capacity_loss"] = m_no_cap.room_temp - m_cap.room_temp
+        check_bench_metrics(num_regression, bench_metrics)
         assert m_cap.room_temp < m_no_cap.room_temp - 0.5, (
             f"Capacity curve should reduce cold-weather room temp: "
             f"no_cap={m_no_cap.room_temp:.3f} cap={m_cap.room_temp:.3f}"
@@ -514,6 +593,8 @@ class TestHPCapacityCurve:
         # Run until decayed; HP commanded ON but capacity=0 → no heat input.
         for tick in range(500):
             m_cap.step(hp_setpoint=23.0, dt_minutes=15.0, mode="heat", tick=tick)
+        bench_metrics["final_room_temp"] = m_cap.room_temp
+        check_bench_metrics(num_regression, bench_metrics)
         assert abs(m_cap.room_temp - (-20.0)) < 0.5, (
             f"Below design temp, room should decay to outdoor: "
             f"got {m_cap.room_temp:.3f}, expected ~-20.0"
@@ -534,6 +615,9 @@ class TestHPCapacityCurve:
         for tick in range(500):
             m_no_cap.step(hp_setpoint=23.0, dt_minutes=15.0, mode="heat", tick=tick)
             m_cap.step(hp_setpoint=23.0, dt_minutes=15.0, mode="heat", tick=tick)
+        bench_metrics["no_cap_temp"] = m_no_cap.room_temp
+        bench_metrics["cap_temp"] = m_cap.room_temp
+        check_bench_metrics(num_regression, bench_metrics)
         assert m_cap.room_temp < m_no_cap.room_temp - 0.5
 
     def test_capacity_boost_above_rated(self, bench_metrics, num_regression):
@@ -553,6 +637,9 @@ class TestHPCapacityCurve:
         for tick in range(20):
             m_no_cap.step(hp_setpoint=22.0, dt_minutes=15.0, mode="heat", tick=tick)
             m_cap.step(hp_setpoint=22.0, dt_minutes=15.0, mode="heat", tick=tick)
+        bench_metrics["no_cap_temp"] = m_no_cap.room_temp
+        bench_metrics["cap_temp"] = m_cap.room_temp
+        check_bench_metrics(num_regression, bench_metrics)
         assert m_cap.room_temp > m_no_cap.room_temp, (
             f"Mild outdoor should boost capacity: "
             f"no_cap={m_no_cap.room_temp:.3f} cap={m_cap.room_temp:.3f}"
@@ -576,6 +663,9 @@ class TestHPCapacityCurve:
         for tick in range(500):
             m_no_cap.step(hp_setpoint=20.0, dt_minutes=15.0, mode="cool", tick=tick)
             m_cap.step(hp_setpoint=20.0, dt_minutes=15.0, mode="cool", tick=tick)
+        bench_metrics["no_cap_temp"] = m_no_cap.room_temp
+        bench_metrics["cap_temp"] = m_cap.room_temp
+        check_bench_metrics(num_regression, bench_metrics)
         # With reduced capacity, room stays warmer (less effective cooling).
         assert m_cap.room_temp > m_no_cap.room_temp + 0.3, (
             f"Hot outdoor should reduce cooling: "
@@ -585,8 +675,11 @@ class TestHPCapacityCurve:
     def test_living_room_capacity_profile_registered(self, bench_metrics, num_regression):
         """PROFILES_2R2C['living_room_capacity'] uses STANDARD_HP_CAPACITY."""
         profile = PROFILES_2R2C["living_room_capacity"]
+        base = PROFILES_2R2C["living_room"]
+        bench_metrics["tau_env"] = profile.tau_env
+        bench_metrics["hp_gain"] = profile.hp_gain
+        check_bench_metrics(num_regression, bench_metrics)
         assert profile.hp_capacity is STANDARD_HP_CAPACITY
         # Same thermal characteristics as base living_room.
-        base = PROFILES_2R2C["living_room"]
         assert profile.tau_env == base.tau_env
         assert profile.hp_gain == base.hp_gain

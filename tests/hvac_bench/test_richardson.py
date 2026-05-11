@@ -52,6 +52,10 @@ class TestTwoGridExtrapolation:
         slope = 2.0
         k = [truth + slope * x for x in h]
         rep = richardson_extrapolate(h, k, assumed_order=1.0, kpi_name="test")
+        bench_metrics["extrapolated_value"] = rep.extrapolated_value
+        bench_metrics["observed_order"] = rep.observed_order
+        bench_metrics["error_band"] = rep.error_band
+        check_bench_metrics(num_regression, bench_metrics)
         assert rep.extrapolated_value == pytest.approx(truth, abs=1e-9)
         assert rep.observed_order == 1.0
         assert rep.fit_method == "two_point_assumed_order"
@@ -65,6 +69,10 @@ class TestTwoGridExtrapolation:
         c = 0.5
         k = [truth + c * x ** 2 for x in h]
         rep = richardson_extrapolate(h, k, assumed_order=2.0, kpi_name="test")
+        bench_metrics["extrapolated_value"] = rep.extrapolated_value
+        bench_metrics["observed_order"] = rep.observed_order
+        bench_metrics["error_band"] = rep.error_band
+        check_bench_metrics(num_regression, bench_metrics)
         assert rep.extrapolated_value == pytest.approx(truth, abs=1e-9)
         assert rep.observed_order == 2.0
         assert rep.error_band == pytest.approx(c * h[-1] ** 2, abs=1e-9)
@@ -73,6 +81,8 @@ class TestTwoGridExtrapolation:
         h = [15.0, 30.0]  # finest first → must be sorted internally
         k = [7.0, 9.0]    # KPI at h=15 is finer
         rep = richardson_extrapolate(h, k, assumed_order=1.0, kpi_name="test")
+        bench_metrics["extrapolated_value"] = rep.extrapolated_value
+        check_bench_metrics(num_regression, bench_metrics)
         # After sorting descending: h=[30,15], k=[9,7]
         # extrap = (2*7 - 9)/(2-1) = 5
         assert rep.extrapolated_value == pytest.approx(5.0, abs=1e-9)
@@ -92,6 +102,9 @@ class TestThreeGridOrderRecovery:
         slope = 0.3
         k = [truth + slope * x for x in h]
         rep = richardson_extrapolate(h, k, kpi_name="test")
+        bench_metrics["observed_order"] = rep.observed_order
+        bench_metrics["extrapolated_value"] = rep.extrapolated_value
+        check_bench_metrics(num_regression, bench_metrics)
         assert rep.observed_order == pytest.approx(1.0, abs=1e-6)
         assert rep.extrapolated_value == pytest.approx(truth, abs=1e-6)
         assert rep.fit_method == "three_point_observed_order"
@@ -103,6 +116,9 @@ class TestThreeGridOrderRecovery:
         c = 0.05
         k = [truth + c * x ** 2 for x in h]
         rep = richardson_extrapolate(h, k, kpi_name="test")
+        bench_metrics["observed_order"] = rep.observed_order
+        bench_metrics["extrapolated_value"] = rep.extrapolated_value
+        check_bench_metrics(num_regression, bench_metrics)
         assert rep.observed_order == pytest.approx(2.0, abs=1e-6)
         assert rep.extrapolated_value == pytest.approx(truth, abs=1e-6)
 
@@ -113,6 +129,9 @@ class TestThreeGridOrderRecovery:
         p_true = 1.5
         k = [truth + c * x ** p_true for x in h]
         rep = richardson_extrapolate(h, k, kpi_name="test")
+        bench_metrics["observed_order"] = rep.observed_order
+        bench_metrics["extrapolated_value"] = rep.extrapolated_value
+        check_bench_metrics(num_regression, bench_metrics)
         assert rep.observed_order == pytest.approx(p_true, abs=1e-5)
         assert rep.extrapolated_value == pytest.approx(truth, abs=1e-3)
 
@@ -123,6 +142,9 @@ class TestThreeGridOrderRecovery:
         c = 0.05
         k = [truth + c * x ** 2 for x in h]  # actually p=2
         rep = richardson_extrapolate(h, k, assumed_order=1.0, kpi_name="test")
+        bench_metrics["observed_order"] = rep.observed_order
+        bench_metrics["extrapolated_value"] = rep.extrapolated_value
+        check_bench_metrics(num_regression, bench_metrics)
         assert rep.fit_method == "two_point_assumed_order"
         assert rep.observed_order == 1.0
         # Wrong assumed order → won't recover truth exactly
@@ -138,6 +160,9 @@ class TestNonUniformRefinement:
         slope = 0.5
         k = [truth + slope * x for x in h]
         rep = richardson_extrapolate(h, k, kpi_name="test")
+        bench_metrics["observed_order"] = rep.observed_order
+        bench_metrics["extrapolated_value"] = rep.extrapolated_value
+        check_bench_metrics(num_regression, bench_metrics)
         assert rep.observed_order == pytest.approx(1.0, abs=1e-5)
         assert rep.extrapolated_value == pytest.approx(truth, abs=1e-5)
         assert rep.fit_method == "nonuniform_observed_order"
@@ -148,6 +173,9 @@ class TestNonUniformRefinement:
         c = 0.1
         k = [truth + c * x ** 2 for x in h]
         rep = richardson_extrapolate(h, k, kpi_name="test")
+        bench_metrics["observed_order"] = rep.observed_order
+        bench_metrics["extrapolated_value"] = rep.extrapolated_value
+        check_bench_metrics(num_regression, bench_metrics)
         assert rep.observed_order == pytest.approx(2.0, abs=1e-4)
         assert rep.extrapolated_value == pytest.approx(truth, abs=1e-3)
 
@@ -162,6 +190,9 @@ class TestDegenerateCases:
         h = [30.0, 15.0, 5.0]
         k = [3.14, 3.14, 3.14]
         rep = richardson_extrapolate(h, k, kpi_name="test")
+        bench_metrics["extrapolated_value"] = rep.extrapolated_value
+        bench_metrics["error_band"] = rep.error_band
+        check_bench_metrics(num_regression, bench_metrics)
         assert rep.extrapolated_value == 3.14
         assert rep.error_band == 0.0
         assert rep.fit_method == "degenerate_constant_kpi"
@@ -173,6 +204,8 @@ class TestDegenerateCases:
         h = [30.0, 15.0, 5.0]
         k = [10.0, 8.0, 9.0]  # delta_coarse=-2, delta_fine=+1 → opposite signs
         rep = richardson_extrapolate(h, k, kpi_name="test")
+        bench_metrics["extrapolated_value"] = rep.extrapolated_value
+        check_bench_metrics(num_regression, bench_metrics)
         assert rep.fit_method == "fallback_assumed_order_1"
         assert math.isnan(rep.observed_order)
         assert rep.monotone_convergence is False
@@ -182,6 +215,8 @@ class TestDegenerateCases:
         h = [30.0, 15.0, 5.0]
         k = [10.0, 10.0, 9.5]
         rep = richardson_extrapolate(h, k, kpi_name="test")
+        bench_metrics["extrapolated_value"] = rep.extrapolated_value
+        check_bench_metrics(num_regression, bench_metrics)
         assert rep.fit_method == "fallback_assumed_order_1"
         assert math.isnan(rep.observed_order)
 
@@ -190,6 +225,10 @@ class TestDegenerateCases:
         h = [10.0, 5.0]
         k = [3.0, 1.5]  # extrap = (2*1.5 - 3)/1 = 0
         rep = richardson_extrapolate(h, k, assumed_order=1.0, kpi_name="test")
+        bench_metrics["extrapolated_value"] = rep.extrapolated_value
+        bench_metrics["error_band"] = rep.error_band
+        # relative_error is inf — filtered out by check_bench_metrics
+        check_bench_metrics(num_regression, bench_metrics)
         assert rep.extrapolated_value == 0.0
         assert math.isinf(rep.relative_error)
 
@@ -197,6 +236,10 @@ class TestDegenerateCases:
         h = [10.0, 5.0]
         k = [0.0, 0.0]
         rep = richardson_extrapolate(h, k, assumed_order=1.0, kpi_name="test")
+        bench_metrics["extrapolated_value"] = rep.extrapolated_value
+        bench_metrics["error_band"] = rep.error_band
+        bench_metrics["relative_error"] = rep.relative_error
+        check_bench_metrics(num_regression, bench_metrics)
         assert rep.extrapolated_value == 0.0
         assert rep.error_band == 0.0
         assert rep.relative_error == 0.0
@@ -265,6 +308,10 @@ class TestBundleSweep:
                           cold=0.2, warm=0.0, sp_ch=30, n_ticks=864),
         }
         reports = kpi_richardson_sweep(bundles)
+        bench_metrics["n_reports"] = len(reports)
+        for name in DEFAULT_RICHARDSON_KPIS:
+            bench_metrics[f"{name}_extrap"] = reports[name].extrapolated_value
+        check_bench_metrics(num_regression, bench_metrics)
         assert set(reports.keys()) == set(DEFAULT_RICHARDSON_KPIS)
         for name in DEFAULT_RICHARDSON_KPIS:
             assert isinstance(reports[name], RichardsonReport)
@@ -280,6 +327,8 @@ class TestBundleSweep:
         reports = kpi_richardson_sweep(
             bundles, kpi_names=("tdis_tot",), assumed_order=1.0,
         )
+        bench_metrics["tdis_tot_extrap"] = reports["tdis_tot"].extrapolated_value
+        check_bench_metrics(num_regression, bench_metrics)
         assert list(reports.keys()) == ["tdis_tot"]
 
     def test_sweep_too_few_grids(self, bench_metrics, num_regression):
@@ -315,6 +364,10 @@ class TestRegimeClassifier:
         p_true = 1.5
         k = [truth + c * x ** p_true for x in h]
         rep = richardson_extrapolate(h, k, kpi_name="test")
+        bench_metrics["safety_factor"] = rep.safety_factor
+        bench_metrics["gci"] = rep.gci
+        bench_metrics["error_band"] = rep.error_band
+        check_bench_metrics(num_regression, bench_metrics)
         assert rep.in_asymptotic_regime is True
         assert rep.safety_factor == ROACHE_FS_ASYMPTOTIC
         # GCI bounds the actual error generously
@@ -324,6 +377,8 @@ class TestRegimeClassifier:
         h = [30.0, 15.0, 5.0]
         k = [10.0, 8.0, 9.0]  # sign-flip in deltas
         rep = richardson_extrapolate(h, k, kpi_name="test")
+        bench_metrics["safety_factor"] = rep.safety_factor
+        check_bench_metrics(num_regression, bench_metrics)
         assert rep.in_asymptotic_regime is False
         assert rep.safety_factor == ROACHE_FS_NON_ASYMPTOTIC
 
@@ -333,6 +388,9 @@ class TestRegimeClassifier:
         h = [30.0, 15.0, 5.0]
         k = [50.0, 10.0, 9.5]  # d_coarse=-40, d_fine=-0.5, ratio=80
         rep = richardson_extrapolate(h, k, kpi_name="test")
+        bench_metrics["observed_order"] = rep.observed_order
+        bench_metrics["safety_factor"] = rep.safety_factor
+        check_bench_metrics(num_regression, bench_metrics)
         # Observed order is well above REGIME_ORDER_MAX (4.0) — order
         # this large indicates a fit dominated by the coarsest grid,
         # not a true power-law regime.
@@ -347,6 +405,8 @@ class TestRegimeClassifier:
         h = [30.0, 15.0]
         k = [11.0, 8.0]
         rep = richardson_extrapolate(h, k, assumed_order=1.0, kpi_name="test")
+        bench_metrics["safety_factor"] = rep.safety_factor
+        check_bench_metrics(num_regression, bench_metrics)
         assert rep.in_asymptotic_regime is False
         assert rep.safety_factor == ROACHE_FS_NON_ASYMPTOTIC
 
@@ -354,6 +414,9 @@ class TestRegimeClassifier:
         h = [30.0, 15.0, 5.0]
         k = [3.14, 3.14, 3.14]
         rep = richardson_extrapolate(h, k, kpi_name="test")
+        bench_metrics["safety_factor"] = rep.safety_factor
+        bench_metrics["gci"] = rep.gci
+        check_bench_metrics(num_regression, bench_metrics)
         # Degenerate; not asymptotic in the Roache sense (no convergence
         # to extract from). Fs=3.0 conservatively.
         assert rep.in_asymptotic_regime is False
@@ -366,9 +429,17 @@ class TestRegimeClassifier:
         c = 0.5
         k = [5.0 + c * x ** 1.5 for x in h]
         rep = richardson_extrapolate(h, k, kpi_name="test")
+        bench_metrics["gci"] = rep.gci
+        bench_metrics["error_band"] = rep.error_band
+        check_bench_metrics(num_regression, bench_metrics)
         assert rep.gci == pytest.approx(rep.error_band * ROACHE_FS_ASYMPTOTIC, abs=1e-9)
 
     def test_regime_constants_sensible(self, bench_metrics, num_regression):
+        bench_metrics["regime_order_min"] = REGIME_ORDER_MIN
+        bench_metrics["regime_order_max"] = REGIME_ORDER_MAX
+        bench_metrics["fs_asymptotic"] = ROACHE_FS_ASYMPTOTIC
+        bench_metrics["fs_non_asymptotic"] = ROACHE_FS_NON_ASYMPTOTIC
+        check_bench_metrics(num_regression, bench_metrics)
         # Sanity: regime thresholds bracket the typical first/second-order
         # range expected for reasonable convergence schemes.
         assert 0 < REGIME_ORDER_MIN < 1.0 < 2.0 < REGIME_ORDER_MAX
@@ -384,18 +455,24 @@ class TestTickRateSpread:
         rep = richardson_extrapolate(
             [30.0, 15.0, 5.0], [10.0, 7.0, 5.5], kpi_name="test"
         )
+        bench_metrics["spread"] = tick_rate_spread(rep)
+        check_bench_metrics(num_regression, bench_metrics)
         assert tick_rate_spread(rep) == pytest.approx(4.5, abs=1e-9)
 
     def test_spread_zero_for_constant(self, bench_metrics, num_regression):
         rep = richardson_extrapolate(
             [30.0, 15.0, 5.0], [3.0, 3.0, 3.0], kpi_name="test"
         )
+        bench_metrics["spread"] = tick_rate_spread(rep)
+        check_bench_metrics(num_regression, bench_metrics)
         assert tick_rate_spread(rep) == 0.0
 
     def test_spread_works_for_non_monotone(self, bench_metrics, num_regression):
         rep = richardson_extrapolate(
             [30.0, 15.0, 5.0], [5.0, 8.0, 6.0], kpi_name="test"
         )
+        bench_metrics["spread"] = tick_rate_spread(rep)
+        check_bench_metrics(num_regression, bench_metrics)
         assert tick_rate_spread(rep) == 3.0
 
 
