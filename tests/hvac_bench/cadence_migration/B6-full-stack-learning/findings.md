@@ -55,3 +55,15 @@ CSV diff between `regression_data/default/test_full_stack_learning/*.csv` and `r
 - `TestMultiYearStability` (@design, 365-day) — not in fast tier; @design opt-in.
 
 The bench batch-timing fidelity gap (#97) is the most important follow-up. Until it lands, B6's tests have a workaround in `test_features_start_frozen` and a documented cadence-sensitivity in `test_no_long_violation_streaks`.
+
+## 2026-05-12 — #97 landed
+
+The bench batch-WLS timing gap is closed: `pi_controller.BATCH_WLS_HOURS = (7, 19)` is now the single source of truth, used by production's `async_track_time_change(hour=BATCH_WLS_HOURS, …)` and imported by `full_stack_runner` to derive `_BATCH_WALL_CLOCK_MINUTES`. The bench now fires `pi._run_batch_analysis()` when `(tick+1) * tick_min` lands on 07:00 or 19:00 sim-time.
+
+**Baselines regenerated at both cadences** under the new timing. Drift was uniformly small (~1% relative on `outdoor_delta` snapshots, ~1pp on `ctrl_comfort_pct`) and consistent with the timing shift — no behavioral regressions, no test logic changes needed.
+
+**Workaround in `test_features_start_frozen` kept.** The day-1 solar suppression wrapper still preserves test intent (frozen→unlocked progression). Removing it post-#97 would have required re-verifying that the first batch (now at 07:00 vs noon) sees insufficient solar variance to unlock — a marginal call. The wrapper is cadence-and-timing invariant; leaving it in is the lower-risk choice.
+
+**`test_no_long_violation_streaks` 600-min bound also kept.** Original docstring noted the bound might tighten post-#97; checked — at the new timing the 3-min cadence streak is still ~340-380 min wall-clock (well under 600). No tightening warranted; the bound was always there to catch runaway, not to be a tight regression on integral-buildup magnitude.
+
+**Dead `batch_interval_hours` field removed** from `FullStackConfig` (formerly defaulted from `BATCH_INTERVAL_HOURS_DEFAULT` in `tests/hvac_bench/constants.py`; that constant also removed). The post-processing helper `summarize_post_fill` keeps its own local `batch_interval_hours=12.0` parameter — that's metadata for trajectory-index → days math, not scheduling control.

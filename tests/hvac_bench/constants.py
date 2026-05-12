@@ -35,11 +35,6 @@ from datetime import datetime, timezone
 TICK_MINUTES_DEFAULT: float = float(os.environ.get("BENCH_TICK_MINUTES", "15.0"))
 
 
-# ── Batch WLS cadence ───────────────────────────────────────────────────
-
-BATCH_INTERVAL_HOURS_DEFAULT: float = 12.0
-
-
 # ── Simulated wall-clock epoch ──────────────────────────────────────────
 
 _SIM_EPOCH: datetime = datetime(2026, 1, 15, 0, 0, 0, tzinfo=timezone.utc)

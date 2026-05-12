@@ -27,11 +27,11 @@ from unittest.mock import patch
 from freezegun import freeze_time
 
 from custom_components.tasmota_irhvac.const import DEFAULT_KAPPA_THRESHOLD
+from custom_components.tasmota_irhvac.pi.pi_controller import BATCH_WLS_HOURS
 
 from tests.benchmark_metrics import count_reversals
 from tests.hvac_bench.adapters import TasmotaPIAdapter
 from tests.hvac_bench.constants import (
-    BATCH_INTERVAL_HOURS_DEFAULT,
     TICK_MINUTES_DEFAULT,
     _SIM_EPOCH,
 )
@@ -41,10 +41,12 @@ from tests.hvac_bench.thermal_model import ThermalModel2R2C
 
 # ── Local derived constants ─────────────────────────────────────────────
 #
-# Re-exports of TICK_MINUTES_DEFAULT, BATCH_INTERVAL_HOURS_DEFAULT, and
-# _SIM_EPOCH live in ``tests.hvac_bench.constants``; downstream callers
-# (open_loop_runner, test files) import via this module for backwards
-# compatibility, but the source of truth is the constants module.
+# Re-exports of TICK_MINUTES_DEFAULT and _SIM_EPOCH live in
+# ``tests.hvac_bench.constants``; downstream callers (open_loop_runner,
+# test files) import via this module for backwards compatibility, but
+# the source of truth is the constants module.  ``BATCH_WLS_HOURS`` is
+# imported from production (``pi_controller``) so the bench tracks any
+# future schedule change there automatically.
 
 TICKS_PER_HOUR = int(60 / TICK_MINUTES_DEFAULT)
 TICKS_PER_DAY = 24 * TICKS_PER_HOUR  # at 15-min default → 96
@@ -131,9 +133,6 @@ class FullStackConfig:
 
     # Tick interval (minutes).  Fixed for synthetic; overridden by CSV.
     tick_minutes: float = TICK_MINUTES_DEFAULT
-
-    # Batch WLS interval in hours
-    batch_interval_hours: float = BATCH_INTERVAL_HOURS_DEFAULT
 
     # Model inputs
     model_inputs: list[ModelInputSpec] = field(default_factory=list)
@@ -496,7 +495,11 @@ def run_full_stack(
     tick_min = config.tick_minutes
     n_ticks = int(config.n_days * 24 * 60 / tick_min)
     ticks_per_day = int(24 * 60 / tick_min)
-    batch_interval_ticks = int(config.batch_interval_hours * 60 / tick_min)
+    # Production fires `_run_batch_analysis` via async_track_time_change at
+    # the hours in ``BATCH_WLS_HOURS`` (pi_controller).  We mirror that
+    # schedule against _SIM_EPOCH (midnight); see #97 for the tick-modulo
+    # vs wall-clock divergence the prior implementation hid.
+    _BATCH_WALL_CLOCK_MINUTES: tuple[int, ...] = tuple(h * 60 for h in BATCH_WLS_HOURS)
 
     # Build model input config for PIController
     pi_model_inputs = []
@@ -911,8 +914,12 @@ def run_full_stack(
                 for mi in config.model_inputs},
             })
 
-            # Trigger batch WLS at intervals
-            if tick > 0 and tick % batch_interval_ticks == 0:
+            # Trigger batch WLS at production-faithful wall-clock 07:00/19:00.
+            # The adapter advances `_sim_clock` by `dt_seconds` before
+            # `pi._pi_tick()` above, so this tick completes at sim time
+            # `(tick + 1) * tick_min` minutes past _SIM_EPOCH (midnight).
+            sim_minute = int(round((tick + 1) * tick_min))
+            if (sim_minute % 1440) in _BATCH_WALL_CLOCK_MINUTES:
                 pi._run_batch_analysis()
                 batch_count += 1
 

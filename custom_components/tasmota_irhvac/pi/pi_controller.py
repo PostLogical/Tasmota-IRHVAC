@@ -208,6 +208,13 @@ def _compute_prior_run_age_s(saved_at_wallclock: str) -> float | None:
     return max(0.0, (dt_util.utcnow() - prior).total_seconds())
 
 
+# Local wall-clock hours at which batch WLS analysis fires.  Single source
+# of truth — production wires this into ``async_track_time_change`` in
+# ``schedule_batch_analysis`` below; the bench's ``full_stack_runner``
+# imports it so changes here propagate to bench fidelity automatically.
+BATCH_WLS_HOURS: tuple[int, ...] = (7, 19)
+
+
 class PIController:
     """PI + feedforward temperature controller for IRHVAC climate entities.
 
@@ -1004,7 +1011,7 @@ class PIController:
             self._run_batch_analysis()
 
         self._batch_analysis_timer = async_track_time_change(
-            self._hass, _run_batch, hour=(7, 19), minute=0, second=0,
+            self._hass, _run_batch, hour=BATCH_WLS_HOURS, minute=0, second=0,
         )
 
     def _run_batch_analysis(self) -> None:
