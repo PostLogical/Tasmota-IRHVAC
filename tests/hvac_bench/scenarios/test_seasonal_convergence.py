@@ -51,6 +51,7 @@ from tests.hvac_bench.full_stack_runner import (
     run_full_stack,
 )
 from tests.hvac_bench.conftest import check_bench_metrics
+from tests.hvac_bench.constants import TICK_MINUTES_DEFAULT
 from tests.hvac_bench.house_profiles import PROFILES_2R2C
 from tests.hvac_bench.scenarios._weather_mode import (
     SHOULDER_FALL,
@@ -175,7 +176,7 @@ def _make_synth_config(season_name: str, n_days: int = 90) -> FullStackConfig:
     """
     season = SEASONS[season_name]
     profile = PROFILES_2R2C["living_room"]
-    tick_min = 15.0
+    tick_min = TICK_MINUTES_DEFAULT
     n_ticks = int(n_days * 24 * 60 / tick_min)
     weather_state = WeatherState(
         n_ticks=n_ticks, seed=42, persistence_hours=36.0, tick_minutes=tick_min
