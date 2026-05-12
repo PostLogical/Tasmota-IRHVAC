@@ -125,6 +125,271 @@ DEFAULT_DIVERSITY_BUFFER_SIZE = 2000
 # buffer fills and during early operation when rank may be deficient.
 INFO_MATRIX_REGULARIZATION = 1e-4
 
+# Wall-clock correlation time for thermal residuals (minutes).  Used to
+# anchor the HAC bandwidth in physical time rather than sample count, so
+# the bandwidth covers the same wall-clock window regardless of sampling
+# cadence.  Building thermal residuals are correlated over roughly
+# (envelope τ ÷ EMA-tau pre-filter pass) ≈ 30 min for typical residential
+# buildings (Bacher-Madsen 2011 thermal time constants).  Default 60 min
+# rather than 30: the Bartlett kernel undershoots highly-autocorrelated
+# variance amplification (effective bandwidth ≈ L/2), so we double the
+# nominal correlation time to recover most of the correction.  A
+# Quadratic-Spectral kernel would let us hold T_corr=30 with a closer-to-
+# unity effective coverage but adds compute (Andrews 1991).
+# See ~/.claude/plans/wls_cadence_corrections.md (open questions 1, 2) —
+# both T_corr default and kernel choice should be validated against
+# actual residual ACF on B9/B8 reproducers and tuned if the empirical
+# decay differs.
+HAC_T_CORR_MIN = 60.0
+
+
+# ── Cadence-invariant statistics: HAC std_err + ESS ─────────────────────
+#
+# Classical OLS/WLS std_err shrinks like 1/√N regardless of whether new
+# samples carry independent information.  At fine sampling cadences,
+# thermal residuals are autocorrelated — N grows but ESS doesn't, so
+# IID std_err underestimates true sampling variance, K = σ²_prior/(σ²_prior
+# + σ²_batch) becomes too aggressive, and a single batch can dominate
+# the persistent state.  The Newey-West (1987) HAC sandwich corrects the
+# variance estimator using a Bartlett-kernel-weighted residual ACF.
+# Bandwidth is wall-clock-anchored (HAC_T_CORR_MIN ÷ Δt) rather than
+# Newey-West's N-only formula so the correction is cadence-invariant by
+# construction.
+#
+# Both HAC std_err and ESS-substituted BIC share the residual ACF as
+# their primitive; the helpers below compute it once and reuse.
+
+
+def _estimate_observation_dt_min(
+    observations: list[Observation],
+) -> float:
+    """Median consecutive wall-clock dt in minutes across observations.
+
+    Observations may have gaps (filtered passive/transient ones removed
+    from the buffer); the median of consecutive deltas is the cleanest
+    cadence proxy.  Returns 1.0 if unavailable so HAC bandwidth degenerates
+    to a safe minimum rather than blowing up.  None entries (test seams
+    that pass placeholder lists) are tolerated.
+    """
+    if len(observations) < 2:
+        return 1.0
+    times = sorted(
+        o.wall_time for o in observations
+        if o is not None and o.wall_time > 0
+    )
+    if len(times) < 2:
+        return 1.0
+    deltas = [times[i + 1] - times[i] for i in range(len(times) - 1)]
+    deltas = [d for d in deltas if d > 0]
+    if not deltas:
+        return 1.0
+    deltas.sort()
+    median_seconds = deltas[len(deltas) // 2]
+    return median_seconds / 60.0
+
+
+def _hac_bandwidth(
+    n_obs: int, dt_min: float, t_corr_min: float = HAC_T_CORR_MIN,
+) -> int:
+    """Wall-clock-anchored HAC bandwidth.
+
+    L = ceil(t_corr_min / dt_min), capped at n_obs/5 to guarantee small-
+    sample stability (Andrews 1991 plug-in could replace this for fully
+    data-driven bandwidth selection — see plan open question 2).
+    """
+    if dt_min <= 0:
+        return 1
+    raw = math.ceil(t_corr_min / dt_min)
+    cap = max(1, n_obs // 5)
+    return max(1, min(raw, cap))
+
+
+def _bartlett_acf(
+    residuals: list[float],
+    weights: list[float],
+    max_lag: int,
+) -> list[float]:
+    """Bartlett-weighted residual autocovariances γ̂(0)..γ̂(max_lag).
+
+    Bartlett kernel weights `(1 - k/(max_lag+1))` ensure the implied
+    spectral density / variance estimator is positive semi-definite
+    (Newey-West 1987).  Weights are applied multiplicatively to each
+    residual before computing the lagged products, treating WLS weights
+    as importance weights for the variance computation.
+    """
+    n = len(residuals)
+    if n == 0:
+        return [0.0] * (max_lag + 1)
+    we = [weights[i] * residuals[i] for i in range(n)]
+    acf = [0.0] * (max_lag + 1)
+    for k in range(max_lag + 1):
+        s = 0.0
+        for t in range(k, n):
+            s += we[t] * we[t - k]
+        acf[k] = s / n
+    return acf
+
+
+def _ess_from_acf(acf: list[float], n_obs: int) -> float:
+    """Effective sample size from Bartlett-weighted residual ACF.
+
+    ESS = N / (1 + 2·Σ_{k=1..L} (1 - k/(L+1)) · ρ̂(k))
+    where ρ̂(k) = γ̂(k)/γ̂(0).  Bartlett weighting on the sum (not just
+    the ACF estimator) keeps ESS positive and bounded in [1, N].
+
+    Returns N when γ̂(0) ≤ 0 (degenerate residuals) — degrade to classical.
+    """
+    if not acf or acf[0] <= 0 or n_obs <= 0:
+        return float(max(1, n_obs))
+    L = len(acf) - 1
+    if L <= 0:
+        return float(n_obs)
+    rho_sum = 0.0
+    for k in range(1, L + 1):
+        bartlett = 1.0 - k / (L + 1)
+        rho_sum += bartlett * (acf[k] / acf[0])
+    denom = 1.0 + 2.0 * rho_sum
+    if denom <= 0:
+        # Pathological ACF (negative correlations dominate) — clamp to N.
+        return float(n_obs)
+    ess = n_obs / denom
+    return max(1.0, min(float(n_obs), ess))
+
+
+def _hac_meat_matrix(
+    X_normalized: list[list[float]],
+    weights: list[float],
+    residuals: list[float],
+    bandwidth: int,
+) -> list[list[float]]:
+    """Newey-West sandwich meat: X' W Σ̂ W X with Bartlett kernel.
+
+    Σ̂[t,s] = Σ_{k=-L..L} (1 - |k|/(L+1)) · γ̂(k) · 1{s = t-k}
+
+    Equivalent (and cheaper) form:
+        meat = Σ_t (w_t · X_t · e_t)(w_t · X_t · e_t)'
+             + Σ_{k=1..L} (1 - k/(L+1)) · [Σ_t (w_t·X_t·e_t)(w_{t-k}·X_{t-k}·e_{t-k})' + transpose]
+    """
+    n = len(residuals)
+    if n == 0:
+        return [[]]
+    p = len(X_normalized[0]) if X_normalized and X_normalized[0] else 0
+    if p == 0:
+        return [[]]
+    # Score vectors s_t = w_t · e_t · X_t
+    s_vecs = [
+        [weights[t] * residuals[t] * X_normalized[t][j] for j in range(p)]
+        for t in range(n)
+    ]
+    meat = [[0.0] * p for _ in range(p)]
+    # Lag 0
+    for t in range(n):
+        for i in range(p):
+            for j in range(p):
+                meat[i][j] += s_vecs[t][i] * s_vecs[t][j]
+    # Lags 1..L
+    for k in range(1, bandwidth + 1):
+        bartlett = 1.0 - k / (bandwidth + 1)
+        for t in range(k, n):
+            for i in range(p):
+                for j in range(p):
+                    cross = s_vecs[t][i] * s_vecs[t - k][j]
+                    meat[i][j] += bartlett * cross
+                    meat[j][i] += bartlett * cross
+    return meat
+
+
+def _hac_std_err_from_sandwich(
+    XtWX_inv: list[list[float]],
+    meat: list[list[float]],
+    col_scales: list[float],
+    classical_std_err: list[float],
+) -> list[float]:
+    """Assemble HAC sandwich variance and return per-coefficient std_err.
+
+    Var(β̂) = (X'WX)⁻¹ · meat · (X'WX)⁻¹
+    De-normalize by col_scales (matches existing convention in WLS solvers).
+
+    Safeguard: if HAC std_err < classical std_err for any coefficient,
+    fall back to classical for that coefficient.  HAC under
+    autocorrelation should always be ≥ classical; smaller indicates
+    numerical issue (e.g. negative meat diagonal from pathological ACF).
+    """
+    p = len(XtWX_inv)
+    if p == 0:
+        return []
+    # M_inv · meat · M_inv (manual matrix multiply — keep pure-Python
+    # path for parity with rest of module).
+    inv_meat = [[0.0] * p for _ in range(p)]
+    for i in range(p):
+        for j in range(p):
+            s = 0.0
+            for k in range(p):
+                s += XtWX_inv[i][k] * meat[k][j]
+            inv_meat[i][j] = s
+    var_hac = [0.0] * p
+    for i in range(p):
+        s = 0.0
+        for k in range(p):
+            s += inv_meat[i][k] * XtWX_inv[k][i]
+        var_hac[i] = s
+
+    out: list[float] = []
+    for i in range(p):
+        scale_sq = col_scales[i] * col_scales[i] if i < len(col_scales) else 1.0
+        v = max(0.0, var_hac[i]) / scale_sq if scale_sq > 0 else 0.0
+        hac_se = math.sqrt(v) if v > 0 else 0.0
+        cse = classical_std_err[i] if i < len(classical_std_err) else float("inf")
+        if math.isfinite(cse) and hac_se < cse:
+            # Numerical safeguard: HAC should always be ≥ classical for
+            # autocorrelated residuals.  Smaller means meat had a
+            # negative diagonal contribution — fall back.
+            _LOGGER.debug(
+                "HAC std_err[%d]=%.4f < classical=%.4f; falling back to classical",
+                i, hac_se, cse,
+            )
+            out.append(cse)
+        else:
+            out.append(hac_se if math.isfinite(hac_se) else cse)
+    return out
+
+
+def _hac_std_err_univariate(
+    r_z: list[float],
+    weights: list[float],
+    residuals: list[float],
+    wrzrz: float,
+    bandwidth: int,
+    classical_std_err: float,
+) -> float:
+    """HAC std_err for a univariate FWL partial regression.
+
+    For β = (r_z' W y) / (r_z' W r_z), the sandwich is:
+        Var(β̂) = (1/wrzrz²) · Σ_{|k|≤L} κ(k) · Σ_t (w_t·r_z[t]·e_t)(w_{t-k}·r_z[t-k]·e_{t-k})
+
+    Same Bartlett kernel and safeguard as the full-matrix variant.
+    """
+    n = len(residuals)
+    if n == 0 or wrzrz <= 0:
+        return classical_std_err
+    s = [weights[t] * r_z[t] * residuals[t] for t in range(n)]
+    meat = sum(x * x for x in s)
+    for k in range(1, bandwidth + 1):
+        bartlett = 1.0 - k / (bandwidth + 1)
+        cross = sum(s[t] * s[t - k] for t in range(k, n))
+        meat += 2.0 * bartlett * cross
+    if meat < 0:
+        return classical_std_err
+    var_hac = meat / (wrzrz * wrzrz)
+    hac_se = math.sqrt(var_hac) if var_hac > 0 else 0.0
+    if math.isfinite(classical_std_err) and hac_se < classical_std_err:
+        _LOGGER.debug(
+            "HAC univariate std_err=%.4f < classical=%.4f; falling back",
+            hac_se, classical_std_err,
+        )
+        return classical_std_err
+    return hac_se if math.isfinite(hac_se) else classical_std_err
+
 
 @dataclass(frozen=True, slots=True)
 class BufferAddResult:
@@ -538,17 +803,12 @@ def _detect_optimal_tau(
 
     r2_improvement = 1.0 - rss_opt / rss_raw
 
-    # BIC test: τ adds one nuisance parameter (k=1).  Accept iff
-    # n·log(RSS_0/RSS_τ) > log(n) (equivalently ΔBIC < 0).  This is
-    # the standard nested-model criterion in system identification —
-    # n-aware so the threshold tightens for small buffers and loosens
-    # as the buffer fills.
-    bic_gain = n_eff * math.log(rss_raw / rss_opt)
-    bic_threshold = math.log(n_eff)
-
     # Recover the input coefficient at tau_opt — always, even when
     # rejected, so debug bundles can compare β at the candidate τ
     # against β at τ=0 and reason about why the search was rejected.
+    # Also compute residuals + weights at tau_opt for ESS computation
+    # below (BIC test uses ESS in place of raw n_eff to honor the
+    # autocorrelation-induced information collapse at fine cadence).
     filtered = _apply_retrospective_ema(observations, entity_id, tau_opt)
     rows_f: list[int] = []
     x_input_f: list[float] = []
@@ -577,6 +837,39 @@ def _detect_optimal_tau(
         XtWX_f[a][a] += 1e-6
     beta_f = _solve_symmetric(XtWX_f, XtWy_f, p)
     beta_input = beta_f[4] if beta_f else 0.0
+
+    # ESS-substituted BIC: replace raw n_eff with ESS computed from the
+    # tau_opt-fitted residuals.  Schwarz 1978 BIC assumes IID errors;
+    # thermal residuals are heavily autocorrelated at fine cadence, so
+    # raw n overstates the information content.  ESS = N/(1+2Σρ_k) via
+    # Bartlett-weighted ACF (Bartlett 1946; Newey-West 1987 kernel).
+    # Falls back to raw n_eff if residuals are degenerate or beta_f
+    # failed (preserves classical behavior in pathological cases).
+    n_for_bic: float = float(n_eff)
+    if beta_f is not None and rows_f:
+        m_f = len(rows_f)
+        resid_f = [0.0] * m_f
+        w_f = [0.0] * m_f
+        for j, i in enumerate(rows_f):
+            od_i = base_X[i][1] if base_X else 0.0
+            s_i, c_i = tod_cols[i] if tod_cols else (0.0, 0.0)
+            row = [1.0, od_i, s_i, c_i, x_input_f[j]]
+            pred = sum(beta_f[a] * row[a] for a in range(p))
+            resid_f[j] = y_values[i] - pred
+            w_f[j] = weights[i]
+        # Wall-clock-anchored bandwidth — same primitive as HAC std_err.
+        rows_obs = [observations[i] for i in rows_f]
+        dt_min_bic = _estimate_observation_dt_min(rows_obs)
+        bw_bic = _hac_bandwidth(m_f, dt_min_bic)
+        acf = _bartlett_acf(resid_f, w_f, bw_bic)
+        n_for_bic = _ess_from_acf(acf, m_f)
+
+    # BIC test: τ adds one nuisance parameter (k=1).  Accept iff
+    # ESS·log(RSS_0/RSS_τ) > log(ESS) (equivalently ΔBIC < 0).  Standard
+    # nested-model criterion in system identification, with ESS replacing
+    # raw N to honor autocorrelated residuals (see ESS computation above).
+    bic_gain = n_for_bic * math.log(rss_raw / rss_opt)
+    bic_threshold = math.log(n_for_bic)
 
     # Boundary-hit detection: τ_opt within ε of the upper rail is the
     # Raue 2009 practical-non-identifiability signal — the optimizer has
@@ -1558,24 +1851,58 @@ def _solve_joint(
     for jj, fi in enumerate(ctx.active_input_indices):
         beta[fi + 2] = beta_norm[ctx.n_base + jj] / col_scales[ctx.n_base + jj]
 
-    # Standard errors from (X'WX)^-1
+    # Standard errors: classical (X'WX)⁻¹·σ² baseline + Newey-West HAC
+    # sandwich (uses Bartlett-weighted residual ACF; cadence-invariant via
+    # wall-clock-anchored bandwidth).  HAC kicks in for autocorrelated
+    # residuals; safeguard falls back to classical per-coefficient if the
+    # sandwich produces a smaller value (numerical pathology, not a real
+    # correction).
     std_err = [float("inf")] * ctx.n
     cov_diag = _diagonal_of_inverse(XtWX, n_joint)
     if cov_diag is not None:  # pragma: no branch — XtWX is well-conditioned when _solve_symmetric succeeded
-        # Residuals use all columns (including nuisance) for correct σ²
         all_beta_norm = [beta_norm[jj] / col_scales[jj] for jj in range(n_joint)]
         resid = [
             y[idx] - sum(joint_cols[jj][idx] * all_beta_norm[jj] for jj in range(n_joint))
             for idx in range(m_complete)
         ]
         rms_sq = sum(r * r for r in resid) / max(1, m_complete - n_joint)
+
+        # Classical per-coefficient std_err keyed back to ctx.n positions.
+        classical_norm = [0.0] * n_joint
+        for i in range(n_joint):
+            v = rms_sq * max(0.0, cov_diag[i])
+            classical_norm[i] = math.sqrt(v) if v > 0 else 0.0
+
+        # HAC sandwich on the normalized design matrix.
+        complete_obs = [ctx.base_eligible[k] for k in ctx.complete_indices]
+        dt_min = _estimate_observation_dt_min(complete_obs)
+        bandwidth = _hac_bandwidth(m_complete, dt_min)
+        XtWX_inv = DiversityAwareBuffer._invert_matrix(
+            [row[:] for row in XtWX], n_joint,
+        )
+        if XtWX_inv is not None:
+            X_rows = [
+                [joint_cols[jj][idx] / col_scales[jj] for jj in range(n_joint)]
+                for idx in range(m_complete)
+            ]
+            meat = _hac_meat_matrix(X_rows, w, resid, bandwidth)
+            hac_norm = _hac_std_err_from_sandwich(
+                XtWX_inv, meat,
+                col_scales=[1.0] * n_joint,  # de-norm done below
+                classical_std_err=classical_norm,
+            )
+        else:  # pragma: no cover — XtWX inversion mirrors cov_diag presence
+            hac_norm = classical_norm
+
+        # De-normalize and place into the ctx.n positions (skip sin/cos
+        # nuisance coefficients which aren't reported).
         for i in range(ctx.n_base):
-            var_i = rms_sq * max(0.0, cov_diag[i]) / (col_scales[i] ** 2)
-            std_err[i] = math.sqrt(var_i) if var_i > 0 else 0.0
+            std_err[i] = hac_norm[i] / col_scales[i] if col_scales[i] > 0 else 0.0
         for jj, fi in enumerate(ctx.active_input_indices):
             idx_in = ctx.n_base + jj
-            var_i = rms_sq * max(0.0, cov_diag[idx_in]) / (col_scales[idx_in] ** 2)
-            std_err[fi + 2] = math.sqrt(var_i) if var_i > 0 else 0.0
+            std_err[fi + 2] = (
+                hac_norm[idx_in] / col_scales[idx_in] if col_scales[idx_in] > 0 else 0.0
+            )
 
     return beta, std_err
 
@@ -1697,7 +2024,17 @@ def _solve_fwl(
         beta[coeff_idx] = wrzry / wrzrz
         sub_resid = [y_sub[i] - beta[coeff_idx] * r_z[i] for i in range(m_sub)]
         sub_rms_sq = sum(r * r for r in sub_resid) / max(1, m_sub - 1)
-        std_err[coeff_idx] = math.sqrt(sub_rms_sq / wrzrz) if wrzrz > 1e-15 else float("inf")
+        classical_se = math.sqrt(sub_rms_sq / wrzrz) if wrzrz > 1e-15 else float("inf")
+
+        # HAC sandwich for univariate FWL — replaces classical IID std_err
+        # with autocorrelation-consistent variance.  Wall-clock-anchored
+        # bandwidth keeps it cadence-invariant.
+        sub_obs = [ctx.base_eligible[k] for k in subset_indices]
+        dt_min_sub = _estimate_observation_dt_min(sub_obs)
+        bw = _hac_bandwidth(m_sub, dt_min_sub)
+        std_err[coeff_idx] = _hac_std_err_univariate(
+            r_z, w_sub, sub_resid, wrzrz, bw, classical_se,
+        )
 
     # Re-estimate base to absorb model input contributions
     y_adj = list(ctx.y_base)
@@ -1965,14 +2302,44 @@ def weighted_least_squares(
         std_err = [float("inf")] * n
         cov_diag = _diagonal_of_inverse(XtWX_base, n_base)
         if cov_diag is not None:  # pragma: no branch — XtWX_base ridge-regularized is always invertible
+            resid_base = [
+                y_base[k] - sum(beta_base[i] * X_base[k][i] for i in range(n_base))
+                for k in range(m_base)
+            ]
             rms_base = math.sqrt(
-                sum((y_base[k] - sum(beta_base[i] * X_base[k][i] for i in range(n_base))) ** 2
-                    for k in range(m_base)) / max(1, m_base - n_base)
+                sum(r * r for r in resid_base) / max(1, m_base - n_base)
             )
             rms_sq = rms_base * rms_base if rms_base > 0 else 1e-12
+
+            classical_norm = [0.0] * n_base
             for i in range(n_base):
-                var_i = rms_sq * max(0.0, cov_diag[i]) / (col_scales_base[i] ** 2)
-                std_err[i] = math.sqrt(var_i) if var_i > 0 else 0.0
+                v = rms_sq * max(0.0, cov_diag[i])
+                classical_norm[i] = math.sqrt(v) if v > 0 else 0.0
+
+            # HAC sandwich on the base-only design matrix.
+            dt_min = _estimate_observation_dt_min(base_eligible)
+            bandwidth = _hac_bandwidth(m_base, dt_min)
+            XtWX_inv = DiversityAwareBuffer._invert_matrix(
+                [row[:] for row in XtWX_base], n_base,
+            )
+            if XtWX_inv is not None:
+                X_norm_rows = [
+                    [X_base[k][i] / col_scales_base[i] for i in range(n_base)]
+                    for k in range(m_base)
+                ]
+                meat = _hac_meat_matrix(X_norm_rows, w_base, resid_base, bandwidth)
+                hac_norm = _hac_std_err_from_sandwich(
+                    XtWX_inv, meat,
+                    col_scales=[1.0] * n_base,
+                    classical_std_err=classical_norm,
+                )
+            else:  # pragma: no cover — XtWX_base inversion mirrors cov_diag presence
+                hac_norm = classical_norm
+
+            for i in range(n_base):
+                std_err[i] = (
+                    hac_norm[i] / col_scales_base[i] if col_scales_base[i] > 0 else 0.0
+                )
 
     # Fill held features from current model
     fallback = current_beta if current_beta else [0.0] * n
