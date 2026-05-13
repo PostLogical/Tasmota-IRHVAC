@@ -136,11 +136,12 @@ def run_reference_scenario(
 
     for tick in range(n_ticks):
         dt_seconds = tick_min * 60.0
+        minute = tick * tick_min
 
         # Drive outdoor schedule (synthetic diurnal, no weather state coupling
         # — that's a Phase 4 / multi-realisation concern).
         model.outdoor_temp = diurnal_outdoor(
-            tick, scenario.outdoor_base_c, scenario.outdoor_diurnal_c, tick_min
+            minute, scenario.outdoor_base_c, scenario.outdoor_diurnal_c
         )
 
         # Compute model input values per role.
@@ -149,7 +150,7 @@ def run_reference_scenario(
         q_air_extra = 0.0
         q_wall_extra = 0.0
         for mi in model_inputs:
-            val = mi.schedule(tick) if mi.schedule is not None else 0.0
+            val = mi.schedule(minute) if mi.schedule is not None else 0.0
             input_values[mi.name] = val
             if mi.input_role == "solar":
                 solar_proxy_value += val
@@ -211,9 +212,9 @@ def run_reference_scenario(
 # ── Canonical scenario set ────────────────────────────────────────────────
 
 
-def _solar_schedule(tick: int) -> float:
+def _solar_schedule(minute: float) -> float:
     """Solar input schedule: matches the bench's canonical diurnal solar."""
-    return diurnal_solar(tick, peak=0.8, tick_minutes=15.0)
+    return diurnal_solar(minute, peak=0.8)
 
 
 CANONICAL_SCENARIOS: dict[str, ReferenceScenario] = {

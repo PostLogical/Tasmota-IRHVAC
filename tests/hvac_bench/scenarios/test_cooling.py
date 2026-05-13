@@ -94,7 +94,7 @@ class TestCoolingHeatWave:
             return min(40.0, 30.0 + minute * (3.2 / 60.0))
 
         history = run_scenario(ctrl, model, duration_minutes=8 * 60, mode="cool",
-                               outdoor_minute_schedule=outdoor_schedule)
+                               outdoor_schedule=outdoor_schedule)
         record_scenario_rollup(bench_metrics, history, profile_name=profile_name,
                     seed_factor=seed_factor, desired=24.0)
 
@@ -173,7 +173,7 @@ class TestCoolingSolarRejection:
             return min(0.8, (minute - 60.0) * (0.4 / 60.0))
 
         history = run_scenario(ctrl, model, duration_minutes=8 * 60, mode="cool",
-                               solar_minute_schedule=solar_schedule)
+                               solar_schedule=solar_schedule)
         record_scenario_rollup(bench_metrics, history, profile_name=profile_name,
                     seed_factor=1.0, desired=24.0)
 

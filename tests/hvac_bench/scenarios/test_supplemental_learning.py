@@ -90,13 +90,13 @@ class StoveCycleModel:
 
 
 def run_with_stove(controller, model, stove, duration_minutes, mode="heat",
-                   outdoor_minute_schedule=None, stove_on_minutes=(0, None),
+                   outdoor_schedule=None, stove_on_minutes=(0, None),
                    tick_interval_min=None):
     """Run simulation with stove cycling.
 
     Args:
         duration_minutes: total simulated wall-clock duration.
-        outdoor_minute_schedule: callable(minute) -> outdoor_temp.
+        outdoor_schedule: callable(minute) -> outdoor_temp.
         stove_on_minutes: (start_min, end_min) wall-clock when stove
             thermostat is on. None for end means stays on.
         tick_interval_min: minutes per tick.  Defaults to
@@ -118,9 +118,9 @@ def run_with_stove(controller, model, stove, duration_minutes, mode="heat",
     for tick in range(n_ticks):
         minute = tick * tick_interval_min
         # Outdoor schedule
-        if outdoor_minute_schedule is not None:
-            if callable(outdoor_minute_schedule):
-                model.outdoor_temp = outdoor_minute_schedule(minute)
+        if outdoor_schedule is not None:
+            if callable(outdoor_schedule):
+                model.outdoor_temp = outdoor_schedule(minute)
 
         # Stove on/off schedule: fire on the tick that contains the
         # transition minute (was `tick == stove_start` at fixed cadence).
@@ -382,7 +382,7 @@ class TestOutdoorVariation:
             history = run_with_stove(ctrl, model, stove,
                                      duration_minutes=12 * 60,
                                      stove_on_minutes=(240, None),
-                                     outdoor_minute_schedule=outdoor)
+                                     outdoor_schedule=outdoor)
 
             # Was ticks 12-15 (min 180-225), ticks 32-47 (min 480-705).
             pre = [h for h in history if 180 <= h["minute"] <= 225]

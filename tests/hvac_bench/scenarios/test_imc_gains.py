@@ -77,11 +77,11 @@ def _make_imc_controller(profile: HouseProfile):
 
 
 def _run_pair(profile, initial, outdoor, desired, duration_minutes, mode,
-              outdoor_minute_schedule=None, desired_minute_schedule=None):
+              outdoor_schedule=None, desired_schedule=None):
     """Run both flat and IMC controllers, return (flat_metrics, imc_metrics)."""
     final_desired = desired
-    if desired_minute_schedule:
-        for _, temp in sorted(desired_minute_schedule.items()):
+    if desired_schedule:
+        for _, temp in sorted(desired_schedule.items()):
             final_desired = temp
 
     results = {}
@@ -91,8 +91,8 @@ def _run_pair(profile, initial, outdoor, desired, duration_minutes, mode,
         model = ThermalModel(profile=profile, initial_temp=initial,
                              outdoor_temp=outdoor)
         history = run_scenario(ctrl, model, duration_minutes=duration_minutes, mode=mode,
-                               outdoor_minute_schedule=outdoor_minute_schedule,
-                               desired_minute_schedule=desired_minute_schedule)
+                               outdoor_schedule=outdoor_schedule,
+                               desired_schedule=desired_schedule)
         results[label] = compute_all_metrics(history, desired=final_desired)
 
     return results["flat"], results["imc"]
@@ -123,7 +123,7 @@ class TestIMCNoRegression:
         flat, imc = _run_pair(
             profile, initial=20.5, outdoor=10.0, desired=20.5,
             duration_minutes=8 * 60, mode="heat",
-            outdoor_minute_schedule=lambda m: max(-5.0, 10.0 - m * (5.0 / 60.0)),
+            outdoor_schedule=lambda m: max(-5.0, 10.0 - m * (5.0 / 60.0)),
         )
         _record_imc_pair(bench_metrics, flat, imc, profile_name=profile_name, scenario="cold_snap_bounded")
         check_bench_metrics(num_regression, bench_metrics)
@@ -168,13 +168,13 @@ class TestIMCImprovesSlowProfiles:
                             duration_minutes=8 * 60, mode="heat")),
         ("setpoint_step", dict(initial=20.5, outdoor=5.0, desired=20.5,
                                duration_minutes=8 * 60, mode="heat",
-                               desired_minute_schedule={150: 22.5})),
+                               desired_schedule={150: 22.5})),
         ("cold_snap", dict(initial=20.5, outdoor=10.0, desired=20.5,
                            duration_minutes=8 * 60, mode="heat",
-                           outdoor_minute_schedule=lambda m: max(-5.0, 10.0 - m * (5.0 / 60.0)))),
+                           outdoor_schedule=lambda m: max(-5.0, 10.0 - m * (5.0 / 60.0)))),
         ("ramp_dist", dict(initial=20.5, outdoor=5.0, desired=20.5,
                            duration_minutes=8 * 60, mode="heat",
-                           outdoor_minute_schedule=lambda m: 5.0 - m * (1.0 / 60.0))),
+                           outdoor_schedule=lambda m: 5.0 - m * (1.0 / 60.0))),
         ("warm_start", dict(initial=28.0, outdoor=32.0, desired=24.0,
                             duration_minutes=8 * 60, mode="cool")),
     ]
@@ -276,15 +276,15 @@ class TestIMCAggregate:
                             duration_minutes=8 * 60, mode="heat")),
         ("cold_snap", dict(initial=20.5, outdoor=10.0, desired=20.5,
                            duration_minutes=8 * 60, mode="heat",
-                           outdoor_minute_schedule=lambda m: max(-5.0, 10.0 - m * (5.0 / 60.0)))),
+                           outdoor_schedule=lambda m: max(-5.0, 10.0 - m * (5.0 / 60.0)))),
         ("setpoint_up", dict(initial=20.5, outdoor=5.0, desired=20.5,
                              duration_minutes=8 * 60, mode="heat",
-                             desired_minute_schedule={150: 22.5})),
+                             desired_schedule={150: 22.5})),
         ("steady_state", dict(initial=20.5, outdoor=5.0, desired=20.5,
                               duration_minutes=12 * 60, mode="heat")),
         ("ramp_dist", dict(initial=20.5, outdoor=5.0, desired=20.5,
                            duration_minutes=8 * 60, mode="heat",
-                           outdoor_minute_schedule=lambda m: 5.0 - m * (1.0 / 60.0))),
+                           outdoor_schedule=lambda m: 5.0 - m * (1.0 / 60.0))),
         ("warm_start", dict(initial=28.0, outdoor=32.0, desired=24.0,
                             duration_minutes=8 * 60, mode="cool")),
     ]

@@ -134,7 +134,7 @@ class TestDerivativeColdSnap:
             model = _make_model(profile, initial_temp=20.5, outdoor=10.0)
 
             history = run_scenario(ctrl, model, duration_minutes=12 * 60, mode="heat",
-                                   outdoor_minute_schedule=outdoor_schedule)
+                                   outdoor_schedule=outdoor_schedule)
             m = compute_all_metrics(history, desired=20.5)
 
             d_terms = [h["d_term"] for h in history]
@@ -239,7 +239,7 @@ class TestDerivativeSetpointStep:
             model = _make_model(profile, initial_temp=20.5, outdoor=5.0)
 
             history = run_scenario(ctrl, model, duration_minutes=12 * 60, mode="heat",
-                                   desired_minute_schedule={STEP_MINUTE: 22.5})
+                                   desired_schedule={STEP_MINUTE: 22.5})
             m = compute_all_metrics(history, desired=22.5)
 
             # D at the step moment should be small — measurement hasn't

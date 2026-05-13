@@ -126,7 +126,7 @@ class TestHeatingColdSnap:
             return max(-5.0, 10.0 - minute * (5.0 / 60.0))
 
         history = run_scenario(ctrl, model, duration_minutes=8 * 60, mode="heat",
-                               outdoor_minute_schedule=outdoor_schedule)
+                               outdoor_schedule=outdoor_schedule)
         record_scenario_rollup(bench_metrics, history, profile_name=profile_name,
                     seed_factor=seed_factor, desired=20.5)
 
@@ -169,7 +169,7 @@ class TestHeatingSetpointUp:
         # Setpoint step at 150 min = 2.5h (was tick=10 at 15-min cadence).
         # Total run 8h.
         history = run_scenario(ctrl, model, duration_minutes=8 * 60, mode="heat",
-                               desired_minute_schedule={150.0: 22.5})
+                               desired_schedule={150.0: 22.5})
         # Final desired is 22.5; rollup is computed against final desired
         # so post-step tracking error dominates the metrics.
         record_scenario_rollup(bench_metrics, history, profile_name=profile_name,
@@ -217,7 +217,7 @@ class TestHeatingSetpointDown:
 
         # Setpoint step down at 150 min = 2.5h (was tick=10 at 15-min).
         history = run_scenario(ctrl, model, duration_minutes=8 * 60, mode="heat",
-                               desired_minute_schedule={150.0: 20.5})
+                               desired_schedule={150.0: 20.5})
         record_scenario_rollup(bench_metrics, history, profile_name=profile_name,
                     seed_factor=seed_factor, desired=20.5)
 
@@ -301,7 +301,7 @@ class TestHeatingRampDisturbance:
             return 5.0 - minute * (1.0 / 60.0)
 
         history = run_scenario(ctrl, model, duration_minutes=8 * 60, mode="heat",
-                               outdoor_minute_schedule=outdoor_schedule)
+                               outdoor_schedule=outdoor_schedule)
         record_scenario_rollup(bench_metrics, history, profile_name=profile_name,
                     seed_factor=seed_factor, desired=20.5)
 

@@ -152,7 +152,7 @@ class TestColdSnapMonteCarlo:
                 return max(-5.0, 10.0 - minute * (5.0 / 60.0))
 
             history = run_scenario(ctrl, model, duration_minutes=8 * 60, mode="heat",
-                                   outdoor_minute_schedule=outdoor)
+                                   outdoor_schedule=outdoor)
             m = compute_all_metrics(history, desired=20.5)
             cold_ticks_list.append(m["cold_ticks"])
 
