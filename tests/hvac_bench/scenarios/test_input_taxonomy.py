@@ -50,7 +50,7 @@ from tests.hvac_bench.house_profiles import PROFILES_2R2C
 # ── Shared schedules (tick-rate aware) ──────────────────────────────────
 
 
-def make_pellet_stove_schedule(tick_minutes: float = 15.0):
+def make_pellet_stove_schedule():
     """Pellet stove with varied firing hours for identifiability.
 
     Fires every other day, alternating between morning (7-10 AM) and
@@ -58,9 +58,9 @@ def make_pellet_stove_schedule(tick_minutes: float = 15.0):
     timing from pure-evening or pure-morning patterns, giving the WLS
     independent variance to identify β.
     """
-    def schedule(tick: int) -> float:
-        hour = (tick * tick_minutes / 60.0) % 24.0
-        day = int(tick * tick_minutes / (60.0 * 24.0))
+    def schedule(minute: float) -> float:
+        hour = (minute / 60.0) % 24.0
+        day = int(minute / (60.0 * 24.0))
         if day % 2 != 0:
             return 0.0
         # Alternate morning vs evening firing across pairs of stove days
@@ -70,7 +70,7 @@ def make_pellet_stove_schedule(tick_minutes: float = 15.0):
     return schedule
 
 
-def make_dr_temp_schedule(tick_minutes: float = 15.0):
+def make_dr_temp_schedule():
     """DR temperature aggregating multiple un-instrumented sources.
 
     Composition:
@@ -83,9 +83,9 @@ def make_dr_temp_schedule(tick_minutes: float = 15.0):
     Returns absolute °C; consumed via ``delta_from_room=True`` in the
     model input config.
     """
-    def schedule(tick: int) -> float:
-        hour = (tick * tick_minutes / 60.0) % 24.0
-        day = tick * tick_minutes / (60.0 * 24.0)
+    def schedule(minute: float) -> float:
+        hour = (minute / 60.0) % 24.0
+        day = minute / (60.0 * 24.0)
         d_int = int(day)
 
         # Modulating HP keeps DR around 20.5 ± wobble.  Wobble is a slow
@@ -120,7 +120,7 @@ def make_dr_temp_schedule(tick_minutes: float = 15.0):
     return schedule
 
 
-def make_passive_zone_schedule(tick_minutes: float = 15.0):
+def make_passive_zone_schedule():
     """Pure-passive zone: deterministic linear function of outdoor + solar.
 
     No independent variance.  The WLS-from-thermal-physics view: this
@@ -133,9 +133,9 @@ def make_passive_zone_schedule(tick_minutes: float = 15.0):
     approximation while outdoor catches up.  The test isn't about
     extreme heat-sink magnitudes; it's about identifiability.
     """
-    def schedule(tick: int) -> float:
-        hour = (tick * tick_minutes / 60.0) % 24.0
-        day = tick * tick_minutes / (60.0 * 24.0)
+    def schedule(minute: float) -> float:
+        hour = (minute / 60.0) % 24.0
+        day = minute / (60.0 * 24.0)
 
         outdoor = (
             -5.0
@@ -182,7 +182,7 @@ class TestDirectActiveSource:
                     input_role="heat_source",
                     _true_ff_coef=-3.0,
                     seed_heat=0.0,
-                    schedule=make_pellet_stove_schedule(TICK_MINUTES_DEFAULT),
+                    schedule=make_pellet_stove_schedule(),
                 ),
             ],
             relax_kappa_gate=True,
@@ -276,7 +276,7 @@ class TestAdjacentZoneProxy:
                     input_role="adjacent_zone",
                     _true_ff_coef=-0.4,  # moderate party-wall coupling
                     seed_heat=0.0,
-                    schedule=make_dr_temp_schedule(TICK_MINUTES_DEFAULT),
+                    schedule=make_dr_temp_schedule(),
                     delta_from_room=True,
                 ),
             ],
@@ -353,7 +353,7 @@ class TestPurePassiveAdjacent:
                     input_role="adjacent_zone",
                     _true_ff_coef=-0.2,
                     seed_heat=0.0,
-                    schedule=make_passive_zone_schedule(TICK_MINUTES_DEFAULT),
+                    schedule=make_passive_zone_schedule(),
                     delta_from_room=True,
                 ),
             ],

@@ -691,15 +691,14 @@ class TestDisturbanceRejection:
 # ── Scenario: Staged model input rollout ─────────────────────────────────
 
 
-def _stove_schedule(tick: int) -> float:
+def _stove_schedule(minute: float) -> float:
     """Pellet stove: runs 6pm-10pm on cold days, off otherwise.
 
     Intermittent, correlated with cold outdoor (runs when it's coldest).
     This is the hard case for learning — sparse, confounded.
     """
-    tick_min = 15.0
-    hour = (tick * tick_min / 60.0) % 24.0
-    day = tick * tick_min / (60.0 * 24.0)
+    hour = (minute / 60.0) % 24.0
+    day = minute / (60.0 * 24.0)
     # Only fires on "cold" days (day 0, 2, 4, ... — alternating)
     if int(day) % 2 != 0:
         return 0.0
@@ -708,7 +707,7 @@ def _stove_schedule(tick: int) -> float:
     return 1.0
 
 
-def _adjacent_zone_schedule(tick: int) -> float:
+def _adjacent_zone_schedule(minute: float) -> float:
     """Adjacent zone (sunroom) absolute temperature.
 
     Returns the sunroom's absolute °C reading — the controlled room's
@@ -722,9 +721,8 @@ def _adjacent_zone_schedule(tick: int) -> float:
     multi-input staged-rollout.  See the dedicated TestAdjacentZone*
     classes below for scenario-specific sunroom realism.
     """
-    tick_min = 15.0
-    hour = (tick * tick_min / 60.0) % 24.0
-    day = tick * tick_min / (60.0 * 24.0)
+    hour = (minute / 60.0) % 24.0
+    day = minute / (60.0 * 24.0)
     REFERENCE_ROOM_TEMP = 20.5
     if 8 <= hour <= 18:
         solar_factor = math.sin(math.pi * (hour - 8) / 10)
@@ -841,9 +839,9 @@ class TestStagedModelInputRollout:
         solar_spec = next(mi for mi in config.model_inputs if mi.name == "Solar Proxy")
         _underlying_solar = solar_spec.schedule
         assert _underlying_solar is not None, "solar input must have a schedule"
-        def _overcast_day1(tick: int, _base=_underlying_solar) -> float:
-            day = tick * TICK_MINUTES_DEFAULT / (60.0 * 24.0)
-            return 0.0 if day < 1.0 else _base(tick)
+        def _overcast_day1(minute: float, _base=_underlying_solar) -> float:
+            day = minute / (60.0 * 24.0)
+            return 0.0 if day < 1.0 else _base(minute)
         solar_spec.schedule = _overcast_day1
         result = run_full_stack(config)
         bench_metrics["n_snapshots"] = len(result.coef_trajectory)
