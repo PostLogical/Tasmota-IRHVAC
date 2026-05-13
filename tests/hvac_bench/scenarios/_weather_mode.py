@@ -138,29 +138,19 @@ def windowed_real_weather(
     n_days: int,
     *,
     weather_dir: Path | None = None,
-    tick_minutes: float | None = None,
-) -> tuple[Callable[[int], float], Callable[[int], float] | None, int]:
-    """Slice the multi-year Open-Meteo CSV into tick-indexed schedules.
+) -> tuple[Callable[[float], float], Callable[[float], float] | None, int]:
+    """Slice the multi-year Open-Meteo CSV into minute-indexed schedules.
 
-    Tick 0 maps to ``start_day × 24h`` past the CSV's first timestamp; the
-    interpolator sees only the requested window so out-of-range ticks clamp
-    to the window's first/last sample (matching :func:`csv_to_schedules`
-    semantics). ``solar_fn`` normalizes W/m² to the 0-1 proxy the thermal
-    model expects, and ``max_days`` is the actual length served —
-    ``min(n_days, total_days - start_day)``.
+    Minute 0 maps to ``start_day × 24h`` past the CSV's first timestamp;
+    the interpolator sees only the requested window so out-of-range
+    minutes clamp to the window's first/last sample (matching
+    :func:`csv_to_schedules` semantics). ``solar_fn`` normalizes W/m² to
+    the 0-1 proxy the thermal model expects, and ``max_days`` is the
+    actual length served — ``min(n_days, total_days - start_day)``.
 
-    ``tick_minutes`` controls the schedule's tick-to-time mapping: each
-    tick advances by ``tick_minutes`` minutes of wall-clock data.  When
-    None (default), reads the current ``BENCH_TICK_MINUTES`` env var;
-    falls back to 15.0.  Reading the env var live (rather than at module
-    import) lets callers that set ``BENCH_TICK_MINUTES`` after import
-    (e.g. ad-hoc dump scripts) get correct cadence-aware behavior.  At
-    pytest time, ``pytest_configure`` sets the env var pre-import so the
-    default path picks up the override too.
+    Schedules are cadence-invariant: ``outdoor_fn(m)`` interpolates the
+    CSV at sim-minute ``m`` regardless of the bench's tick cadence.
     """
-    if tick_minutes is None:
-        import os
-        tick_minutes = float(os.environ.get("BENCH_TICK_MINUTES", "15.0"))
     weather_dir = weather_dir or _WEATHER_DIR
     csv_data = _load_multiyear(weather_dir)
     outdoor_series = csv_data.get("outdoor_c", [])
@@ -191,12 +181,12 @@ def windowed_real_weather(
     for name, series in csv_data.items():
         sliced[name] = [pt for pt in series if t_lo - 3600.0 <= pt[0] <= t_hi]
 
-    schedules = csv_to_schedules(sliced, tick_minutes=tick_minutes)
+    schedules = csv_to_schedules(sliced)
     outdoor_fn = schedules["outdoor_c"]
     raw_solar = schedules.get("solar_w_m2")
-    solar_fn: Callable[[int], float] | None = None
+    solar_fn: Callable[[float], float] | None = None
     if raw_solar is not None:
-        solar_fn = lambda t, _f=raw_solar: _f(t) / 1000.0
+        solar_fn = lambda m, _f=raw_solar: _f(m) / 1000.0
 
     return outdoor_fn, solar_fn, max_days
 
@@ -206,8 +196,7 @@ def real_weather_schedules(
     *,
     min_days: int = 0,
     weather_dir: Path | None = None,
-    tick_minutes: float | None = None,
-) -> tuple[Callable[[int], float], Callable[[int], float] | None, int]:
+) -> tuple[Callable[[float], float], Callable[[float], float] | None, int]:
     """Resolve a season name to a multi-year window and return schedules.
 
     Thin wrapper over :func:`windowed_real_weather` (#51 replaced the six
@@ -223,5 +212,4 @@ def real_weather_schedules(
         start_day=window.start_day,
         n_days=n_days,
         weather_dir=weather_dir,
-        tick_minutes=tick_minutes,
     )

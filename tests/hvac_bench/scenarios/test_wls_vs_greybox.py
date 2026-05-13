@@ -45,19 +45,19 @@ from tests.hvac_bench.conftest import check_bench_metrics
 from tests.hvac_bench.house_profiles import PROFILES_2R2C
 
 
-def _spring_outdoor(tick: int) -> float:
+def _spring_outdoor(minute: float) -> float:
     """Late spring weather: warm base (16°C) with ±8°C diurnal + weather fronts.
 
     Afternoons regularly exceed desired (20.5°C). Combined with solar,
     HP should be off 30-50% of the time — matching production patterns.
     With 5-day weather drift ±8°C, warm spells push outdoor to 32°C.
     """
-    return diurnal_outdoor(tick, base_c=16.0, amplitude_c=8.0)
+    return diurnal_outdoor(minute, base_c=16.0, amplitude_c=8.0)
 
 
-def _spring_solar(tick: int) -> float:
+def _spring_solar(minute: float) -> float:
     """Strong spring solar (peak 0.8)."""
-    return diurnal_solar(tick, peak=0.8)
+    return diurnal_solar(minute, peak=0.8)
 
 
 @dataclass

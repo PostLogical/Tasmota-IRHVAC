@@ -83,9 +83,9 @@ from tests.hvac_bench.scenarios._weather_mode import (
 # ── Shared weather schedules ─────────────────────────────────────────────
 
 
-def _solar_schedule(tick: int) -> float:
+def _solar_schedule(minute: float) -> float:
     """Solar with variable cloud cover (decorrelated from outdoor)."""
-    return diurnal_solar(tick, peak=0.8)
+    return diurnal_solar(minute, peak=0.8)
 
 
 # ── Scenario 1: Wrong Seeds → Convergence ────────────────────────────────

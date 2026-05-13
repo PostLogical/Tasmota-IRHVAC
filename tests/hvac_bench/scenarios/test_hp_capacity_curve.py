@@ -61,8 +61,8 @@ def _make_config(profile_name: str) -> FullStackConfig:
         profile_name=profile_name,
         outdoor_base_c=_WINTER_BASE_C,
         outdoor_diurnal_c=_WINTER_DIURNAL_C,
-        outdoor_schedule=lambda t: diurnal_outdoor(
-            t, _WINTER_BASE_C, _WINTER_DIURNAL_C, TICK_MINUTES_DEFAULT, weather
+        outdoor_schedule=lambda m: diurnal_outdoor(
+            m, _WINTER_BASE_C, _WINTER_DIURNAL_C, weather
         ),
         desired_c=20.5,
         noise_sigma=0.1,
@@ -75,9 +75,8 @@ def _make_config(profile_name: str) -> FullStackConfig:
                 _true_ff_coef=-2.0,
                 lag_tau=120,
                 clamp_min=0,
-                schedule=lambda t: diurnal_solar(
-                    t, peak=_WINTER_SOLAR_PEAK,
-                    tick_minutes=TICK_MINUTES_DEFAULT,
+                schedule=lambda m: diurnal_solar(
+                    m, peak=_WINTER_SOLAR_PEAK,
                     weather_state=weather,
                 ),
             ),

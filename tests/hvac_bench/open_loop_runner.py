@@ -231,8 +231,8 @@ class OpenLoopConfig:
     model_inputs: list[ModelInputSpec] = field(default_factory=list)
 
     # Outdoor/solar schedule overrides
-    outdoor_schedule: Callable[[int], float] | None = None
-    solar_schedule: Callable[[int], float] | None = None
+    outdoor_schedule: Callable[[float], float] | None = None
+    solar_schedule: Callable[[float], float] | None = None
 
 
 @dataclass
@@ -297,11 +297,11 @@ def run_open_loop_probe(config: OpenLoopConfig) -> OpenLoopResult:
     )
 
     outdoor_fn = config.outdoor_schedule or (
-        lambda t: diurnal_outdoor(t, config.outdoor_base_c,
-                                  config.outdoor_diurnal_c, tick_min)
+        lambda m: diurnal_outdoor(m, config.outdoor_base_c,
+                                  config.outdoor_diurnal_c)
     )
     solar_fn = config.solar_schedule or (
-        lambda t: diurnal_solar(t, tick_minutes=tick_min)
+        lambda m: diurnal_solar(m)
     )
 
     # Truth coefficients for downstream comparison.
@@ -331,10 +331,11 @@ def run_open_loop_probe(config: OpenLoopConfig) -> OpenLoopResult:
 
     for tick in range(n_ticks):
         dt_seconds = tick_min * 60.0
+        minute = tick * tick_min
         sim_clock += dt_seconds
 
         # Update outdoor.
-        model.outdoor_temp = outdoor_fn(tick)
+        model.outdoor_temp = outdoor_fn(minute)
 
         # Compute model input values + per-node heat injection (mirrors
         # full_stack_runner's ASHRAE/Madsen routing).
@@ -344,7 +345,7 @@ def run_open_loop_probe(config: OpenLoopConfig) -> OpenLoopResult:
         q_wall_extra = 0.0
         raw_readings: dict[str, float] = {}
         for mi in model_inputs:
-            val = mi.schedule(tick) if mi.schedule is not None else 0.0
+            val = mi.schedule(minute) if mi.schedule is not None else 0.0
             input_values[mi.name] = val
             raw_readings[mi.entity_id] = val
             if mi.input_role == "solar":
@@ -361,7 +362,7 @@ def run_open_loop_probe(config: OpenLoopConfig) -> OpenLoopResult:
         # Default solar contribution from the diurnal generator (only
         # active when no model input owns the solar role).
         if not any(mi.input_role == "solar" for mi in model_inputs):
-            solar_proxy_value = solar_fn(tick)
+            solar_proxy_value = solar_fn(minute)
 
         # Read sensor at the START of the tick (room_rate is computed
         # from consecutive readings).

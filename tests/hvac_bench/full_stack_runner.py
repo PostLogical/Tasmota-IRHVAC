@@ -77,7 +77,7 @@ class ModelInputSpec:
     _true_ff_coef: float = -3.0  # ground-truth β; tte derived from this
     seed_heat: float = 0.0
     seed_cool: float = 0.0
-    schedule: Callable[[int], float] | None = None  # tick -> value
+    schedule: Callable[[float], float] | None = None  # minute -> value
     delta_from_room: bool = False
     lag_tau: int = 0
     clamp_min: float | None = None  # min in seed space (positive = warms room)
@@ -140,9 +140,9 @@ class FullStackConfig:
     # PI config overrides (passed to TasmotaPIAdapter)
     pi_overrides: dict = field(default_factory=dict)
 
-    # Outdoor/solar schedule overrides (callable: tick -> value)
-    outdoor_schedule: Callable[[int], float] | None = None
-    solar_schedule: Callable[[int], float] | None = None
+    # Outdoor/solar schedule overrides (callable: minute -> value)
+    outdoor_schedule: Callable[[float], float] | None = None
+    solar_schedule: Callable[[float], float] | None = None
 
     # Disturbances to inject
     disturbances: list[Disturbance] = field(default_factory=list)
@@ -373,7 +373,8 @@ class WeatherState:
         for t in range(1, n_ticks):
             self._W[t] = self._phi * self._W[t - 1] + sigma_eps * rng.gauss(0.0, 1.0)
 
-    def __call__(self, tick: int) -> float:
+    def __call__(self, minute: float) -> float:
+        tick = int(minute / self._tick_minutes)
         if tick < 0:
             return self._W[0]
         if tick >= self._n_ticks:
@@ -382,27 +383,26 @@ class WeatherState:
 
 
 def diurnal_outdoor(
-    tick: int,
+    minute: float,
     base_c: float,
     amplitude_c: float,
-    tick_minutes: float = TICK_MINUTES_DEFAULT,
-    weather_state: Callable[[int], float] | None = None,
+    weather_state: Callable[[float], float] | None = None,
     weather_amp_c: float = 2.0,
 ) -> float:
     """Sinusoidal outdoor temp with multi-day weather-front drift.
 
     Coldest at 6AM, warmest at 3PM. With ``weather_state=None`` (legacy) uses a
     pure 8.0°C 5-day sine drift. With a ``WeatherState`` instance, drift becomes
-    a 7.0°C *independent* 5-day sine plus ``weather_amp_c × W(tick)`` *shared*
+    a 7.0°C *independent* 5-day sine plus ``weather_amp_c × W(minute)`` *shared*
     with the solar cloud factor. The shared term is intentionally smaller than
     the independent drift so the residual T-vs-S correlation lands near 0.20
     (average of real Open-Meteo seasons fall=0.30, winter=0.10, spring=0.26),
     not at saturation.
     """
-    hour = (tick * tick_minutes / 60.0) % 24.0
-    day = tick * tick_minutes / (60.0 * 24.0)
+    hour = (minute / 60.0) % 24.0
+    day = minute / (60.0 * 24.0)
     if weather_state is not None:
-        weather_drift = 7.0 * math.sin(2 * math.pi * day / 5.0) + weather_amp_c * weather_state(tick)
+        weather_drift = 7.0 * math.sin(2 * math.pi * day / 5.0) + weather_amp_c * weather_state(minute)
     else:
         weather_drift = 8.0 * math.sin(2 * math.pi * day / 5.0)
     return base_c + weather_drift + amplitude_c * math.cos(
@@ -411,10 +411,9 @@ def diurnal_outdoor(
 
 
 def diurnal_solar(
-    tick: int,
+    minute: float,
     peak: float = 0.8,
-    tick_minutes: float = TICK_MINUTES_DEFAULT,
-    weather_state: Callable[[int], float] | None = None,
+    weather_state: Callable[[float], float] | None = None,
     cloud_coupling: float = 0.5,
     sunrise_hour: float = 6.0,
     sunset_hour: float = 18.0,
@@ -423,17 +422,17 @@ def diurnal_solar(
 
     With ``weather_state=None`` (legacy) uses a smooth 3-day cosine cloud cycle.
     With a ``WeatherState`` instance, the cloud factor is ``clip(0.7 +
-    cloud_coupling × W(tick), 0.2, 1.0)`` — bursty stretches of clear/cloudy days
-    emerge from AR(1) persistence, and the same W also shifts outdoor temp.
+    cloud_coupling × W(minute), 0.2, 1.0)`` — bursty stretches of clear/cloudy
+    days emerge from AR(1) persistence, and the same W also shifts outdoor temp.
     """
-    hour = (tick * tick_minutes / 60.0) % 24.0
+    hour = (minute / 60.0) % 24.0
     if hour < sunrise_hour or hour > sunset_hour:
         return 0.0
     base = peak * math.sin(math.pi * (hour - sunrise_hour) / (sunset_hour - sunrise_hour))
     if weather_state is not None:
-        cloud = max(0.2, min(1.0, 0.7 + cloud_coupling * weather_state(tick)))
+        cloud = max(0.2, min(1.0, 0.7 + cloud_coupling * weather_state(minute)))
     else:
-        day = tick * tick_minutes / (60.0 * 24.0)
+        day = minute / (60.0 * 24.0)
         cloud = 0.5 + 0.5 * math.cos(2 * math.pi * day / 3.0 + 1.0)
     return base * cloud
 
@@ -575,11 +574,11 @@ def run_full_stack(
 
     # Resolve outdoor/solar schedules
     outdoor_fn = config.outdoor_schedule or (
-        lambda t: diurnal_outdoor(t, config.outdoor_base_c,
-                                  config.outdoor_diurnal_c, tick_min)
+        lambda m: diurnal_outdoor(m, config.outdoor_base_c,
+                                  config.outdoor_diurnal_c)
     )
     solar_fn = config.solar_schedule or (
-        lambda t: diurnal_solar(t, tick_minutes=tick_min)
+        lambda m: diurnal_solar(m)
     )
 
     # Build disturbance lookup
@@ -684,9 +683,10 @@ def run_full_stack(
     try:
         for tick in range(n_ticks):
             dt_seconds = tick_min * 60.0
+            minute = tick * tick_min
 
             # Update outdoor temp
-            model.outdoor_temp = outdoor_fn(tick)
+            model.outdoor_temp = outdoor_fn(minute)
 
             # Compute model input values.  Each input role injects heat through
             # the physical pathway it represents, per Madsen & Holst (1995) and
@@ -705,7 +705,7 @@ def run_full_stack(
             q_air_extra = 0.0
             q_wall_extra = 0.0
             for mi in config.model_inputs:
-                val = mi.schedule(tick) if mi.schedule is not None else 0.0
+                val = mi.schedule(minute) if mi.schedule is not None else 0.0
                 input_values[mi.name] = val
                 if mi.input_role == "solar":
                     # Solar handled inside model.step via the 2R2C split.

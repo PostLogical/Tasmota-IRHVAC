@@ -484,7 +484,7 @@ class TestAnomalyRobustness:
                     seed_heat=0.0,
                     lag_tau=120,
                     clamp_min=0,
-                    schedule=lambda t: diurnal_solar(t, peak=0.8, tick_minutes=tick_minutes),
+                    schedule=lambda m: diurnal_solar(m, peak=0.8),
                 ),
             ],
             thermal_disturbances=thermal_disturbances,

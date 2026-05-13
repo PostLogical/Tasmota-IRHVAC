@@ -69,8 +69,9 @@ def _run_with_tick_interval(tick_min: float, n_days: int = 14) -> dict:
 
     for tick in range(n_ticks):
         dt_seconds = tick_min * 60.0
-        model.outdoor_temp = diurnal_outdoor(tick, -5.0, 6.0, tick_min)
-        solar_val = diurnal_solar(tick, tick_minutes=tick_min)
+        minute = tick * tick_min
+        model.outdoor_temp = diurnal_outdoor(minute, -5.0, 6.0)
+        solar_val = diurnal_solar(minute)
 
         sensor_reading = model.read_sensor()
         adapter._sim_clock += dt_seconds
@@ -259,8 +260,9 @@ class TestObservationDataQuality:
 
         for tick in range(n_ticks):
             dt_seconds = tick_min * 60.0
-            model.outdoor_temp = diurnal_outdoor(tick, -5.0, 6.0, tick_min)
-            solar_val = diurnal_solar(tick, tick_minutes=tick_min)
+            minute = tick * tick_min
+            model.outdoor_temp = diurnal_outdoor(minute, -5.0, 6.0)
+            solar_val = diurnal_solar(minute)
 
             sensor_reading = model.read_sensor()
             adapter._sim_clock += dt_seconds

@@ -56,8 +56,9 @@ def _run_and_collect_observations(outdoor_base: float, n_days: int = 7,
 
     for tick in range(n_ticks):
         dt_seconds = tick_min * 60.0
-        model.outdoor_temp = diurnal_outdoor(tick, outdoor_base, 6.0, tick_min)
-        solar_val = diurnal_solar(tick, peak=0.6, tick_minutes=tick_min)
+        minute = tick * tick_min
+        model.outdoor_temp = diurnal_outdoor(minute, outdoor_base, 6.0)
+        solar_val = diurnal_solar(minute, peak=0.6)
 
         sensor_reading = model.read_sensor()
         adapter._sim_clock += dt_seconds

@@ -110,8 +110,8 @@ class BiasAttributionConfig:
     # Optional explicit schedules — when None, both arms get the same
     # canonical diurnal schedule keyed off the shared outdoor_base_c /
     # outdoor_diurnal_c.
-    outdoor_schedule: Callable[[int], float] | None = None
-    solar_schedule: Callable[[int], float] | None = None
+    outdoor_schedule: Callable[[float], float] | None = None
+    solar_schedule: Callable[[float], float] | None = None
 
 
 # ── Result types ───────────────────────────────────────────────────────
@@ -168,15 +168,14 @@ def run_bias_attribution(config: BiasAttributionConfig) -> BiasAttributionResult
     tick_min = config.tick_minutes
 
     outdoor_fn = config.outdoor_schedule or (
-        lambda t: diurnal_outdoor(
-            t,
+        lambda m: diurnal_outdoor(
+            m,
             config.outdoor_base_c,
             config.outdoor_diurnal_c,
-            tick_min,
         )
     )
     solar_fn = config.solar_schedule or (
-        lambda t: diurnal_solar(t, tick_minutes=tick_min)
+        lambda m: diurnal_solar(m)
     )
 
     # ── Closed-loop arm: full PI controller ─────────────────────────

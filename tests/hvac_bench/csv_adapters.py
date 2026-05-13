@@ -3,8 +3,9 @@
 Primary format: simple CSV with timestamp + named columns.
 Adapters convert from HA history JSON, debug bundles, and open-meteo.
 
-All adapters return schedule dicts: {field_name: callable(tick) -> value}
+All adapters return schedule dicts: {field_name: callable(minute) -> value}
 compatible with FullStackConfig.outdoor_schedule / model input schedules.
+``minute`` is sim-minutes from the data's first timestamp.
 """
 
 from __future__ import annotations
@@ -64,12 +65,11 @@ def load_csv(path: str | Path) -> dict[str, list[tuple[float, float]]]:
 
 def csv_to_schedules(
     csv_data: dict[str, list[tuple[float, float]]],
-    tick_minutes: float = 15.0,
-) -> dict[str, Callable[[int], float]]:
-    """Convert CSV timeseries to tick-indexed schedule callables.
+) -> dict[str, Callable[[float], float]]:
+    """Convert CSV timeseries to minute-indexed schedule callables.
 
-    Each callable interpolates the CSV data at the tick's time.
-    Tick 0 maps to the first timestamp in the data.
+    Each callable interpolates the CSV data at sim-minute ``m`` past the
+    data's first timestamp. Minute 0 maps to that first timestamp.
     """
     # Find earliest timestamp across all series
     all_starts = [series[0][0] for series in csv_data.values() if series]
@@ -77,9 +77,9 @@ def csv_to_schedules(
         return {}
     t0 = min(all_starts)
 
-    schedules: dict[str, Callable[[int], float]] = {}
+    schedules: dict[str, Callable[[float], float]] = {}
     for name, series in csv_data.items():
-        schedules[name] = _make_interpolator(series, t0, tick_minutes)
+        schedules[name] = _make_interpolator(series, t0)
 
     return schedules
 
@@ -87,11 +87,10 @@ def csv_to_schedules(
 def _make_interpolator(
     series: list[tuple[float, float]],
     t0: float,
-    tick_minutes: float,
-) -> Callable[[int], float]:
-    """Create a tick -> value interpolator from a timeseries."""
-    def interpolate(tick: int) -> float:
-        t = t0 + tick * tick_minutes * 60.0
+) -> Callable[[float], float]:
+    """Create a minute -> value interpolator from a timeseries."""
+    def interpolate(minute: float) -> float:
+        t = t0 + minute * 60.0
         # Binary search for bracketing interval
         if t <= series[0][0]:
             return series[0][1]

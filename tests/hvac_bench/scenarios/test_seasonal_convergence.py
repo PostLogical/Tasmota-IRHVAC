@@ -126,23 +126,23 @@ SEASONS: dict[str, SeasonProfile] = {
 def _make_solar_schedule(
     season: SeasonProfile,
     weather_state: WeatherState,
-    tick_minutes: float = 15.0,
 ):
     """Solar with seasonal day length and peak intensity, AR(1) cloud factor.
 
-    Cloud factor is ``clip(0.7 + 0.5·W(tick), 0.2, 1.0)`` where W is the shared
-    weather state — same instance also shifts outdoor temp in :func:`diurnal_outdoor`,
-    producing the residual T-vs-S correlation seen in real Open-Meteo data.
+    Cloud factor is ``clip(0.7 + 0.5·W(minute), 0.2, 1.0)`` where W is the
+    shared weather state — same instance also shifts outdoor temp in
+    :func:`diurnal_outdoor`, producing the residual T-vs-S correlation seen
+    in real Open-Meteo data.
     """
-    def schedule(tick: int) -> float:
-        hour = (tick * tick_minutes / 60.0) % 24.0
+    def schedule(minute: float) -> float:
+        hour = (minute / 60.0) % 24.0
         if hour < season.solar_sunrise or hour > season.solar_sunset:
             return 0.0
         day_len = season.solar_sunset - season.solar_sunrise
         base = season.solar_peak * math.sin(
             math.pi * (hour - season.solar_sunrise) / day_len
         )
-        cloud = max(0.2, min(1.0, 0.7 + 0.3 * weather_state(tick)))
+        cloud = max(0.2, min(1.0, 0.7 + 0.3 * weather_state(minute)))
         return base * cloud
     return schedule
 
@@ -150,15 +150,13 @@ def _make_solar_schedule(
 def _make_outdoor_schedule(
     season: SeasonProfile,
     weather_state: WeatherState,
-    tick_minutes: float = 15.0,
 ):
     """Outdoor temp with diurnal swing + AR(1) weather offset (replaces 5-day sine)."""
-    def schedule(tick: int) -> float:
+    def schedule(minute: float) -> float:
         return diurnal_outdoor(
-            tick,
+            minute,
             base_c=season.outdoor_base_c,
             amplitude_c=season.outdoor_diurnal_c,
-            tick_minutes=tick_minutes,
             weather_state=weather_state,
         )
     return schedule
@@ -186,7 +184,7 @@ def _make_synth_config(season_name: str, n_days: int = 90) -> FullStackConfig:
         profile_name="living_room",
         outdoor_base_c=season.outdoor_base_c,
         outdoor_diurnal_c=season.outdoor_diurnal_c,
-        outdoor_schedule=_make_outdoor_schedule(season, weather_state, tick_min),
+        outdoor_schedule=_make_outdoor_schedule(season, weather_state),
         desired_c=20.5,
         noise_sigma=0.1,
         noise_seed=42,
@@ -199,7 +197,7 @@ def _make_synth_config(season_name: str, n_days: int = 90) -> FullStackConfig:
                 seed_heat=0.0,
                 lag_tau=120,
                 clamp_min=0,
-                schedule=_make_solar_schedule(season, weather_state, tick_min),
+                schedule=_make_solar_schedule(season, weather_state),
             ),
         ],
         pi_overrides={
