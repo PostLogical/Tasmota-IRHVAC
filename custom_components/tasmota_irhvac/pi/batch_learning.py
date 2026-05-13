@@ -983,6 +983,14 @@ class DiversityAwareBuffer:
                 f"errors."
             )
         self._buffer: list[Observation] = []
+        # Cache of feature vectors, maintained in lockstep with _buffer
+        # (same length, same index correspondence). Eliminates redundant
+        # build_feature_vector_from_raw calls in find_evictee paths —
+        # vectors are deterministic in (obs, model_inputs, feature_order),
+        # so a stable cache yields byte-identical eviction decisions.
+        # Rebuilt on update_config / recompute_info_matrix; filtered
+        # in parallel on filter_inactive / exclude_time_range.
+        self._feature_vectors: list[list[float]] = []
         self._max_size = max_size
         self._n_features = n_features
         self._feature_order: list[str] | None = feature_order
@@ -1020,6 +1028,7 @@ class DiversityAwareBuffer:
     def clear(self) -> None:
         """Remove all observations and reset the information matrix."""
         self._buffer.clear()
+        self._feature_vectors.clear()
         n = self._n_features
         reg_inv = 1.0 / INFO_MATRIX_REGULARIZATION
         self._info_inv = [
@@ -1084,6 +1093,7 @@ class DiversityAwareBuffer:
             ]
         removed = before - len(self._buffer)
         if removed:
+            # recompute_info_matrix rebuilds _feature_vectors from scratch
             self.recompute_info_matrix()
         return removed
 
@@ -1102,6 +1112,7 @@ class DiversityAwareBuffer:
         ]
         removed = before - len(self._buffer)
         if removed:
+            # recompute_info_matrix rebuilds _feature_vectors from scratch
             self.recompute_info_matrix()
         return removed
 
@@ -1129,6 +1140,7 @@ class DiversityAwareBuffer:
                 x, self._info_inv, self._xtx_matrix, len(self._buffer),
             )
             self._buffer.append(obs)
+            self._feature_vectors.append(x)
             self._sherman_morrison_update(x)
             return BufferAddResult(
                 admitted=True,
@@ -1139,7 +1151,7 @@ class DiversityAwareBuffer:
                 policy_name=policy_name,
             )
 
-        feature_vectors = [self._get_feature_vector(o) for o in self._buffer]
+        feature_vectors = self._feature_vectors
 
         # Joint-optimization policies (e.g. DOptimalPolicy) supply
         # ``attempt_exchange`` so admit/evict can consider the candidate↔
@@ -1157,6 +1169,7 @@ class DiversityAwareBuffer:
                     old_x = feature_vectors[decision.evictee_index]
                     self._sherman_morrison_downdate(old_x)
                     self._buffer[decision.evictee_index] = obs
+                    self._feature_vectors[decision.evictee_index] = x
                     self._sherman_morrison_update(x)
                     return BufferAddResult(
                         admitted=True,
@@ -1190,6 +1203,7 @@ class DiversityAwareBuffer:
             old_x = feature_vectors[evictee.index]
             self._sherman_morrison_downdate(old_x)
             self._buffer[evictee.index] = obs
+            self._feature_vectors[evictee.index] = x
             self._sherman_morrison_update(x)
             return BufferAddResult(
                 admitted=True,
@@ -1313,13 +1327,17 @@ class DiversityAwareBuffer:
         Also stores the forward matrix for condition number estimation.
         """
         n = self._n_features
+        # Rebuild the feature-vector cache in lockstep with buffer order.
+        # All other callsites read self._feature_vectors directly; this is
+        # the single rebuild point invoked by update_config / filter_inactive
+        # / exclude_time_range / from_list.
+        self._feature_vectors = [self._get_feature_vector(o) for o in self._buffer]
         # Build X^T X + λI
         xtx = [
             [INFO_MATRIX_REGULARIZATION if i == j else 0.0 for j in range(n)]
             for i in range(n)
         ]
-        for obs in self._buffer:
-            x = self._get_feature_vector(obs)
+        for x in self._feature_vectors:
             for i in range(n):
                 for j in range(n):
                     xtx[i][j] += x[i] * x[j]
