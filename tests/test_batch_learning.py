@@ -3208,12 +3208,15 @@ class TestBatchLearningDefensivePaths:
         assert result.reject_reason == ""
 
     def test_detect_optimal_tau_flags_boundary_hit_at_upper_rail(self):
-        """τ_opt within ε of the upper search rail → reject as boundary_hit.
+        """τ_opt within ε of the upper search rail → ACCEPT with flag set.
 
-        Raue 2009 practical-non-identifiability: when the profile likelihood
-        keeps decreasing toward the rail, the optimum sits at the boundary
-        and the value isn't informative.  We pin τ_opt at the rail via a
-        mocked minimizer to exercise the new gate.
+        Raue 2009 practical-non-identifiability: the rail-hit means the
+        likelihood surface is shallow at the boundary and the precise τ
+        value isn't pinpoint-identifiable.  But BIC still passed at this
+        point — the data strongly prefers τ_opt over τ=0.  Falling back
+        to τ=0 is the wrong direction (discards the "long lag exists"
+        evidence).  We accept τ_opt and flag boundary_hit so downstream
+        knows the precise value is unreliable.  See #100 plan.
         """
         import datetime as _dt
         from unittest.mock import patch as _patch, MagicMock
@@ -3253,22 +3256,26 @@ class TestBatchLearningDefensivePaths:
                 base_X=base_X, tod_cols=tod_cols,
             )
         assert result is not None
-        assert result.tau == 0.0  # not applied
-        assert result.accepted is False
-        assert result.reject_reason == "boundary_hit"
+        # τ_opt is applied (not τ=0) — accepting the rail value beats the
+        # τ=0 fallback because BIC strongly supports the long lag.
+        assert result.tau == pytest.approx(rail * 0.999)
+        assert result.accepted is True
+        assert result.reject_reason == ""
+        # boundary_hit flag is preserved so downstream diagnostics can know
+        # the precise τ value is unreliable (sits at the search boundary).
         assert result.boundary_hit is True
         assert result.search_max_used == rail
-        # Diagnostic preserves the rail-hit value so debug bundles can see
-        # *which* rail it bumped.
         assert result.tau_opt_raw == pytest.approx(rail * 0.999)
 
     def test_detect_optimal_tau_uses_per_role_search_max_solar(self):
-        """`input_role="solar"` shrinks the search ceiling to 6h.
+        """`input_role="solar"` uses the role-specific search rail.
 
-        An EMA with τ ≥ 12h smooths out the diurnal cycle solar lives in
-        (Forssell-Ljung 1999 closed-loop bandwidth argument) — the global
-        8h rail is too generous for solar.  The per-role 6h rail keeps
-        the search inside the physically meaningful band.
+        Solar rail is set at the Forssell-Ljung 1999 diurnal identifiability
+        ceiling (11h) — at the 12h half-period landmark, EMA passes 30% of
+        the diurnal amplitude (still SNR-identifiable for typical
+        residential noise floors).  Above 12h the EMA approaches DC.  The
+        per-role rail is independent of the global ``_TAU_SEARCH_MAX``;
+        the test verifies the per-role table is consulted.
         """
         import datetime as _dt
         from unittest.mock import patch as _patch, MagicMock
@@ -3302,7 +3309,9 @@ class TestBatchLearningDefensivePaths:
                 input_role="solar",
             )
         assert captured_bounds[0][1] == bl._TAU_SEARCH_MAX_BY_ROLE["solar"]
-        assert captured_bounds[0][1] < bl._TAU_SEARCH_MAX
+        # Solar rail is independent of the global default — the per-role
+        # table takes precedence regardless of relative magnitude.
+        assert captured_bounds[0][1] != bl._TAU_SEARCH_MAX
 
     def test_detect_optimal_tau_search_max_falls_back_to_global(self):
         """Unknown / missing input_role falls back to the global 8h rail."""

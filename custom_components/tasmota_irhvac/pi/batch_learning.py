@@ -504,16 +504,25 @@ _PHI = (math.sqrt(5) - 1) / 2  # ≈ 0.618
 _TAU_SEARCH_MIN = 0.0
 _TAU_SEARCH_MAX = 28800.0
 
-# Per-role upper rails for the tau search (seconds).  Physical reasoning:
-# an EMA with τ filters out signal frequencies above 1/τ, so a search rail
-# matched to the input's plausible thermal timescale prevents the optimizer
-# from running off into the diurnal band where solar lives (τ ≥ 12h ≈ half
-# the diurnal period collapses EMA(solar) to a near-DC signal — see the
-# Forssell-Ljung 1999 / Raue 2009 practical-non-identifiability argument).
+# Per-role upper rails for the tau search (seconds).  Set at the
+# Forssell-Ljung 1999 / Raue 2009 practical-identifiability ceiling for
+# the input's signal bandwidth.  For a periodic input at angular frequency
+# ω, an EMA with τ attenuates the amplitude by 1/√(1+(ωτ)²); above the
+# rail the surviving amplitude is too small to identify the lag from data
+# in the presence of typical sensor noise.
+#
+# Solar is fundamentally diurnal (24h period, ω=2π/24h).  At τ=12h the
+# EMA passes 30% of the diurnal amplitude — still identifiable for typical
+# residential SNR (σ_noise≈0.1°C, solar peak room effect ≈1°C).  Above
+# τ=12h the EMA approaches DC.  Set at 11h with a small margin from the
+# 12h identifiability landmark; serves the full range of residential
+# building masses (light-frame ~4-8h true τ → interior optimum; heavy-
+# mass brick/concrete ~12-24h true τ → rail-hit, accepted by the
+# boundary-hit handling in `_detect_optimal_tau`).
 #
 # Inputs with no role match fall back to ``_TAU_SEARCH_MAX``.
 _TAU_SEARCH_MAX_BY_ROLE: dict[str, float] = {
-    "solar": 21600.0,         # 6h — well below 12h diurnal half-period
+    "solar": 39600.0,         # 11h — Forssell-Ljung diurnal identifiability
     "heat_source": 3600.0,    # 1h — convective response of radiators / stoves
     "adjacent_zone": 43200.0, # 12h — party-wall conduction timescale
 }
@@ -902,11 +911,23 @@ def _detect_optimal_tau(
         )
 
     if boundary_hit:
+        # Boundary-hit at the search rail: optimizer found the maximum at
+        # the boundary, which is the Raue 2009 practical-non-identifiability
+        # signal — the likelihood surface is shallow across the rail's
+        # neighborhood and we can't pin τ precisely.  But BIC has already
+        # passed at this point, meaning the data strongly prefers τ_opt
+        # over τ=0.  Falling back to τ=0 here is the wrong direction —
+        # it discards strong evidence for "long lag exists" because we
+        # can't pin the exact value.  Accept τ_opt, flag boundary_hit so
+        # downstream knows the precise value is unreliable.
+        # The rail itself is set per-role to a literature-grounded
+        # building thermal timescale (e.g. solar=6h ≈ slow_tau of typical
+        # 2R2C residential — see _TAU_SEARCH_MAX_BY_ROLE).
         return LagTauDiagnostic(
-            tau=0.0, tau_opt_raw=tau_opt,
+            tau=tau_opt, tau_opt_raw=tau_opt,
             bic_gain=bic_gain, bic_threshold=bic_threshold,
             r2_improvement=r2_improvement, beta_at_tau=beta_input,
-            n_eff=n_eff, accepted=False, reject_reason="boundary_hit",
+            n_eff=n_eff, accepted=True, reject_reason="",
             search_max_used=search_max, boundary_hit=True,
         )
 
