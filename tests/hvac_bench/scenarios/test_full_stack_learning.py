@@ -1230,6 +1230,14 @@ class TestMultiYearStability:
         od = result.final_coefs.get("outdoor_delta", 0)
         assert abs(od) < 5.0, f"outdoor_delta diverged: {od:.3f}"
 
+        # ── Headline metrics (final-state snapshot) ──────────────────
+        bench_metrics["max_integral"] = max_integral
+        bench_metrics["final_outdoor_delta"] = od
+        bench_metrics["final_solar"] = result.final_coefs.get("Solar Proxy", 0.0)
+        bench_metrics["final_intercept"] = result.final_coefs.get("intercept", 0.0)
+        bench_metrics["n_batches"] = len(result.coef_trajectory)
+        bench_metrics["n_history"] = len(result.history)
+
         # Late-year coefficient stability (last 30 days of batches)
         if len(result.coef_trajectory) >= 60:
             late_ods = [snap.get("outdoor_delta", 0)
@@ -1238,6 +1246,41 @@ class TestMultiYearStability:
             assert od_range < 0.5, (
                 f"outdoor_delta unstable in last 30 days: range={od_range:.4f}"
             )
+            bench_metrics["od_range_late_30d"] = od_range
+
+            # Solar β collapse detector (#100 bug class — 80+ consecutive
+            # identical values in production was the textbook signature).
+            late_solars = [snap.get("Solar Proxy", 0.0)
+                           for snap in result.coef_trajectory[-60:]]
+            bench_metrics["solar_beta_unique_in_last_60"] = len({
+                round(s, 6) for s in late_solars
+            })
+
+            # Minimum covariance trace in last 30 days — catches general
+            # P-matrix collapse beyond the solar-specific freeze.  tr(P) is
+            # stored alongside coef_trajectory in result.batch_covariance_trace
+            # (same per-batch indexing), not on the trajectory snapshots.
+            if len(result.batch_covariance_trace) >= 60:
+                bench_metrics["min_covariance_trace_late"] = min(
+                    result.batch_covariance_trace[-60:]
+                )
+
+        # ── Monthly trajectory checkpoints (12 × 3 coefs + 12 cov traces) ─
+        # 12h batches over 365 days → ~730 snapshots; every 60th ≈ monthly.
+        # Indices [60, 120, ..., 720] give 12 end-of-month checkpoints.
+        if len(result.coef_trajectory) >= 720:
+            for month in range(1, 13):
+                idx = month * 60
+                snap = result.coef_trajectory[idx]
+                bench_metrics[f"m{month:02d}_outdoor_delta"] = snap.get("outdoor_delta", 0.0)
+                bench_metrics[f"m{month:02d}_solar"] = snap.get("Solar Proxy", 0.0)
+                bench_metrics[f"m{month:02d}_intercept"] = snap.get("intercept", 0.0)
+                if idx < len(result.batch_covariance_trace):
+                    bench_metrics[f"m{month:02d}_cov_trace"] = (
+                        result.batch_covariance_trace[idx]
+                    )
+
+        check_bench_metrics(num_regression, bench_metrics)
 
     def test_one_year_comfort_stable(self, bench_metrics, num_regression, _multi_year_result):
         """Monthly MAE should not grow over the year."""
@@ -1260,6 +1303,34 @@ class TestMultiYearStability:
                 f"Comfort degrading: H1 MAE={first_half:.3f}, "
                 f"H2 MAE={second_half:.3f}"
             )
+            bench_metrics["h1_monthly_mae"] = first_half
+            bench_metrics["h2_monthly_mae"] = second_half
+
+        # ── Headline metrics ─────────────────────────────────────────
+        if result.daily_mae:
+            bench_metrics["daily_mae_max"] = max(result.daily_mae)
+        bench_metrics["ctrl_comfort_pct"] = result.ctrl_comfort_pct
+        bench_metrics["ctrl_violations"] = result.ctrl_violations
+        bench_metrics["longest_violation_streak"] = result.longest_violation_streak
+
+        # FF fraction headline + extremes (ties to #105 cadence-velocity
+        # finding — a year-horizon regression in FF learning surfaces here).
+        if result.daily_ff_fraction:
+            bench_metrics["daily_ff_fraction_final"] = result.daily_ff_fraction[-1]
+            bench_metrics["daily_ff_fraction_min"] = min(result.daily_ff_fraction)
+
+        # ── Monthly MAE trajectory (full 12-vector) ──────────────────
+        for i, mae in enumerate(monthly_mae[:12], start=1):
+            bench_metrics[f"m{i:02d}_mae"] = mae
+
+        # ── Monthly FF fraction (end-of-month subsample of dailies) ──
+        if len(result.daily_ff_fraction) >= 360:
+            for month in range(1, 13):
+                day_idx = month * 30 - 1
+                if day_idx < len(result.daily_ff_fraction):
+                    bench_metrics[f"m{month:02d}_ff"] = result.daily_ff_fraction[day_idx]
+
+        check_bench_metrics(num_regression, bench_metrics)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
