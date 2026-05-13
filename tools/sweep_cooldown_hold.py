@@ -92,11 +92,10 @@ def run_setpoint_change(tick_min, hold_seconds, profile, outdoor=5.0):
     model = ThermalModel(profile=profile, initial_temp=20.5, outdoor_temp=outdoor,
                          sensor_noise_sigma=0.05, noise_seed=42,
                          hp_lag_minutes=HP_LAG)
-    change_tick = int(2 * 60 / tick_min)
     n_ticks = int(8 * 60 / tick_min)
     return run_scenario(ctrl, model, n_ticks=n_ticks, mode="heat",
                         tick_interval_min=tick_min,
-                        desired_schedule={change_tick: 22.0})
+                        desired_schedule={120.0: 22.0})
 
 
 def run_disturbance(tick_min, hold_seconds, profile):
@@ -106,11 +105,10 @@ def run_disturbance(tick_min, hold_seconds, profile):
     model = ThermalModel(profile=profile, initial_temp=20.5, outdoor_temp=5.0,
                          sensor_noise_sigma=0.05, noise_seed=42,
                          hp_lag_minutes=HP_LAG)
-    drop_tick = int(2 * 60 / tick_min)
     n_ticks = int(8 * 60 / tick_min)
     return run_scenario(ctrl, model, n_ticks=n_ticks, mode="heat",
                         tick_interval_min=tick_min,
-                        outdoor_schedule={drop_tick: -5.0})
+                        outdoor_schedule={120.0: -5.0})
 
 
 def analyze(history, desired, tick_min, deadband=0.3):
@@ -151,15 +149,15 @@ def run_mild_disturbance(tick_min, hold_seconds, profile):
                          hp_lag_minutes=HP_LAG)
 
     n_ticks = int(8 * 60 / tick_min)
-    ramp_start = int(1 * 60 / tick_min)  # start ramp at hour 1
-    ramp_end = int(5 * 60 / tick_min)    # end ramp at hour 5
+    ramp_start_min = 60.0   # start ramp at hour 1
+    ramp_end_min = 5 * 60.0  # end ramp at hour 5
 
-    def outdoor_fn(tick):
-        if tick < ramp_start:
+    def outdoor_fn(minute):
+        if minute < ramp_start_min:
             return 5.0
-        if tick > ramp_end:
+        if minute > ramp_end_min:
             return 0.0
-        progress = (tick - ramp_start) / (ramp_end - ramp_start)
+        progress = (minute - ramp_start_min) / (ramp_end_min - ramp_start_min)
         return 5.0 - 5.0 * progress  # 5°C → 0°C
 
     return run_scenario(ctrl, model, n_ticks=n_ticks, mode="heat",
@@ -179,12 +177,11 @@ def run_small_setpoint_bump(tick_min, hold_seconds, profile):
                          sensor_noise_sigma=0.05, noise_seed=42,
                          hp_lag_minutes=HP_LAG)
 
-    change_tick = int(1 * 60 / tick_min)
     n_ticks = int(8 * 60 / tick_min)
 
     return run_scenario(ctrl, model, n_ticks=n_ticks, mode="heat",
                         tick_interval_min=tick_min,
-                        desired_schedule={change_tick: 21.0})
+                        desired_schedule={60.0: 21.0})
 
 
 def run_solar_gain(tick_min, hold_seconds, profile):
@@ -201,16 +198,16 @@ def run_solar_gain(tick_min, hold_seconds, profile):
                          hp_lag_minutes=HP_LAG,
                          solar_gain=0.4)
 
-    solar_start = int(1 * 60 / tick_min)
-    solar_peak = int(3 * 60 / tick_min)
+    solar_start_min = 60.0    # solar starts at hour 1
+    solar_peak_min = 3 * 60.0  # solar peaks at hour 3
     n_ticks = int(8 * 60 / tick_min)
 
-    def solar_fn(tick):
-        if tick < solar_start:
+    def solar_fn(minute):
+        if minute < solar_start_min:
             return 0.0
-        if tick > solar_peak:
+        if minute > solar_peak_min:
             return 0.8
-        progress = (tick - solar_start) / (solar_peak - solar_start)
+        progress = (minute - solar_start_min) / (solar_peak_min - solar_start_min)
         return 0.8 * progress
 
     return run_scenario(ctrl, model, n_ticks=n_ticks, mode="heat",

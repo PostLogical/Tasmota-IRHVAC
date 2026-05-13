@@ -57,7 +57,7 @@ SCENARIOS = [
         "initial_temp": 20.5,
         "desired": 20.5,
         "outdoor": 5.0,
-        "desired_schedule": {10: 22.5},
+        "desired_schedule": {150: 22.5},
         "n_ticks": 32,
     },
     {
@@ -72,7 +72,7 @@ SCENARIOS = [
         "initial_temp": 20.5,
         "desired": 20.5,
         "outdoor": 10.0,
-        "outdoor_schedule": lambda tick: max(-5.0, 10.0 - tick * 1.25),
+        "outdoor_schedule": lambda minute: max(-5.0, 10.0 - minute * (1.25 / 15.0)),
         "n_ticks": 32,
     },
     {
@@ -80,7 +80,7 @@ SCENARIOS = [
         "initial_temp": 20.5,
         "desired": 20.5,
         "outdoor": 5.0,
-        "outdoor_schedule": lambda tick: 5.0 - tick * 0.25,  # 1°C/hour
+        "outdoor_schedule": lambda minute: 5.0 - minute / 60.0,  # 1°C/hour
         "n_ticks": 32,
     },
 ]
