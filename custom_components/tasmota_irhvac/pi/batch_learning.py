@@ -991,6 +991,17 @@ class DiversityAwareBuffer:
         # Rebuilt on update_config / recompute_info_matrix; filtered
         # in parallel on filter_inactive / exclude_time_range.
         self._feature_vectors: list[list[float]] = []
+        # Parallel numpy view of _feature_vectors. Pre-allocated to max_size
+        # so policies that consume numpy (find_evictee + attempt_exchange via
+        # np.einsum) get an O(1) view slice instead of an O(N·p)
+        # np.asarray copy from the list every tick. Maintained in lockstep
+        # with _feature_vectors via the same admit/evict/rebuild seams.
+        # None when numpy is unavailable (pure-Python policies still work
+        # off the list cache).
+        self._feature_vectors_np: "np.ndarray | None" = (
+            np.zeros((max_size, n_features), dtype=np.float64)
+            if _NUMPY_AVAILABLE else None
+        )
         self._max_size = max_size
         self._n_features = n_features
         self._feature_order: list[str] | None = feature_order
@@ -1029,6 +1040,8 @@ class DiversityAwareBuffer:
         """Remove all observations and reset the information matrix."""
         self._buffer.clear()
         self._feature_vectors.clear()
+        if self._feature_vectors_np is not None:
+            self._feature_vectors_np.fill(0.0)
         n = self._n_features
         reg_inv = 1.0 / INFO_MATRIX_REGULARIZATION
         self._info_inv = [
@@ -1141,6 +1154,8 @@ class DiversityAwareBuffer:
             )
             self._buffer.append(obs)
             self._feature_vectors.append(x)
+            if self._feature_vectors_np is not None:
+                self._feature_vectors_np[len(self._buffer) - 1] = x
             self._sherman_morrison_update(x)
             return BufferAddResult(
                 admitted=True,
@@ -1151,7 +1166,21 @@ class DiversityAwareBuffer:
                 policy_name=policy_name,
             )
 
-        feature_vectors = self._feature_vectors
+        # Pass the numpy view when numpy is available AND the buffer is
+        # large enough that policies will take their numpy path
+        # (``m > 50`` threshold in ``find_evictee`` / ``attempt_exchange``).
+        # Below threshold, policies use a Python loop; passing a numpy view
+        # would contaminate that loop with numpy-scalar arithmetic and break
+        # bit-exact tied-score admission semantics. Above threshold the
+        # view turns the policy's ``np.asarray()`` into an O(1) no-op
+        # instead of an O(N·p) copy from list-of-list.
+        if (
+            self._feature_vectors_np is not None
+            and len(self._buffer) > 50
+        ):
+            feature_vectors = self._feature_vectors_np[:len(self._buffer)]
+        else:
+            feature_vectors = self._feature_vectors
 
         # Joint-optimization policies (e.g. DOptimalPolicy) supply
         # ``attempt_exchange`` so admit/evict can consider the candidate↔
@@ -1170,6 +1199,8 @@ class DiversityAwareBuffer:
                     self._sherman_morrison_downdate(old_x)
                     self._buffer[decision.evictee_index] = obs
                     self._feature_vectors[decision.evictee_index] = x
+                    if self._feature_vectors_np is not None:
+                        self._feature_vectors_np[decision.evictee_index] = x
                     self._sherman_morrison_update(x)
                     return BufferAddResult(
                         admitted=True,
@@ -1204,6 +1235,8 @@ class DiversityAwareBuffer:
             self._sherman_morrison_downdate(old_x)
             self._buffer[evictee.index] = obs
             self._feature_vectors[evictee.index] = x
+            if self._feature_vectors_np is not None:
+                self._feature_vectors_np[evictee.index] = x
             self._sherman_morrison_update(x)
             return BufferAddResult(
                 admitted=True,
@@ -1332,6 +1365,16 @@ class DiversityAwareBuffer:
         # the single rebuild point invoked by update_config / filter_inactive
         # / exclude_time_range / from_list.
         self._feature_vectors = [self._get_feature_vector(o) for o in self._buffer]
+        # Reallocate the numpy view — update_config may have changed
+        # n_features, in which case the pre-allocated shape is stale.
+        if _NUMPY_AVAILABLE:
+            self._feature_vectors_np = np.zeros(
+                (self._max_size, n), dtype=np.float64,
+            )
+            if self._feature_vectors:
+                self._feature_vectors_np[:len(self._feature_vectors)] = (
+                    np.asarray(self._feature_vectors, dtype=np.float64)
+                )
         # Build X^T X + λI
         xtx = [
             [INFO_MATRIX_REGULARIZATION if i == j else 0.0 for j in range(n)]
