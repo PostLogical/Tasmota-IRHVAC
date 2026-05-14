@@ -125,6 +125,8 @@ REFERENCE_SCORES: dict[str, dict[str, dict[float, dict[str, ScoreExpectation]]]]
                 # Production behaves like well-tuned over 3 days because batch
                 # WLS κ-gate rejects coefficient updates during early learning
                 # (κ severe). Differentiation is expected on longer horizons.
+                # Re-locked #99 (2026-05-14): batch timing realigned to
+                # production-faithful 07:00/19:00 wall-clock; minor shift.
                 "tdis_tot": ScoreExpectation(0.216, 0.10),
                 "ener_tot": ScoreExpectation(5.996, 0.05),
                 "peak_kw": ScoreExpectation(0.215, 0.005),
@@ -133,16 +135,15 @@ REFERENCE_SCORES: dict[str, dict[str, dict[float, dict[str, ScoreExpectation]]]]
                 "setpoint_changes": ScoreExpectation(21, 3),
             },
             3.0: {
-                # Locked #102 (2026-05-14).  Slight differentiation from
-                # well-tuned at 3-min (tdis_tot 0.022 vs 0.010) because
-                # production starts with default seeds and learns;
-                # 3-day window is too short for full convergence.
-                "tdis_tot": ScoreExpectation(0.022, 0.10),
-                "ener_tot": ScoreExpectation(6.009, 0.05),
+                # Re-locked #99 (2026-05-14): batch timing realigned to
+                # 07:00/19:00 wall-clock.  3-min cells largely byte-stable;
+                # tdis_tot improved slightly (0.022 → 0.012).
+                "tdis_tot": ScoreExpectation(0.012, 0.10),
+                "ener_tot": ScoreExpectation(6.013, 0.05),
                 "peak_kw": ScoreExpectation(0.219, 0.005),
-                "cold_time_h": ScoreExpectation(0.35, 0.5),
-                "warm_time_h": ScoreExpectation(0.45, 0.5),
-                "setpoint_changes": ScoreExpectation(39, 5),
+                "cold_time_h": ScoreExpectation(0.05, 0.5),
+                "warm_time_h": ScoreExpectation(0.55, 0.5),
+                "setpoint_changes": ScoreExpectation(41, 5),
             },
         },
     },
@@ -190,25 +191,28 @@ REFERENCE_SCORES: dict[str, dict[str, dict[float, dict[str, ScoreExpectation]]]]
         },
         "production_pi": {
             15.0: {
-                "tdis_tot": ScoreExpectation(0.378, 0.10),
-                "ener_tot": ScoreExpectation(1.448, 0.03),
+                # Re-locked #99 (2026-05-14): batch-timing alignment shifted
+                # tdis_tot 0.378 → 0.51, setpoint_changes 20 → 24 — cool-mode
+                # learning fires later in the run with the wall-clock 07/19
+                # schedule.  Discriminative invariant still holds (naive
+                # 28.5 vs 0.51 → 56× ratio).
+                "tdis_tot": ScoreExpectation(0.51, 0.10),
+                "ener_tot": ScoreExpectation(1.446, 0.03),
                 "peak_kw": ScoreExpectation(0.046, 0.003),
-                "cold_time_h": ScoreExpectation(2.75, 0.5),
-                "warm_time_h": ScoreExpectation(1.0, 0.5),
-                "setpoint_changes": ScoreExpectation(20, 3),
+                "cold_time_h": ScoreExpectation(3.25, 0.5),
+                "warm_time_h": ScoreExpectation(1.75, 0.5),
+                "setpoint_changes": ScoreExpectation(24, 3),
             },
             3.0: {
-                # Locked #102 (2026-05-14).  Production differentiates from
-                # well-tuned more at 3-min (tdis_tot 1.79 vs 0.26) — cool-
-                # mode learning gets enough observations to attempt FF
-                # adjustment but the 3-day window is too short to converge
-                # cleanly.  Discriminative ratio vs naive ≈ 12× (well > 5×).
-                "tdis_tot": ScoreExpectation(1.788, 0.20),
+                # Re-locked #99 (2026-05-14): tdis_tot drift 1.79 → 2.02
+                # (still within previous 0.20 tolerance band); minor
+                # cold/warm time shifts.
+                "tdis_tot": ScoreExpectation(2.024, 0.20),
                 "ener_tot": ScoreExpectation(1.477, 0.03),
                 "peak_kw": ScoreExpectation(0.046, 0.003),
-                "cold_time_h": ScoreExpectation(10.60, 0.5),
-                "warm_time_h": ScoreExpectation(0.40, 0.5),
-                "setpoint_changes": ScoreExpectation(57, 5),
+                "cold_time_h": ScoreExpectation(11.90, 0.5),
+                "warm_time_h": ScoreExpectation(0.70, 0.5),
+                "setpoint_changes": ScoreExpectation(59, 5),
             },
         },
     },
@@ -261,24 +265,28 @@ REFERENCE_SCORES: dict[str, dict[str, dict[float, dict[str, ScoreExpectation]]]]
         },
         "production_pi": {
             15.0: {
-                "tdis_tot": ScoreExpectation(0.105, 0.10),
-                "ener_tot": ScoreExpectation(5.713, 0.05),
-                "peak_kw": ScoreExpectation(0.191, 0.005),
-                "cold_time_h": ScoreExpectation(1.50, 0.5),
-                "warm_time_h": ScoreExpectation(1.75, 0.5),
-                "setpoint_changes": ScoreExpectation(16, 3),
+                # Re-locked #99 (2026-05-14): batch-timing alignment shifted
+                # tdis_tot 0.105 → 0.211 (solar-modulated learning fires
+                # mid-day when solar disturbance is still active).
+                "tdis_tot": ScoreExpectation(0.211, 0.10),
+                "ener_tot": ScoreExpectation(5.714, 0.05),
+                "peak_kw": ScoreExpectation(0.190, 0.005),
+                "cold_time_h": ScoreExpectation(2.00, 0.5),
+                "warm_time_h": ScoreExpectation(2.25, 0.5),
+                "setpoint_changes": ScoreExpectation(20, 3),
             },
             3.0: {
-                # Locked #102 (2026-05-14).  Production beats well-tuned
-                # at 3-min on this scenario (0.014 vs 0.312) — solar FF
+                # Re-locked #99 (2026-05-14): production still beats
+                # well-tuned at 3-min (tdis_tot 0.0075 vs 0.312) — solar FF
                 # learning kicks in within the 3-day window with enough
-                # observations at the finer cadence.
-                "tdis_tot": ScoreExpectation(0.014, 0.10),
-                "ener_tot": ScoreExpectation(5.731, 0.05),
-                "peak_kw": ScoreExpectation(0.217, 0.005),
-                "cold_time_h": ScoreExpectation(0.15, 0.5),
-                "warm_time_h": ScoreExpectation(0.25, 0.5),
-                "setpoint_changes": ScoreExpectation(25, 5),
+                # observations at the finer cadence.  setpoint_changes
+                # shifted 25 → 30 from the timing realignment.
+                "tdis_tot": ScoreExpectation(0.008, 0.10),
+                "ener_tot": ScoreExpectation(5.721, 0.05),
+                "peak_kw": ScoreExpectation(0.213, 0.005),
+                "cold_time_h": ScoreExpectation(0.20, 0.5),
+                "warm_time_h": ScoreExpectation(0.10, 0.5),
+                "setpoint_changes": ScoreExpectation(30, 5),
             },
         },
     },

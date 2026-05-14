@@ -69,7 +69,6 @@ class ReferenceScenario:
     initial_temp_c: float | None = None  # None = desired_c
     initial_wall_temp_c: float | None = None  # None = initial_temp_c
     model_inputs: tuple[ModelInputSpec, ...] = field(default_factory=tuple)
-    batch_interval_hours: float = 12.0
     head_calibration_bounds: tuple[float, float] = (0.0, 0.0)
 
 
@@ -127,7 +126,16 @@ def run_reference_scenario(
 
     tick_min = scenario.tick_minutes
     n_ticks = int(scenario.n_days * 24 * 60 / tick_min)
-    batch_interval_ticks = max(1, int(scenario.batch_interval_hours * 60 / tick_min))
+
+    # Wall-clock-anchored batch firing — mirrors
+    # ``full_stack_runner.run_full_stack`` post-#97 (and production via
+    # ``pi_controller.BATCH_WLS_HOURS``).  Pre-#99 this used the old
+    # ``tick % batch_interval_ticks`` pattern (sim_epoch midnight + 12h
+    # cadence-coupled), which mistimed the batch relative to production
+    # 07:00/19:00.  ``ReferenceScenario.batch_interval_hours`` was
+    # dropped in #99 — was dead post-fix.
+    from custom_components.tasmota_irhvac.pi.pi_controller import BATCH_WLS_HOURS
+    _batch_wall_clock_minutes = tuple(h * 60 for h in BATCH_WLS_HOURS)
 
     controller.set_mode(scenario.mode)
     controller.set_desired_temp(scenario.desired_c)
@@ -199,10 +207,12 @@ def run_reference_scenario(
             "ff_offset": state.get("ff_offset", 0.0),
         })
 
-        # Trigger learning batches at the configured interval. Controllers
-        # without learning expose batch_update as a no-op.
+        # Trigger learning batches at production-faithful 07:00/19:00
+        # wall-clock minutes (post-#99).  Controllers without learning
+        # expose batch_update as a no-op.
         if hasattr(controller, "batch_update"):
-            if tick > 0 and tick % batch_interval_ticks == 0:
+            sim_minute_next = (tick + 1) * tick_min
+            if sim_minute_next % 1440 in _batch_wall_clock_minutes:
                 controller.batch_update(tick)
 
     bundle = compute_control_kpis(history, tick_minutes=tick_min)
