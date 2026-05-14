@@ -23,14 +23,14 @@ from datetime import datetime, timezone
 # ── Cadence ──────────────────────────────────────────────────────────────
 #
 # Production runs sensor-driven at ~60s cooldown (per
-# ``feedback_pi_tick_architecture.md``).  Bench default kept at 15 min
-# during the wall-clock-refactor migration so a Phase-2 run at the
-# refactored API can be diffed against the Phase-1 baseline without the
-# cadence change confounding the comparison.  The final post-migration
-# commit will flip this to 3.0 to bring bench fidelity closer to
-# production.
+# ``feedback_pi_tick_architecture.md``).  Bench default flipped from 15
+# to 3 minutes (#93, 2026-05-14) at the close of the cadence migration
+# (#91, #97, #98, #100, #101, #103, #104) so bench fidelity tracks
+# production.  15-min is still runnable via ``--tick-minutes=15.0``;
+# baselines at that cadence are preserved under
+# ``regression_data/15.0min/``.
 
-TICK_MINUTES_DEFAULT: float = 15.0
+TICK_MINUTES_DEFAULT: float = 3.0
 
 
 def set_tick_minutes_default(value: float) -> None:

@@ -1,2 +1,2 @@
 ,imc_itae,smith_itae,imc_overshoot,smith_overshoot,imc_reversals,smith_reversals,imc_setpoint_changes,smith_setpoint_changes,imc_integral_rms,smith_integral_rms,imc_total_kwh,smith_total_kwh,imc_settling_time,smith_settling_time
-0,1281.02,1354.3699999999999,2.8999999999999999,2.8999999999999999,1,1,2,2,5.4900000000000002,5.5499999999999998,1.6180000000000001,1.615,300,300
+0,1844.96,2057.2399999999998,4.0899999999999999,4.1200000000000001,1,1,2,2,5.6100000000000003,5.7199999999999998,1.621,1.619,303,306

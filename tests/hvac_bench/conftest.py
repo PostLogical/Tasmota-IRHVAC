@@ -178,10 +178,14 @@ def original_datadir(request: pytest.FixtureRequest) -> Path:
     """Override pytest-datadir's default to put regression baselines under
     ``tests/hvac_bench/regression_data/<tick-minutes>/``.
 
-    Cadence-aware: ``--tick-minutes=3.0`` writes to a separate baseline
-    directory than the default 15-min cadence, so tests can carry distinct
-    snapshots per cadence.  Without ``--tick-minutes``, baselines live
-    under ``regression_data/default/``.
+    Cadence-aware routing.  Without ``--tick-minutes``, baselines live
+    under ``regression_data/default/`` — which holds the
+    ``constants.TICK_MINUTES_DEFAULT`` (3-min, post-#93) snapshots.
+    ``--tick-minutes=15.0`` reads ``regression_data/15.0min/`` (preserved
+    pre-#93 baselines); ``--tick-minutes=1.0`` reads
+    ``regression_data/1.0min/`` (sparse #105 reference).  Run at the
+    default cadence with no flag — explicit ``--tick-minutes=3.0`` looks
+    for ``3.0min/`` which does not exist post-#93.
 
     Why override: pytest-datadir's default puts baselines next to the
     test file, which doesn't compose with our cadence-sweep workflow.

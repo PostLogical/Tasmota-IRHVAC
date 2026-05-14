@@ -200,20 +200,6 @@ class TestDirectActiveSource:
                 "Stove never unlocked over 30 days"
             )
 
-    @pytest.mark.xfail(
-        strict=False,
-        reason=(
-            "Stove × outdoor identifiability confound: pellet-stove "
-            "activations correlate with cold outdoor (more heating "
-            "needed → stove fires), creating multi-collinearity that "
-            "attenuates β_stove via shared-direction variance.  WLS "
-            "converges β_stove to ~-0.96 vs truth -3.0 (sign correct, "
-            "magnitude short).  Pre-existing pre-#84 (verified at "
-            "f1b4906).  Eventual fix: excitation-aware input design "
-            "(decouple stove from outdoor) or multi-collinearity-aware "
-            "regularization.  See project_bench_audit_20260509.md."
-        ),
-    )
     def test_stove_beta_recovers_meaningful_magnitude(self, bench_metrics, num_regression):
         """Stove β should reach at least 50% of true magnitude."""
         result = run_full_stack(self._make_config())

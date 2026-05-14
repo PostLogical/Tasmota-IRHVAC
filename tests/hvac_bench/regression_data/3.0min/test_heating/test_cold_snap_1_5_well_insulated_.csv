@@ -1,2 +1,0 @@
-,seed_factor,n_ticks,rollup_itae,rollup_overshoot,rollup_settling_time,rollup_reversals,rollup_setpoint_changes,rollup_integral_rms,rollup_rls_obs_count,rollup_cold_ticks,rollup_cold_max_run,rollup_cold_max_undershoot,rollup_total_kwh,rollup_avg_cop,rollup_kwh_per_degree_hour,post_settle_max_abs_dev,post_settle_mean_abs_dev,tolerance_threshold
-0,1.5,160,3904.27,0.97999999999999998,165,0,3,6.75,0,0,0,0,0.308,2.4500000000000002,0.0016999999999999999,0.98255565103228193,0.35956198287304802,2

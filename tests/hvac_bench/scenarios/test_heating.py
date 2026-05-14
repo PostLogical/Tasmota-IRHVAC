@@ -101,20 +101,7 @@ class TestHeatingColdSnap:
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
     @pytest.mark.parametrize("seed_factor", SEED_FACTORS)
-    def test_cold_snap(self, bench_metrics, num_regression, request, profile_name, seed_factor):
-        if seed_factor == 1.5 and profile_name == "drafty_bungalow":
-            request.node.add_marker(pytest.mark.xfail(
-                strict=False,
-                reason=(
-                    "Post-#84 sim-coherent bench reveals real over-seed × "
-                    "weak-insulation oscillation that the wall-clock leak "
-                    "previously masked.  Test window (32 ticks) is too "
-                    "short for batch WLS to correct the seed.  Eventual "
-                    "fix: gain scheduling against insulation, OR rewrite "
-                    "as a learning-window test with batch correction.  "
-                    "See project_bench_audit_20260509.md."
-                ),
-            ))
+    def test_cold_snap(self, bench_metrics, num_regression, profile_name, seed_factor):
         profile = QUICK_PROFILES[profile_name]
         ctrl = _make_controller(profile, seed_factor)
         ctrl.set_desired_temp(20.5)
@@ -196,20 +183,7 @@ class TestHeatingSetpointDown:
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
     @pytest.mark.parametrize("seed_factor", [0.5, 1.0, 1.5])
-    def test_setpoint_down(self, bench_metrics, num_regression, request, profile_name, seed_factor):
-        if seed_factor == 1.5 and profile_name == "drafty_bungalow":
-            request.node.add_marker(pytest.mark.xfail(
-                strict=False,
-                reason=(
-                    "Post-#84 sim-coherent bench reveals real over-seed × "
-                    "weak-insulation oscillation that the wall-clock leak "
-                    "previously masked.  Test window (32 ticks) is too "
-                    "short for batch WLS to correct the seed.  Eventual "
-                    "fix: gain scheduling against insulation, OR rewrite "
-                    "as a learning-window test.  "
-                    "See project_bench_audit_20260509.md."
-                ),
-            ))
+    def test_setpoint_down(self, bench_metrics, num_regression, profile_name, seed_factor):
         profile = QUICK_PROFILES[profile_name]
         ctrl = _make_controller(profile, seed_factor)
         ctrl.set_desired_temp(22.5)
@@ -241,22 +215,7 @@ class TestHeatingSteadyState:
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
     @pytest.mark.parametrize("seed_factor", [0.5, 1.0, 1.5])
-    def test_steady_state(self, bench_metrics, num_regression, request, profile_name, seed_factor):
-        if seed_factor == 1.5 and profile_name in (
-            "drafty_bungalow", "standard_residential",
-        ):
-            request.node.add_marker(pytest.mark.xfail(
-                strict=False,
-                reason=(
-                    "Post-#84 sim-coherent bench reveals real over-seed × "
-                    "weak-insulation oscillation that the wall-clock leak "
-                    "previously masked.  Test window (48 ticks) is too "
-                    "short for batch WLS to correct the seed.  Eventual "
-                    "fix: gain scheduling against insulation, OR rewrite "
-                    "as a learning-window test.  "
-                    "See project_bench_audit_20260509.md."
-                ),
-            ))
+    def test_steady_state(self, bench_metrics, num_regression, profile_name, seed_factor):
         profile = QUICK_PROFILES[profile_name]
         ctrl = _make_controller(profile, seed_factor)
         ctrl.set_desired_temp(20.5)
