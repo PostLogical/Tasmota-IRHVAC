@@ -8,16 +8,48 @@ Schedules are minute-keyed (cadence-invariant): a schedule is either a
 is sim-minutes since the run started, computed as
 ``minute = tick * tick_interval_min``.
 
+Dict-keyed schedules are interpreted as step functions: at minute ``m``
+the value is ``schedule[k]`` where ``k`` is the largest key ≤ ``m``.
+If no key is ≤ ``m`` (cadence has not yet reached the first key), the
+schedule contributes nothing for that tick.  This semantic is cadence-
+invariant — events fire on the first tick at-or-after their key,
+regardless of whether the cadence grid lands on the key exactly.
+
 Run length is given in minutes via ``duration_minutes`` (preferred) or
 ticks via ``n_ticks`` (legacy escape hatch for tests asserting on
 tick-counted phenomena like buffer fill).  Pass exactly one.
 """
+
+import bisect
 
 from .constants import TICK_MINUTES_DEFAULT
 from .thermal_model import ThermalModel
 from .controller_protocol import HVACController
 from .house_profiles import HouseProfile
 from .disturbances import Disturbance
+
+
+def _dict_to_step_fn(d: dict):
+    """Wrap a {minute: value} dict as a step-function callable.
+
+    Returns ``d[k]`` where k is the largest key ≤ minute, or ``None``
+    when no key is ≤ minute.  ``None`` lets the caller decide whether
+    to leave the underlying state untouched.
+    """
+    keys = sorted(d.keys())
+
+    def step(minute: float):
+        i = bisect.bisect_right(keys, minute) - 1
+        return d[keys[i]] if i >= 0 else None
+
+    return step
+
+
+def _coerce_schedule(schedule):
+    """Return a callable for a schedule given as callable or dict, or None."""
+    if schedule is None or callable(schedule):
+        return schedule
+    return _dict_to_step_fn(schedule)
 
 
 def run_scenario(controller: HVACController, model: ThermalModel,
@@ -68,33 +100,39 @@ def run_scenario(controller: HVACController, model: ThermalModel,
     dt_seconds = tick_interval_min * 60.0
     controller.set_mode(mode)
 
+    outdoor_fn = _coerce_schedule(outdoor_schedule)
+    solar_fn = _coerce_schedule(solar_schedule)
+    stove_fn = _coerce_schedule(stove_schedule)
+    desired_fn = _coerce_schedule(desired_schedule)
+
     history = []
     solar = 0.0
     stove = 0.0
+    last_desired = None
 
     for tick in range(n_ticks):
         minute = tick * tick_interval_min
 
-        if outdoor_schedule is not None:
-            if callable(outdoor_schedule):
-                model.outdoor_temp = outdoor_schedule(minute)
-            elif minute in outdoor_schedule:
-                model.outdoor_temp = outdoor_schedule[minute]
+        if outdoor_fn is not None:
+            v = outdoor_fn(minute)
+            if v is not None:
+                model.outdoor_temp = v
 
-        if solar_schedule is not None:
-            if callable(solar_schedule):
-                solar = solar_schedule(minute)
-            elif minute in solar_schedule:
-                solar = solar_schedule[minute]
+        if solar_fn is not None:
+            v = solar_fn(minute)
+            if v is not None:
+                solar = v
 
-        if stove_schedule is not None:
-            if callable(stove_schedule):
-                stove = stove_schedule(minute)
-            elif minute in stove_schedule:
-                stove = stove_schedule[minute]
+        if stove_fn is not None:
+            v = stove_fn(minute)
+            if v is not None:
+                stove = v
 
-        if desired_schedule is not None and minute in desired_schedule:
-            controller.set_desired_temp(desired_schedule[minute])
+        if desired_fn is not None:
+            v = desired_fn(minute)
+            if v is not None and v != last_desired:
+                controller.set_desired_temp(v)
+                last_desired = v
 
         # Read sensor (with noise if configured)
         sensor_reading = model.read_sensor()
