@@ -5,8 +5,9 @@ Surfaces several cross-cutting bench knobs:
 - ``--weather``: real-vs-synth weather source (per #45 / #49 Phase 1).
 - ``--run-studies``: opt-in for ad-hoc ``@pytest.mark.study`` tests.
 - ``--tick-minutes``: override ``constants.TICK_MINUTES_DEFAULT`` for this
-  run (sets ``BENCH_TICK_MINUTES`` env var, read by ``constants.py`` at
-  module import time during collection).
+  run AND route pytest-regressions baselines under
+  ``regression_data/<N>min/``.  Single canonical entry — both effects
+  are tied to the CLI flag so they cannot be set independently.
 - ``--bench-phase``: tag the ``bench_metrics`` recorder output with a
   phase label (e.g. ``B0-baseline``, ``B0-refactored``, ``B0-3min``) so
   multiple runs land in distinct directories.
@@ -57,10 +58,11 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         action="store",
         default=None,
         help=(
-            "Override TICK_MINUTES_DEFAULT for this pytest invocation. Sets "
-            "BENCH_TICK_MINUTES env var which constants.py reads at import. "
-            "Use during cadence sweeps; without this flag the constants.py "
-            "default applies."
+            "Override TICK_MINUTES_DEFAULT for this pytest invocation AND "
+            "route pytest-regressions baselines under "
+            "regression_data/<N>min/.  Single canonical entry — use during "
+            "cadence sweeps; without this flag the constants.py default "
+            "applies and baselines live under regression_data/default/."
         ),
     )
     parser.addoption(
@@ -82,7 +84,8 @@ def pytest_configure(config: pytest.Config) -> None:
 
     tick_min = config.getoption("--tick-minutes")
     if tick_min is not None:
-        os.environ["BENCH_TICK_MINUTES"] = str(tick_min)
+        from tests.hvac_bench.constants import set_tick_minutes_default
+        set_tick_minutes_default(float(tick_min))
 
 
 def pytest_collection_modifyitems(

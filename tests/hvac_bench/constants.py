@@ -9,11 +9,14 @@ the entire bench cadence or sim epoch.
 ``pytest --tick-minutes=N`` (see ``conftest.py``); without that flag the
 default below applies to any callsite that doesn't pass an explicit
 ``tick_interval_min`` / ``tick_minutes`` argument.
+
+Standalone scripts that need a non-default cadence call
+``set_tick_minutes_default(value)`` *before* importing any module that
+captures ``TICK_MINUTES_DEFAULT`` as a function default argument.
 """
 
 from __future__ import annotations
 
-import os
 from datetime import datetime, timezone
 
 
@@ -26,13 +29,21 @@ from datetime import datetime, timezone
 # cadence change confounding the comparison.  The final post-migration
 # commit will flip this to 3.0 to bring bench fidelity closer to
 # production.
-#
-# The ``BENCH_TICK_MINUTES`` environment variable provides a runtime
-# override (set by conftest.pytest_configure when ``--tick-minutes`` is
-# passed), so test invocations can sweep cadence without editing this
-# file.
 
-TICK_MINUTES_DEFAULT: float = float(os.environ.get("BENCH_TICK_MINUTES", "15.0"))
+TICK_MINUTES_DEFAULT: float = 15.0
+
+
+def set_tick_minutes_default(value: float) -> None:
+    """Set ``TICK_MINUTES_DEFAULT`` for the current process.
+
+    Single canonical entry point — ``conftest.pytest_configure`` calls
+    this when ``--tick-minutes=N`` is passed, and standalone scripts
+    invoke it before importing bench runner modules.  Eliminates the
+    pre-#104 trap where setting ``BENCH_TICK_MINUTES`` env var alone
+    changed runtime cadence but not pytest-regressions baseline routing.
+    """
+    global TICK_MINUTES_DEFAULT
+    TICK_MINUTES_DEFAULT = float(value)
 
 
 # ── Simulated wall-clock epoch ──────────────────────────────────────────
@@ -42,15 +53,17 @@ _SIM_EPOCH: datetime = datetime(2026, 1, 15, 0, 0, 0, tzinfo=timezone.utc)
 
 # ── Derived helpers ─────────────────────────────────────────────────────
 #
-# These are functions, not module-level constants, because
-# ``TICK_MINUTES_DEFAULT`` can be overridden by the env var (set after
-# import time by pytest_configure).  Materialising them as constants at
-# import time would freeze the value before the override lands.
+# Sentinel default (None → look up at call time) so a mutation of
+# ``TICK_MINUTES_DEFAULT`` after this module's import is observed by
+# subsequent calls.  Function-default arguments would otherwise freeze
+# the import-time value.
 
 
-def ticks_per_hour(tick_minutes: float = TICK_MINUTES_DEFAULT) -> int:
+def ticks_per_hour(tick_minutes: float | None = None) -> int:
+    if tick_minutes is None:
+        tick_minutes = TICK_MINUTES_DEFAULT
     return int(round(60.0 / tick_minutes))
 
 
-def ticks_per_day(tick_minutes: float = TICK_MINUTES_DEFAULT) -> int:
+def ticks_per_day(tick_minutes: float | None = None) -> int:
     return 24 * ticks_per_hour(tick_minutes)

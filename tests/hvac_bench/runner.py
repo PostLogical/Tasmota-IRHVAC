@@ -78,7 +78,7 @@ def run_scenario(controller: HVACController, model: ThermalModel,
         stove_schedule: dict {minute: val} or callable(minute) -> val.
         tick_interval_min: Minutes per tick.  Defaults to
             ``constants.TICK_MINUTES_DEFAULT`` (overridable via
-            ``pytest --tick-minutes=N`` or ``BENCH_TICK_MINUTES`` env).
+            ``pytest --tick-minutes=N``).
         solar_gain: Override model's solar gain for this run.
         stove_gain: Override model's stove gain for this run.
         duration_minutes: Cadence-independent run length (preferred).
