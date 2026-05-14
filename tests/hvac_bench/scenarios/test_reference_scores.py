@@ -21,6 +21,7 @@ scenarios. Marked plain (regression tier) — runs in CI on every push.
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 
 import pytest
 
@@ -38,9 +39,16 @@ from tests.hvac_bench.reference_scores import (
 
 PRINT_SCORES = os.environ.get("BENCH_PRINT_REFERENCE_SCORES") == "1"
 
+# Cadences swept by the locked-score and discriminative-invariant tests.
+# 15.0 = bench's historical default, preserved for cross-cadence drift
+# detection.  3.0 = post-#93 default, production-realistic.
+CADENCES_TO_TEST = (15.0, 3.0)
 
-def _run(scenario_name: str, controller_name: str):
+
+def _run(scenario_name: str, controller_name: str, cadence_min: float):
     scenario = CANONICAL_SCENARIOS[scenario_name]
+    if cadence_min != scenario.tick_minutes:
+        scenario = replace(scenario, tick_minutes=cadence_min)
     controller = CONTROLLER_FACTORIES[controller_name](scenario)
     history, bundle = run_reference_scenario(controller, scenario)
     return bundle
@@ -51,21 +59,30 @@ def _run(scenario_name: str, controller_name: str):
 
 @pytest.mark.parametrize("scenario_name", sorted(REFERENCE_SCORES.keys()))
 @pytest.mark.parametrize("controller_name", sorted(CONTROLLER_FACTORIES.keys()))
-def test_locked_scores_within_tolerance(bench_metrics, num_regression, scenario_name, controller_name):
-    """Every KPI of every (scenario × controller) is within locked tolerance.
+@pytest.mark.parametrize("cadence_min", CADENCES_TO_TEST)
+def test_locked_scores_within_tolerance(
+    bench_metrics, num_regression, scenario_name, controller_name, cadence_min,
+):
+    """Every KPI of every (scenario × controller × cadence) is within locked tolerance.
 
     A failure here means: either the bench changed (intentionally — relock)
     or it changed (unintentionally — investigate).
     """
-    expected_block = REFERENCE_SCORES[scenario_name].get(controller_name)
-    if expected_block is None:
+    controller_block = REFERENCE_SCORES[scenario_name].get(controller_name)
+    if controller_block is None:
         pytest.skip(f"no locked scores for {controller_name} on {scenario_name}")
+    expected_block = controller_block.get(cadence_min)
+    if expected_block is None:
+        pytest.skip(
+            f"no locked scores for {controller_name} on {scenario_name} "
+            f"at {cadence_min}-min cadence"
+        )
 
-    bundle = _run(scenario_name, controller_name)
+    bundle = _run(scenario_name, controller_name, cadence_min)
     observed = bundle.as_dict()
 
     if PRINT_SCORES:
-        print(f"\n{scenario_name} / {controller_name}:")
+        print(f"\n{scenario_name} / {controller_name} @ {cadence_min}min:")
         for k, v in observed.items():
             if k in expected_block:
                 exp = expected_block[k]
@@ -89,7 +106,7 @@ def test_locked_scores_within_tolerance(bench_metrics, num_regression, scenario_
             )
     check_bench_metrics(num_regression, bench_metrics)
     assert not failures, (
-        f"{scenario_name} / {controller_name} drifted from locked scores:\n  "
+        f"{scenario_name} / {controller_name} @ {cadence_min}min drifted from locked scores:\n  "
         + "\n  ".join(failures)
     )
 
@@ -98,9 +115,12 @@ def test_locked_scores_within_tolerance(bench_metrics, num_regression, scenario_
 
 
 @pytest.mark.parametrize("scenario_name", sorted(CANONICAL_SCENARIOS.keys()))
-def test_naive_bangbang_worse_than_well_tuned_on_comfort(bench_metrics, num_regression, scenario_name):
+@pytest.mark.parametrize("cadence_min", CADENCES_TO_TEST)
+def test_naive_bangbang_worse_than_well_tuned_on_comfort(
+    bench_metrics, num_regression, scenario_name, cadence_min,
+):
     """Naive bang-bang must score substantially worse than well-tuned PI on
-    ``tdis_tot`` for every canonical scenario.
+    ``tdis_tot`` for every canonical scenario × cadence.
 
     This invariant is what gives the bench discriminative power: if it
     stops holding, the bench can no longer distinguish a known-bad
@@ -108,8 +128,8 @@ def test_naive_bangbang_worse_than_well_tuned_on_comfort(bench_metrics, num_regr
     numbers — catches a bench break even if scores happen to land within
     each other's tolerances after a regression.
     """
-    naive_bundle = _run(scenario_name, "naive_bang_bang")
-    well_tuned_bundle = _run(scenario_name, "well_tuned_pi")
+    naive_bundle = _run(scenario_name, "naive_bang_bang", cadence_min)
+    well_tuned_bundle = _run(scenario_name, "well_tuned_pi", cadence_min)
 
     rule = DISCRIMINATIVE_INVARIANTS["naive_worse_than_well_tuned_on_comfort"]
     metric = rule["metric"]
@@ -121,7 +141,7 @@ def test_naive_bangbang_worse_than_well_tuned_on_comfort(bench_metrics, num_regr
     # Guard against a degenerate well-tuned score (≤0 makes the ratio
     # ill-defined) — that's its own failure mode worth surfacing.
     assert well_tuned_v > 0.0, (
-        f"{scenario_name}: well_tuned_pi.{metric}={well_tuned_v} "
+        f"{scenario_name} @ {cadence_min}min: well_tuned_pi.{metric}={well_tuned_v} "
         f"— bench produced zero-discomfort score for the mid baseline; "
         f"likely scenario too short or insensitive."
     )
@@ -132,7 +152,7 @@ def test_naive_bangbang_worse_than_well_tuned_on_comfort(bench_metrics, num_regr
     bench_metrics["ratio"] = ratio
     check_bench_metrics(num_regression, bench_metrics)
     assert ratio >= min_ratio, (
-        f"{scenario_name}: naive/well_tuned {metric} ratio={ratio:.2f} "
+        f"{scenario_name} @ {cadence_min}min: naive/well_tuned {metric} ratio={ratio:.2f} "
         f"(naive={naive_v}, well_tuned={well_tuned_v}); "
         f"need ≥ {min_ratio}× to maintain discriminative power"
     )

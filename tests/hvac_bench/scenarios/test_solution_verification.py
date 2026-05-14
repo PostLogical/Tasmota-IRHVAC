@@ -35,9 +35,11 @@ KPI-semantic-aware logic in the Richardson module.
 Runtime: ~12-18s wall-clock for the four (scenario × controller) cells
 × three tick rates. Marked ``slow`` because of the 5-minute tick cells.
 
-Solar scenario excluded — its hard-coded ``tick_minutes=15.0`` solar
-schedule aliases against the sweep, and β_solar is on the Phase 4
-fidelity track.
+Solar scenario re-included by #102 (2026-05-14): the schedule was
+migrated to minute-keyed in #101, so it no longer aliases against the
+sweep.  β_solar identification quality remains a Phase 4 fidelity
+question separate from the kernel-discretization properties this test
+locks in.
 
 Print mode: ``BENCH_PRINT_RICHARDSON=1 pytest -s -m slow
 tests/hvac_bench/scenarios/test_solution_verification.py`` prints the
