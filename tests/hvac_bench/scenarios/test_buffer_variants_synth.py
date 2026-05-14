@@ -24,6 +24,8 @@ from tests.hvac_bench.full_stack_runner import (
     run_full_stack,
 )
 from tests.hvac_bench.scenarios.test_buffer_variants import (
+    _POST_FILL_BIAS_TOL,
+    _POST_FILL_STD_TOL,
     _compute_variant_results,
     _print_variant_summary,
     _replace_buffers,
@@ -82,7 +84,13 @@ class TestBufferVariantsSynth:
     """
 
     def test_no_variant_diverges(self, bench_metrics, num_regression, synth_variant_results):
-        """Sanity: every (variant, season) finishes with bounded coefs."""
+        """Sanity: every (variant, season) finishes with bounded coefs.
+
+        Locks per-cell post-fill bias/std/drift (the principled buffer-policy
+        quality signal — `summarize_post_fill`) on top of final coefs.  Synth
+        AR(1) sibling of the real-CSV test_no_variant_diverges; same shape.
+        """
+        from tests.hvac_bench.full_stack_runner import summarize_post_fill
         for vname, by_season in synth_variant_results.items():
             for sname, r in by_season.items():
                 od = r.final_coefs.get("outdoor_delta", 0.0)
@@ -91,6 +99,14 @@ class TestBufferVariantsSynth:
                 # land in one CSV row.
                 bench_metrics[f"{vname}__{sname}__outdoor_delta"] = od
                 bench_metrics[f"{vname}__{sname}__solar"] = solar
+                post_fill = summarize_post_fill(
+                    r, bias_tols=_POST_FILL_BIAS_TOL, std_tols=_POST_FILL_STD_TOL,
+                )
+                for coef, pf in post_fill.items():
+                    coef_key = coef.replace(" ", "_")
+                    bench_metrics[f"{vname}__{sname}__{coef_key}_pf_bias"] = pf.bias
+                    bench_metrics[f"{vname}__{sname}__{coef_key}_pf_std"] = pf.std
+                    bench_metrics[f"{vname}__{sname}__{coef_key}_pf_drift_per_day"] = pf.drift_per_day
                 assert -2.0 < od < 0.0, f"{vname}/{sname}: outdoor_delta={od:.4f}"
                 assert -5.0 < solar < 1.0, f"{vname}/{sname}: solar={solar:.4f}"
         check_bench_metrics(num_regression, bench_metrics)

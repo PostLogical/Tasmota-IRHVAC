@@ -395,13 +395,29 @@ class TestBufferVariants:
     """
 
     def test_no_variant_diverges(self, bench_metrics, num_regression, variant_results):
-        """Sanity: every (variant, season) finishes with bounded coefs."""
+        """Sanity: every (variant, season) finishes with bounded coefs.
+
+        Locks per-cell post-fill bias/std/drift (the principled buffer-policy
+        quality signal — `summarize_post_fill`) on top of final coefs, so a
+        cross-variant regression in identification quality surfaces in the
+        diff, not just terminal divergence.
+        """
+        from tests.hvac_bench.full_stack_runner import summarize_post_fill
         for vname, by_season in variant_results.items():
             for sname, r in by_season.items():
                 od = r.final_coefs.get("outdoor_delta", 0.0)
                 solar = r.final_coefs.get("Solar Proxy", 0.0)
                 bench_metrics[f"{vname}__{sname}__outdoor_delta"] = od
                 bench_metrics[f"{vname}__{sname}__solar"] = solar
+                # Post-fill quality per coef per (variant, season) cell.
+                post_fill = summarize_post_fill(
+                    r, bias_tols=_POST_FILL_BIAS_TOL, std_tols=_POST_FILL_STD_TOL,
+                )
+                for coef, pf in post_fill.items():
+                    coef_key = coef.replace(" ", "_")
+                    bench_metrics[f"{vname}__{sname}__{coef_key}_pf_bias"] = pf.bias
+                    bench_metrics[f"{vname}__{sname}__{coef_key}_pf_std"] = pf.std
+                    bench_metrics[f"{vname}__{sname}__{coef_key}_pf_drift_per_day"] = pf.drift_per_day
                 assert -2.0 < od < 0.0, f"{vname}/{sname}: outdoor_delta={od:.4f}"
                 assert -5.0 < solar < 1.0, f"{vname}/{sname}: solar={solar:.4f}"
         check_bench_metrics(num_regression, bench_metrics)
@@ -426,7 +442,10 @@ _VARIANT_RESULTS_DIR = _pathlib.Path(
 @pytest.mark.study
 @pytest.mark.parametrize("variant", VARIANTS, ids=lambda v: v[0])
 @pytest.mark.parametrize("season", list(_SEASON_WINDOWS.keys()))
-def test_variant_cell(variant: tuple[str, int, str], season: str) -> None:
+def test_variant_cell(
+    variant: tuple[str, int, str], season: str,
+    bench_metrics, num_regression,
+) -> None:
     """One (variant × season) cell. xdist runs cells across workers.
 
     Writes per-cell results to ``BUFFER_VARIANT_RESULTS_DIR/{variant}__{season}.json``
@@ -436,6 +455,11 @@ def test_variant_cell(variant: tuple[str, int, str], season: str) -> None:
     AND post-fill identification quality via ``summarize_post_fill``
     against pinned tolerances grounded in the seasonal convergence
     test (outdoor_delta tol 0.05, Solar Proxy tol 0.20).
+
+    Locks the full diagnostic set (final coefs, fill_day, trajectory at
+    days 5/15/30/45/60/75/90, β at fill, post-fill bias/std/drift per
+    coef) in pytest-regressions per-parametrize CSV so a future
+    regression on any buffer-policy quality signal surfaces in the diff.
     """
     from tests.hvac_bench.full_stack_runner import summarize_post_fill
 
@@ -494,6 +518,30 @@ def test_variant_cell(variant: tuple[str, int, str], season: str) -> None:
     }
     out_path = _VARIANT_RESULTS_DIR / f"{vname}__{season}.json"
     out_path.write_text(_json.dumps(out, indent=2))
+
+    # ── Lock everything in pytest-regressions per-cell baseline ──────
+    # NaN sentinels keep the schema deterministic across parametrize
+    # cases even when a cell never reaches buffer capacity (fill_day=None).
+    bench_metrics["max_size"] = size
+    bench_metrics["tick_minutes"] = _BENCH_TICK_MINUTES
+    bench_metrics["beta_outdoor"] = od
+    bench_metrics["beta_solar"] = bs
+    bench_metrics["fill_day"] = float(fill_day) if fill_day is not None else float("nan")
+    bench_metrics["beta_outdoor_at_fill"] = beta_outdoor_at_fill
+    bench_metrics["beta_solar_at_fill"] = beta_solar_at_fill
+    for d in traj_days:
+        bench_metrics[f"traj_solar_d{d:02d}"] = traj_solar.get(d, float("nan"))
+    for coef, pf_data in post_fill_dump.items():
+        coef_key = coef.replace(" ", "_")
+        bench_metrics[f"post_fill_{coef_key}_truth"] = pf_data["truth"]
+        pf_fill = pf_data["fill_day"]
+        bench_metrics[f"post_fill_{coef_key}_fill_day"] = (
+            float(pf_fill) if pf_fill is not None else float("nan")
+        )
+        bench_metrics[f"post_fill_{coef_key}_bias"] = pf_data["bias"]
+        bench_metrics[f"post_fill_{coef_key}_std"] = pf_data["std"]
+        bench_metrics[f"post_fill_{coef_key}_drift_per_day"] = pf_data["drift_per_day"]
+    check_bench_metrics(num_regression, bench_metrics)
 
     # Loose non-divergence bounds preserved from the historical study.
     import os as _os2

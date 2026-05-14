@@ -434,6 +434,11 @@ class TestQFeedbackConvergence:
             avg = total / 3.0
             bench_metrics["profile"] = profile_name
             bench_metrics["avg_reversals_per_week"] = avg
+            # Per-week breakout: trend shape matters; averaging hides whether
+            # week 1 was the anomaly (transient) vs week 3 (regression).
+            bench_metrics["w1_reversals"] = result.weekly_reversals[0]
+            bench_metrics["w2_reversals"] = result.weekly_reversals[1]
+            bench_metrics["w3_reversals"] = result.weekly_reversals[2]
             check_bench_metrics(num_regression, bench_metrics)
             assert avg < 20, (
                 f"{profile_name}: average reversals {avg:.1f}/week "
@@ -597,6 +602,16 @@ class TestConvergenceToTruth:
         bench_metrics["od"] = od
         bench_metrics["baseline_od"] = baseline_od
         bench_metrics["diff"] = abs(od - baseline_od)
+        # Test name promises "all seeds converge to same value" — the existing
+        # assert only checks outdoor_delta, but intercept is the other
+        # estimated coefficient in this model (no model inputs configured) and
+        # should also be consistent across seed factors.  Solar Proxy isn't in
+        # this fixture's model, so don't lock it (would always be 0.0).
+        intercept = result.final_coefs.get("intercept", 0.0)
+        baseline_intercept = baseline_result.final_coefs.get("intercept", 0.0)
+        bench_metrics["intercept"] = intercept
+        bench_metrics["baseline_intercept"] = baseline_intercept
+        bench_metrics["intercept_diff"] = abs(intercept - baseline_intercept)
         check_bench_metrics(num_regression, bench_metrics)
         assert abs(od - baseline_od) < 0.1, (
             f"seed_factor={seed_factor}: converged to {od:.4f}, "
@@ -606,9 +621,14 @@ class TestConvergenceToTruth:
     def test_worse_seeds_take_longer(self, bench_metrics, num_regression, seed_results):
         """More wrong seeds should take more batch cycles to converge."""
         first_stable_for: dict[float, int | None] = {}
-        for factor in (1.0, 2.0, 3.0):
+        final_od_for: dict[float, float] = {}
+        # Expanded loop to all 5 seed factors — completes monotonicity coverage
+        # the test name claims.  Existing assertion below still only requires
+        # 1x vs 3x ordering (preserves the original contract).
+        for factor in (0.5, 1.0, 1.5, 2.0, 3.0):
             result = seed_results[factor]
             final_od = result.final_coefs.get("outdoor_delta", 0)
+            final_od_for[factor] = final_od
             first_stable: int | None = None
             for i, snap in enumerate(result.coef_trajectory):
                 od = snap.get("outdoor_delta", 0)
@@ -618,9 +638,16 @@ class TestConvergenceToTruth:
             first_stable_for[factor] = first_stable
 
         print(f"\n  Convergence speed: {first_stable_for}")
+        bench_metrics["stable_05x"] = first_stable_for[0.5] if first_stable_for[0.5] is not None else -1
         bench_metrics["stable_1x"] = first_stable_for[1.0] if first_stable_for[1.0] is not None else -1
+        bench_metrics["stable_15x"] = first_stable_for[1.5] if first_stable_for[1.5] is not None else -1
         bench_metrics["stable_2x"] = first_stable_for[2.0] if first_stable_for[2.0] is not None else -1
         bench_metrics["stable_3x"] = first_stable_for[3.0] if first_stable_for[3.0] is not None else -1
+        bench_metrics["od_final_05x"] = final_od_for[0.5]
+        bench_metrics["od_final_1x"] = final_od_for[1.0]
+        bench_metrics["od_final_15x"] = final_od_for[1.5]
+        bench_metrics["od_final_2x"] = final_od_for[2.0]
+        bench_metrics["od_final_3x"] = final_od_for[3.0]
         check_bench_metrics(num_regression, bench_metrics)
         if first_stable_for[1.0] is not None and first_stable_for[3.0] is not None:
             assert first_stable_for[3.0] >= first_stable_for[1.0], (

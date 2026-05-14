@@ -428,6 +428,14 @@ class TestSeasonalConvergence:
             solar = r.final_coefs.get("Solar Proxy", 0.0)
             bench_metrics[f"{name}__outdoor_delta"] = od
             bench_metrics[f"{name}__solar"] = solar
+            # Per-season comfort + MAE shape: same fixture data, locks the
+            # full per-season control-quality picture in one test.
+            if r.daily_mae:
+                bench_metrics[f"{name}__daily_mae_max"] = max(r.daily_mae)
+                bench_metrics[f"{name}__daily_mae_mean"] = sum(r.daily_mae) / len(r.daily_mae)
+            bench_metrics[f"{name}__ctrl_comfort_pct"] = r.ctrl_comfort_pct
+            bench_metrics[f"{name}__ctrl_violations"] = r.ctrl_violations
+            bench_metrics[f"{name}__longest_violation_streak"] = r.longest_violation_streak
             assert -2.0 < od < 0.0, (
                 f"{name}: outdoor_delta out of plausible range: {od:.4f}"
             )

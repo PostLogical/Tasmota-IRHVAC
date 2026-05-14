@@ -364,6 +364,14 @@ class TestGreybox2R2CRealCSV:
         for season, by_mode in real_csv_results.items():
             for mode, r in by_mode.items():
                 bench_metrics[f"{season}__{mode}__n_2r2c_batches"] = r.n_2r2c_batches
+                # Locked count alone is uninformative — "200 dispatches" means
+                # different things at 400 total vs 4000 total batches.  Lock
+                # the denominator + ratio.
+                bench_metrics[f"{season}__{mode}__gb_total_batches"] = r.gb_total_batches
+                if r.gb_total_batches > 0:
+                    bench_metrics[f"{season}__{mode}__dispatch_rate"] = (
+                        r.n_2r2c_batches / r.gb_total_batches
+                    )
         check_bench_metrics(num_regression, bench_metrics)
         for season, by_mode in real_csv_results.items():
             assert any(r.is_2r2c_dispatched for r in by_mode.values()), (
@@ -388,6 +396,12 @@ class TestGreybox2R2CRealCSV:
             r = by_mode["fused"]
             bench_metrics[f"{season}__fused__gb_gates_passed"] = r.gb_gates_passed
             bench_metrics[f"{season}__fused__gb_total_batches"] = r.gb_total_batches
+            # When this xfail eventually xpasses (2R2C upgrade lands), the
+            # diagnostic question is WHICH gates are now passing.  Lock the
+            # per-gate failure counts so the xpass diff shows what changed.
+            if r.gate_failure_counts:
+                for gate_name, count in sorted(r.gate_failure_counts.items()):
+                    bench_metrics[f"{season}__fused__gate_fail__{gate_name}"] = count
         check_bench_metrics(num_regression, bench_metrics)
         for season, by_mode in real_csv_results.items():
             r = by_mode["fused"]
