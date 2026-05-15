@@ -31,6 +31,7 @@ import json
 import logging
 import re
 import shutil
+from collections import Counter
 from collections.abc import Iterator
 from datetime import date, datetime
 from pathlib import Path
@@ -191,14 +192,22 @@ class EventLogReader:
             yield path
 
     def _read_file(self, path: Path) -> Iterator[TickOutput]:
-        """Yield TickOutputs from a single .jsonl or .jsonl.gz file."""
-        # Both gzip.open and builtin open accept (path, mode, encoding)
-        # but their static signatures differ — narrowed by the .gz suffix.
+        """Yield TickOutputs from a single .jsonl or .jsonl.gz file.
+
+        Per-line parse failures are aggregated and logged once at file
+        close — the prior per-line warning was noisy enough to hide
+        actionable schema-drift signals (e.g. a uniform ``KeyError`` on
+        one renamed field across thousands of lines). The summary names
+        the field on ``KeyError`` so future schema drift is
+        self-diagnosing.
+        """
         opener: object
         if path.suffix == ".gz":
             opener = gzip.open
         else:
             opener = open
+        parse_errors: Counter[str] = Counter()
+        ok_count = 0
         try:
             with opener(path, "rt", encoding="utf-8") as f:
                 for line in f:
@@ -208,11 +217,22 @@ class EventLogReader:
                     try:
                         data = json.loads(line)
                         yield TickOutput.from_dict(data)
-                    except (json.JSONDecodeError, ValueError, KeyError):
-                        _LOGGER.warning(
-                            "Skipping malformed event-log line in %s",
-                            path.name,
+                        ok_count += 1
+                    except (json.JSONDecodeError, ValueError, KeyError) as e:
+                        detail = (
+                            f"KeyError({e!s})" if isinstance(e, KeyError)
+                            else type(e).__name__
                         )
+                        parse_errors[detail] += 1
                         continue
+            if parse_errors:
+                _LOGGER.warning(
+                    "Event log %s: %d records ok, %d skipped (%s)",
+                    path.name, ok_count, sum(parse_errors.values()),
+                    ", ".join(
+                        f"{k}×{v}"
+                        for k, v in parse_errors.most_common(5)
+                    ),
+                )
         except OSError:
             _LOGGER.exception("Failed to read event log %s", path)

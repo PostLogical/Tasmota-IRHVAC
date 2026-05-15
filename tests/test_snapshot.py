@@ -48,8 +48,8 @@ from custom_components.tasmota_irhvac.pi.snapshot import (
 # ── Schema version ─────────────────────────────────────────────────────
 
 
-def test_tick_output_schema_version_is_one():
-    assert TickOutput.SCHEMA_VERSION == 1
+def test_tick_output_schema_version_is_two():
+    assert TickOutput.SCHEMA_VERSION == 2
 
 
 # ── Per-sub-dataclass roundtrip ────────────────────────────────────────
@@ -526,7 +526,7 @@ def test_tick_output_empty_constructor():
     """TickOutput.empty() produces a valid roundtrippable dataclass."""
     tick = _minimal_tick()
     assert tick.zone_label == "test"
-    assert tick.SCHEMA_VERSION == 1
+    assert tick.SCHEMA_VERSION == 2
 
 
 def test_tick_output_roundtrip_minimal():
@@ -567,7 +567,7 @@ def test_tick_output_roundtrip_with_events():
 def test_tick_output_to_dict_includes_underscore_fields():
     tick = _minimal_tick("living_room")
     d = tick.to_dict()
-    assert d["_schema_version"] == 1
+    assert d["_schema_version"] == 2
     assert d["_zone_label"] == "living_room"
     assert "_ts_mono" in d
     assert "_ts_wall" in d
@@ -597,6 +597,103 @@ def test_tick_output_from_dict_rejects_wrong_schema_version():
     d["_schema_version"] = 99
     with pytest.raises(ValueError, match="schema version mismatch"):
         TickOutput.from_dict(d)
+
+
+def test_tick_output_v1_observation_renames_migrate_to_v2():
+    """v1 records (leverage_score etc.) survive read on v2 code.
+
+    Daily event-log JSONL files written before the ObservationContext
+    field rename use the v1 key names. The migration in
+    `TickOutput._migrate_v1_to_v2` must rewrite them transparently so
+    historical corpus stays readable indefinitely.
+    """
+    tick = dataclasses.replace(
+        _minimal_tick(),
+        observation=ObservationContext(
+            admitted=True, clamped=False, clamped_reason="",
+            score=0.012, mode="heat",
+            raw_readings={"sensor.outdoor": 5.0},
+            feature_vector=(1.0, 12.5),
+            evicted_timestamp=12345.6,
+            min_incumbent_score=0.18,
+            rejection_reason=None,
+            gb_admitted=True,
+            gb_score=0.05,
+            gb_evicted_timestamp=98765.4,
+            gb_min_incumbent_score=0.03,
+            gb_rejection_reason=None,
+        ),
+    )
+    v2_dict = tick.to_dict()
+    # Rewrite to v1 shape: new names → old names, version 2 → 1.
+    v1_dict = {**v2_dict, "_schema_version": 1}
+    obs = dict(v1_dict["_observation"])
+    obs["leverage_score"] = obs.pop("score")
+    obs["min_incumbent_leverage"] = obs.pop("min_incumbent_score")
+    obs["gb_leverage_score"] = obs.pop("gb_score")
+    obs["gb_min_incumbent_leverage"] = obs.pop("gb_min_incumbent_score")
+    v1_dict["_observation"] = obs
+
+    restored = TickOutput.from_dict(v1_dict)
+    assert restored == tick
+
+
+def test_tick_output_v1_without_observation_migrates():
+    """v1 records lacking _observation still bump version cleanly.
+
+    HP-off / sensor-unavailable ticks emit no _observation block.
+    Migration must be a no-op on the body and only update the version.
+    """
+    tick = _minimal_tick()
+    v1_dict = {**tick.to_dict(), "_schema_version": 1}
+    assert "_observation" not in v1_dict
+    restored = TickOutput.from_dict(v1_dict)
+    assert restored == tick
+
+
+def test_migrate_v1_to_v2_does_not_mutate_input():
+    """Migration is pure — caller's dict is untouched."""
+    tick = dataclasses.replace(
+        _minimal_tick(),
+        observation=ObservationContext(
+            admitted=True, clamped=False, clamped_reason="",
+            score=0.5, mode="heat",
+            raw_readings={}, feature_vector=(),
+        ),
+    )
+    v1_dict = {**tick.to_dict(), "_schema_version": 1}
+    v1_dict["_observation"] = {
+        **v1_dict["_observation"],
+        "leverage_score": v1_dict["_observation"].pop("score"),
+    }
+    snapshot = {
+        "version": v1_dict["_schema_version"],
+        "leverage_score": v1_dict["_observation"].get("leverage_score"),
+        "score": v1_dict["_observation"].get("score"),
+    }
+    TickOutput._migrate_v1_to_v2(v1_dict)
+    assert v1_dict["_schema_version"] == snapshot["version"]
+    assert v1_dict["_observation"].get("leverage_score") == snapshot["leverage_score"]
+    assert v1_dict["_observation"].get("score") == snapshot["score"]
+
+
+def test_migrate_v1_to_v2_prefers_new_name_when_both_present():
+    """If both new and old keys exist, new wins (idempotent re-migration)."""
+    tick = dataclasses.replace(
+        _minimal_tick(),
+        observation=ObservationContext(
+            admitted=True, clamped=False, clamped_reason="",
+            score=0.5, mode="heat",
+            raw_readings={}, feature_vector=(),
+        ),
+    )
+    v1_dict = {**tick.to_dict(), "_schema_version": 1}
+    v1_dict["_observation"] = {
+        **v1_dict["_observation"],
+        "leverage_score": 0.99,  # stale old key
+    }
+    migrated = TickOutput._migrate_v1_to_v2(v1_dict)
+    assert migrated["_observation"]["score"] == 0.5
 
 
 def test_tick_output_is_frozen():

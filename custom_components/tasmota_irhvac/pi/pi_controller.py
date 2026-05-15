@@ -884,9 +884,23 @@ class PIController:
                 _LOGGER.debug("PI: restored from ExtraStoredData")
                 restored = True
                 prior_saved_wallclock = pi_data.saved_at_wallclock
+            else:
+                # ExtraStoredData was present but unreadable — historically
+                # the bare-except in from_dict hid this entirely and the
+                # controller silently degraded to defaults. Surface it so
+                # restore regressions don't become silent feature loss
+                # (see pre52: pi_event_log_enabled was a casualty of this
+                # exact pattern).
+                _LOGGER.warning(
+                    "%sPI: ExtraStoredData present but PIExtraStoredData."
+                    "from_dict returned None — falling through to "
+                    "auto-save / legacy attrs / defaults. See preceding "
+                    "exception traceback for the failing field.",
+                    self._log_prefix,
+                )
         if not restored and pi_autosave is not None:
             pi_data = PIExtraStoredData.from_dict(pi_autosave)
-            if pi_data is not None:  # pragma: no branch — pi_data is None only on first ever boot before persistence write
+            if pi_data is not None:
                 self.restore_extra_stored_data(pi_data)
                 _LOGGER.info(
                     "%sPI: restored from auto-save (previous PI session)",
@@ -894,6 +908,13 @@ class PIController:
                 )
                 restored = True
                 prior_saved_wallclock = pi_data.saved_at_wallclock
+            else:
+                _LOGGER.warning(
+                    "%sPI: auto-save present but PIExtraStoredData."
+                    "from_dict returned None — falling through to legacy "
+                    "attrs / defaults.",
+                    self._log_prefix,
+                )
         if not restored:
             # Fall back to state attributes (migration from pre-ExtraStoredData versions)
             if old_state is None:
@@ -907,6 +928,19 @@ class PIController:
                 if attrs.get(ATTR_HP_SETPOINT) is not None:
                     self._hp_setpoint = float(attrs[ATTR_HP_SETPOINT])
                 _LOGGER.debug("PI: restored from state attributes (legacy)")
+            elif extra_data is not None or pi_autosave is not None:
+                # Both higher-priority sources existed but failed —
+                # log the final fallback explicitly with the bool flags
+                # most prone to silent regression (pi_event_log_enabled
+                # is the only persisted-False default; all others are
+                # active-by-default).
+                _LOGGER.warning(
+                    "%sPI: no usable restore source; running on factory "
+                    "defaults (control_active=True, ff_enabled=True, "
+                    "batch_wls_enabled=True, plant_id_enabled=True, "
+                    "pi_event_log_enabled=False)",
+                    self._log_prefix,
+                )
 
         # Fallback: sync with restored _attr_target_temperature
         if self._desired_temp is None and e._attr_target_temperature is not None:

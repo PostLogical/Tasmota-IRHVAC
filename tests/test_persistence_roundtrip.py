@@ -113,6 +113,50 @@ def test_legacy_dict_missing_saved_at_wallclock_defaults_empty():
     assert restored.saved_at_wallclock == ""
 
 
+# ── Loud-failure logging on from_dict (pre52 followup) ────────────────
+
+
+def test_from_dict_missing_required_field_logs_exception(caplog):
+    """A bare-swallow used to hide all restore failures.
+
+    Pre-pre52, `from_dict` returned None on any exception with no log
+    output — the failure mode behind pi_event_log_enabled silently
+    flipping back to default. Now it logs the exception with traceback
+    so future regressions are visible.
+    """
+    broken = _minimal_stored_data().as_dict()
+    del broken["pi_integral"]  # required field, bracket-indexed
+    with caplog.at_level("ERROR"):
+        restored = PIExtraStoredData.from_dict(broken)
+    assert restored is None
+    failure_logs = [
+        r for r in caplog.records
+        if "PIExtraStoredData.from_dict failed" in r.message
+    ]
+    assert len(failure_logs) == 1, (
+        f"expected one exception log, got: {[r.message for r in caplog.records]}"
+    )
+    # _LOGGER.exception attaches traceback info; pytest's caplog
+    # exposes it via exc_info.
+    assert failure_logs[0].exc_info is not None
+    assert failure_logs[0].exc_info[0] is KeyError
+
+
+def test_from_dict_bad_type_logs_exception(caplog):
+    """ValueError from float() coercion is logged the same way."""
+    broken = _minimal_stored_data().as_dict()
+    broken["pi_integral"] = "not-a-number"
+    with caplog.at_level("ERROR"):
+        restored = PIExtraStoredData.from_dict(broken)
+    assert restored is None
+    failure_logs = [
+        r for r in caplog.records
+        if "PIExtraStoredData.from_dict failed" in r.message
+    ]
+    assert len(failure_logs) == 1
+    assert failure_logs[0].exc_info[0] is ValueError
+
+
 # ── _compute_prior_run_age_s helper ───────────────────────────────────
 
 

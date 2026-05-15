@@ -3593,3 +3593,201 @@ class TestBatchLearningDefensivePaths:
         held_set = set(result.held_features)
         # held_features uses indices, not names — index 2 is "coll".
         assert 2 in held_set
+
+
+# ── HAC / ESS helper edge-case guards ─────────────────────────────────
+
+
+class TestBatchLearningHACEdgeGuards:
+    """Pathological-input guards on HAC/ESS helpers.
+
+    These private helpers degrade gracefully on degenerate inputs
+    (empty residuals, non-positive denominators, zero-dimensional
+    feature vectors). Tests pin the early-return behavior so future
+    refactors can't silently change it.
+    """
+
+    def test_estimate_observation_dt_min_returns_one_for_single_obs(self):
+        from custom_components.tasmota_irhvac.pi.batch_learning import (
+            _estimate_observation_dt_min,
+        )
+        single = [Observation(
+            timestamp=0.0, wall_time=time.time(), hp_setpoint=22.0,
+            current_c=20.0, desired_c=20.0, outdoor_temp_c=10.0,
+            room_rate=0.0, raw_readings={}, clamped=False,
+        )]
+        assert _estimate_observation_dt_min(single) == 1.0
+
+    def test_estimate_observation_dt_min_returns_one_when_all_dts_zero(self):
+        from custom_components.tasmota_irhvac.pi.batch_learning import (
+            _estimate_observation_dt_min,
+        )
+        # Same wall_time on both → delta=0 → filtered → empty deltas
+        same_wt = time.time()
+        obs = [
+            Observation(
+                timestamp=float(i), wall_time=same_wt, hp_setpoint=22.0,
+                current_c=20.0, desired_c=20.0, outdoor_temp_c=10.0,
+                room_rate=0.0, raw_readings={}, clamped=False,
+            )
+            for i in range(2)
+        ]
+        assert _estimate_observation_dt_min(obs) == 1.0
+
+    def test_hac_bandwidth_returns_one_for_nonpositive_dt(self):
+        from custom_components.tasmota_irhvac.pi.batch_learning import (
+            _hac_bandwidth,
+        )
+        assert _hac_bandwidth(n_obs=100, dt_min=0.0) == 1
+        assert _hac_bandwidth(n_obs=100, dt_min=-1.0) == 1
+
+    def test_bartlett_acf_returns_zeros_for_empty_residuals(self):
+        from custom_components.tasmota_irhvac.pi.batch_learning import (
+            _bartlett_acf,
+        )
+        assert _bartlett_acf([], [], max_lag=3) == [0.0, 0.0, 0.0, 0.0]
+
+    def test_ess_from_acf_degrades_to_n_obs_on_pathological_inputs(self):
+        from custom_components.tasmota_irhvac.pi.batch_learning import (
+            _ess_from_acf,
+        )
+        # Empty ACF → max(1, n_obs)
+        assert _ess_from_acf([], n_obs=100) == 100.0
+        # γ̂(0) ≤ 0 (degenerate residuals)
+        assert _ess_from_acf([0.0, 0.1], n_obs=100) == 100.0
+        # n_obs ≤ 0 → max(1, n_obs) = 1
+        assert _ess_from_acf([1.0, 0.5], n_obs=0) == 1.0
+        # L ≤ 0 (only γ̂(0), no lags)
+        assert _ess_from_acf([1.0], n_obs=50) == 50.0
+        # Pathological negative-correlation: ρ̂(1)=-1 makes
+        # denom = 1 + 2·(1 - 1/2)·(-1) = 0
+        assert _ess_from_acf([1.0, -1.0], n_obs=42) == 42.0
+
+    def test_hac_meat_matrix_returns_empty_for_zero_observations(self):
+        from custom_components.tasmota_irhvac.pi.batch_learning import (
+            _hac_meat_matrix,
+        )
+        assert _hac_meat_matrix([], [], [], bandwidth=2) == [[]]
+
+    def test_hac_meat_matrix_returns_empty_for_zero_features(self):
+        from custom_components.tasmota_irhvac.pi.batch_learning import (
+            _hac_meat_matrix,
+        )
+        # Empty-feature-vector row (p=0)
+        assert _hac_meat_matrix([[]], [1.0], [0.5], bandwidth=2) == [[]]
+
+    def test_hac_std_err_from_sandwich_returns_empty_for_zero_dim(self):
+        from custom_components.tasmota_irhvac.pi.batch_learning import (
+            _hac_std_err_from_sandwich,
+        )
+        assert _hac_std_err_from_sandwich(
+            XtWX_inv=[], meat=[], col_scales=[], classical_std_err=[],
+        ) == []
+
+    def test_hac_std_err_univariate_returns_classical_for_empty(self):
+        from custom_components.tasmota_irhvac.pi.batch_learning import (
+            _hac_std_err_univariate,
+        )
+        # n == 0 path (line 373)
+        assert _hac_std_err_univariate(
+            r_z=[], weights=[], residuals=[], wrzrz=1.0, bandwidth=2,
+            classical_std_err=0.5,
+        ) == 0.5
+
+    def test_hac_std_err_univariate_returns_classical_for_zero_wrzrz(self):
+        from custom_components.tasmota_irhvac.pi.batch_learning import (
+            _hac_std_err_univariate,
+        )
+        # wrzrz ≤ 0 path (line 373)
+        assert _hac_std_err_univariate(
+            r_z=[1.0], weights=[1.0], residuals=[0.5], wrzrz=0.0,
+            bandwidth=1, classical_std_err=0.7,
+        ) == 0.7
+
+    def test_hac_std_err_univariate_returns_classical_when_meat_negative(
+        self, monkeypatch,
+    ):
+        """Safeguard returns classical_std_err when meat < 0.
+
+        Newey-West's Bartlett kernel is PSD by construction (Newey &
+        West 1987), so under valid inputs meat ≥ 0 and this branch
+        never fires. The safeguard exists for IEEE 754 float drift and
+        — more importantly — as a tripwire against future refactors
+        that might break the PSD invariant by changing the kernel
+        weighting or lag indexing. To exercise it without writing
+        broken math, monkey-patch the module-level `sum` so the
+        cross-product accumulation lands negative. The test then pins:
+        "if meat goes negative for any reason, return classical."
+        """
+        import custom_components.tasmota_irhvac.pi.batch_learning as bl
+
+        # First sum call is for `sum(x*x for x in s)` — leave alone.
+        # Subsequent calls are the lag-k cross products — return a
+        # large negative so the accumulator drops below zero.
+        real_sum = sum
+        call_count = {"n": 0}
+
+        def patched_sum(iterable, /, start=0):
+            call_count["n"] += 1
+            return real_sum(iterable, start) if call_count["n"] == 1 else -1e9
+
+        monkeypatch.setattr(bl, "sum", patched_sum, raising=False)
+
+        out = bl._hac_std_err_univariate(
+            r_z=[1.0, 1.0, 1.0], weights=[1.0, 1.0, 1.0],
+            residuals=[0.1, -0.05, 0.08], wrzrz=3.0, bandwidth=2,
+            classical_std_err=0.123,
+        )
+        assert out == 0.123
+
+    def test_hac_std_err_univariate_meat_is_nonnegative_for_valid_inputs(self):
+        """PSD invariant test: meat stays ≥ 0 across many random valid
+        Bartlett-weighted inputs.
+
+        A property test that catches the inverse of the safeguard above:
+        if a future refactor breaks the PSD property of the kernel,
+        meat will start going negative on real inputs and this test
+        will catch it. Together the two tests pin both halves of the
+        Newey-West guarantee (PSD invariant + defensive safeguard).
+        """
+        import random
+        from custom_components.tasmota_irhvac.pi.batch_learning import (
+            _hac_std_err_univariate,
+        )
+        rng = random.Random(42)
+        for _ in range(50):
+            n = rng.randint(5, 30)
+            bandwidth = rng.randint(1, min(5, n - 1))
+            r_z = [rng.uniform(-2.0, 2.0) for _ in range(n)]
+            weights = [rng.uniform(0.1, 1.0) for _ in range(n)]
+            residuals = [rng.uniform(-1.0, 1.0) for _ in range(n)]
+            wrzrz = sum(weights[t] * r_z[t] * r_z[t] for t in range(n))
+            if wrzrz <= 0:
+                continue
+            # If meat goes negative, _hac_std_err_univariate returns
+            # classical_std_err. Setting classical=-1.0 (impossible for
+            # a real std_err) makes any return of classical detectable.
+            out = _hac_std_err_univariate(
+                r_z, weights, residuals, wrzrz, bandwidth,
+                classical_std_err=-1.0,
+            )
+            # Either the PSD-protected HAC std_err (≥ 0) or the
+            # classical fallback (-1.0 sentinel). Bartlett-PSD says
+            # we should never see the sentinel.
+            assert out >= 0.0, (
+                f"PSD invariant violated: meat went negative for "
+                f"n={n} bandwidth={bandwidth}; the Bartlett kernel "
+                f"should guarantee meat ≥ 0 (Newey-West 1987)"
+            )
+
+    def test_hac_meat_matrix_normal_path_returns_pxp(self):
+        """Smoke test: non-empty inputs produce a p×p matrix."""
+        from custom_components.tasmota_irhvac.pi.batch_learning import (
+            _hac_meat_matrix,
+        )
+        X = [[1.0, 0.5], [1.0, 0.6], [1.0, 0.7]]
+        weights = [1.0, 1.0, 1.0]
+        residuals = [0.1, -0.05, 0.08]
+        meat = _hac_meat_matrix(X, weights, residuals, bandwidth=1)
+        assert len(meat) == 2
+        assert all(len(row) == 2 for row in meat)

@@ -54,7 +54,7 @@ class FakePIEntity(_PITestEntityRoomTempMixin):
     def temperature_unit(self):
         return self._attr_temperature_unit
 
-    def __init__(self, config):
+    def __init__(self, config, *, skip_tick_output: bool = False):
         # Simulate base class attributes — all temps in °C (entity unit)
         self.hass = MagicMock()
         # Default the temp-sensor lookup to "no initial state" — production
@@ -78,7 +78,7 @@ class FakePIEntity(_PITestEntityRoomTempMixin):
         self.async_get_last_state = AsyncMock(return_value=None)
 
         # Initialize PI via composition; mixin syncs UI temp into PI state.
-        self._pi = PIController(self, config)
+        self._pi = PIController(self, config, skip_tick_output=skip_tick_output)
         self._sync_room_temp_to_pi()
 
     @property
@@ -1893,6 +1893,80 @@ class TestPIMathContinued:
 
         assert entity._pi._pi_integral == 8.8
         assert entity._pi._desired_temp == 22.0
+
+    @pytest.mark.asyncio
+    async def test_corrupt_autosave_falls_through_with_warning(self, caplog):
+        """A corrupt auto-save dict logs a warning and falls through to legacy.
+
+        Mirror of pre52's diagnosis: silent restore failures used to hide
+        themselves. With ExtraStoredData absent and auto-save corrupt,
+        the controller must log loudly and not silently degrade.
+        """
+        config = make_pi_config({"outdoor_temp_sensor": ""})
+        entity = FakePIEntity(config)
+        entity.async_get_last_extra_data = AsyncMock(return_value=None)
+        # pi_integral is required + bracket-indexed in from_dict → KeyError
+        corrupt_autosave = {"some": "unrecognized", "shape": True}
+
+        with caplog.at_level("WARNING"):
+            await entity._pi.async_added_to_hass(pi_autosave=corrupt_autosave)
+
+        warns = [r.message for r in caplog.records if "auto-save present" in r.message]
+        assert warns, (
+            f"expected an auto-save-failed warning, got: "
+            f"{[r.message for r in caplog.records]}"
+        )
+
+    def test_skip_tick_output_returns_before_building_tick(self):
+        """When skip_tick_output=True (bench-only), fire_dispatcher returns
+        early without rebuilding last_tick.
+
+        Bench code sets this flag to skip the hot per-tick TickOutput
+        rebuild that production needs but bench full_stack runs don't
+        consume. Test pins the early-return so a future refactor can't
+        silently start building tick output in this mode.
+        """
+        config = make_pi_config({"outdoor_temp_sensor": ""})
+        entity = FakePIEntity(config, skip_tick_output=True)
+        before = entity._pi._last_tick
+
+        entity._pi.fire_dispatcher()
+
+        # last_tick is untouched (still the initial empty TickOutput) and
+        # no coordinator publish was attempted because the early-return
+        # short-circuits before either.
+        assert entity._pi._last_tick is before
+
+    @pytest.mark.asyncio
+    async def test_all_restore_sources_fail_logs_factory_defaults_warning(self, caplog):
+        """When ExtraStoredData parses to None AND auto-save parses to None
+        AND there's no usable old_state, log a final warning naming the
+        active default flags. Catches the worst-case silent-degradation
+        that pre52's investigation traced.
+        """
+        config = make_pi_config({"outdoor_temp_sensor": ""})
+        entity = FakePIEntity(config)
+        mock_extra = MagicMock()
+        # Dict that survives the None-isinstance check but fails from_dict
+        mock_extra.as_dict.return_value = {"not_pi": True}
+        entity.async_get_last_extra_data = AsyncMock(return_value=mock_extra)
+        entity.async_get_last_state = AsyncMock(return_value=None)
+        corrupt_autosave = {"also_not_pi": True}
+
+        with caplog.at_level("WARNING"):
+            await entity._pi.async_added_to_hass(pi_autosave=corrupt_autosave)
+
+        defaults_warns = [
+            r.message for r in caplog.records
+            if "running on factory defaults" in r.message
+        ]
+        assert defaults_warns, (
+            f"expected factory-defaults warning, got: "
+            f"{[r.message for r in caplog.records]}"
+        )
+        # Must surface pi_event_log_enabled — the flag the pre52 incident
+        # silently flipped to False.
+        assert "pi_event_log_enabled=False" in defaults_warns[0]
 
     @pytest.mark.asyncio
     async def test_controller_reload_payload_when_restored_from_extra_data(self):

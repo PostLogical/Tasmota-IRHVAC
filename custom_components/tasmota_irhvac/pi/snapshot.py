@@ -1312,7 +1312,7 @@ class TickOutput:
     Schema versioning: see module docstring for evolution rules.
     """
 
-    SCHEMA_VERSION: ClassVar[int] = 1
+    SCHEMA_VERSION: ClassVar[int] = 2
 
     # Timing + framing
     ts_mono: float
@@ -1434,14 +1434,44 @@ class TickOutput:
         out["_stable_combined_bias_ema"] = self.stable_combined_bias_ema
         return out
 
+    @staticmethod
+    def _migrate_v1_to_v2(data: dict[str, Any]) -> dict[str, Any]:
+        """Rewrite v1 records into v2 shape.
+
+        v1 used `leverage_score` / `min_incumbent_leverage` /
+        `gb_leverage_score` / `gb_min_incumbent_leverage` on the
+        `_observation` sub-dict; v2 renamed all four to `score` /
+        `min_incumbent_score` / `gb_score` / `gb_min_incumbent_score`.
+        Kept indefinitely — v1 daily JSONL files exist in user installs
+        on disk from before the rename.
+
+        Returns a shallow copy with the migrated `_observation` block;
+        leaves the input untouched.
+        """
+        if "_observation" not in data:
+            return {**data, "_schema_version": 2}
+        obs = dict(data["_observation"])
+        for old, new in (
+            ("leverage_score", "score"),
+            ("min_incumbent_leverage", "min_incumbent_score"),
+            ("gb_leverage_score", "gb_score"),
+            ("gb_min_incumbent_leverage", "gb_min_incumbent_score"),
+        ):
+            if new not in obs and old in obs:
+                obs[new] = obs.pop(old)
+        return {**data, "_observation": obs, "_schema_version": 2}
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> TickOutput:
         """Reconstruct a TickOutput from its serialized form.
 
-        Raises ValueError if the schema_version doesn't match. Once we
-        bump SCHEMA_VERSION, add migration logic here.
+        Migrates older schema versions forward in-place; raises
+        ValueError on unknown versions.
         """
         version = data.get("_schema_version")
+        if version == 1:
+            data = cls._migrate_v1_to_v2(data)
+            version = 2
         if version != cls.SCHEMA_VERSION:
             raise ValueError(
                 f"TickOutput schema version mismatch: expected "

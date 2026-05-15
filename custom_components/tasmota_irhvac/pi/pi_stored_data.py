@@ -7,9 +7,12 @@ restarts without bloating the recorder DB on every state write.
 from __future__ import annotations
 
 import dataclasses
+import logging
 from typing import Any, Self
 
 from homeassistant.helpers.restore_state import ExtraStoredData
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclasses.dataclass
@@ -232,4 +235,22 @@ class PIExtraStoredData(ExtraStoredData):
                 ],
             )
         except (KeyError, ValueError, TypeError, AttributeError):
+            # Returning None lets callers fall through to the next
+            # restore source, but the bare-swallow used to hide the
+            # failure entirely — including the case where the only
+            # persisted-False boolean (pi_event_log_enabled) silently
+            # flipped back to default. Log loudly so future restore
+            # regressions are visible in HA logs and the failing
+            # field/value is captured in the traceback.
+            keys_preview = (
+                sorted(restored.keys())[:20] if isinstance(restored, dict)
+                else f"<not-a-dict: {type(restored).__name__}>"
+            )
+            _LOGGER.exception(
+                "PIExtraStoredData.from_dict failed; callers will fall "
+                "back to next restore source (auto-save / legacy "
+                "attributes / defaults). Affected keys present in input: "
+                "%s",
+                keys_preview,
+            )
             return None

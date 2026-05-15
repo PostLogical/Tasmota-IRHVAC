@@ -86,7 +86,7 @@ def test_writer_appends_one_record_per_call(tmp_path: Path):
     # Each line is valid JSON of a TickOutput
     for line in lines:
         data = json.loads(line)
-        assert data["_schema_version"] == 1
+        assert data["_schema_version"] == 2
 
 
 def test_writer_gzips_yesterday_on_rollover(tmp_path: Path):
@@ -193,14 +193,58 @@ def test_reader_filters_by_date_range(tmp_path: Path):
 
 
 def test_reader_skips_malformed_lines(tmp_path: Path, caplog):
-    """A garbled line in the middle of a file doesn't kill the reader."""
+    """A garbled line in the middle of a file doesn't kill the reader.
+
+    Per-line failures are aggregated into one summary log entry at file
+    close so a uniform schema-drift failure across thousands of records
+    can't be hidden by repetition.
+    """
     path = tmp_path / "test_2026-05-01.jsonl"
     valid_line = json.dumps(_basic_tick().to_dict())
     path.write_text(f"{valid_line}\nNOT JSON\n{valid_line}\n")
 
     reader = EventLogReader(tmp_path, "test")
-    ticks = list(reader.iter_ticks())
+    with caplog.at_level("WARNING"):
+        ticks = list(reader.iter_ticks())
     assert len(ticks) == 2
+    summaries = [
+        r.message for r in caplog.records
+        if "2 records ok, 1 skipped" in r.message
+    ]
+    assert len(summaries) == 1, (
+        f"expected one aggregate summary log, got: {[r.message for r in caplog.records]}"
+    )
+
+
+def test_reader_summary_names_keyerror_field(tmp_path: Path, caplog):
+    """KeyError detail in summary names the missing field.
+
+    The 2026-05 incident was a silent loss of ~99% of records because
+    the reader's per-line warning said "malformed" without naming the
+    field. The aggregated summary must surface the field so the next
+    schema drift is self-diagnosing.
+    """
+    path = tmp_path / "test_2026-05-02.jsonl"
+    valid_tick = _basic_tick().to_dict()
+    # Forge a tick missing a required top-level key
+    broken = dict(valid_tick)
+    del broken["enabled"]
+    path.write_text(
+        json.dumps(valid_tick) + "\n"
+        + json.dumps(broken) + "\n"
+        + json.dumps(broken) + "\n"
+    )
+
+    reader = EventLogReader(tmp_path, "test")
+    with caplog.at_level("WARNING"):
+        ticks = list(reader.iter_ticks())
+    assert len(ticks) == 1
+    matches = [r.message for r in caplog.records if "'enabled'" in r.message]
+    assert matches, (
+        f"expected summary to name 'enabled', got: {[r.message for r in caplog.records]}"
+    )
+    # And the count should be aggregated, not per-line
+    assert "2 skipped" in matches[0]
 
 
 def test_reader_returns_empty_when_log_dir_missing(tmp_path: Path):

@@ -1450,6 +1450,72 @@ class TestHumidityError:
         # Should not crash
 
 
+class TestTempSensorError:
+    """Cover temperature sensor ValueError in _async_update_temp."""
+
+    @pytest.mark.asyncio
+    async def test_temp_sensor_invalid_value(self, hass, setup_integration):
+        """Non-numeric temperature sensor state should not crash.
+
+        The float(state.state) conversion can raise ValueError on a
+        sensor reporting a string that doesn't parse — the integration
+        must log and keep the prior _attr_current_temperature rather
+        than crashing the entity.
+        """
+        hass.states.async_set(
+            "sensor.room_temp", "20.5", {"unit_of_measurement": "°C"},
+        )
+        entry = await setup_integration({"temperature_sensor": "sensor.room_temp"})
+        entity = get_climate_entity(hass, entry)
+        prior = entity._attr_current_temperature
+
+        hass.states.async_set(
+            "sensor.room_temp", "not_a_number", {"unit_of_measurement": "°C"},
+        )
+        await hass.async_block_till_done()
+        # _attr_current_temperature must be left intact — the prior
+        # value persists across the bad reading.
+        assert entity._attr_current_temperature == prior
+
+
+class TestSensorPiDisabled:
+    """Cover the pi-is-None branches in health/learning sensor attributes.
+
+    When pi_enabled=False the climate entity carries a NullController.
+    `TasmotaIrhvacHealthSensor._pi` and `TasmotaIrhvacLearningSensor._pi`
+    narrow to None via isinstance, and their `extra_state_attributes`
+    short-circuit to {} — covered here.
+    """
+
+    @pytest.mark.asyncio
+    async def test_health_sensor_attrs_empty_when_pi_disabled(
+        self, hass, setup_integration,
+    ):
+        from custom_components.tasmota_irhvac.sensor import (
+            TasmotaIrhvacHealthSensor,
+        )
+        entry = await setup_integration({"pi_enabled": False})
+        climate = get_climate_entity(hass, entry)
+        coordinator = climate.coordinator
+        sensor = TasmotaIrhvacHealthSensor(coordinator, climate)
+        assert sensor._pi is None
+        assert sensor.extra_state_attributes == {}
+
+    @pytest.mark.asyncio
+    async def test_learning_sensor_attrs_empty_when_pi_disabled(
+        self, hass, setup_integration,
+    ):
+        from custom_components.tasmota_irhvac.sensor import (
+            TasmotaIrhvacLearningSensor,
+        )
+        entry = await setup_integration({"pi_enabled": False})
+        climate = get_climate_entity(hass, entry)
+        coordinator = climate.coordinator
+        sensor = TasmotaIrhvacLearningSensor(coordinator, climate)
+        assert sensor._pi is None
+        assert sensor.extra_state_attributes == {}
+
+
 class TestIsDeviceActive:
     """Cover _is_device_active."""
 

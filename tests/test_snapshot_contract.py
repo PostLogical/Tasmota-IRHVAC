@@ -7,7 +7,9 @@ ships, the corresponding xfail marker is removed.
 Stages (from `~/.claude/plans/why-don-t-you-give-dynamic-chipmunk.md`):
 
 - Stage 1: snapshot.py module exists with TickOutput dataclass
-- Stage 2: controller.last_tick populated after tick(); SCHEMA_VERSION=1
+- Stage 2: controller.last_tick populated after tick(); SCHEMA_VERSION=2
+  (v1 used `leverage_score` fields on ObservationContext; v2 renamed
+  them and TickOutput._migrate_v1_to_v2 reads v1 files transparently)
 - Stage 3: set_debug_capture service toggles full_p_heat/cool fields
 - Stage 4: get_full_diagnostics() reduced to last_tick.diagnostics().to_dict()
 - Stage 5: sensor-feeding getters read from last_tick
@@ -29,7 +31,7 @@ def test_snapshot_module_importable():
     """
     from custom_components.tasmota_irhvac.pi.snapshot import TickOutput
 
-    assert TickOutput.SCHEMA_VERSION == 1
+    assert TickOutput.SCHEMA_VERSION == 2
 
 
 def test_tick_output_roundtrip():
@@ -66,7 +68,7 @@ async def test_last_tick_populated_after_fire_dispatcher(hass, setup_pi_integrat
     pi.fire_dispatcher()
 
     assert pi.last_tick is not None
-    assert pi.last_tick.SCHEMA_VERSION == 1
+    assert pi.last_tick.SCHEMA_VERSION == 2
 
 
 @pytest.mark.asyncio
@@ -138,7 +140,7 @@ async def test_null_controller_last_tick_compat(hass, setup_integration):
     pi = get_climate_entity(hass, entry)._controller
 
     assert pi.last_tick is not None
-    assert pi.last_tick.SCHEMA_VERSION == 1
+    assert pi.last_tick.SCHEMA_VERSION == 2
 
 
 # ── Stage 3: set_debug_capture service ────────────────────────────────
