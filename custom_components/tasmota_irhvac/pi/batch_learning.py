@@ -2290,9 +2290,26 @@ def weighted_least_squares(
                         tau_result.r2_improvement, tau_result.beta_at_tau,
                         tau_result.bic_gain, tau_result.bic_threshold,
                     )
-                # Cache filtered values for this entity
+                # τ to use for filtering this batch's regression.
+                # On BIC acceptance: optimizer's τ_opt.
+                # On rejection (lag couldn't be identified from this batch):
+                # use the configured / previously-confirmed m_input["lag_tau"]
+                # as a physically-valid running τ.  Falling back to lag=0
+                # silently runs a misspecified model for features with
+                # thermal-mass lag (solar gain) — the regression result is
+                # biased even when statistically identifiable (low VIF /
+                # finite std_err), so existing identifiability gates can't
+                # protect the update.  τ has an obvious running prior
+                # (configured value + pi_controller's confirmed-detection
+                # smoothing, bounded by _TAU_SEARCH_MAX_BY_ROLE rail);
+                # β does not — so we keep the model correctly specified
+                # rather than relying on a β prior we don't have.
+                if tau_result.accepted:
+                    filter_tau = tau_result.tau
+                else:
+                    filter_tau = float(m_input.get("lag_tau", 0.0))
                 _filtered_cache[entity_id] = _apply_retrospective_ema(
-                    base_eligible, entity_id, tau_result.tau,
+                    base_eligible, entity_id, filter_tau,
                 )
 
     # Classify model input features

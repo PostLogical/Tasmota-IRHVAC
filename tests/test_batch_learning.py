@@ -945,12 +945,23 @@ class TestConfigChangeResilience:
     coefficients without buffer invalidation.
     """
 
-    def test_tau_change_does_not_affect_batch(self):
-        """Changing lag_tau has zero effect on batch WLS results.
+    def test_lag_tau_affects_batch_on_bic_rejection(self):
+        """lag_tau is used as the running-τ fallback when BIC rejects.
 
-        The batch uses raw sensor values from raw_readings, not EMA-filtered
-        features.  Two runs with identical observations but different
-        model_inputs lag_tau should produce identical coefficients.
+        Pre-#100-followup invariant was "lag_tau has zero effect on batch
+        WLS" — the batch read raw sensor values directly, with detect_lag
+        only filtering on BIC acceptance and silently falling back to
+        lag=0 (raw) on rejection.  That fallback ran a misspecified model
+        (current solar predicting current room rate) for any thermal-mass-
+        lagged feature, with the result downstream-clamped to 0 for solar
+        and unprotected for other inputs.
+
+        Post-fix invariant: on BIC rejection, the regression filters at
+        m_input["lag_tau"] (the configured / pi_controller-confirmed
+        running τ), not lag=0.  raw_readings is untouched; only the τ
+        passed to ``_apply_retrospective_ema`` changes.  So two runs with
+        the same data but different ``lag_tau`` produce *different* β
+        when BIC rejects — that is the design.
         """
         model_inputs_tau3600 = [{"entity_id": "sensor.solar", "name": "solar", "lag_tau": 3600}]
         model_inputs_tau7200 = [{"entity_id": "sensor.solar", "name": "solar", "lag_tau": 7200}]
@@ -980,9 +991,21 @@ class TestConfigChangeResilience:
         )
         assert result_3600 is not None
         assert result_7200 is not None
-        # Identical — tau is not used by batch WLS
-        for i in range(3):
-            assert result_3600.beta_batch[i] == result_7200.beta_batch[i]
+        # Precondition: this small-N construction reliably triggers BIC
+        # rejection.  If a future change makes it accept, retune the data.
+        diag_3600 = result_3600.detected_tau_diagnostics["solar"]
+        diag_7200 = result_7200.detected_tau_diagnostics["solar"]
+        assert not diag_3600.accepted and not diag_7200.accepted, (
+            "Test precondition: both runs should hit BIC rejection so the "
+            "lag_tau fallback path is exercised."
+        )
+
+        # Solar β (index 2) must differ between the two runs — the running
+        # τ is now load-bearing on rejection.
+        assert result_3600.beta_batch[2] != result_7200.beta_batch[2], (
+            f"lag_tau is supposed to affect β on BIC rejection, but both runs "
+            f"produced β={result_3600.beta_batch[2]} — fallback path not engaging."
+        )
 
     def test_entity_swap_old_obs_excluded_for_new_feature(self):
         """Swapping solar entity: old observations excluded for solar, kept for base.
@@ -2847,6 +2870,104 @@ class TestWLSDetectedTau:
         assert err_auto < err_raw, (
             f"Auto β={beta_auto:.3f} should be closer to true {beta_true} "
             f"than raw β={beta_raw:.3f}"
+        )
+
+    def test_bic_rejection_uses_running_tau_not_lag_zero(self):
+        """BIC rejection → filter at m_input['lag_tau'], not lag=0.
+
+        BIC tests *lag specification* (lag=0 nested in lag=τ_opt), not
+        *feature inclusion*.  When BIC rejects, falling back to lag=0
+        silently runs a misspecified model for any feature with thermal-mass
+        lag — the regression is statistically identifiable (low VIF, finite
+        std_err) but the β estimate is biased relative to truth.  No
+        identifiability gate (VIF, std_err, dead-zone) catches that, because
+        the gates are conditional on the model being correct.
+
+        Principled move: keep the model correctly specified.  τ has an
+        obvious running prior (configured value + pi_controller's confirmed
+        smoothing, rail-bounded 0-11h for solar per Forssell-Ljung diurnal
+        identifiability); β does not.  On BIC rejection, regress at the
+        running τ, not at lag=0.
+
+        Construction: lagged-truth solar data with an excessively short
+        configured ``lag_tau`` (so optimizer lands close enough to true τ
+        that BIC may or may not accept under tighter penalties — but the
+        contract is independent of acceptance).  We compare the regression
+        result against an explicit lag=0 fit; the post-fix path should
+        differ from lag=0 even on rejection.
+        """
+        import random
+        rng = random.Random(2024)
+        tau_true = 6 * 3600.0  # 6h (well inside 0-11h solar rail)
+        configured_lag_tau = 4 * 3600.0  # 4h running prior — wrong-but-physical
+        dt = 900.0
+        n_obs = 200
+        beta_true = -2.5
+
+        # Pure-noise solar — BIC will reliably reject because there's no
+        # solar→y relationship at any lag.
+        raw_solar = [rng.uniform(0.0, 1.0) for _ in range(n_obs)]
+        lagged = [raw_solar[0]]
+        for i in range(1, n_obs):
+            a = 1 - math.exp(-dt / tau_true)
+            lagged.append(a * raw_solar[i] + (1 - a) * lagged[-1])
+
+        obs = []
+        for i in range(n_obs):
+            od = rng.uniform(-5, 15)
+            # y driven by outdoor only — no solar contribution at any lag.
+            y = 0.3 * od + rng.gauss(0, 0.05)
+            obs.append(Observation(
+                timestamp=float(i), wall_time=1713650000.0 + i * dt,
+                hp_setpoint=20.0 + y, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=20.0 + od, room_rate=0.005,
+                raw_readings={"sensor.solar": raw_solar[i]},
+                clamped=False,
+            ))
+
+        model_inputs = [{
+            "entity_id": "sensor.solar", "name": "solar",
+            "lag_tau": configured_lag_tau,
+        }]
+        feature_order = ["intercept", "outdoor_delta", "solar", "sin_hour", "cos_hour"]
+
+        result = weighted_least_squares(
+            obs, n_features=5, feature_order=feature_order,
+            model_inputs=model_inputs, detect_lag=True,
+        )
+        assert result is not None
+        # Precondition: BIC must reject for this test to exercise the path.
+        # If it ever accepts under a future change, re-tune the construction.
+        diag = result.detected_tau_diagnostics["solar"]
+        assert not diag.accepted, (
+            f"Test precondition failed: BIC accepted (gain={diag.bic_gain:.2f}, "
+            f"thr={diag.bic_threshold:.2f}). Pure-noise solar should reject."
+        )
+
+        # Pre-fix behavior was: rejection → filter at lag=0 (raw solar) →
+        # regression β reflects current-solar correlation with y.
+        # Post-fix behavior: filter at configured_lag_tau → regression β
+        # reflects lagged-solar correlation.  Compare the post-fix result
+        # against an explicit lag=0 fit; they must differ.
+        beta_post_fix = result.beta_batch[2]
+
+        # Construct an explicit lag=0 reference (detect_lag=False uses raw
+        # values, equivalent to lag=0 behavior).
+        result_lag0 = weighted_least_squares(
+            obs, n_features=5, feature_order=feature_order,
+            model_inputs=model_inputs, detect_lag=False,
+        )
+        assert result_lag0 is not None
+        beta_lag0 = result_lag0.beta_batch[2]
+
+        # Post-fix path must not collapse to lag=0 regression on rejection.
+        # Using a finite threshold rather than strict !=  to allow for the
+        # rare case where lagged and raw happen to produce identical
+        # numerics; we want a substantive difference proving the fix path.
+        assert abs(beta_post_fix - beta_lag0) > 1e-3, (
+            f"BIC rejected but post-fix β ({beta_post_fix:.4f}) is "
+            f"indistinguishable from lag=0 β ({beta_lag0:.4f}); the fix "
+            f"path is not engaging — rejection still falls back to lag=0."
         )
 
 
