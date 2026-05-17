@@ -300,12 +300,17 @@ class ThermalModel2R2C:
         tau_env_eff = tau_env * tau_modifier
 
         # Heat input rates (°C/min).
-        # Solar is split: ~30% heats air convectively, ~70% is absorbed
-        # by walls/furniture as radiation. This prevents the small air
-        # capacitance from over-responding to solar transients.
+        # Solar gain split between wall (radiative absorption, released
+        # via wall thermal mass) and air (convective fraction). Per
+        # ASHRAE F18 Ch.18 RTS Table 14: absorbed solar at glass splits
+        # ~70% radiant / 30% convective; transmitted-beam through
+        # unshaded glass is ~100% radiant (lands on interior surfaces).
+        # Per-profile via solar_wall_fraction (default 0.7); raise toward
+        # 0.9-1.0 for sun-exposed rooms with significant direct-beam.
+        wall_frac = p.solar_wall_fraction
         q_solar_total = self.solar_gain * solar_proxy
-        q_solar_air = q_solar_total * 0.3
-        q_solar_wall = q_solar_total * 0.7
+        q_solar_wall = q_solar_total * wall_frac
+        q_solar_air = q_solar_total * (1.0 - wall_frac)
         q_stove = self.stove_gain * stove_active
         q_extra = extra_heat
 

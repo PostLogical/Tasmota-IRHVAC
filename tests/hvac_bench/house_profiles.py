@@ -103,19 +103,63 @@ COLD_CLIMATE_HP_CAPACITY = HPCapacityCurve(
 )
 
 
-# Fujitsu Halcyon hyper-heat AOU-RLF/XLTH series (NEEP cold-climate listing
-# typical): rated 100% at +47°F (8.3°C), ~75% at +5°F (-15°C),
-# ~50% at -15°F (-26°C, design point), continues operating with declining
-# capacity to ~-25°F to -30°F (-32°C to -34°C) cutout.
-# Modeled with heating_design_t=-26°C, heating_design_factor=0.5,
-# heating_cutoff_t=-32°C — matches the user's deployed system class.
+# Fujitsu AOU24RLXFWH single-zone outdoor + ASU24RLF wall-mount head.
+# Source: Fujitsu 24RLXFW1 Design & Technical Manual (pdf-extracted 2026-05-17,
+# Heating Capacity section, ASU24RLF table at 70°F indoor):
+#   Outdoor °C   TC kBtu/h   factor (vs +8.3°C/47°F rated = 36.17)
+#     +15.0 / 59°F   35.11      0.97
+#     +10.0 / 50°F   36.85      1.02
+#     +8.3  / 47°F   36.17      1.00   ← AHRI rated
+#     +5.0  / 41°F   35.14      0.97
+#     +0.0  / 32°F   32.21      0.89
+#     -5.0  / 23°F   29.31      0.81
+#     -10.0 / 14°F   26.87      0.74
+#     -15.0 /  5°F   25.21      0.70
+#     -20.6 / -5°F   22.54      0.62
+# Operation cutoff: -15°F (-26°C) per spec sheet.
+# Linear fit (rated_t=+8.3, design_t=cutoff_t=-26, design_factor=0.54)
+# matches all measured points within ~1%; design_factor=0.54 is the
+# implied capacity at cutoff (extrapolation of the linear segment).
+# Below cutoff: 0 (HP off per spec).
+# Earlier values (0.5/-32°C) were a Mitsubishi H2i curve mislabeled.
+# Per user_profile.md this is the LR outdoor; DR/BR/NU run off an
+# AOU36RLXFZH multi-split (separate curve, FUJITSU_AOU36RLXFZH_CAPACITY).
 FUJITSU_HYPERHEAT_CAPACITY = HPCapacityCurve(
     heating_design_t=-26.0,
-    heating_design_factor=0.5,
-    heating_cutoff_t=-32.0,
+    heating_design_factor=0.54,
+    heating_cutoff_t=-26.0,
     heating_rated_t=8.3,
     heating_mild_t=20.0,
-    heating_mild_factor=1.10,
+    heating_mild_factor=0.95,
+)
+
+
+# Fujitsu AOU36RLXFZH 4-zone-capable multi-split outdoor.
+# Source: AOU36RLXFZH Design & Technical Manual (pdf-extracted 2026-05-17,
+# Heating Capacity section, 36 kBtu connecting-capacity row, 70°F indoor;
+# user's connected heads ASU18+ASU9+ASU9 = 36 kBtu so this row applies):
+#   Outdoor °C   TC kBtu/h   factor (vs +8.3°C/47°F rated = 42.0)
+#     +15.0 / 59°F   42.0       1.00   (flat top)
+#     +10.0 / 50°F   42.0       1.00
+#     +8.3  / 47°F   42.0       1.00   ← AHRI rated
+#     +5.0  / 41°F   42.0       1.00   (flat to here)
+#     +0.0  / 32°F   42.0       1.00
+#     -5.0  / 23°F   40.8       0.97
+#     -10.0 / 14°F   38.6       0.92
+#     -15.0 /  5°F   36.4       0.87
+#     -20.6 / -5°F   25.1       0.60   (cliff drop here)
+#     -26.0 /-15°F   22.1       0.53
+# Operation cutoff: -15°F (-26°C).  Curve has a wide flat top + cliff drop
+# below ~-5°F that single-linear can't capture cleanly.  Fit prioritizes
+# cold-end accuracy (design_t=-26, design_factor=0.53) which approximates
+# the moderate-temp behavior as well (matches within ~10pts above -15°C).
+FUJITSU_AOU36RLXFZH_CAPACITY = HPCapacityCurve(
+    heating_design_t=-26.0,
+    heating_design_factor=0.53,
+    heating_cutoff_t=-26.0,
+    heating_rated_t=8.3,
+    heating_mild_t=20.0,
+    heating_mild_factor=0.95,
 )
 
 
@@ -171,6 +215,18 @@ class HouseProfile2R2C:
             seen from the wall side is τ_couple * mass_ratio.
         hp_gain: HP effectiveness (1/min). HP heating rate per °C of
             setpoint above room temp. Typical: 0.02-0.08.
+        solar_wall_fraction: Fraction of incoming solar gain absorbed by
+            the wall/mass node (rest goes directly to air). Per ASHRAE
+            Fundamentals Ch. 18 (RTS method, Table 14): the *absorbed*
+            solar at the glass splits ~70% radiant / 30% convective; for
+            *transmitted-beam* solar through unshaded glass the canonical
+            treatment is 100% radiant (deposited on interior surfaces).
+            Default 0.7 is conservative-residential (mixed glazing,
+            partial shading); raise to ~0.9 for sun-exposed rooms with
+            single-pane / sunroom direct beam. Bacher & Madsen 2011
+            §2 don't fix this ratio — they treat solar A_w·Φ_s as an
+            input that enters interior or sensor node depending on model
+            order. Sources: ASHRAE F18 Ch.18 RTS; Bacher & Madsen 2011.
         description: What kind of building this represents.
     """
     name: str
@@ -180,6 +236,7 @@ class HouseProfile2R2C:
     hp_gain: float
     description: str = ""
     hp_capacity: HPCapacityCurve | None = None
+    solar_wall_fraction: float = 0.7
 
     @property
     def true_seed(self) -> float:
@@ -381,26 +438,31 @@ PROFILES_2R2C["bunkroom_capacity"] = HouseProfile2R2C(
 # capacity holds 50% at -26°C design and runs down to -32°C cutout, instead
 # of the cliff-at-design behavior of STANDARD_HP_CAPACITY.
 PROFILES_2R2C["living_room_fujitsu"] = HouseProfile2R2C(
-    name="Living Room (calibrated, Fujitsu hyper-heat capacity)",
+    name="Living Room (calibrated, AOU24RLXFWH capacity)",
     tau_env=100,
     tau_couple=30,
     mass_ratio=8,
     hp_gain=0.04,
-    description="living_room with FUJITSU_HYPERHEAT_CAPACITY. Use for tests "
-                "that need realistic CCASHP saturation under sub-design "
-                "cold snaps without an abrupt cliff. Design temp -26°C "
-                "(-15°F), cutoff -32°C.",
+    description="living_room with FUJITSU_HYPERHEAT_CAPACITY = AOU24RLXFWH "
+                "single-zone outdoor (the LR deployed unit per user_profile.md). "
+                "Linear capacity from 1.00 at +8.3°C rated to 0.54 at -26°C "
+                "cutoff (extrapolated from D&T-manual table). Use this for "
+                "tests that need realistic capacity derating in cold weather.",
     hp_capacity=FUJITSU_HYPERHEAT_CAPACITY,
 )
 
 PROFILES_2R2C["bunkroom_fujitsu"] = HouseProfile2R2C(
-    name="Bunkroom (calibrated, Fujitsu hyper-heat capacity)",
+    name="Bunkroom (calibrated, AOU36RLXFZH multi-split capacity)",
     tau_env=170,
     tau_couple=20,
     mass_ratio=8,
     hp_gain=0.025,
-    description="bunkroom with FUJITSU_HYPERHEAT_CAPACITY. Already "
-                "'modestly undersized' per calibration; CCASHP curve "
-                "preserves partial capacity below -26°C instead of cliff.",
-    hp_capacity=FUJITSU_HYPERHEAT_CAPACITY,
+    description="bunkroom with FUJITSU_AOU36RLXFZH_CAPACITY = AOU36RLXFZH "
+                "4-zone-capable multi-split (the DR/BR/NU deployed unit per "
+                "user_profile.md). Wide flat top down to ~+5°F then cliff "
+                "drop; modeled by linear fit prioritizing cold-end accuracy "
+                "(1.00 at +8.3°C → 0.53 at -26°C cutoff). Note: at the "
+                "user's 36 kBtu head load, the AOU36 is at full nameplate "
+                "in mild weather but derates faster than a single-zone unit.",
+    hp_capacity=FUJITSU_AOU36RLXFZH_CAPACITY,
 )
