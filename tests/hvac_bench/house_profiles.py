@@ -410,6 +410,25 @@ PROFILES_2R2C = {
 # the rated-conditions profiles above; the capacity curve scales hp_gain
 # down as outdoor temp drops, so winter scenarios saturate more.  These are
 # opt-in — existing tests using the non-capacity profiles are unchanged.
+# Literature-typical 2R2C for generic residential — uses Bacher-Madsen 2011
+# §5 typical values, NOT calibrated to any specific room.  Use this for
+# tests that need a believable 2R2C without relying on suspect production-
+# data calibrations (which often hit non-identifiability rails per
+# Reynders 2014).
+PROFILES_2R2C["standard_residential_2r2c"] = HouseProfile2R2C(
+    name="Standard Residential (literature-typical 2R2C)",
+    tau_env=150,        # Bacher-Madsen typical residential 1-3hr
+    tau_couple=60,      # Bacher-Madsen TiTm 30-90 min typical
+    mass_ratio=8,       # Bacher-Madsen C_s/C_i ≈ 5-10
+    hp_gain=0.05,       # Typical inverter mini-split
+    description="Literature-typical 2R2C (Bacher-Madsen 2011 §5 typical "
+                "values: τ_env=150, τ_couple=60, mr=8, g=0.05). Not "
+                "calibrated to data — uses lit-grounded parameters that "
+                "exercise 2R2C dynamics (distinct wall+air time constants) "
+                "without relying on a particular room's suspect fit.",
+)
+
+
 PROFILES_2R2C["living_room_capacity"] = HouseProfile2R2C(
     name="Living Room (calibrated, capacity curve)",
     tau_env=100,
