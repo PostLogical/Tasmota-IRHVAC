@@ -405,30 +405,122 @@ PROFILES_2R2C = {
     # HP barely ran (solar/stove heated the zone). Needs winter data.
 }
 
+# ── Literature-grounded 2R2C archetypes (parallel to PROFILES_1R1C) ──────
+#
+# Five 2R2C entries paralleling the 1R1C archetype dict, with each parameter
+# grounded in Bacher-Madsen 2011 §5 typical-value ranges:
+#   τ_env       — air-to-outdoor envelope time constant; inherits 1R1C τ
+#                 (the 1R1C lumped tau collapses to envelope-air timescale
+#                 in the air-node-only single-state model).
+#   τ_couple    — air-to-wall surface coupling time constant; lands in the
+#                 Bacher-Madsen TiTm 30–90 min range, lower for lightweight/
+#                 timber surfaces, upper for masonry.
+#   mass_ratio  — C_wall/C_air; Bacher-Madsen residential typical 5–10,
+#                 below for very lightweight construction (timber/gypsum
+#                 studio), at the upper bound for masonry (also matches
+#                 ASHRAE F18 Ch.18 heavyweight category).
+#   hp_gain     — matches the 1R1C value so the steady-state offset
+#                 (FF seed = 1/(g·τ_env)) and HP authority at the air node
+#                 are identical between the 1R1C and 2R2C archetypes.
+#
+# Use these for bench tests that need 2R2C dynamics without relying on the
+# production-calibrated living_room/bunkroom entries (which hit Reynders
+# 2014 identifiability rails — see project_lr_2r2c_calibration_2026_05).
+
+PROFILES_2R2C["studio_apartment_2r2c"] = HouseProfile2R2C(
+    name="Studio Apartment (2R2C lit-archetype)",
+    tau_env=15,
+    tau_couple=30,
+    mass_ratio=3,
+    hp_gain=0.08,
+    description="Parallels PROFILES_1R1C['studio_apartment'] (τ=15, g=0.08). "
+                "τ_env inherits the 1R1C τ. τ_couple at the lower bound of "
+                "Bacher-Madsen 2011 §5 TiTm range (30 min) — thin partition "
+                "walls, fast air-surface coupling. mass_ratio=3 sits below "
+                "B-M residential 5–10 to reflect lightweight construction "
+                "(timber framing, gypsum, minimal interior mass) per ASHRAE "
+                "F18 Ch.18 lightweight category. Note: τ_env=15 is below "
+                "B-M 'typical residential 1–3hr' — represents an "
+                "atypically-leaky / small-volume archetype, intentionally.",
+)
+
+PROFILES_2R2C["drafty_bungalow_2r2c"] = HouseProfile2R2C(
+    name="Drafty Bungalow (2R2C lit-archetype)",
+    tau_env=25,
+    tau_couple=40,
+    mass_ratio=5,
+    hp_gain=0.12,
+    description="Parallels PROFILES_1R1C['drafty_bungalow'] (τ=25, g=0.12). "
+                "τ_env inherits the 1R1C τ. τ_couple=40 within Bacher-Madsen "
+                "2011 §5 TiTm 30–90 min range. mass_ratio=5 at the lower "
+                "edge of B-M residential C_s/C_i ≈ 5–10 — older timber "
+                "framing with plaster walls and wood floors but no "
+                "significant masonry mass. τ_env=25 sits below B-M "
+                "'typical residential 1–3hr' as expected for a drafty/"
+                "uninsulated archetype.",
+)
+
+PROFILES_2R2C["standard_residential_2r2c"] = HouseProfile2R2C(
+    name="Standard Residential (2R2C lit-archetype)",
+    tau_env=50,
+    tau_couple=60,
+    mass_ratio=7,
+    hp_gain=0.06,
+    description="Parallels PROFILES_1R1C['standard_residential'] (τ=50, "
+                "g=0.06). τ_env inherits the 1R1C τ. τ_couple=60 at the "
+                "centre of Bacher-Madsen 2011 §5 TiTm 30–90 min range, "
+                "typical for modern drywall/insulation surface coupling. "
+                "mass_ratio=7 at the centre of B-M residential C_s/C_i ≈ "
+                "5–10. Replaces the prior literature-typical entry "
+                "(τ_env=150, g=0.05, added in 6249d18) with parallel-rule "
+                "values matching the 1R1C archetype.",
+)
+
+PROFILES_2R2C["well_insulated_2r2c"] = HouseProfile2R2C(
+    name="Well Insulated (2R2C lit-archetype)",
+    tau_env=120,
+    tau_couple=70,
+    mass_ratio=8,
+    hp_gain=0.025,
+    description="Parallels PROFILES_1R1C['well_insulated'] (τ=120, g=0.025). "
+                "τ_env inherits the 1R1C τ; sits in Bacher-Madsen 2011 §5 "
+                "'typical residential 1–3hr' upper-mid. τ_couple=70 within "
+                "B-M TiTm range. mass_ratio=8 at the upper-mid of B-M "
+                "residential 5–10 — passive-house / ICF construction often "
+                "pairs high envelope insulation with significant interior "
+                "thermal mass for temperature stability.",
+)
+
+PROFILES_2R2C["heavy_masonry_2r2c"] = HouseProfile2R2C(
+    name="Heavy Masonry (2R2C lit-archetype)",
+    tau_env=150,
+    tau_couple=90,
+    mass_ratio=10,
+    hp_gain=0.02,
+    description="Parallels PROFILES_1R1C['heavy_masonry'] (τ=150, g=0.02). "
+                "τ_env inherits the 1R1C τ; near the upper end of Bacher-"
+                "Madsen 2011 §5 'typical residential 1–3hr'. τ_couple=90 "
+                "at the upper bound of B-M TiTm 30–90 min — slow air-to-"
+                "surface coupling through thick masonry. mass_ratio=10 at "
+                "the upper bound of B-M residential 5–10, matching ASHRAE "
+                "F18 Ch.18 heavyweight construction category (brick/"
+                "concrete/CMU).",
+)
+
+# Quick subset for fast-running tests; parallels QUICK_PROFILES selection
+# (drafty / standard / well_insulated) but indexes the lit-grounded 2R2C
+# entries above.
+QUICK_PROFILES_2R2C = {
+    k: PROFILES_2R2C[k]
+    for k in ["drafty_bungalow_2r2c", "standard_residential_2r2c", "well_insulated_2r2c"]
+}
+
+
 # Capacity-curve variants of the calibrated profiles, for benches that need
 # realistic cold-snap saturation (#43).  Same thermal/HP-gain parameters as
 # the rated-conditions profiles above; the capacity curve scales hp_gain
 # down as outdoor temp drops, so winter scenarios saturate more.  These are
 # opt-in — existing tests using the non-capacity profiles are unchanged.
-# Literature-typical 2R2C for generic residential — uses Bacher-Madsen 2011
-# §5 typical values, NOT calibrated to any specific room.  Use this for
-# tests that need a believable 2R2C without relying on suspect production-
-# data calibrations (which often hit non-identifiability rails per
-# Reynders 2014).
-PROFILES_2R2C["standard_residential_2r2c"] = HouseProfile2R2C(
-    name="Standard Residential (literature-typical 2R2C)",
-    tau_env=150,        # Bacher-Madsen typical residential 1-3hr
-    tau_couple=60,      # Bacher-Madsen TiTm 30-90 min typical
-    mass_ratio=8,       # Bacher-Madsen C_s/C_i ≈ 5-10
-    hp_gain=0.05,       # Typical inverter mini-split
-    description="Literature-typical 2R2C (Bacher-Madsen 2011 §5 typical "
-                "values: τ_env=150, τ_couple=60, mr=8, g=0.05). Not "
-                "calibrated to data — uses lit-grounded parameters that "
-                "exercise 2R2C dynamics (distinct wall+air time constants) "
-                "without relying on a particular room's suspect fit.",
-)
-
-
 PROFILES_2R2C["living_room_capacity"] = HouseProfile2R2C(
     name="Living Room (calibrated, capacity curve)",
     tau_env=100,
