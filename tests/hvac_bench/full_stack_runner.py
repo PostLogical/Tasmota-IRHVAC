@@ -904,6 +904,14 @@ def run_full_stack(
                 "error": error,
                 "outdoor": model.outdoor_temp,
                 "d_term": getattr(pi, "_pi_d_filtered", 0.0),
+                # Diagnostic fields for anti-windup analysis (not load-bearing
+                # for any test assertion; used by replay tools).
+                "integration_frozen": getattr(pi, "_integration_frozen", False),
+                "hp_estimated_active_state": getattr(pi, "_hp_estimated_active_state", True),
+                "overtemp_regime": getattr(pi, "_overtemp_regime", False),
+                "supervisor_mode": getattr(getattr(pi, "_ref_governor", None), "mode", "NORMAL"),
+                "supervisor_nudge_c": getattr(getattr(pi, "_ref_governor", None), "nudge_c", 0.0),
+                "chatter_event_count": getattr(getattr(pi, "_chatter_monitor", None), "event_count", 0),
                 "rls_obs_count": pi._rls_heat.observation_count,
                 "obs_admitted": oc.admitted if oc is not None else None,
                 "obs_score": oc.score if oc is not None else None,

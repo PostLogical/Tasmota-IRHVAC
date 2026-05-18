@@ -181,6 +181,7 @@ from .health_checks import (
 )
 from .performance_metrics import PerformanceMetrics
 from .auto_perturbation import AutoPerturbation, PerturbState
+from .ref_governor import ChatterMonitor, ReferenceGovernor
 from .boundary_estimator import BoundaryEstimator
 from .regime_probe import ProbeState, RegimeProbe
 from .smith_predictor import SmithPredictor
@@ -365,6 +366,24 @@ class PIController:
             window_start=config.get(CONF_PI_AUTO_PERTURB_WINDOW_START),
             window_end=config.get(CONF_PI_AUTO_PERTURB_WINDOW_END),
             research_mode=config.get(CONF_PI_AUTO_PERTURB_RESEARCH_MODE, False),
+        )
+
+        # Chatter detection + reference-side quantization defense.
+        # Replaces q-feedback's integrator-corrupting approach with a
+        # supervisor that watches HP-change events and nudges the
+        # effective reference when chatter is detected. See ref_governor.py
+        # for lit citations.
+        self._chatter_monitor = ChatterMonitor()
+        self._ref_governor = ReferenceGovernor()
+        # Effective desired_c the inner PI tracked on the most recent tick
+        # (= r_user + auto_perturb_offset + supervisor_nudge_c). Surfaced
+        # in TickOutput for debug bundles; None until first tick.
+        self._last_effective_desired_c: float | None = None
+        # When False, q-feedback is bypassed and the supervisor alone
+        # defends against quantization-boundary chatter. Default True
+        # preserves legacy behavior for backward compatibility.
+        self._q_feedback_enabled: bool = config.get(
+            "pi_q_feedback_enabled", True,
         )
 
         # Active probing for HP contribution regime boundary (Layer 3).
@@ -4050,6 +4069,14 @@ class PIController:
             events=tuple(self._pending_events),
             overtemp_regime=self._overtemp_regime,
             stable_combined_bias_ema=self._stable_combined_bias_ema,
+            # Reference governor / chatter supervisor diagnostics.
+            effective_desired_c=(
+                round(self._last_effective_desired_c, 3)
+                if self._last_effective_desired_c is not None
+                else None
+            ),
+            supervisor_mode=self._ref_governor.mode,
+            supervisor_nudge_c=round(self._ref_governor.nudge_c, 3),
         )
         # Consume pending events: each event is published on exactly one
         # TickOutput.  HA may call ``async_write_ha_state`` (which calls
@@ -5102,6 +5129,35 @@ class PIController:
             room_rate_noise_floor=noise_floor,
         )
 
+        # Chatter supervisor: watches raw_setpoint chatter pressure and
+        # nudges the effective reference when quantization-boundary
+        # chatter is detected. Replaces q-feedback as the quantization
+        # defense.  Uses the PREVIOUS tick's raw_setpoint (the current
+        # tick's hasn't been computed yet); on the first tick it's NaN
+        # and the monitor naturally suppresses the event.
+        # `desired_c` here is post-auto-perturb (the perturbation is a
+        # separate-layer setpoint excitation for plant ID); the
+        # supervisor adds a chatter-defense nudge on top.
+        #
+        # The supervisor also returns a back-calc integral adjustment
+        # at mode transitions so PI output stays continuous across the
+        # change in effective reference (Åström-Hägglund tracking
+        # bumpless; same pattern as the three other bumpless transfers
+        # in this codebase — see project_back_calc_bumpless memory).
+        prev_raw = self._last_raw_setpoint
+        if prev_raw == prev_raw:  # NaN guard (NaN != NaN)
+            chatter_alarm = self._chatter_monitor.update(prev_raw, now_mono)
+        else:
+            chatter_alarm = False
+        duty_lean = self._chatter_monitor.duty_cycle_lean()
+        desired_c, supervisor_integral_delta = self._ref_governor.step(
+            desired_c, current_c, chatter_alarm, duty_lean,
+            self._pi_ki, now_mono,
+        )
+        if supervisor_integral_delta != 0.0:
+            self._pi_integral += supervisor_integral_delta
+        self._last_effective_desired_c = desired_c
+
         error = desired_c - current_c
 
         # Check ongoing τ step-response observation (raw — measures real plant).
@@ -5636,7 +5692,7 @@ class PIController:
         # than at the 15-min cadence at which gain=0.4 was tuned, which
         # over-suppresses integral build at faster cadences and creates
         # the very limit cycle q-feedback was designed to prevent.
-        if self._pi_ff_enabled and in_deadband:
+        if self._pi_ff_enabled and in_deadband and self._q_feedback_enabled:
             q_error = float(self._hp_setpoint) - clamped_setpoint
             if self._q_feedback_lower < abs(q_error) <= 0.5:
                 self._pi_integral += (
