@@ -512,6 +512,74 @@ def controllable_comfort_within_two_degrees_F(b: Bundle) -> AssertionResult:
     )
 
 
+@assertion(SEVERITY_EXPECTED)
+def no_heat_demand_when_room_warm(b: Bundle) -> AssertionResult:
+    """In heating mode, HP should not be calling for additional heat when
+    room is already above desired (and vice versa in cooling). Detects:
+
+      heat mode: room > desired + 0.5°C AND hp_setpoint > room + 1°C
+                  — controller actively heating an already-warm room
+      cool mode: room < desired - 0.5°C AND hp_setpoint < room - 1°C
+                  — controller actively cooling an already-cool room
+
+    Brief transient violations (user setpoint changes, sudden outdoor
+    shifts) are expected; threshold tolerates ≤ 5% of post-warmup ticks.
+    Sustained violations indicate the integrator is corrupted or the
+    overtemp/undertemp regime gate isn't firing — exactly the q_feedback
+    bunkroom-bug pattern. qref should drop this number toward zero.
+    """
+    if b.mode not in ("heat", "cool"):
+        return AssertionResult(
+            name="no_heat_demand_when_room_warm",
+            severity=SEVERITY_EXPECTED,
+            passed=True,
+            detail=f"N/A (mode={b.mode})",
+        )
+    bad = 0
+    total = 0
+    worst_excess = 0.0
+    worst = None
+    for t in b.ticks:
+        desired_c = extract_desired_c(t)
+        room = extract_room_temp_c(t)
+        hp = t.get("hp_setpoint")
+        if desired_c is None or room is None or hp is None:
+            continue
+        total += 1
+        if b.mode == "heat":
+            if room > desired_c + 0.5 and hp > room + 1.0:
+                bad += 1
+                excess = hp - room
+                if excess > worst_excess:
+                    worst_excess = excess
+                    worst = t
+        else:
+            if room < desired_c - 0.5 and hp < room - 1.0:
+                bad += 1
+                excess = room - hp
+                if excess > worst_excess:
+                    worst_excess = excess
+                    worst = t
+    if total < 100:
+        return AssertionResult(
+            name="no_heat_demand_when_room_warm",
+            severity=SEVERITY_EXPECTED,
+            passed=True,
+            detail=f"N/A (only {total} valid ticks)",
+        )
+    pct_bad = bad / total
+    passed = pct_bad <= 0.05
+    direction = "heat-while-hot" if b.mode == "heat" else "cool-while-cold"
+    return AssertionResult(
+        name="no_heat_demand_when_room_warm",
+        severity=SEVERITY_EXPECTED,
+        passed=passed,
+        detail=f"{bad}/{total} ({pct_bad:.1%}) ticks were {direction} "
+               f"(threshold: ≤ 5.0%); worst |hp − room| = {worst_excess:.2f}°C",
+        counter_example=worst if not passed else None,
+    )
+
+
 @assertion(SEVERITY_STATISTICAL)
 def no_beeps_during_hp_saturation(b: Bundle) -> AssertionResult:
     """When hp_estimated_active_state was False for both consecutive ticks
