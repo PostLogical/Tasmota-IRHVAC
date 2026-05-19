@@ -209,6 +209,9 @@ DEFAULT_MODES_LIST = [
 DEFAULT_SWING_LIST = [SWING_OFF, SWING_VERTICAL]
 DEFAULT_INITIAL_OPERATION_MODE = HVACMode.OFF
 
+# Beep-storm guard: max resends per mismatch cascade before giving up.
+MAX_RESEND_ATTEMPTS = 3
+
 _LOGGER = logging.getLogger(__name__)
 
 SUPPORT_FLAGS = ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.FAN_MODE
@@ -819,6 +822,11 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         # Echo classification state (only active when PI is active)
         self._has_sent_once: bool = False
         self._expected_state: dict[str, Any] = {}
+        # Bounded retry: a persistent telemetry mismatch (e.g. Tasmota rejects a
+        # payload it can't encode) used to free-run at network round-trip cadence
+        # until HA restart. Cap at MAX_RESEND_ATTEMPTS; reset on matching telemetry
+        # or on any user-initiated action (set_mode, turn_on/off, set_temperature).
+        self._resend_attempts: int = 0
 
         # PI recovery subscription (PI owns its own fallback timer)
         self._pi_recovery_unsub: CALLBACK_TYPE | None = None
@@ -1062,6 +1070,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                 matches = self._payload_matches_expected(payload)
                 if matches:
                     # Cases 1 & 3: echo or confirmation — no state change
+                    self._resend_attempts = 0
                     _LOGGER.debug(
                         "%s MQTT %s: payload matches expected, ignoring",
                         self.entity_id, "echo" if ir_received else "confirmation",
@@ -1072,10 +1081,19 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
                     _LOGGER.info("%s Physical remote detected (state diff)", self.entity_id)
                     # Fall through to apply state, then notify PI
                 else:
-                    # Case 4: mismatch without IrReceived — resend
+                    # Case 4: mismatch without IrReceived — resend, capped.
+                    if self._resend_attempts >= MAX_RESEND_ATTEMPTS:
+                        _LOGGER.error(
+                            "%s Telemetry mismatch persisted past %d resends — "
+                            "giving up. payload=%s expected=%s",
+                            self.entity_id, MAX_RESEND_ATTEMPTS,
+                            payload, self._expected_state,
+                        )
+                        return
+                    self._resend_attempts += 1
                     _LOGGER.warning(
-                        "%s Telemetry mismatch (no IrReceived), resending",
-                        self.entity_id,
+                        "%s Telemetry mismatch (no IrReceived), resending (%d/%d)",
+                        self.entity_id, self._resend_attempts, MAX_RESEND_ATTEMPTS,
                     )
                     await self.send_ir()
                     return
@@ -1427,14 +1445,21 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
 
     async def async_turn_on(self) -> None:
         """Turn thermostat on."""
+        self._resend_attempts = 0
         self._attr_hvac_mode = (
             self._last_on_mode if self._last_on_mode is not None else HVACMode.AUTO
         )
+        # Maintain the invariant every other path holds: when _attr_hvac_mode
+        # becomes an on-mode, _last_on_mode tracks it. Without this, the
+        # keep_mode_when_off payload at send_ir reads None when the AUTO
+        # fallback fires (beep-storm class bug).
+        self._last_on_mode = self._attr_hvac_mode
         self.power_mode = STATE_ON
         await self.async_send_cmd()
 
     async def async_turn_off(self) -> None:
         """Turn thermostat off."""
+        self._resend_attempts = 0
         self._attr_hvac_mode = HVACMode.OFF
         self.power_mode = STATE_OFF
         await self.async_send_cmd()
@@ -1445,6 +1470,7 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         hvac_mode = kwargs.get(ATTR_HVAC_MODE)
         if temperature is None:
             return
+        self._resend_attempts = 0
 
         # Controller handles its own setpoint logic when active
         if self._controller.is_active:
@@ -2103,6 +2129,8 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
     async def set_mode(self, hvac_mode: str) -> None:
         """Set hvac mode."""
         hvac_mode = hvac_mode.lower()
+        # Fresh user intent → forget any prior mismatch cascade.
+        self._resend_attempts = 0
         if hvac_mode not in self._attr_hvac_modes or hvac_mode == HVACMode.OFF:
             self._attr_hvac_mode = HVACMode.OFF
             self._enabled = False
@@ -2190,6 +2218,20 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
             "Clock": int(_min),
             "Weekday": int(_dt.weekday()),
         }
+        # Defense in depth: refuse to publish a payload Tasmota can't encode.
+        # Mode=None while Power=on means a code path bypassed _last_on_mode
+        # initialization (root cause is the async_turn_on sync, but a future
+        # regression in any code path that toggles power_mode could re-trigger
+        # this). Returning here trades a no-op user click for the beep-storm.
+        if payload_data["Mode"] is None and payload_data["Power"] == STATE_ON:
+            _LOGGER.error(
+                "%s Refusing to publish payload with Mode=None and Power=on. "
+                "last_on_mode=%s attr_hvac_mode=%s keep_mode=%s",
+                self.entity_id, self._last_on_mode,
+                self._attr_hvac_mode, self._keep_mode,
+            )
+            return
+
         self._state_mode = DEFAULT_STATE_MODE
         for key in self._toggle_list:
             setattr(self, "_" + key.lower(), "off")

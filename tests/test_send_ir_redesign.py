@@ -519,3 +519,229 @@ class TestIntegrationSequences:
 
         # PI should have updated desired_temp to match last remote press
         assert entity._controller._desired_temp == 25
+
+
+# ── Beep-storm regression tests (incident 2026-05-18) ──────────────────
+
+
+class TestBeepStormRegression:
+    """Three-layer defense against the BR beep-storm incident.
+
+    Trigger: HA restart while entity OFF → `_last_on_mode=None` → user power-on →
+    keep_mode=True payload picks `_last_on_mode` → `Mode=None` shipped → Tasmota
+    refuses → mismatch resend → 9689 IR sends in 16 min.
+    """
+
+    @pytest.mark.asyncio
+    async def test_async_turn_on_syncs_last_on_mode(self, hass, setup_integration):
+        """async_turn_on must sync `_last_on_mode` so keep_mode payloads aren't None.
+
+        Layer 1 (root cause). The only path in the codebase that sets
+        `_attr_hvac_mode` to an on-mode without also updating `_last_on_mode`.
+        """
+        entry = await setup_integration({"keep_mode_when_off": True})
+        entity = get_climate_entity(hass, entry)
+
+        # Simulate fresh restart with no on-history: state OFF, _last_on_mode None.
+        entity._attr_hvac_mode = HVACMode.OFF
+        entity._last_on_mode = None
+
+        await entity.async_turn_on()
+        await hass.async_block_till_done()
+
+        # _attr_hvac_mode falls back to AUTO (upstream behavior). _last_on_mode
+        # must now mirror that — otherwise the keep_mode payload ships None.
+        assert entity._attr_hvac_mode is not None
+        assert entity._attr_hvac_mode != HVACMode.OFF
+        assert entity._last_on_mode == entity._attr_hvac_mode
+
+    @pytest.mark.asyncio
+    async def test_turn_on_with_keep_mode_never_sends_none(self, hass, setup_integration):
+        """End-to-end: keep_mode=True + cold-boot turn-on → Mode field is not None."""
+        entry = await setup_integration({"keep_mode_when_off": True})
+        entity = get_climate_entity(hass, entry)
+
+        entity._attr_hvac_mode = HVACMode.OFF
+        entity._last_on_mode = None
+
+        captured = {}
+        original = entity.send_ir
+
+        async def capture_send():
+            await original()
+            captured["expected"] = dict(entity._expected_state)
+
+        with patch.object(entity, "send_ir", side_effect=capture_send):
+            await entity.async_turn_on()
+            await hass.async_block_till_done()
+
+        assert captured["expected"]["Mode"] is not None, (
+            "keep_mode payload Mode must not be None on cold-boot turn-on"
+        )
+
+    @pytest.mark.asyncio
+    async def test_send_ir_refuses_none_mode_when_power_on(
+        self, hass, setup_integration
+    ):
+        """Layer 3: send_ir refuses to publish Mode=None while Power=on.
+
+        Defense-in-depth against future regressions of the same bug class.
+        Bypasses the layer-1 fix by forcing the bad state directly.
+        """
+        entry = await setup_integration({"keep_mode_when_off": True})
+        entity = get_climate_entity(hass, entry)
+
+        # Force the structurally-bad state (post-layer-1, this is unreachable
+        # through user paths; we set it directly to test layer 3).
+        entity._attr_hvac_mode = HVACMode.OFF
+        entity._last_on_mode = None
+        entity.power_mode = "on"
+        entity._has_sent_once = False
+        entity._expected_state = {}
+
+        with patch(
+            "custom_components.tasmota_irhvac.climate.mqtt.async_publish"
+        ) as mock_publish:
+            await entity.send_ir()
+            await hass.async_block_till_done()
+
+        assert not mock_publish.called, (
+            "send_ir must refuse to publish a payload with Mode=None and Power=on"
+        )
+        assert not entity._has_sent_once, (
+            "Refused send must not arm echo-classification"
+        )
+        assert entity._expected_state == {}, (
+            "Refused send must not populate _expected_state"
+        )
+
+    @pytest.mark.asyncio
+    async def test_resend_caps_at_three_attempts(self, hass, setup_pi_integration):
+        """Layer 2: persistent mismatch caps at 3 resends, not 9689."""
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity.power_mode = "on"
+        await entity.send_ir()
+        await hass.async_block_till_done()
+        expected = dict(entity._expected_state)
+
+        # Count resends triggered by mismatches.
+        send_count = 0
+        original = entity.send_ir
+
+        async def counting_send():
+            nonlocal send_count
+            send_count += 1
+            await original()
+
+        with patch.object(entity, "send_ir", side_effect=counting_send):
+            # Fire 10 mismatching telemetry messages back-to-back.
+            mismatched = dict(expected)
+            mismatched["Temp"] = expected.get("Temp", 22) + 5
+            for _ in range(10):
+                _fire_tele(hass, mismatched)
+                await hass.async_block_till_done()
+
+        assert send_count <= 3, (
+            f"Resend must cap at 3 attempts; got {send_count}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_resend_counter_resets_on_successful_match(
+        self, hass, setup_pi_integration
+    ):
+        """Counter resets when a tele matches — prevents premature cap-out."""
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity.power_mode = "on"
+        await entity.send_ir()
+        await hass.async_block_till_done()
+        expected = dict(entity._expected_state)
+
+        send_count = 0
+        original = entity.send_ir
+
+        async def counting_send():
+            nonlocal send_count
+            send_count += 1
+            await original()
+
+        with patch.object(entity, "send_ir", side_effect=counting_send):
+            # Two mismatches (well under cap).
+            mismatched = dict(expected)
+            mismatched["Temp"] = expected.get("Temp", 22) + 3
+            _fire_tele(hass, mismatched)
+            await hass.async_block_till_done()
+            _fire_tele(hass, mismatched)
+            await hass.async_block_till_done()
+
+            # Now a matching tele — counter should reset to 0.
+            _fire_tele(hass, expected)
+            await hass.async_block_till_done()
+
+            pre_count = send_count
+
+            # Six more mismatches should produce 3 resends, not 1 (cap would
+            # have engaged if counter hadn't reset).
+            for _ in range(6):
+                _fire_tele(hass, mismatched)
+                await hass.async_block_till_done()
+
+        post_resends = send_count - pre_count
+        assert post_resends == 3, (
+            f"After match-reset, expected 3 resends from 6 mismatches, got {post_resends}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_resend_counter_resets_on_user_set_mode(
+        self, hass, setup_pi_integration
+    ):
+        """User intervention (set_mode) resets the resend counter."""
+        entry = await setup_pi_integration()
+        entity = get_climate_entity(hass, entry)
+
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity.power_mode = "on"
+        await entity.send_ir()
+        await hass.async_block_till_done()
+        expected = dict(entity._expected_state)
+
+        send_count = 0
+        original = entity.send_ir
+
+        async def counting_send():
+            nonlocal send_count
+            send_count += 1
+            await original()
+
+        with patch.object(entity, "send_ir", side_effect=counting_send):
+            # Cap out the resends.
+            mismatched = dict(expected)
+            mismatched["Temp"] = expected.get("Temp", 22) + 5
+            for _ in range(8):
+                _fire_tele(hass, mismatched)
+                await hass.async_block_till_done()
+
+            assert send_count <= 3
+            capped_at = send_count
+
+        # User intervenes — resets counter.
+        await entity.set_mode(HVACMode.COOL)
+        await entity.send_ir()
+        await hass.async_block_till_done()
+        new_expected = dict(entity._expected_state)
+
+        send_count = 0
+        with patch.object(entity, "send_ir", side_effect=counting_send):
+            mismatched2 = dict(new_expected)
+            mismatched2["Temp"] = new_expected.get("Temp", 22) + 5
+            _fire_tele(hass, mismatched2)
+            await hass.async_block_till_done()
+
+        assert send_count == 1, (
+            "After set_mode reset, first mismatch must resend (not skipped by stale cap)"
+        )
