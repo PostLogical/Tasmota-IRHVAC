@@ -515,18 +515,23 @@ def controllable_comfort_within_two_degrees_F(b: Bundle) -> AssertionResult:
 @assertion(SEVERITY_EXPECTED)
 def no_heat_demand_when_room_warm(b: Bundle) -> AssertionResult:
     """In heating mode, HP should not be calling for additional heat when
-    room is already above desired (and vice versa in cooling). Detects:
+    room is already above the *controller's effective target* (and vice
+    versa in cooling).
 
-      heat mode: room > desired + 0.5°C AND hp_setpoint > room + 1°C
-                  — controller actively heating an already-warm room
-      cool mode: room < desired - 0.5°C AND hp_setpoint < room - 1°C
-                  — controller actively cooling an already-cool room
+    Compares to `_effective_desired_c` when present (post-qref bundles)
+    since qref intentionally biases room ±0.3–0.5°C from user-facing
+    desired — that bias is wanted comfort-direction behavior, not
+    pathology. When effective_desired_c isn't in the bundle (pre-qref
+    builds, supervisor disabled), falls back to user desired.
+
+    Detects:
+      heat mode: room > eff_target + 0.5°C AND hp_setpoint > room + 1°C
+      cool mode: room < eff_target - 0.5°C AND hp_setpoint < room - 1°C
 
     Brief transient violations (user setpoint changes, sudden outdoor
-    shifts) are expected; threshold tolerates ≤ 5% of post-warmup ticks.
-    Sustained violations indicate the integrator is corrupted or the
-    overtemp/undertemp regime gate isn't firing — exactly the q_feedback
-    bunkroom-bug pattern. qref should drop this number toward zero.
+    shifts) tolerated up to 5% of post-warmup ticks. Sustained violations
+    indicate integrator corruption or a missing regime gate — the
+    q_feedback bunkroom-bug pattern. qref should drop this near zero.
     """
     if b.mode not in ("heat", "cool"):
         return AssertionResult(
@@ -539,22 +544,30 @@ def no_heat_demand_when_room_warm(b: Bundle) -> AssertionResult:
     total = 0
     worst_excess = 0.0
     worst = None
+    using_eff = 0
     for t in b.ticks:
-        desired_c = extract_desired_c(t)
+        # Prefer effective_desired_c (what controller actually tracked).
+        # Fall back to user-facing desired when missing.
+        eff_target = t.get("_effective_desired_c")
+        if isinstance(eff_target, (int, float)):
+            target_c = eff_target
+            using_eff += 1
+        else:
+            target_c = extract_desired_c(t)
         room = extract_room_temp_c(t)
         hp = t.get("hp_setpoint")
-        if desired_c is None or room is None or hp is None:
+        if target_c is None or room is None or hp is None:
             continue
         total += 1
         if b.mode == "heat":
-            if room > desired_c + 0.5 and hp > room + 1.0:
+            if room > target_c + 0.5 and hp > room + 1.0:
                 bad += 1
                 excess = hp - room
                 if excess > worst_excess:
                     worst_excess = excess
                     worst = t
         else:
-            if room < desired_c - 0.5 and hp < room - 1.0:
+            if room < target_c - 0.5 and hp < room - 1.0:
                 bad += 1
                 excess = room - hp
                 if excess > worst_excess:
@@ -570,11 +583,12 @@ def no_heat_demand_when_room_warm(b: Bundle) -> AssertionResult:
     pct_bad = bad / total
     passed = pct_bad <= 0.05
     direction = "heat-while-hot" if b.mode == "heat" else "cool-while-cold"
+    eff_used = " (vs effective_desired)" if using_eff > total // 2 else " (vs user desired)"
     return AssertionResult(
         name="no_heat_demand_when_room_warm",
         severity=SEVERITY_EXPECTED,
         passed=passed,
-        detail=f"{bad}/{total} ({pct_bad:.1%}) ticks were {direction} "
+        detail=f"{bad}/{total} ({pct_bad:.1%}) ticks were {direction}{eff_used} "
                f"(threshold: ≤ 5.0%); worst |hp − room| = {worst_excess:.2f}°C",
         counter_example=worst if not passed else None,
     )
