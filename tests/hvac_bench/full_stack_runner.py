@@ -916,6 +916,8 @@ def run_full_stack(
                 "effective_desired_c": getattr(pi, "_last_effective_desired_c", None),
                 "rls_obs_count": pi._rls_heat.observation_count,
                 "obs_admitted": oc.admitted if oc is not None else None,
+                "obs_clamped": oc.clamped if oc is not None else None,
+                "obs_clamped_reason": oc.clamped_reason if oc is not None else None,
                 "obs_score": oc.score if oc is not None else None,
                 "obs_evicted_ts": oc.evicted_timestamp if oc is not None else None,
                 "obs_min_incumbent_score": oc.min_incumbent_score if oc is not None else None,
