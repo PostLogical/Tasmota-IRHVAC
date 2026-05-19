@@ -1184,7 +1184,13 @@ class TestFullRateIntegrationRegression:
     @staticmethod
     def _make_entity(current_temp, desired=22.0, hp_setpoint=22,
                      outdoor=10.0, mode=HVACMode.HEAT):
-        """Create a fresh FakePIEntity with standard setup."""
+        """Create a fresh FakePIEntity with standard setup.
+
+        These tests compare full-rate vs variable-rate integration in
+        isolation. The supervisor (default qref since 0.19.2-pre53) injects
+        reference bias in deadband, which is not what's under test here —
+        disable it so the A/B exercises pure PI integration behavior.
+        """
         entity = FakePIEntity(make_pi_config())
         pi = entity._pi
         pi._desired_temp = desired
@@ -1192,6 +1198,7 @@ class TestFullRateIntegrationRegression:
         pi._pi_integral = 0.0
         pi._pi_deadband = 0.5
         pi._inputs.outdoor_temp = outdoor
+        pi._supervisor_enabled = False  # isolate PI integration policies
         entity._attr_hvac_mode = mode
         entity._attr_current_temperature = current_temp
         return entity

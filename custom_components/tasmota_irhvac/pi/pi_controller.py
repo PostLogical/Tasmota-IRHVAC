@@ -379,48 +379,53 @@ class PIController:
             relax_bumpless=config.get("pi_supervisor_relax_bumpless", True),
             release_bumpless=config.get("pi_supervisor_release_bumpless", True),
         )
-        # Supervisor "kind" selector — "governor" (engage/release lifecycle)
-        # or "qref" (q_feedback's mechanism applied through reference, no
-        # lifecycle). Both share the same hp_active gate. Default "governor"
-        # preserves existing behavior; "qref" is the experimental next-design
-        # candidate (see supervisor_session_2026_05_18 memory).
-        self._supervisor_kind: str = config.get("pi_supervisor_kind", "governor")
+        # Supervisor "kind" selector — "qref" (default, q_feedback's
+        # mechanism applied through reference channel, integrator-clean) or
+        # "governor" (legacy engage/release lifecycle from earlier session).
+        # qref is the production default as of this release; "governor" kept
+        # as an opt-in fallback. See project_qref_session_2026_05_18 memory.
+        self._supervisor_kind: str = config.get("pi_supervisor_kind", "qref")
+        # qref defaults are the aggressive mode-aware config validated on 5
+        # bench scenarios (winter/summer/shoulder/april_25/cold_steady).
         self._qref_biaser = QRefBiaser(
-            gain=config.get("pi_supervisor_qref_gain", 0.4),
-            ema_alpha=config.get("pi_supervisor_qref_ema_alpha", 0.1),
+            gain=config.get("pi_supervisor_qref_gain", 1.0),
+            ema_alpha=config.get("pi_supervisor_qref_ema_alpha", 0.2),
             max_bias_c=config.get("pi_supervisor_qref_max_bias_c", 0.45),
             max_bias_up_c=config.get("pi_supervisor_qref_max_bias_up_c", None),
             max_bias_down_c=config.get("pi_supervisor_qref_max_bias_down_c", None),
-            decay_alpha=config.get("pi_supervisor_qref_decay_alpha", 0.1),
+            decay_alpha=config.get("pi_supervisor_qref_decay_alpha", 0.2),
         )
         # When True, qref only biases inside the in-deadband region (controller
-        # is settled near desired). When False, qref biases all the time HP is
-        # active. The gate was designed for engage/release lifecycle to avoid
-        # cycling during dynamic recovery — qref doesn't have a lifecycle, so
-        # the gate's necessity is an open question.
+        # is settled near desired). False (default) lets bias act during
+        # transients — surprisingly improves recovery overshoot because the
+        # persistent bias firmly locks HP at saturation during disturbance
+        # response (see qref_sweep.py winter_typical).
         self._supervisor_qref_require_in_deadband: bool = config.get(
-            "pi_supervisor_qref_require_in_deadband", True,
+            "pi_supervisor_qref_require_in_deadband", False,
         )
-        # Mode-aware asymmetric caps (comfort-direction semantics). Set both
-        # to enable: in heating mode the "tolerable" direction is warmer (room
-        # above r_user), in cooling it's cooler (room below r_user). Mapped to
-        # the biaser's up/down caps each tick based on current hvac_mode.
-        # When unset (None), the biaser uses its own max_bias_c / up_c / down_c.
+        # Mode-aware asymmetric caps (comfort-direction semantics). Heating
+        # mode: tolerable=warmer (positive bias), uncomfortable=cooler.
+        # Cooling: inverse. Defaults reflect "warmer by 0.5°C tolerable, cooler
+        # by 0.3°C uncomfortable" in heating; flip applies in cooling. Caller
+        # may override to None to fall back to symmetric max_bias_c.
         self._qref_tolerable_cap: float | None = config.get(
-            "pi_supervisor_qref_tolerable_cap_c", None,
+            "pi_supervisor_qref_tolerable_cap_c", 0.5,
         )
         self._qref_uncomfortable_cap: float | None = config.get(
-            "pi_supervisor_qref_uncomfortable_cap_c", None,
+            "pi_supervisor_qref_uncomfortable_cap_c", 0.3,
         )
         # Effective desired_c the inner PI tracked on the most recent tick
         # (= r_user + auto_perturb_offset + supervisor_nudge_c). Surfaced
         # in TickOutput for debug bundles; None until first tick.
         self._last_effective_desired_c: float | None = None
-        # When False, q-feedback is bypassed and the supervisor alone
-        # defends against quantization-boundary chatter. Default True
-        # preserves legacy behavior for backward compatibility.
+        # DEPRECATED — q_feedback violates Tarbouriech-Zaccarian small-signal
+        # preservation (integrator-corrupting) and is empirically dominated
+        # by the qref supervisor on all bench scenarios. Default False as of
+        # this release; the code path is preserved for opt-in fallback during
+        # the production transition. To be removed in a future release once
+        # qref is field-validated. See project_qref_session_2026_05_18 memory.
         self._q_feedback_enabled: bool = config.get(
-            "pi_q_feedback_enabled", True,
+            "pi_q_feedback_enabled", False,
         )
         # Master enable for the reference-governor supervisor. When False,
         # supervisor never runs (no chatter monitoring, no nudge, no
