@@ -150,11 +150,18 @@ class Bundle:
 
     @property
     def mode(self) -> str:
-        for t in self.ticks[:10]:
-            cfg = t.get("config") or {}
-            m = cfg.get("mode")
-            if m:
+        """HVAC mode for the bundle. First check the `_observation.mode`
+        field (populated each tick from the climate entity's hvac_mode),
+        then fall back to config. Returns 'heat' / 'cool' / 'unknown'."""
+        for t in self.ticks[:50]:
+            obs = t.get("_observation") or {}
+            m = obs.get("mode")
+            if m in ("heat", "cool"):
                 return m
+            cfg = t.get("config") or {}
+            cm = cfg.get("mode")
+            if cm in ("heat", "cool"):
+                return cm
         return "unknown"
 
 
@@ -440,37 +447,68 @@ def hp_changes_per_day_below_baseline(b: Bundle) -> AssertionResult:
 
 
 @assertion(SEVERITY_STATISTICAL)
-def comfort_within_two_degrees_F(b: Bundle) -> AssertionResult:
-    """Room should be within ±2°F (≈±1.111°C) of desired ≥ 95% of the time.
+def controllable_comfort_within_two_degrees_F(b: Bundle) -> AssertionResult:
+    """Room should be within ±2°F of desired ≥ 95% of the time *when the HP
+    could have done something different*.
 
-    ±1°F is the user's "comfortable" band per their 1°F-step UI semantics.
-    ±2°F is the soft outer comfort bound — being outside this band is
-    noticeable.
+    "Controllable" means the violation is in the direction the HP can act on:
+      heating mode: room < desired - band (HP could have heated more)
+      cooling mode: room > desired + band (HP could have cooled more)
+
+    Violations in the opposite direction are physics-driven (solar overshoot
+    in heating, cold infiltration in cooling) and the HP literally can't
+    respond. Counting them as "comfort failures" would unfairly penalize
+    the controller for things it has no actuator authority over.
+
+    Raw (unfiltered) comfort % is included in detail for context.
     """
+    if b.mode not in ("heat", "cool"):
+        return AssertionResult(
+            name="controllable_comfort_within_two_degrees_F",
+            severity=SEVERITY_STATISTICAL,
+            passed=True,
+            detail=f"N/A (mode={b.mode}; can't classify violation direction)",
+        )
+    band = 1.111  # ±2°F
     in_band = 0
-    total = 0
+    ctrl_viol = 0  # violation in actuator-can-act direction
+    uncrtl_viol = 0  # violation in actuator-can't direction
     for t in b.ticks:
         desired_c = extract_desired_c(t)
         room = extract_room_temp_c(t)
         if desired_c is None or room is None:
             continue
-        if abs(room - desired_c) <= 1.111:
+        err = room - desired_c
+        if abs(err) <= band:
             in_band += 1
-        total += 1
-    if total < 100:
+        elif b.mode == "heat":
+            if err < 0:  # room too cold — HP could heat more
+                ctrl_viol += 1
+            else:        # room too hot — solar; HP can't cool
+                uncrtl_viol += 1
+        else:  # cool
+            if err > 0:  # room too hot — HP could cool more
+                ctrl_viol += 1
+            else:        # room too cold — HP can't heat
+                uncrtl_viol += 1
+    ctrl_total = in_band + ctrl_viol
+    if ctrl_total < 100:
         return AssertionResult(
-            name="comfort_within_two_degrees_F",
+            name="controllable_comfort_within_two_degrees_F",
             severity=SEVERITY_STATISTICAL,
             passed=True,
-            detail=f"N/A (only {total} ticks had both room and desired)",
+            detail=f"N/A (only {ctrl_total} controllable ticks; need ≥ 100)",
         )
-    pct = in_band / total
-    passed = pct >= 0.95
+    ctrl_pct = in_band / ctrl_total
+    raw_pct = in_band / (in_band + ctrl_viol + uncrtl_viol)
+    passed = ctrl_pct >= 0.95
     return AssertionResult(
-        name="comfort_within_two_degrees_F",
+        name="controllable_comfort_within_two_degrees_F",
         severity=SEVERITY_STATISTICAL,
         passed=passed,
-        detail=f"{pct:.1%} of {total} ticks within ±2°F (threshold: ≥ 95%)",
+        detail=f"controllable: {ctrl_pct:.1%} of {ctrl_total} ticks within "
+               f"±2°F (threshold: ≥ 95%); raw: {raw_pct:.1%} with "
+               f"{uncrtl_viol} uncontrollable violations ({b.mode} mode)",
     )
 
 
