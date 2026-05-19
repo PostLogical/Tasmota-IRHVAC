@@ -462,21 +462,6 @@ class TestSeasonalConvergence:
             f"Diversity buffer's persistence role appears load-bearing."
         )
 
-    @pytest.mark.xfail(
-        TICK_MINUTES_DEFAULT < 15.0,
-        reason=(
-            "Post-#97 wall-clock 07:00/19:00 batch firing means different "
-            "sun positions per season at fine cadence.  At 15-min: spread ~0.7 "
-            "(meets `< 0.8`).  At 3-min: spread = 2.15 (winter solar=0.0, "
-            "spring=-2.15, fall=-1.11 — winter is the outlier).  Wider spread "
-            "is a real consequence of the (correct) wall-clock timing; the "
-            "0.8 threshold was calibrated under pre-#97 sim-epoch batching.  "
-            "Until cadence-aware tolerance or a smoothing approach lands, "
-            "xfail at fine cadences.  See `project_98_progress_20260514.md` "
-            "Section A."
-        ),
-        strict=True,
-    )
     def test_cross_season_solar_agreement(self, bench_metrics, num_regression, seasonal_results):
         """Solar coefficient varies modestly across seasons.
 
@@ -486,10 +471,6 @@ class TestSeasonalConvergence:
         (real β = -1.03 to -1.20; see project_buffer_seasonal_findings.md).
         Tolerance widened from 0.5 (clean-synth era) to 0.8 to reflect the
         realistic difficulty.
-
-        Note: tolerance calibrated for 15-min ticks; xfailed at finer cadences
-        because wall-clock batch firing produces different sun positions per
-        season (see decorator).
         """
         solars = [r.final_coefs.get("Solar Proxy", 0.0)
                   for r in seasonal_results.values()]

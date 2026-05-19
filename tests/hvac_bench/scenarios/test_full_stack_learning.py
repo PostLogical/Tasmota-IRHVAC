@@ -414,26 +414,8 @@ class TestQFeedbackConvergence:
     """
 
     @pytest.mark.parametrize("profile_name", QUICK_PROFILES.keys())
-    @pytest.mark.xfail(
-        TICK_MINUTES_DEFAULT < 15.0,
-        reason=(
-            "Reversals/week scale ~linearly with sampling rate.  The `< 20`/week "
-            "threshold was calibrated for 15-min cadence (where reversals = 14-19 "
-            "after q-feedback convergence).  At 3-min cadence reversals are 41-46/week "
-            "(~5x ratio matching the cadence ratio); at 1-min would be ~200+/week.  "
-            "The test still validates the underlying property (reversals stay bounded "
-            "after q-feedback locks in), it just needs cadence-aware tolerance.  "
-            "Until smoothing or per-cadence thresholds land, xfail at fine cadences.  "
-            "See `project_98_progress_20260514.md` Section A."
-        ),
-        strict=True,
-    )
     def test_reversals_decrease_over_time(self, bench_metrics, num_regression, profile_name):
-        """Reversals/week should decrease as q-feedback converges.
-
-        Note: reversals scale with sampling rate.  The `< 20` threshold here is
-        calibrated for 15-min ticks; xfailed at finer cadences (see decorator).
-        """
+        """Reversals/week should decrease as qref converges."""
         profile = QUICK_PROFILES[profile_name]
         config = FullStackConfig(
             n_days=21,  # 3 weeks
