@@ -414,6 +414,19 @@ class PIController:
         self._qref_uncomfortable_cap: float | None = config.get(
             "pi_supervisor_qref_uncomfortable_cap_c", 0.3,
         )
+        # qref-quiet WLS admission gate. When qref is biasing the reference,
+        # `hp_setpoint` (the WLS Y target) carries a qref_bias component that
+        # correlates with FF inputs through the feedback chain (q_error →
+        # raw_setpoint → FF → bias). This Y-side endogeneity biases β_solar
+        # estimates. Restricting WLS admission to ticks where |qref_bias| <
+        # threshold recovers near-open-loop conditions and removes the bias
+        # (lit-grounded sanity floor per Forssell-Ljung / Hjalmarsson;
+        # empirically validated 2026-05-19, see project_qref_y_side_endogeneity
+        # memory: |err_β_solar| 0.81 → 0.15 at threshold 0.05°C on 30-day spring
+        # bench). Set to 0 (or negative) to disable the gate entirely.
+        self._supervisor_qref_quiet_gate_c: float = config.get(
+            "pi_supervisor_qref_quiet_gate_c", 0.05,
+        )
         # Effective desired_c the inner PI tracked on the most recent tick
         # (= r_user + auto_perturb_offset + supervisor_nudge_c). Surfaced
         # in TickOutput for debug bundles; None until first tick.
@@ -5808,6 +5821,23 @@ class PIController:
         else:
             obs_clamped = False
             obs_clamped_reason = ""
+
+        # qref-quiet admission gate: when qref is biasing the reference,
+        # hp_setpoint contains a qref_bias component correlated with FF
+        # inputs. Restricting WLS admission to ticks where the bias is
+        # below noise floor recovers open-loop-like conditions and removes
+        # the Y-side endogeneity. See project_qref_y_side_endogeneity memory
+        # (2026-05-19): |err_β_solar| improves 5.4× at 0.05°C threshold.
+        # Only applies when not already clamped (preserves existing reason)
+        # and when the supervisor is active (otherwise qref_bias is 0 and
+        # the gate is a no-op).
+        if (not obs_clamped
+                and self._supervisor_qref_quiet_gate_c > 0.0
+                and self._supervisor_enabled
+                and self._supervisor_kind == "qref"
+                and abs(self._qref_biaser.bias) >= self._supervisor_qref_quiet_gate_c):
+            obs_clamped = True
+            obs_clamped_reason = "qref_active"
 
         if data_complete:
             # Observation metadata for batch diagnostics.
