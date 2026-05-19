@@ -181,6 +181,7 @@ from .health_checks import (
 )
 from .performance_metrics import PerformanceMetrics
 from .auto_perturbation import AutoPerturbation, PerturbState
+from .ref_governor import ChatterMonitor, QRefBiaser, ReferenceGovernor
 from .boundary_estimator import BoundaryEstimator
 from .regime_probe import ProbeState, RegimeProbe
 from .smith_predictor import SmithPredictor
@@ -365,6 +366,68 @@ class PIController:
             window_start=config.get(CONF_PI_AUTO_PERTURB_WINDOW_START),
             window_end=config.get(CONF_PI_AUTO_PERTURB_WINDOW_END),
             research_mode=config.get(CONF_PI_AUTO_PERTURB_RESEARCH_MODE, False),
+        )
+
+        # Chatter detection + reference-side quantization defense.
+        # Replaces q-feedback's integrator-corrupting approach with a
+        # supervisor that watches HP-change events and nudges the
+        # effective reference when chatter is detected. See ref_governor.py
+        # for lit citations.
+        self._chatter_monitor = ChatterMonitor()
+        self._ref_governor = ReferenceGovernor(
+            engage_bumpless=config.get("pi_supervisor_engage_bumpless", True),
+            relax_bumpless=config.get("pi_supervisor_relax_bumpless", True),
+            release_bumpless=config.get("pi_supervisor_release_bumpless", True),
+        )
+        # Supervisor "kind" selector — "governor" (engage/release lifecycle)
+        # or "qref" (q_feedback's mechanism applied through reference, no
+        # lifecycle). Both share the same hp_active gate. Default "governor"
+        # preserves existing behavior; "qref" is the experimental next-design
+        # candidate (see supervisor_session_2026_05_18 memory).
+        self._supervisor_kind: str = config.get("pi_supervisor_kind", "governor")
+        self._qref_biaser = QRefBiaser(
+            gain=config.get("pi_supervisor_qref_gain", 0.4),
+            ema_alpha=config.get("pi_supervisor_qref_ema_alpha", 0.1),
+            max_bias_c=config.get("pi_supervisor_qref_max_bias_c", 0.45),
+            max_bias_up_c=config.get("pi_supervisor_qref_max_bias_up_c", None),
+            max_bias_down_c=config.get("pi_supervisor_qref_max_bias_down_c", None),
+            decay_alpha=config.get("pi_supervisor_qref_decay_alpha", 0.1),
+        )
+        # When True, qref only biases inside the in-deadband region (controller
+        # is settled near desired). When False, qref biases all the time HP is
+        # active. The gate was designed for engage/release lifecycle to avoid
+        # cycling during dynamic recovery — qref doesn't have a lifecycle, so
+        # the gate's necessity is an open question.
+        self._supervisor_qref_require_in_deadband: bool = config.get(
+            "pi_supervisor_qref_require_in_deadband", True,
+        )
+        # Mode-aware asymmetric caps (comfort-direction semantics). Set both
+        # to enable: in heating mode the "tolerable" direction is warmer (room
+        # above r_user), in cooling it's cooler (room below r_user). Mapped to
+        # the biaser's up/down caps each tick based on current hvac_mode.
+        # When unset (None), the biaser uses its own max_bias_c / up_c / down_c.
+        self._qref_tolerable_cap: float | None = config.get(
+            "pi_supervisor_qref_tolerable_cap_c", None,
+        )
+        self._qref_uncomfortable_cap: float | None = config.get(
+            "pi_supervisor_qref_uncomfortable_cap_c", None,
+        )
+        # Effective desired_c the inner PI tracked on the most recent tick
+        # (= r_user + auto_perturb_offset + supervisor_nudge_c). Surfaced
+        # in TickOutput for debug bundles; None until first tick.
+        self._last_effective_desired_c: float | None = None
+        # When False, q-feedback is bypassed and the supervisor alone
+        # defends against quantization-boundary chatter. Default True
+        # preserves legacy behavior for backward compatibility.
+        self._q_feedback_enabled: bool = config.get(
+            "pi_q_feedback_enabled", True,
+        )
+        # Master enable for the reference-governor supervisor. When False,
+        # supervisor never runs (no chatter monitoring, no nudge, no
+        # integral adjustments). Used for A/B testing against q-feedback-
+        # only and no-defense baselines.
+        self._supervisor_enabled: bool = config.get(
+            "pi_supervisor_enabled", True,
         )
 
         # Active probing for HP contribution regime boundary (Layer 3).
@@ -4050,6 +4113,14 @@ class PIController:
             events=tuple(self._pending_events),
             overtemp_regime=self._overtemp_regime,
             stable_combined_bias_ema=self._stable_combined_bias_ema,
+            # Reference governor / chatter supervisor diagnostics.
+            effective_desired_c=(
+                round(self._last_effective_desired_c, 3)
+                if self._last_effective_desired_c is not None
+                else None
+            ),
+            supervisor_mode=self._ref_governor.mode,
+            supervisor_nudge_c=round(self._ref_governor.nudge_c, 3),
         )
         # Consume pending events: each event is published on exactly one
         # TickOutput.  HA may call ``async_write_ha_state`` (which calls
@@ -5102,6 +5173,67 @@ class PIController:
             room_rate_noise_floor=noise_floor,
         )
 
+        # Chatter supervisor: watches raw_setpoint chatter pressure and
+        # nudges the effective reference when quantization-boundary
+        # chatter is detected. Replaces q-feedback as the quantization
+        # defense.  Uses the PREVIOUS tick's raw_setpoint (the current
+        # tick's hasn't been computed yet); on the first tick it's NaN
+        # and the monitor naturally suppresses the event.
+        # `desired_c` here is post-auto-perturb (the perturbation is a
+        # separate-layer setpoint excitation for plant ID); the
+        # supervisor adds a chatter-defense nudge on top.
+        #
+        # The supervisor also returns a back-calc integral adjustment
+        # at mode transitions so PI output stays continuous across the
+        # change in effective reference (Åström-Hägglund tracking
+        # bumpless; same pattern as the three other bumpless transfers
+        # in this codebase — see project_back_calc_bumpless memory).
+        # Supervisor follows the same principle as integration freezing: don't
+        # act when the HP isn't actively contributing. Chatter "events" during
+        # HP-saturated or HP-off periods aren't real chatter (the actuator
+        # can't move) and engaging the supervisor in those periods perturbs
+        # the integrator state for downstream active-control periods. See
+        # supervisor_ab cooling-mode regression analysis.
+        if self._supervisor_enabled and self._hp_estimated_active_state:
+            prev_raw = self._last_raw_setpoint
+            if self._supervisor_kind == "qref":
+                # Mode-aware asymmetric caps: heating tolerates room warmer
+                # than r_user more than cooler; cooling is the inverse.
+                if (self._qref_tolerable_cap is not None
+                        and self._qref_uncomfortable_cap is not None):
+                    if is_heating:
+                        self._qref_biaser.max_bias_up_c = self._qref_tolerable_cap
+                        self._qref_biaser.max_bias_down_c = self._qref_uncomfortable_cap
+                    else:
+                        self._qref_biaser.max_bias_up_c = self._qref_uncomfortable_cap
+                        self._qref_biaser.max_bias_down_c = self._qref_tolerable_cap
+                # Reference-side q_feedback alternative. Active when HP is
+                # contributing; optionally further gated on in-deadband.
+                if self._supervisor_qref_require_in_deadband:
+                    in_db = abs(desired_c - current_c) < self._pi_deadband
+                    active_ok = self._hp_estimated_active_state and in_db
+                else:
+                    active_ok = self._hp_estimated_active_state
+                if prev_raw == prev_raw:  # NaN guard
+                    bias = self._qref_biaser.update(prev_raw, active_ok)
+                else:
+                    bias = self._qref_biaser.update(0.0, False)
+                desired_c = desired_c + bias
+            else:
+                # Default: ReferenceGovernor engage/release lifecycle.
+                if prev_raw == prev_raw:  # NaN guard
+                    chatter_alarm = self._chatter_monitor.update(prev_raw, now_mono)
+                else:
+                    chatter_alarm = False
+                duty_lean = self._chatter_monitor.duty_cycle_lean()
+                desired_c, supervisor_integral_delta = self._ref_governor.step(
+                    desired_c, current_c, chatter_alarm, duty_lean,
+                    self._pi_ki, now_mono,
+                )
+                if supervisor_integral_delta != 0.0:
+                    self._pi_integral += supervisor_integral_delta
+        self._last_effective_desired_c = desired_c
+
         error = desired_c - current_c
 
         # Check ongoing τ step-response observation (raw — measures real plant).
@@ -5636,7 +5768,7 @@ class PIController:
         # than at the 15-min cadence at which gain=0.4 was tuned, which
         # over-suppresses integral build at faster cadences and creates
         # the very limit cycle q-feedback was designed to prevent.
-        if self._pi_ff_enabled and in_deadband:
+        if self._pi_ff_enabled and in_deadband and self._q_feedback_enabled:
             q_error = float(self._hp_setpoint) - clamped_setpoint
             if self._q_feedback_lower < abs(q_error) <= 0.5:
                 self._pi_integral += (

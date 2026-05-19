@@ -1374,6 +1374,15 @@ class TickOutput:
     # at regime exit.  None until enough stable observations have populated
     # it.  Visible in debug bundles for tuning the bumpless behavior.
     stable_combined_bias_ema: float | None = None
+    # Reference governor / chatter-supervisor state (see pi/ref_governor.py).
+    # `effective_desired_c` is what the PI actually tracked this tick
+    # (r_user + auto_perturb_offset + supervisor_nudge); the existing
+    # `desired_temp` field above remains the user-facing setpoint in
+    # entity units.  `supervisor_nudge_c` is the signed nudge magnitude
+    # in °C (≥ 0 in NORMAL mode, ±max in NUDGE mode).
+    effective_desired_c: float | None = None
+    supervisor_mode: str = "NORMAL"
+    supervisor_nudge_c: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to the legacy `get_full_diagnostics()` wire format.
