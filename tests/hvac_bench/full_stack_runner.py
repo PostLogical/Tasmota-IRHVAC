@@ -912,6 +912,8 @@ def run_full_stack(
                 "supervisor_mode": getattr(getattr(pi, "_ref_governor", None), "mode", "NORMAL"),
                 "supervisor_nudge_c": getattr(getattr(pi, "_ref_governor", None), "nudge_c", 0.0),
                 "chatter_event_count": getattr(getattr(pi, "_chatter_monitor", None), "event_count", 0),
+                "qref_bias": getattr(getattr(pi, "_qref_biaser", None), "bias", 0.0),
+                "effective_desired_c": getattr(pi, "_last_effective_desired_c", None),
                 "rls_obs_count": pi._rls_heat.observation_count,
                 "obs_admitted": oc.admitted if oc is not None else None,
                 "obs_score": oc.score if oc is not None else None,
