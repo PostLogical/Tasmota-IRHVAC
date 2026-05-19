@@ -394,6 +394,9 @@ def run_open_loop_probe(config: OpenLoopConfig) -> OpenLoopResult:
                 hp_setpoint=hp_setpoint,
                 current_c=sensor_reading,
                 desired_c=config.desired_c,
+                # Open-loop runner has no supervisor in the loop, so the
+                # effective reference equals the user-stated value.
+                effective_desired_c=config.desired_c,
                 outdoor_temp_c=model.outdoor_temp,
                 room_rate=room_rate,
                 raw_readings=raw_readings,

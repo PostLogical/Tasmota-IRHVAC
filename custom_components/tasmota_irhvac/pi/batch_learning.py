@@ -59,11 +59,19 @@ class Observation:
     wall_time: float  # UTC epoch seconds (for sun position, time-of-day)
     hp_setpoint: float | None  # HP setpoint (°C), None for passive observations
     current_c: float  # filtered room temperature (°C)
-    desired_c: float  # target temperature (°C)
-    outdoor_temp_c: float | None  # absolute outdoor temperature (°C)
-    room_rate: float  # dT/dt in °C/min at observation time
-    raw_readings: dict[str, float]  # entity_id → raw sensor value at obs time
-    clamped: bool  # True if HP output is unusable for learning
+    desired_c: float  # occupant-stated setpoint (°C) — user-frame reference
+    # Post-supervisor reference the inner PI tracked this tick (°C).
+    # When qref / reference governor is active, this differs from desired_c
+    # by the bias. None for passive observations where no controller tracking
+    # happened (clamped, observe-only). Used by closed-loop ID regressors
+    # (Forssell-Ljung 1999): regressor reference must be the signal the loop
+    # actually responded to; using desired_c there leaves the supervisor's
+    # bias in the residual, correlated with FF inputs.
+    effective_desired_c: float | None = None
+    outdoor_temp_c: float | None = None  # absolute outdoor temperature (°C)
+    room_rate: float = 0.0  # dT/dt in °C/min at observation time
+    raw_readings: dict[str, float] = field(default_factory=dict)  # entity_id → raw sensor value
+    clamped: bool = False  # True if HP output is unusable for learning
     clamped_reason: str = ""  # "", "no_output", "saturated_low", "saturated_high", "observe_only"
     supplemental_active: bool = False  # supplemental source tracking or assisting
     hp_contribution_uncertain: bool = False  # |hp_offset| within regime margin
@@ -73,14 +81,31 @@ class Observation:
     # partition perturbation-regime observations from operational ones.
     during_perturbation: bool = False
 
+    @property
+    def regressor_reference(self) -> float:
+        """Reference signal for closed-loop ID regressors.
+
+        Returns effective_desired_c when present (active-tick observations
+        where the supervisor's bias is the signal the loop tracked); falls
+        back to desired_c for v2 observations (pre-rename) and for passive
+        observations (no controller tracking happened). The fallback
+        preserves behavior for legacy data — v2 active-tick observations
+        stored the post-supervisor value in desired_c, so the fallback
+        recovers it.
+        """
+        if self.effective_desired_c is not None:
+            return self.effective_desired_c
+        return self.desired_c
+
     def as_dict(self) -> dict[str, Any]:
         return {
-            "v": 2,  # schema version
+            "v": 3,  # schema version (v3: adds effective_desired_c)
             "t": self.timestamp,
             "wt": self.wall_time,
             "sp": self.hp_setpoint,
             "cur": self.current_c,
             "des": self.desired_c,
+            "edes": self.effective_desired_c,
             "ot": self.outdoor_temp_c,
             "rate": self.room_rate,
             "rr": self.raw_readings,
@@ -93,10 +118,15 @@ class Observation:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Observation:
-        """Restore a v2 Observation from a serialized dict.
+        """Restore an Observation from a serialized dict (v2 or v3 schema).
 
         Raises ValueError for v1 observations (pre-raw_readings format)
         or corrupt data, so callers can skip gracefully.
+
+        v2 → v3 migration: v2 observations have ``effective_desired_c``
+        absent. On the active-tick path the v2 code stored the post-
+        supervisor value in ``desired_c``; the ``regressor_reference``
+        fallback recovers it, so consumers see the same value as before.
         """
         if d.get("v", 1) < 2:
             raise ValueError("v1 observation cannot be restored")
@@ -106,6 +136,7 @@ class Observation:
             hp_setpoint=d["sp"],
             current_c=d["cur"],
             desired_c=d["des"],
+            effective_desired_c=d.get("edes"),
             outdoor_temp_c=d.get("ot"),
             room_rate=d["rate"],
             raw_readings=d.get("rr", {}),
@@ -441,9 +472,11 @@ def build_feature_vector_from_raw(
 
     Feature construction:
     - "intercept": always 1.0
-    - "outdoor_delta": obs.outdoor_temp_c - obs.desired_c (requires outdoor_temp_c)
-      References desired temp (exogenous), not room temp, to match the online
-      model and prevent endogeneity in the regressor (Ljung, System Identification).
+    - "outdoor_delta": obs.outdoor_temp_c - obs.regressor_reference (requires outdoor_temp_c).
+      Uses the post-supervisor reference (``effective_desired_c`` when present,
+      falling back to ``desired_c`` for legacy v2 observations) — that is the
+      signal the inner controller actually tracked, which is what closed-loop
+      ID consistency requires (Forssell & Ljung 1999; Van den Hof-Schrama).
     - model inputs: raw_readings[entity_id], with delta_from_room adjustment
       if configured (entity_temp_c - current_c).  raw_readings stores °C
       absolute temps; the delta is computed here at batch time.
@@ -459,7 +492,7 @@ def build_feature_vector_from_raw(
 
     features: dict[str, float] = {
         "intercept": 1.0,
-        "outdoor_delta": obs.outdoor_temp_c - obs.desired_c,
+        "outdoor_delta": obs.outdoor_temp_c - obs.regressor_reference,
     }
 
     for m_input in model_inputs:
@@ -1349,7 +1382,7 @@ class DiversityAwareBuffer:
         if self._n_features > 0:  # pragma: no branch — n_features is always ≥ 2
             partial[0] = 1.0  # intercept
         if self._n_features > 1 and obs.outdoor_temp_c is not None:  # pragma: no branch — n always ≥ 2; obs filtered upstream
-            partial[1] = obs.outdoor_temp_c - obs.desired_c
+            partial[1] = obs.outdoor_temp_c - obs.regressor_reference
         return partial
 
     def recompute_info_matrix(self) -> None:
@@ -2213,7 +2246,7 @@ def weighted_least_squares(
         assert o.hp_setpoint is not None
         y_base.append(o.hp_setpoint - o.current_c)
     w_base = [1.0 / (1.0 + (o.room_rate / room_rate_threshold) ** 2) for o in base_eligible]
-    X_base: list[list[float]] = [[1.0, o.outdoor_temp_c - o.desired_c] for o in base_eligible]  # type: ignore[operator]  # filtered not-None above
+    X_base: list[list[float]] = [[1.0, o.outdoor_temp_c - o.regressor_reference] for o in base_eligible]  # type: ignore[operator]  # filtered not-None above
 
     # Scale outdoor_delta column
     n_base = 2

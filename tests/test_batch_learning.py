@@ -1658,12 +1658,14 @@ class TestResidualsByHour:
         """wall_time round-trips through as_dict/from_dict."""
         obs = self._make_obs([1.0, 5.0], sp=22.0, cur=20.0, wall_hour=14)
         d = obs.as_dict()
-        assert d["v"] == 2
+        assert d["v"] == 3
         assert d["wt"] == obs.wall_time
         assert "rr" in d  # raw_readings
+        assert "edes" in d  # effective_desired_c added in v3
         restored = Observation.from_dict(d)
         assert restored.wall_time == obs.wall_time
         assert restored.raw_readings == obs.raw_readings
+        assert restored.effective_desired_c == obs.effective_desired_c
 
     def test_legacy_v1_observation_raises(self):
         """Legacy v1 observations raise ValueError (cannot migrate)."""
@@ -1673,6 +1675,52 @@ class TestResidualsByHour:
         }
         with pytest.raises(ValueError, match="v1 observation"):
             Observation.from_dict(d)
+
+    def test_v2_observation_migrates_without_effective_desired_c(self):
+        """v2 dicts (no 'edes' key) load with effective_desired_c=None.
+
+        Pre-rename, v2 active-tick observations stored the post-supervisor
+        value in `desired_c`. After upgrade, `effective_desired_c` is None
+        and `regressor_reference` falls back to `desired_c` — recovering
+        the same value the v2 code used in the regressor.
+        """
+        v2_dict = {
+            "v": 2, "t": 0.0, "wt": 1713650000.0, "sp": 22.0,
+            "cur": 20.0, "des": 21.3, "ot": -5.0, "rate": 0.005,
+            "rr": {"sensor.solar": 0.4},
+            "clamp": False, "cr": "",
+            "sa": False, "hcu": False, "dp": False,
+        }
+        restored = Observation.from_dict(v2_dict)
+        assert restored.effective_desired_c is None
+        assert restored.desired_c == 21.3
+        # regressor_reference falls back to desired_c for legacy data,
+        # which is what the v2 code used in the regressor.
+        assert restored.regressor_reference == 21.3
+
+    def test_regressor_reference_uses_effective_when_present(self):
+        """regressor_reference returns effective_desired_c when set."""
+        obs = Observation(
+            timestamp=0.0, wall_time=1713650000.0,
+            hp_setpoint=22.0, current_c=20.0,
+            desired_c=20.0,  # occupant-stated
+            effective_desired_c=20.4,  # post-supervisor
+            outdoor_temp_c=-5.0, room_rate=0.005,
+            raw_readings={}, clamped=False,
+        )
+        assert obs.regressor_reference == 20.4
+
+    def test_regressor_reference_falls_back_to_desired_c(self):
+        """When effective_desired_c is None, regressor_reference == desired_c."""
+        obs = Observation(
+            timestamp=0.0, wall_time=1713650000.0,
+            hp_setpoint=22.0, current_c=20.0,
+            desired_c=20.0,
+            effective_desired_c=None,  # passive obs, no supervisor tracking
+            outdoor_temp_c=-5.0, room_rate=0.005,
+            raw_readings={}, clamped=True,
+        )
+        assert obs.regressor_reference == 20.0
 
 
 # ── Coverage gap tests ──────────────────────────────────────────────

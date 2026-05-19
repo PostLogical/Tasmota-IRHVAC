@@ -4956,6 +4956,7 @@ class PIController:
             hp_setpoint=None,
             current_c=current_c,
             desired_c=self._desired_temp or current_c,
+            effective_desired_c=None,  # no PI tracking: HP has no output
             outdoor_temp_c=self._inputs.outdoor_temp,
             room_rate=self._room_temp_rate,
             raw_readings=self._inputs.build_raw_readings(),
@@ -5031,6 +5032,7 @@ class PIController:
             hp_setpoint=hp_sp,
             current_c=current_c,
             desired_c=self._desired_temp or current_c,
+            effective_desired_c=None,  # observe-only: PI is not actively tracking
             outdoor_temp_c=self._inputs.outdoor_temp,
             room_rate=self._room_temp_rate,
             raw_readings=self._inputs.build_raw_readings(),
@@ -5823,12 +5825,18 @@ class PIController:
                 self._supplemental.tracking_mode or self._supplemental.assist_active
             )
 
+            # desired_c here is the post-supervisor local (effective reference
+            # the PI tracked this tick). Store the occupant-stated setpoint in
+            # ``desired_c`` (user frame) and the post-supervisor reference in
+            # ``effective_desired_c`` (controller frame). See Observation
+            # docstring for the rationale.
             obs = Observation(
                 timestamp=now_mono,
                 wall_time=time.time(),
                 hp_setpoint=float(self._hp_setpoint),
                 current_c=current_c,
-                desired_c=desired_c,
+                desired_c=self._desired_temp if self._desired_temp is not None else current_c,
+                effective_desired_c=desired_c,
                 outdoor_temp_c=self._inputs.outdoor_temp,
                 room_rate=self._room_temp_rate,
                 raw_readings=self._inputs.build_raw_readings(),
