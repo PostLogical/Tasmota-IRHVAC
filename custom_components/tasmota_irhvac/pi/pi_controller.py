@@ -4126,6 +4126,8 @@ class PIController:
             ),
             supervisor_mode=self._ref_governor.mode,
             supervisor_nudge_c=round(self._ref_governor.nudge_c, 3),
+            qref_bias=round(self._qref_biaser.bias, 4),
+            hp_estimated_active_state=self._hp_estimated_active_state,
         )
         # Consume pending events: each event is published on exactly one
         # TickOutput.  HA may call ``async_write_ha_state`` (which calls

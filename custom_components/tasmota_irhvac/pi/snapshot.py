@@ -1383,6 +1383,16 @@ class TickOutput:
     effective_desired_c: float | None = None
     supervisor_mode: str = "NORMAL"
     supervisor_nudge_c: float = 0.0
+    # qref biaser state (when pi_supervisor_kind == "qref", default since
+    # 0.19.2-pre53). Reference-side persistent quantization-residue bias;
+    # see pi/ref_governor.QRefBiaser. Always present in tick dumps for
+    # replay analysis even when qref isn't the active mechanism.
+    qref_bias: float = 0.0
+    # Whether the HP was estimated to be actively contributing on this tick.
+    # When False, supervisor is gated off (same principle as integration
+    # freezing). Useful for distinguishing "supervisor inactive because HP
+    # off" from "supervisor inactive because no chatter".
+    hp_estimated_active_state: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to the legacy `get_full_diagnostics()` wire format.
@@ -1441,6 +1451,11 @@ class TickOutput:
             out["_events"] = [e.to_dict() for e in self.events]
         out["_overtemp_regime"] = self.overtemp_regime
         out["_stable_combined_bias_ema"] = self.stable_combined_bias_ema
+        out["_effective_desired_c"] = self.effective_desired_c
+        out["_supervisor_mode"] = self.supervisor_mode
+        out["_supervisor_nudge_c"] = self.supervisor_nudge_c
+        out["_qref_bias"] = self.qref_bias
+        out["_hp_estimated_active_state"] = self.hp_estimated_active_state
         return out
 
     @staticmethod
@@ -1543,6 +1558,11 @@ class TickOutput:
             ),
             overtemp_regime=data.get("_overtemp_regime", False),
             stable_combined_bias_ema=data.get("_stable_combined_bias_ema"),
+            effective_desired_c=data.get("_effective_desired_c"),
+            supervisor_mode=data.get("_supervisor_mode", "NORMAL"),
+            supervisor_nudge_c=data.get("_supervisor_nudge_c", 0.0),
+            qref_bias=data.get("_qref_bias", 0.0),
+            hp_estimated_active_state=data.get("_hp_estimated_active_state", True),
         )
 
     @classmethod
