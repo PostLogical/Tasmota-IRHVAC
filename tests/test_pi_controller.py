@@ -7175,6 +7175,85 @@ class TestPIControllerCoverageGaps:
         # Inconsistent → count reset to 1, lag_tau NOT applied
         assert pi._detected_lag_tau_count["solar:heat"] == 1
 
+    def test_bic_rejection_preserves_configured_lag_tau(self):
+        """BIC rejection must NOT clobber the configured lag_tau prior with 0.
+
+        Regression for the seed-collapse bug: when WLS can't identify a lag
+        (BIC rejection), the per-batch detection used to emit τ=0, which the
+        confirmation loop confirmed as a "near-zero detection" and wrote back
+        over the configured prior — so every model input filtered raw during
+        the cold-start fill window regardless of its configured lag_tau.
+
+        Uses REAL weighted_least_squares (not mocked) with pure-noise inputs
+        so both BIC-reject, exercising the full WLS→controller path.  Two
+        inputs (solar + heat_source) confirm the prior survives independently
+        for each — no cross-contamination.
+        """
+        from custom_components.tasmota_irhvac.pi.batch_learning import Observation
+        import time as time_mod
+        entity = FakePIEntity(make_pi_config({
+            "pi_model_inputs": [
+                {"entity_id": "sensor.solar", "name": "solar",
+                 "input_role": "solar", "seed_heat": 0.0, "seed_cool": 0.0,
+                 "lag_tau": 7200},
+                {"entity_id": "sensor.stove", "name": "stove",
+                 "input_role": "heat_source", "seed_heat": 0.0, "seed_cool": 0.0,
+                 "lag_tau": 1800},
+            ],
+        }))
+        pi = entity._pi
+        entity._attr_hvac_mode = HVACMode.HEAT
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 21.0
+        # Unfreeze both inputs (solar=idx2, stove=idx3) so the apply gate is
+        # reachable — a frozen feature holds lag_tau regardless, which would
+        # mask the bug.
+        pi._rls_heat.frozen[2] = False
+        pi._rls_heat.frozen[3] = False
+
+        import random
+        rng = random.Random(13)
+        now = time_mod.monotonic()
+        for i in range(60):
+            od = rng.uniform(-3.0, 3.0)
+            # y driven by outdoor only → both inputs are pure noise → reject.
+            y = 0.3 * od + rng.gauss(0, 0.03)
+            obs = Observation(
+                timestamp=now + i * 900, wall_time=1713650000.0 + i * 900,
+                hp_setpoint=21.0 + y, current_c=21.0,
+                desired_c=21.0, outdoor_temp_c=21.0 + od,
+                room_rate=0.001,
+                raw_readings={
+                    "sensor.solar": rng.uniform(0.0, 1.0),
+                    "sensor.stove": rng.uniform(0.0, 1.0),
+                },
+                clamped=False,
+            )
+            pi._observation_buffer_heat.add(obs)
+
+        # Two batches: count reaches the 2-confirm threshold, which is when
+        # the buggy path would write 0 over the prior.
+        pi._run_batch_analysis()
+        pi._run_batch_analysis()
+
+        # Precondition: both inputs rejected (else the test proves nothing).
+        br = pi._last_batch_result
+        for name in ("solar", "stove"):
+            diag = br.detected_tau_diagnostics.get(name)
+            assert diag is not None and not diag.accepted, (
+                f"Precondition failed: {name} was not rejected — retune data."
+            )
+
+        # The configured priors must survive the rejections.
+        assert pi._model_inputs[0]["lag_tau"] == 7200, (
+            f"solar lag_tau collapsed to {pi._model_inputs[0]['lag_tau']} "
+            f"(expected 7200) — rejection clobbered the prior."
+        )
+        assert pi._model_inputs[1]["lag_tau"] == 1800, (
+            f"stove lag_tau collapsed to {pi._model_inputs[1]['lag_tau']} "
+            f"(expected 1800)."
+        )
+
     def test_greybox_log_when_no_grey_box_for_feature(self):
         """Direct call to _log_greybox_wls_comparison with None entries (line 1878)."""
         from unittest.mock import MagicMock

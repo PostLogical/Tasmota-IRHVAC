@@ -2313,9 +2313,15 @@ def weighted_least_squares(
             )
 
             if tau_result is not None:
-                detected_tau[name] = tau_result.tau
                 detected_tau_diagnostics[name] = tau_result
-                if tau_result.tau > 0:
+                # Only confirmed detections enter detected_tau. A rejected
+                # search detected no lag; emitting τ=0 here lets the
+                # controller's confirmation loop treat it as a near-zero
+                # detection and overwrite the configured/running lag_tau prior
+                # with 0 (raw filtering). The rejection evidence lives in
+                # detected_tau_diagnostics (reject_reason), not the value dict.
+                if tau_result.accepted:
+                    detected_tau[name] = tau_result.tau
                     _LOGGER.info(
                         "Lag-tau detection: %s τ=%.0fs (%.0f min), "
                         "R²_improvement=%.3f, β=%.3f, BIC gain=%.2f (>%.2f)",

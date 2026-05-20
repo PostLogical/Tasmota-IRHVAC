@@ -3018,6 +3018,81 @@ class TestWLSDetectedTau:
             f"path is not engaging — rejection still falls back to lag=0."
         )
 
+    def test_rejected_tau_excluded_from_detected_tau(self):
+        """A BIC-rejected input must NOT appear in ``detected_tau``.
+
+        ``detected_tau`` means "τ we detected"; a rejected search detected
+        nothing.  Emitting ``detected_tau[name] = 0.0`` on rejection lets the
+        controller's confirmation loop treat the non-detection as a confirmed
+        near-zero τ and overwrite the configured/running lag_tau prior with 0
+        (raw filtering).  The rejection's evidence belongs in
+        ``detected_tau_diagnostics`` (which carries ``reject_reason``), not in
+        the value dict.
+
+        Multi-input: a second (heat_source) input that also rejects must be
+        excluded independently — no cross-contamination between inputs.
+        """
+        import random
+        rng = random.Random(7)
+        dt = 900.0
+        n_obs = 200
+
+        obs = []
+        for i in range(n_obs):
+            od = rng.uniform(-5, 15)
+            # y driven by outdoor only — neither input contributes at any lag,
+            # so BIC rejects both.
+            y = 0.3 * od + rng.gauss(0, 0.05)
+            obs.append(Observation(
+                timestamp=float(i), wall_time=1713650000.0 + i * dt,
+                hp_setpoint=20.0 + y, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=20.0 + od, room_rate=0.005,
+                raw_readings={
+                    "sensor.solar": rng.uniform(0.0, 1.0),
+                    "sensor.stove": rng.uniform(0.0, 1.0),
+                },
+                clamped=False,
+            ))
+
+        model_inputs = [
+            {"entity_id": "sensor.solar", "name": "solar",
+             "input_role": "solar", "lag_tau": 4 * 3600.0},
+            {"entity_id": "sensor.stove", "name": "stove",
+             "input_role": "heat_source", "lag_tau": 1800.0},
+        ]
+        feature_order = [
+            "intercept", "outdoor_delta", "solar", "stove", "sin_hour", "cos_hour",
+        ]
+
+        result = weighted_least_squares(
+            obs, n_features=6, feature_order=feature_order,
+            model_inputs=model_inputs, detect_lag=True,
+        )
+        assert result is not None
+
+        # Precondition: both inputs must reject for this test to be meaningful.
+        for name in ("solar", "stove"):
+            diag = result.detected_tau_diagnostics[name]
+            assert not diag.accepted, (
+                f"Precondition failed: BIC accepted {name} "
+                f"(gain={diag.bic_gain:.2f}, thr={diag.bic_threshold:.2f}). "
+                f"Pure-noise input should reject."
+            )
+
+        # Contract: rejected inputs are ABSENT from detected_tau (not 0.0),
+        # but their diagnostics remain available for observability.
+        assert "solar" not in result.detected_tau, (
+            f"Rejected 'solar' leaked into detected_tau as "
+            f"{result.detected_tau.get('solar')!r}; it must be omitted so the "
+            f"confirmation loop does not clobber the lag_tau prior with 0."
+        )
+        assert "stove" not in result.detected_tau, (
+            f"Rejected 'stove' leaked into detected_tau as "
+            f"{result.detected_tau.get('stove')!r}."
+        )
+        assert "solar" in result.detected_tau_diagnostics
+        assert "stove" in result.detected_tau_diagnostics
+
 
 class TestAutoLagTauDeltaFromRoom:
     """Auto lag-tau detection for delta_from_room model inputs.
