@@ -1117,13 +1117,21 @@ class PIController:
         )
 
     def _run_batch_analysis(self) -> None:
-        """Run batch WLS analysis and apply blended updates to RLS.
+        """Run batch WLS analysis and apply the blended coefficient update.
 
         Analyzes accumulated near-equilibrium observations via weighted
-        least squares, then applies covariance-weighted Kalman fusion
-        to blend batch estimates with the current online model.  Safety:
-        ±1.0°C step cap per coefficient per 12h cycle (enlarged to ±3.0°C
-        for recently-unlocked features when batch quality gates pass).
+        least squares.  The batch is the *sole* coefficient estimator
+        (online RLS removed), so its result is fused toward a moderate
+        scalar prior by a covariance-weighted gain (`compute_blended_update`,
+        Ljung §11.4): K_i = σ²_prior / (σ²_prior + σ²_batch_i).  There is
+        no per-coefficient step cap — with no online estimate to protect,
+        capping the batch would only throttle legitimate corrections.  The
+        guards are instead the κ gate (reject the whole recommendation when
+        the condition number indicates severe multicollinearity) and the
+        physical coefficient clamps applied after the write.  Note: the
+        precision of a *freshly-unlocked* feature is governed by the unlock
+        gate in `_evaluate_feature_unlocks`, which currently admits on
+        finiteness of std_err rather than precision (see future_work #111).
         """
         if not self._pi_batch_wls_enabled or not self._pi_ff_enabled:
             _LOGGER.debug(
