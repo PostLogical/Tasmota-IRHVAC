@@ -19,7 +19,13 @@ testpaths = ["tests"]
 # for design-tier sweeps where each parametrized cell is independent and
 # inter-cell fanout matters more than fixture amortization:
 #   --override-ini='addopts=--dist=load'   (or --dist=worksteal)
-addopts = "--ignore=tests/hvac_bench --dist=loadfile"
+#
+# --store-durations: pytest-split merges each run's per-test durations into the
+# committed .test_durations (continuous, near-zero-cost). Use it to estimate a
+# run's wall-time (sum the scope ÷ workers) and as a regression tripwire
+# (git diff .test_durations after a run). pytest-durations (also installed) is
+# active by default for the live fixture-vs-test breakdown when diagnosing a jump.
+addopts = "--ignore=tests/hvac_bench --dist=loadfile --store-durations --durations-path=.test_durations"
 asyncio_mode = "auto"
 log_format = "%(asctime)s %(levelname)-8s %(name)s: %(message)s"
 log_date_format = "%H:%M:%S"

@@ -1,8 +1,10 @@
 pytest
 pytest-asyncio
 pytest-cov
+pytest-durations
 pytest-homeassistant-custom-component
 pytest-regressions
+pytest-split
 pytest-xdist
 hypothesis
 scipy
