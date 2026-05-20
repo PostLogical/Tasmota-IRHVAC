@@ -2051,6 +2051,51 @@ class TestBatchLearningCoverageGaps:
         assert len(result) == 3
         assert result[0] == 1.0  # intercept
 
+    def test_vif_zero_variance_column_does_not_break_others(self):
+        """A constant (zero-variance) model-input column must NOT singularize
+        VIF for every feature.
+
+        Regression for the unlock-gate freeze bug: a binary input that never
+        fired in the window is an all-constant column, which made the
+        correlation matrix singular -> inf VIF for ALL features -> nothing
+        could ever unlock (solar/adjacent-zone collateral-blocked by a dead
+        heat-source column). The varying features must get finite VIF.
+        """
+        import random
+        from custom_components.tasmota_irhvac.pi.batch_learning import _compute_vif_from_features
+        rng = random.Random(0)
+        # X = [intercept, varying_a, ALL_ZERO, varying_b(mildly corr w/ a)]
+        X = []
+        for _ in range(100):
+            a = rng.gauss(0.0, 1.0)
+            b = 0.3 * a + rng.gauss(0.0, 1.0)
+            X.append([1.0, a, 0.0, b])
+        vif = _compute_vif_from_features(X, n_features=4, n_obs=100)
+        assert vif[0] == 1.0
+        assert math.isfinite(vif[1]), f"varying_a VIF must be finite, got {vif[1]}"
+        assert math.isfinite(vif[3]), f"varying_b VIF must be finite, got {vif[3]}"
+        # Only mildly correlated -> modest VIF, comfortably unlockable.
+        assert vif[1] < 5.0 and vif[3] < 5.0
+
+    def test_vif_scales_with_genuine_collinearity(self):
+        """VIF still flags real feature-feature collinearity (not over-relaxed).
+
+        Two strongly-correlated varying features (r~0.95) must give high VIF
+        (~1/(1-r^2) ~ 10); near-independent features give VIF ~ 1.
+        """
+        import random
+        from custom_components.tasmota_irhvac.pi.batch_learning import _compute_vif_from_features
+        rng = random.Random(1)
+        X_collinear, X_indep = [], []
+        for _ in range(300):
+            a = rng.gauss(0.0, 1.0)
+            X_collinear.append([1.0, a, a + rng.gauss(0.0, 0.33)])  # r ~ 0.95
+            X_indep.append([1.0, rng.gauss(0.0, 1.0), rng.gauss(0.0, 1.0)])
+        vif_c = _compute_vif_from_features(X_collinear, n_features=3, n_obs=300)
+        vif_i = _compute_vif_from_features(X_indep, n_features=3, n_obs=300)
+        assert vif_c[1] > 5.0, f"collinear features should have high VIF, got {vif_c[1]}"
+        assert vif_i[1] < 2.0, f"independent features should have VIF~1, got {vif_i[1]}"
+
     # ── Line 1389: Belsley with n_obs < n_features ──
 
     def test_belsley_insufficient_obs(self):

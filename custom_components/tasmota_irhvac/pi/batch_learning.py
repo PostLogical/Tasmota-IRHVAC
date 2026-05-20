@@ -2578,21 +2578,31 @@ def weighted_least_squares(
 def _compute_vif_from_features(
     X: list[list[float]], n_features: int, n_obs: int,
 ) -> list[float]:
-    """Compute per-feature VIF from a feature matrix, excluding intercept.
+    """Per-feature VIF, excluding the intercept and any zero-variance columns.
 
-    VIF_j = diag((corr)⁻¹)_j where corr is the correlation matrix of
-    features 1..n-1 (excluding the constant intercept at index 0).
-    Uses the same eligible-only data the regression was fitted on.
+    VIF_j = diag((corr)⁻¹)_j on the column-normalized second-moment matrix of
+    the non-intercept features (unchanged, non-centered form — the non-centered
+    VIF also flags non-essential / intercept-like collinearity, which is
+    load-bearing here: it keeps a redundant passive adjacent zone, ≈ outdoor +
+    constant offset, correctly frozen).
 
-    Returns [VIF_0, ..., VIF_{n-1}] where VIF_0 = 1.0 (intercept).
-    All inf if matrix is singular.
+    The ONLY behavioural change vs the original: a constant (zero-variance)
+    column — a model input that never varied in the window, e.g. a binary heat
+    source that didn't fire — is EXCLUDED before inversion.  Otherwise its zero
+    row makes the matrix singular and returns inf for *every* feature, which
+    silently froze the whole model (a dead heat-source column blocked solar and
+    the adjacent zone from ever unlocking, even though their own VIF is fine).
+    Constant columns are caught by the variance/``held`` gate first; here they
+    return inf without poisoning the other features.  For any matrix with no
+    dead column this is identical to the original computation.
+
+    Returns [VIF_0, ..., VIF_{n-1}] with VIF_0 = 1.0 (intercept).
     """
     n = n_features
     if n_obs < 2 or n < 3:
         return [1.0] * n
 
-    # Build X'X for features 1..n-1 (exclude intercept at index 0)
-    m = n - 1
+    m = n - 1  # exclude intercept at index 0
     xtx = [[0.0] * m for _ in range(m)]
     for k in range(n_obs):
         row = X[k]
@@ -2600,31 +2610,35 @@ def _compute_vif_from_features(
             ri = i + 1  # skip intercept
             if ri >= len(row):
                 continue
+            vi = row[ri]
+            xrow = xtx[i]
             for j in range(m):
                 rj = j + 1
                 if rj >= len(row):
                     continue
-                xtx[i][j] += row[ri] * row[rj]
+                xrow[j] += vi * row[rj]
 
-    # Column-normalize to correlation matrix
-    diag_sqrt = [
-        math.sqrt(xtx[i][i]) if xtx[i][i] > 1e-15 else 1.0
-        for i in range(m)
-    ]
+    # Exclude constant columns (zero diagonal) — they singularize the matrix
+    # and would inflate every feature's VIF to inf.  Threshold matches the
+    # original diag-guard so kept columns are computed identically.
+    keep = [i for i in range(m) if xtx[i][i] > 1e-15]
+    result = [1.0] + [float("inf")] * m  # intercept 1.0; constants -> inf
+    mk = len(keep)
+    if mk == 0:
+        return result
+
+    diag_sqrt = [math.sqrt(xtx[keep[i]][keep[i]]) for i in range(mk)]
     corr = [
-        [xtx[i][j] / (diag_sqrt[i] * diag_sqrt[j]) for j in range(m)]
-        for i in range(m)
+        [xtx[keep[i]][keep[j]] / (diag_sqrt[i] * diag_sqrt[j]) for j in range(mk)]
+        for i in range(mk)
     ]
-
-    # Invert correlation matrix
-    corr_inv = DiversityAwareBuffer._invert_matrix(corr, m)
+    corr_inv = DiversityAwareBuffer._invert_matrix(corr, mk)
     if corr_inv is None:
-        return [float('inf')] * n
-
-    # Build result: intercept VIF = 1.0, rest from corr_inv diagonal
-    result = [1.0]  # index 0 = intercept
-    for i in range(m):
-        result.append(max(corr_inv[i][i], 1.0))
+        for i in keep:
+            result[i + 1] = float("inf")
+        return result
+    for idx, i in enumerate(keep):
+        result[i + 1] = max(corr_inv[idx][idx], 1.0)
     return result
 
 
