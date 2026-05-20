@@ -72,7 +72,7 @@ class Observation:
     room_rate: float = 0.0  # dT/dt in °C/min at observation time
     raw_readings: dict[str, float] = field(default_factory=dict)  # entity_id → raw sensor value
     clamped: bool = False  # True if HP output is unusable for learning
-    clamped_reason: str = ""  # "", "no_output", "saturated_low", "saturated_high", "observe_only", "qref_active"
+    clamped_reason: str = ""  # "", "no_output", "saturated_low", "saturated_high", "observe_only"
     supplemental_active: bool = False  # supplemental source tracking or assisting
     hp_contribution_uncertain: bool = False  # |hp_offset| within regime margin
     # Auto-perturbation state at observation time. True when the auto-
