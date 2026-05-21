@@ -2077,6 +2077,16 @@ class TestBatchLearningCoverageGaps:
         # Only mildly correlated -> modest VIF, comfortably unlockable.
         assert vif[1] < 5.0 and vif[3] < 5.0
 
+    def test_vif_all_dead_columns_returns_inf(self):
+        """When EVERY non-intercept column is constant (all dead inputs), no
+        column survives the zero-variance exclusion → return inf for each
+        (intercept stays 1.0).  Covers the mk==0 early return.
+        """
+        from custom_components.tasmota_irhvac.pi.batch_learning import _compute_vif_from_features
+        X = [[1.0, 0.0, 0.0]] * 3  # intercept + two all-zero inputs
+        vif = _compute_vif_from_features(X, n_features=3, n_obs=3)
+        assert vif == [1.0, float("inf"), float("inf")]
+
     def test_vif_scales_with_genuine_collinearity(self):
         """VIF still flags real feature-feature collinearity (not over-relaxed).
 
