@@ -536,7 +536,7 @@ class TestEvaluateFeatureUnlocks:
         entity = FakePIEntity(config)
         return entity
 
-    def _make_partial_result(self, n, std_err=None, held=None, vif=None):
+    def _make_partial_result(self, n, std_err=None, held=None, vif=None, beta=None):
         """Build a partial-regression BatchResult sized to ``n`` features.
 
         Used as the return value of the patched ``weighted_least_squares``
@@ -555,10 +555,20 @@ class TestEvaluateFeatureUnlocks:
         if vif is not None:
             for i, v in enumerate(vif):
                 full_vif[i] = v
+        # beta_batch defaults to a high-SNR magnitude so that, paired with
+        # the permissive default se (0.1), every feature clears the precision
+        # (t-stat) gate (|β|/se = 10 ≫ threshold) unless a test explicitly
+        # supplies a small β.  This keeps the pre-existing "unlocks when
+        # identifiable" tests unlocking now that the gate also requires
+        # |β|/se ≥ UNLOCK_TSTAT_THRESHOLD.
+        full_beta = [1.0] * n
+        if beta is not None:
+            for i, v in enumerate(beta):
+                full_beta[i] = v
         return BatchResult(
             n_total=100,
             n_eligible=80,
-            beta_batch=[0.0] * n,
+            beta_batch=full_beta,
             beta_current=[0.0] * n,
             residual_rms=0.5,
             max_coeff_change_pct=5.0,
@@ -627,6 +637,39 @@ class TestEvaluateFeatureUnlocks:
         pi._cached_kappa = 15.0
         self._eval(pi, result)
         assert pi._rls_heat.frozen[2], "Feature should remain frozen (VIF >= 10)"
+
+    def test_no_unlock_when_imprecise_low_tstat(self):
+        """Feature stays frozen when estimable+finite but imprecise (t<threshold).
+
+        β=0.1 with se=0.08 → t=1.25, well below UNLOCK_TSTAT_THRESHOLD (and
+        below any reasonable choice in [2, 3]).  The old finiteness-only gate
+        would unlock this (se is finite, VIF ok); the precision gate must not.
+        """
+        entity = self._make_entity_with_inputs(n=1)
+        pi = entity._pi
+        n = pi._rls_heat.n
+        result = self._make_partial_result(
+            n, beta=[1.0, 1.0, 0.1], std_err=[0.1, 0.05, 0.08], vif=[1.0, 1.5, 2.0],
+        )
+        pi._cached_kappa = 15.0
+        self._eval(pi, result)
+        assert pi._rls_heat.frozen[2], "Feature should remain frozen (t-stat below precision threshold)"
+
+    def test_unlock_when_tstat_clears_threshold(self):
+        """Feature unlocks when its estimate is precise enough (high t-stat).
+
+        β=1.0 with se=0.08 → t=12.5, comfortably above any threshold — the
+        identifiable-and-precise case the gate is meant to admit.
+        """
+        entity = self._make_entity_with_inputs(n=1)
+        pi = entity._pi
+        n = pi._rls_heat.n
+        result = self._make_partial_result(
+            n, beta=[1.0, 1.0, 1.0], std_err=[0.1, 0.05, 0.08], vif=[1.0, 1.5, 2.0],
+        )
+        pi._cached_kappa = 15.0
+        self._eval(pi, result)
+        assert not pi._rls_heat.frozen[2], "Feature should unlock (t-stat clears precision threshold)"
 
     def test_adjacent_zone_gated_by_kappa(self):
         """Adjacent zone feature stays frozen when κ >= 100."""
@@ -756,6 +799,99 @@ class TestEvaluateFeatureUnlocks:
         assert rec.gate_failed == "std_err"
         assert rec.unfrozen is False
         assert rec.full_model_std_err is None
+
+    def test_records_capture_precision_gate_failure(self):
+        """Low t-stat surfaces gate_failed='precision' with the t-stat preserved."""
+        entity = self._make_entity_with_inputs(n=1)
+        pi = entity._pi
+        n = pi._rls_heat.n
+        result = self._make_partial_result(
+            n, beta=[1.0, 1.0, 0.1], std_err=[0.1, 0.05, 0.08], vif=[1.0, 1.5, 2.0],
+        )
+        pi._cached_kappa = 15.0
+        self._eval(pi, result)
+
+        rec = next(r for r in pi._last_unlock_evaluation if r.coefficient_index == 2)
+        assert rec.gate_failed == "precision"
+        assert rec.unfrozen is False
+        assert rec.full_model_tstat == pytest.approx(0.1 / 0.08)
+        assert rec.full_model_std_err == 0.08
+
+    def test_no_unlock_when_estimate_agrees_with_seed(self):
+        """Seed-relative gate: a feature held at a NONZERO seed stays frozen
+        when the WLS estimate agrees with that seed (β̂≈seed → no bias to
+        correct), even though |β̂|/se would clear the threshold by a mile.
+        This is what makes the gate correct for prod seeds (e.g. solar −4.0)
+        and is the behaviour |β̂|/se gets wrong.
+        """
+        from unittest.mock import patch as _patch
+        entity = self._make_entity_with_inputs(n=1)
+        pi = entity._pi
+        n = pi._rls_heat.n
+        # Feature 2 held at seed −4.0; WLS estimate −4.0 (agrees), se 0.08.
+        # |β̂−seed|/se = 0 → frozen.  Old |β̂|/se = 50 would wrongly unlock.
+        result = self._make_partial_result(
+            n, beta=[1.0, 1.0, -4.0], std_err=[0.1, 0.05, 0.08], vif=[1.0, 1.5, 2.0],
+        )
+        pi._cached_kappa = 15.0
+        with _patch(
+            "custom_components.tasmota_irhvac.pi.pi_controller."
+            "weighted_least_squares",
+            return_value=result,
+        ):
+            pi._evaluate_feature_unlocks(
+                observations=[], current_phys=[0.0, 0.0, -4.0],
+                rls=pi._rls_heat, is_heating=True,
+            )
+        assert pi._rls_heat.frozen[2], (
+            "Feature should stay frozen — estimate agrees with seed, no bias to correct"
+        )
+        rec = next(r for r in pi._last_unlock_evaluation if r.coefficient_index == 2)
+        assert rec.gate_failed == "precision"
+        assert rec.full_model_tstat == pytest.approx(0.0)
+
+    def test_unlock_when_estimate_departs_from_seed(self):
+        """Seed-relative gate: a feature held at a NONZERO seed unlocks when the
+        WLS estimate departs from the seed by enough relative to se (real bias
+        to correct). β̂=−2.0 vs seed −4.0, se 0.08 → |β̂−seed|/se = 25 → unlock.
+        """
+        from unittest.mock import patch as _patch
+        entity = self._make_entity_with_inputs(n=1)
+        pi = entity._pi
+        n = pi._rls_heat.n
+        result = self._make_partial_result(
+            n, beta=[1.0, 1.0, -2.0], std_err=[0.1, 0.05, 0.08], vif=[1.0, 1.5, 2.0],
+        )
+        pi._cached_kappa = 15.0
+        with _patch(
+            "custom_components.tasmota_irhvac.pi.pi_controller."
+            "weighted_least_squares",
+            return_value=result,
+        ):
+            pi._evaluate_feature_unlocks(
+                observations=[], current_phys=[0.0, 0.0, -4.0],
+                rls=pi._rls_heat, is_heating=True,
+            )
+        assert not pi._rls_heat.frozen[2], (
+            "Feature should unlock — estimate departs from seed by 25σ (bias to correct)"
+        )
+
+    def test_unlock_when_se_zero_degenerate(self):
+        """Degenerate zero-variance estimate (se=0, finite): infinitely precise,
+        so it unlocks iff β̂ differs from the seed.  Covers the se≤0 branch of
+        the seed-relative t-stat (|β̂−seed|/se → ∞ when se=0 and Δ>0).
+        """
+        entity = self._make_entity_with_inputs(n=1)
+        pi = entity._pi
+        n = pi._rls_heat.n
+        result = self._make_partial_result(
+            n, beta=[1.0, 1.0, 0.5], std_err=[0.1, 0.05, 0.0], vif=[1.0, 1.5, 2.0],
+        )
+        pi._cached_kappa = 15.0
+        self._eval(pi, result)  # current_phys = 0 → Δ = 0.5 > 0 → t = ∞
+        assert not pi._rls_heat.frozen[2], (
+            "Feature should unlock (se=0, Δ>0 → infinitely precise)"
+        )
 
     def test_records_capture_kappa_gate_failure(self):
         """Adjacent_zone with κ≥100 surfaces gate_failed='kappa'."""

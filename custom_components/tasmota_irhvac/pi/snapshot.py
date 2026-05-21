@@ -310,11 +310,15 @@ class UnlockEvaluationRecord:
     still held" without re-running batch WLS offline.
 
     `gate_failed` is one of:
-      - "held"     — feature in `full_result.held_features` (variance gate)
-      - "std_err"  — full-model std_err non-finite
-      - "vif"      — full-model VIF >= 10
-      - "kappa"    — adjacent_zone feature, condition number >= 100
-      - None       — all gates passed; `unfrozen` is True
+      - "held"      — feature in `full_result.held_features` (variance gate)
+      - "std_err"   — full-model std_err non-finite (not estimable)
+      - "vif"       — full-model VIF >= 10
+      - "precision" — estimable but Wald t-stat |β̂|/se below the precision floor
+      - "kappa"     — adjacent_zone feature, condition number >= 100
+      - None        — all gates passed; `unfrozen` is True
+
+    `full_model_tstat` is the partial-regression Wald t-stat the precision gate
+    decided on (None when std_err is non-finite, i.e. not estimable).
     """
 
     feature_name: str
@@ -326,6 +330,7 @@ class UnlockEvaluationRecord:
     full_model_vif: float | None
     is_adjacent_zone: bool
     kappa_at_decision: float | None
+    full_model_tstat: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -338,6 +343,7 @@ class UnlockEvaluationRecord:
             "full_model_vif": self.full_model_vif,
             "is_adjacent_zone": self.is_adjacent_zone,
             "kappa_at_decision": self.kappa_at_decision,
+            "full_model_tstat": self.full_model_tstat,
         }
 
     @classmethod
@@ -352,6 +358,7 @@ class UnlockEvaluationRecord:
             full_model_vif=data.get("full_model_vif"),
             is_adjacent_zone=data.get("is_adjacent_zone", False),
             kappa_at_decision=data.get("kappa_at_decision"),
+            full_model_tstat=data.get("full_model_tstat"),
         )
 
 

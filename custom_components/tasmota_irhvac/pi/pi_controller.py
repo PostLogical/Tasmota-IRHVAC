@@ -99,6 +99,7 @@ from ..const import (
     DEFAULT_PI_INTERCEPT_SEED_HEAT,
     DEFAULT_PI_OUTDOOR_SEED_COOL,
     DEFAULT_KAPPA_THRESHOLD,
+    UNLOCK_TSTAT_THRESHOLD,
     DEFAULT_PI_OUTDOOR_SEED_HEAT,
     DEFAULT_PI_OUTDOOR_SEED_CLAMP_MAX,
     DEFAULT_PI_OUTDOOR_SEED_CLAMP_MIN,
@@ -2378,7 +2379,11 @@ class PIController:
         1. Feature not held in its partial regression (sufficient variance)
         2. ``beta_std_err[i]`` finite there (feature estimable)
         3. Per-feature ``feature_vif[i] < 10`` (Belsley 1980)
-        4. For adjacent_zone inputs: additionally κ < 100
+        4. Seed-relative Wald t-stat ``|β̂[i] − seed[i]|/se[i] ≥
+           UNLOCK_TSTAT_THRESHOLD`` — a model-selection (AIC/forward-selection)
+           inclusion test: freeing the coefficient must improve the fit over
+           holding it at its seed by enough to act on (future_work #111)
+        5. For adjacent_zone inputs: additionally κ < 100
         Auto-gating skips features with a manual override (not None).
 
         Writes one ``UnlockEvaluationRecord`` per evaluated frozen
@@ -2434,6 +2439,7 @@ class PIController:
                     full_model_std_err=None, full_model_vif=None,
                     is_adjacent_zone=is_adjacent,
                     kappa_at_decision=kappa_at_decision,
+                    full_model_tstat=None,
                 ))
                 continue
 
@@ -2451,6 +2457,34 @@ class PIController:
             )
             feat_vif: float | None = vif_raw if math.isfinite(vif_raw) else None
 
+            # Seed-relative Wald t-stat |β̂ − seed|/se for the precision gate.
+            # The numerator is the *bias-reduction available* by unlocking —
+            # how far the free WLS estimate wants to move the coefficient from
+            # the value it's currently held at (`seed_i` = current_phys[i]).
+            # This is the Wald statistic for H0: β_i = seed_i, i.e. a model-
+            # selection (not significance-against-zero) criterion: it asks
+            # "does freeing this coefficient improve the fit over holding it at
+            # its seed?".  Correct for nonzero prod seeds (e.g. solar −4.0):
+            # if the data agrees with the seed (β̂≈seed), there's nothing to
+            # gain and we don't unlock.  None when se is non-finite (caught by
+            # the std_err gate below).
+            beta_i = (
+                partial.beta_batch[i]
+                if i < len(partial.beta_batch)
+                else 0.0
+            )
+            seed_i = current_phys[i] if i < len(current_phys) else 0.0
+            delta_i = abs(beta_i - seed_i)
+            if not math.isfinite(se_raw):
+                tstat: float | None = None
+            elif se_raw <= 0.0:
+                # Degenerate zero-variance estimate: infinitely precise iff
+                # the coefficient differs from its seed (held gate catches
+                # constants).
+                tstat = float("inf") if delta_i > 0.0 else 0.0
+            else:
+                tstat = delta_i / se_raw
+
             # 1. Not held in partial model (sufficient variance in data)
             if in_held:
                 _LOGGER.debug(
@@ -2464,6 +2498,7 @@ class PIController:
                     full_model_std_err=se, full_model_vif=feat_vif,
                     is_adjacent_zone=is_adjacent,
                     kappa_at_decision=kappa_at_decision,
+                    full_model_tstat=tstat,
                 ))
                 continue
 
@@ -2480,6 +2515,7 @@ class PIController:
                     full_model_std_err=None, full_model_vif=feat_vif,
                     is_adjacent_zone=is_adjacent,
                     kappa_at_decision=kappa_at_decision,
+                    full_model_tstat=None,
                 ))
                 continue
 
@@ -2496,10 +2532,43 @@ class PIController:
                     full_model_std_err=se, full_model_vif=feat_vif,
                     is_adjacent_zone=is_adjacent,
                     kappa_at_decision=kappa_at_decision,
+                    full_model_tstat=tstat,
                 ))
                 continue
 
-            # 4. Adjacent zone: additionally require κ < 100
+            # 4. Precision (model-selection): seed-relative Wald t-stat
+            #    |β̂ − seed|/se ≥ UNLOCK_TSTAT_THRESHOLD.  Estimable +
+            #    non-collinear is not enough — freeing the coefficient must
+            #    improve the fit over holding it at its seed by enough to act
+            #    on.  This is the Wald statistic for H0: β = seed, which is an
+            #    AIC/forward-selection inclusion test (|t|≈√2..2 is the
+            #    prediction-oriented model-selection band, AIC's 2-per-parameter
+            #    penalty ⇔ |t|>√2; |t|>1 is the bare adjusted-R² breakeven) —
+            #    NOT a significance-against-zero test.  It withholds genuinely-
+            #    imprecise coefficients (large se → small ratio) and ones the
+            #    data says the seed already fits (β̂≈seed → small Δ), while
+            #    admitting a precisely-estimated coefficient that meaningfully
+            #    departs from its seed.  See future_work #111/#112.
+            if tstat is None or tstat < UNLOCK_TSTAT_THRESHOLD:
+                _LOGGER.debug(
+                    "%sFeature unlock: %s[%d] — |β̂−seed|/se=%.2f "
+                    "(<%.1f, imprecise vs seed; se=%.4f Δ=%.4f)",
+                    self._log_prefix, name, i,
+                    tstat if tstat is not None else 0.0,
+                    UNLOCK_TSTAT_THRESHOLD, se_raw, delta_i,
+                )
+                records.append(UnlockEvaluationRecord(
+                    feature_name=name, coefficient_index=i,
+                    gate_failed="precision", unfrozen=False,
+                    in_full_model_held=False,
+                    full_model_std_err=se, full_model_vif=feat_vif,
+                    is_adjacent_zone=is_adjacent,
+                    kappa_at_decision=kappa_at_decision,
+                    full_model_tstat=tstat,
+                ))
+                continue
+
+            # 5. Adjacent zone: additionally require κ < 100
             if is_adjacent and kappa is not None and kappa >= 100:
                 _LOGGER.debug(
                     "%sFeature unlock: %s[%d] — adjacent_zone gated by κ=%.0f",
@@ -2512,14 +2581,16 @@ class PIController:
                     full_model_std_err=se, full_model_vif=feat_vif,
                     is_adjacent_zone=True,
                     kappa_at_decision=kappa,
+                    full_model_tstat=tstat,
                 ))
                 continue
 
             # All conditions met — unfreeze
             self.set_frozen(mode, i, frozen=False, manual=False)
             _LOGGER.info(
-                "%sFeature unlock: %s[%d] unfrozen (σ=%.4f, VIF=%.1f, partial fit)",
-                self._log_prefix, name, i, se_raw, vif_raw,
+                "%sFeature unlock: %s[%d] unfrozen (σ=%.4f, t=%.1f, VIF=%.1f, partial fit)",
+                self._log_prefix, name, i, se_raw,
+                tstat if tstat is not None else float("inf"), vif_raw,
             )
             records.append(UnlockEvaluationRecord(
                 feature_name=name, coefficient_index=i,
@@ -2528,6 +2599,7 @@ class PIController:
                 full_model_std_err=se, full_model_vif=feat_vif,
                 is_adjacent_zone=is_adjacent,
                 kappa_at_decision=kappa_at_decision,
+                full_model_tstat=tstat,
             ))
 
         self._last_unlock_evaluation = records

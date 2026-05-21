@@ -242,6 +242,32 @@ DEFAULT_PI_KD_FILTER_N = 8       # Derivative filter coefficient: Tf = Td/N. Hig
 # gate for synthetic-learning experiments pass a larger value via the
 # `kappa_threshold` ctor kwarg on PIController. Not a user-facing config key.
 DEFAULT_KAPPA_THRESHOLD = 100.0
+
+# Feature-unlock precision gate: a frozen feedforward coefficient unfreezes
+# only when its partial-regression seed-relative Wald t-stat |β̂ − seed|/se(β̂)
+# clears this floor (se = Newey-West HAC std_err, autocorrelation-robust).  The
+# numerator is the *bias-reduction available* by unlocking — how far the free
+# WLS estimate departs from the value the coefficient is currently held at — so
+# this is the Wald statistic for H0: β = seed, i.e. a MODEL-SELECTION inclusion
+# test ("does freeing this coefficient improve the fit over holding the seed?"),
+# NOT a significance-against-zero test.  Measuring against the seed (not 0) is
+# what makes it correct for nonzero production seeds (e.g. solar −4.0): if the
+# data agrees with the seed, there is nothing to gain and we don't unlock.
+#
+# Threshold 2.0 is grounded in prediction-oriented model selection, NOT bench
+# output: |t|>1 is the bare adjusted-R² / prediction-improvement breakeven
+# (Haitovsky 1969; Edwards 1969); AIC's 2-per-parameter penalty is |t|>√2≈1.41
+# (and AIC is the criterion preferred for *prediction*); forward-selection
+# α-to-enter 0.05–0.15 is t≈1.4–2; BIC is ~√ln(n)≈2–2.6 at our n.  2.0 sits in
+# that band, above the breakeven for a post-selection-inference margin (β̂ is
+# selected on the data, which inflates the apparent improvement).  An earlier
+# value of 3 was over-strict — its only specific justification was a comfort-
+# degradation finding later shown to be a stale-baseline artifact (future_work
+# #114).  Latching (re-evaluated every 12h batch) means the floor *delays*
+# rather than *omits*.  Not a user-facing config key.  See future_work #111
+# (this gate) / #112 (the closed-loop-weighted refinement that would supersede
+# a coefficient-level criterion).
+UNLOCK_TSTAT_THRESHOLD = 2.0
 DEFAULT_PI_TICK_FALLBACK = 900
 DEFAULT_PI_DEADBAND = 0.5
 
