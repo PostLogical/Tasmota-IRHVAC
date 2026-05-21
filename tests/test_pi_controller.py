@@ -7416,3 +7416,67 @@ class TestPIControllerCoverageGaps:
         # CV = std_err / |value|; k_w_cv = 0.001/0.025 = 0.04 dominates
         # ua_c_cv = 0.0006/0.012 = 0.05 → max picks ua_c_cv.
         assert kwargs["tau_fast_cv"] == pytest.approx(0.05, abs=1e-9)
+
+
+class TestSupervisorTickBranches:
+    """Cover the config-driven supervisor tick branches the default
+    (qref kind, no in-deadband gate) path skips. ``_hp_estimated_active_state``
+    is read at the supervisor block before it's recomputed later in the tick,
+    so setting it True pre-tick reaches the block."""
+
+    @pytest.mark.asyncio
+    async def test_qref_require_in_deadband_branch(self, pi_entity):
+        """qref with require_in_deadband=True hits the in-deadband gate path."""
+        pi = pi_entity._pi
+        pi._supervisor_kind = "qref"
+        pi._supervisor_qref_require_in_deadband = True
+        pi._hp_estimated_active_state = True
+        pi._last_raw_setpoint = 22.3  # non-NaN → qref biaser updates
+        pi_entity._attr_current_temperature = 22.0
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22.0
+        await pi._pi_tick()
+        assert pi._last_effective_desired_c is not None
+
+    @pytest.mark.asyncio
+    async def test_governor_supervisor_kind_branch(self, pi_entity):
+        """supervisor_kind='governor' runs the ReferenceGovernor lifecycle."""
+        pi = pi_entity._pi
+        pi._supervisor_kind = "governor"
+        pi._hp_estimated_active_state = True
+        pi._last_raw_setpoint = 22.3  # non-NaN → chatter_monitor.update runs
+        pi_entity._attr_current_temperature = 21.5
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22.0
+        await pi._pi_tick()
+        assert pi._last_effective_desired_c is not None
+
+    @pytest.mark.asyncio
+    async def test_governor_nan_prev_raw_branch(self, pi_entity):
+        """Governor kind with NaN prev_raw takes the chatter_alarm=False path."""
+        pi = pi_entity._pi
+        pi._supervisor_kind = "governor"
+        pi._hp_estimated_active_state = True
+        pi._last_raw_setpoint = float("nan")  # NaN guard → chatter_alarm=False
+        pi_entity._attr_current_temperature = 21.5
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22.0
+        await pi._pi_tick()
+        assert pi._last_effective_desired_c is not None
+
+    @pytest.mark.asyncio
+    async def test_governor_engage_applies_integral_delta(self, pi_entity):
+        """A governor chatter alarm engages NUDGE and applies its bumpless
+        integral delta to the integrator (the supervisor_integral_delta != 0
+        branch)."""
+        from unittest.mock import patch as _patch
+        pi = pi_entity._pi
+        pi._supervisor_kind = "governor"
+        pi._hp_estimated_active_state = True
+        pi._last_raw_setpoint = 22.3
+        pi_entity._attr_current_temperature = 21.5
+        pi._desired_temp = 22.0
+        pi._hp_setpoint = 22.0
+        with _patch.object(pi._chatter_monitor, "update", return_value=True):
+            await pi._pi_tick()
+        assert pi._ref_governor.mode == "NUDGE"  # engaged → integral delta applied

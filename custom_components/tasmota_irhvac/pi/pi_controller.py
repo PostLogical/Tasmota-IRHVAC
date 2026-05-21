@@ -5857,7 +5857,11 @@ class PIController:
         # than at the 15-min cadence at which gain=0.4 was tuned, which
         # over-suppresses integral build at faster cadences and creates
         # the very limit cycle q-feedback was designed to prevent.
-        if self._pi_ff_enabled and in_deadband and self._q_feedback_enabled:
+        # pragma: no cover — DEPRECATED. q_feedback (integrator-side quantization
+        # defense) was superseded by the reference-side qref supervisor
+        # (da4d5ae) and is default-off; it is no longer field-used and is kept
+        # only as an opt-in fallback. Not exercised by the unit suite.
+        if self._pi_ff_enabled and in_deadband and self._q_feedback_enabled:  # pragma: no cover
             q_error = float(self._hp_setpoint) - clamped_setpoint
             if self._q_feedback_lower < abs(q_error) <= 0.5:
                 self._pi_integral += (

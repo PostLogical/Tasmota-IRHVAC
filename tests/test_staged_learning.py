@@ -893,6 +893,40 @@ class TestEvaluateFeatureUnlocks:
             "Feature should unlock (se=0, Δ>0 → infinitely precise)"
         )
 
+    @pytest.mark.asyncio
+    async def test_lag_tau_first_detection_pending(self):
+        """First auto-lag-τ detection for an UNFROZEN input: the smoothed
+        estimate seeds to tau_new, the consistency count increments to 1
+        (< confirm count 2), and because the feature is unfrozen the loop logs
+        'pending' (covers the first-detection + pending branches of the
+        auto-lag-τ confirmation in _run_batch_analysis)."""
+        from unittest.mock import patch as _patch
+        entity = self._make_entity_with_inputs(n=1)
+        pi = entity._pi
+        entity._attr_hvac_mode = HVACMode.HEAT
+        pi._desired_temp = 21.0
+        pi._hp_setpoint = 21.0
+        n = pi._rls_heat.n
+        pi._rls_heat.frozen[2] = False  # input_0 unfrozen → 'pending' (not 'held')
+        now = time.monotonic()
+        for i in range(25):  # ≥20 so _run_batch_analysis doesn't bail
+            pi._observation_buffer_heat.add(Observation(
+                timestamp=now + i * 900, wall_time=1713650000.0 + i * 900,
+                hp_setpoint=22.0, current_c=21.0 + (i % 3) * 0.1, desired_c=21.0,
+                outdoor_temp_c=21.0 + float(i % 5 - 2), room_rate=0.001,
+                raw_readings={}, clamped=False,
+            ))
+        result = self._make_partial_result(n)
+        result.detected_tau = {"input_0": 7200.0}
+        with _patch(
+            "custom_components.tasmota_irhvac.pi.pi_controller.weighted_least_squares",
+            return_value=result,
+        ):
+            pi._run_batch_analysis()
+        # First detection: smoothed = tau_new; count incremented to 1 (pending).
+        assert pi._detected_lag_tau["input_0:heat"] == 7200.0
+        assert pi._detected_lag_tau_count["input_0:heat"] == 1
+
     def test_records_capture_kappa_gate_failure(self):
         """Adjacent_zone with κ≥100 surfaces gate_failed='kappa'."""
         entity = self._make_entity_with_inputs(n=1, roles=["adjacent_zone"])
