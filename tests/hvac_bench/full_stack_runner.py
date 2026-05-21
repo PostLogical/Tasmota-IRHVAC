@@ -914,7 +914,7 @@ def run_full_stack(
                 "chatter_event_count": getattr(getattr(pi, "_chatter_monitor", None), "event_count", 0),
                 "qref_bias": getattr(getattr(pi, "_qref_biaser", None), "bias", 0.0),
                 "effective_desired_c": getattr(pi, "_last_effective_desired_c", None),
-                "rls_obs_count": pi._rls_heat.observation_count,
+                "rls_obs_count": _mode_rls(pi, config.mode).observation_count,
                 "obs_admitted": oc.admitted if oc is not None else None,
                 "obs_clamped": oc.clamped if oc is not None else None,
                 "obs_clamped_reason": oc.clamped_reason if oc is not None else None,
@@ -940,10 +940,10 @@ def run_full_stack(
 
                 # Snapshot coefficients
                 _snapshot_coefs(pi, batch_count, config.model_inputs,
-                                true_coefs, coef_trajectory)
+                                true_coefs, coef_trajectory, mode=config.mode)
 
                 # κ and covariance trace at batch time
-                rls = pi._rls_heat
+                rls = _mode_rls(pi, config.mode)
                 p_diag = rls.get_covariance_diagonal()
                 batch_covariance_trace.append(sum(p_diag))
                 kappa = pi._cached_kappa
@@ -1001,10 +1001,10 @@ def run_full_stack(
                     day_ff_sum / day_ff_plus_int_sum
                     if day_ff_plus_int_sum > 0 else 0.0
                 )
-                rls = pi._rls_heat
+                rls = _mode_rls(pi, config.mode)
                 p_diag = rls.get_covariance_diagonal()
                 daily_covariance_trace.append(sum(p_diag))
-                buf = pi._observation_buffer_heat
+                buf = _mode_buf(pi, config.mode)
                 buf_max = getattr(buf, "_max_size", 500)
                 daily_buffer_utilization.append(
                     len(buf) / buf_max if buf_max > 0 else 0.0
@@ -1047,16 +1047,16 @@ def run_full_stack(
 
                     # Current coefficients
                     current_coefs, current_errors = _get_coef_state(
-                        pi, config.model_inputs, true_coefs
+                        pi, config.model_inputs, true_coefs, mode=config.mode
                     )
 
                     # Learning state for checkpoint
-                    rls_cp = pi._rls_heat
+                    rls_cp = _mode_rls(pi, config.mode)
                     p_diag_cp = rls_cp.get_covariance_diagonal()
                     ff_a = abs(pi._ff_offset)
                     int_a = abs(pi._pi_integral)
                     denom_cp = ff_a + int_a
-                    buf_cp = pi._observation_buffer_heat
+                    buf_cp = _mode_buf(pi, config.mode)
                     buf_max_cp = getattr(buf_cp, "_max_size", 500)
 
                     state = CheckpointState(
@@ -1095,7 +1095,7 @@ def run_full_stack(
     # ── Final results ────────────────────────────────────────────────
 
     final_coefs, final_errors = _get_coef_state(
-        pi, config.model_inputs, true_coefs
+        pi, config.model_inputs, true_coefs, mode=config.mode
     )
 
     # Weekly rollups
@@ -1192,15 +1192,27 @@ def run_full_stack(
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 
-def _snapshot_coefs(pi, batch_count, model_inputs, true_coefs, trajectory):
+def _mode_rls(pi, mode):
+    """Active RLS model for the run's mode (cool runs learn in _rls_cool)."""
+    return pi._rls_cool if mode == "cool" else pi._rls_heat
+
+
+def _mode_buf(pi, mode):
+    """Active observation buffer for the run's mode."""
+    return pi._observation_buffer_cool if mode == "cool" else pi._observation_buffer_heat
+
+
+def _snapshot_coefs(pi, batch_count, model_inputs, true_coefs, trajectory,
+                    mode="heat"):
     """Take a coefficient snapshot after a batch cycle."""
-    coef_dict = pi._rls_heat.get_coefficients()
+    rls = _mode_rls(pi, mode)
+    coef_dict = rls.get_coefficients()
     names = ["intercept", "outdoor_delta"] + [mi.name for mi in model_inputs]
     snapshot = {"batch": batch_count}
     for idx, name in enumerate(names):
-        if idx < pi._rls_heat.n:
+        if idx < rls.n:
             snapshot[name] = coef_dict[idx]
-            snapshot[f"{name}_frozen"] = pi._rls_heat.frozen[idx]
+            snapshot[f"{name}_frozen"] = rls.frozen[idx]
     br = getattr(pi, "_last_batch_result", None)
     if br is not None and br.detected_tau_diagnostics:
         for mi in model_inputs:
@@ -1221,14 +1233,15 @@ def _snapshot_coefs(pi, batch_count, model_inputs, true_coefs, trajectory):
     trajectory.append(snapshot)
 
 
-def _get_coef_state(pi, model_inputs, true_coefs):
+def _get_coef_state(pi, model_inputs, true_coefs, mode="heat"):
     """Get current coefficients and errors vs truth."""
-    coef_dict = pi._rls_heat.get_coefficients()
+    rls = _mode_rls(pi, mode)
+    coef_dict = rls.get_coefficients()
     names = ["intercept", "outdoor_delta"] + [mi.name for mi in model_inputs]
     current = {}
     errors = {}
     for idx, name in enumerate(names):
-        if idx < pi._rls_heat.n:
+        if idx < rls.n:
             val = coef_dict[idx]
             current[name] = val
             if name in true_coefs:
