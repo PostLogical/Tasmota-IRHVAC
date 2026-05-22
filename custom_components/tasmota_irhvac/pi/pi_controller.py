@@ -5192,6 +5192,13 @@ class PIController:
             e.temperature_unit,
             UnitOfTemperature.CELSIUS,
         )
+        # True occupant setpoint in °C, captured BEFORE auto-perturb (a plant-ID
+        # excitation) and the supervisor's qref bias.  Comfort-safety logic — the
+        # overtemp regime — must reference what the occupant actually asked for,
+        # not the qref-effective target the inner PI tracks; keying it off
+        # effective both false-alarms (bias down) and goes blind to overheating
+        # (bias up).  See memory project_qref_overtemp_bumpless_bugs (Bug 1).
+        user_desired_c = desired_c
 
         # Low-pass filter on room temperature measurement.
         # Reduces sensor noise amplified through Kp.  Uses raw reading for
@@ -5639,10 +5646,12 @@ class PIController:
         # commanded high, current well below setpoint, so the existing
         # gate sees HP as active and this gate stays dormant — HP keeps
         # contributing as it must during cold snap.
+        # Reference the occupant setpoint (user_desired_c), NOT the qref-biased
+        # desired_c the inner PI tracks — this is comfort-safety, not control.
         if is_heating:
-            overtemp_error = current_c - desired_c     # >0 when over-heated
+            overtemp_error = current_c - user_desired_c     # >0 when over-heated
         elif is_cooling:
-            overtemp_error = desired_c - current_c     # >0 when over-cooled
+            overtemp_error = user_desired_c - current_c     # >0 when over-cooled
         else:  # pragma: no cover — defensive: line 4670 returns False if neither
             overtemp_error = 0.0
         # Update uncontrollable-entry latch.  Set when existing gate fires

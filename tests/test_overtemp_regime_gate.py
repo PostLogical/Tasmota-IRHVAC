@@ -157,6 +157,59 @@ async def test_regime_does_not_enter_below_enter_threshold():
     assert pi._overtemp_regime is False
 
 
+# ── Comfort regime references the OCCUPANT setpoint, not qref-effective ──
+# The overtemp regime is occupant-comfort protection ("room too warm for the
+# human → idle the HP"), so its threshold must be measured against the user
+# setpoint, NOT the qref-biased effective reference the inner PI tracks.
+# Keying it off effective makes it both false-alarm (bias down) and go blind
+# (bias up).  See memory project_qref_overtemp_bumpless_bugs (Bug 1).
+
+
+@pytest.mark.asyncio
+async def test_regime_ignores_downward_qref_bias():
+    """qref biases effective DOWN; room is over *effective* by >ENTER but over
+    *user* by <ENTER → must stay dormant (no spurious trip)."""
+    entity = _make_entity()
+    pi = entity._pi
+    pi._desired_temp = 22.0
+    pi._uncontrollable_entry_latch = True
+    pi._supervisor_enabled = True
+    pi._supervisor_kind = "qref"
+    pi._last_raw_setpoint = 24.0            # non-NaN → qref update path runs
+    # Room 22.8: 0.8 over user (22.0, < ENTER 1.0) but 1.1 over effective
+    # (21.7 after a -0.3 bias, > ENTER).  HP commanded high (24) → estimated
+    # active so the supervisor runs.
+    entity._attr_current_temperature = 22.8
+    pi._hp_setpoint = 24
+    with patch.object(pi._qref_biaser, "update", return_value=-0.3):
+        await _tick(pi)
+    assert pi._overtemp_regime is False, (
+        "regime tripped off the qref-effective reference, not the user setpoint"
+    )
+
+
+@pytest.mark.asyncio
+async def test_regime_fires_on_genuine_overheat_despite_upward_bias():
+    """qref biases effective UP; room genuinely over *user* by >ENTER but over
+    *effective* by <ENTER → must still fire (not go blind to overheating)."""
+    entity = _make_entity()
+    pi = entity._pi
+    pi._desired_temp = 22.0
+    pi._uncontrollable_entry_latch = True
+    pi._supervisor_enabled = True
+    pi._supervisor_kind = "qref"
+    pi._last_raw_setpoint = 24.0
+    # Room 23.2: 1.2 over user (> ENTER) but only 0.7 over effective (22.5
+    # after a +0.5 bias, < ENTER).  HP commanded high → estimated active.
+    entity._attr_current_temperature = 23.2
+    pi._hp_setpoint = 24
+    with patch.object(pi._qref_biaser, "update", return_value=0.5):
+        await _tick(pi)
+    assert pi._overtemp_regime is True, (
+        "regime stayed blind to genuine overheating because effective > user"
+    )
+
+
 @pytest.mark.asyncio
 async def test_regime_exits_when_temp_returns_to_band():
     """Regime exits when overtemp_error drops below EXIT threshold (0.5°C)."""
