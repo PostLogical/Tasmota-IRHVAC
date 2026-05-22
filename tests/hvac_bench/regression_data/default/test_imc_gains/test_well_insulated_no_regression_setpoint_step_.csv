@@ -1,2 +1,2 @@
 ,flat_itae,imc_itae,flat_overshoot,imc_overshoot,flat_reversals,imc_reversals,flat_setpoint_changes,imc_setpoint_changes,flat_integral_rms,imc_integral_rms,flat_total_kwh,imc_total_kwh,flat_settling_time,imc_settling_time
-0,8967.7700000000004,8967.7700000000004,1.99,1.99,0,0,1,1,2.3599999999999999,2.5099999999999998,0.19700000000000001,0.19700000000000001,270,270
+0,8967.7700000000004,8967.7700000000004,1.99,1.99,0,0,1,1,1.03,1.6899999999999999,0.19700000000000001,0.19700000000000001,270,270

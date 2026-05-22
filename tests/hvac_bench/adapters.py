@@ -177,6 +177,11 @@ class TasmotaPIAdapter:
             "d_term": getattr(self._pi, "_pi_d_filtered", 0.0),
             "rls_obs_count": self._pi._rls_heat.observation_count,
             "desired_temp": self._pi._desired_temp,
+            "effective_desired": (
+                self._pi._last_effective_desired_c
+                if self._pi._last_effective_desired_c is not None
+                else self._pi._desired_temp
+            ),
             "hp_setpoint": self._pi._hp_setpoint,
             "raw_setpoint": getattr(self._pi, "_last_raw_setpoint", 0.0),
             "smith_correction": smith.correction if smith is not None else 0.0,
@@ -249,6 +254,7 @@ class TextbookPIController:
             "integral": self.integral,
             "ff_offset": 0.0,
             "desired_temp": self.desired,
+            "effective_desired": self.desired,
             "hp_setpoint": self.hp_setpoint,
             "rls_obs_count": 0,
         }

@@ -193,14 +193,17 @@ def run_reference_scenario(
 
         state = controller.get_state()
         desired = state.get("desired_temp", scenario.desired_c)
+        effective_desired = state.get("effective_desired", desired)
 
         history.append({
             "tick": tick,
             "room_temp": model.room_temp,
             "sensor_reading": sensor_reading,
             "desired": desired,
+            "effective_desired": effective_desired,
             "hp_setpoint": hp_setpoint,
             "error": desired - model.room_temp,
+            "error_effective": effective_desired - model.room_temp,
             "outdoor": model.outdoor_temp,
             "cumulative_kwh": model.cumulative_kwh,
             "integral": state.get("integral", 0.0),

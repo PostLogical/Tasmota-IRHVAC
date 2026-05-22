@@ -56,9 +56,15 @@ class KpiBundle:
     # ── Control-side ─────────────────────────────────────────────────
     n_ticks: int
     tick_minutes: float
-    tdis_tot: float          # K·h of |error| accumulated outside deadband
-    cold_time_h: float       # hours where room < desired - deadband
-    warm_time_h: float       # hours where room > desired + deadband
+    tdis_tot: float          # K·h outside deadband, USER frame (user_desired - room)
+    cold_time_h: float       # hours room < user_desired - deadband
+    warm_time_h: float       # hours room > user_desired + deadband
+    # Effective (controller) frame: same KPIs vs the qref-biased reference the
+    # PI actually tracked.  Equals the user-frame values when no supervisor is
+    # active.  tdis_tot - tdis_tot_eff = intentional reference displacement.
+    tdis_tot_eff: float      # K·h outside deadband, EFFECTIVE frame
+    cold_time_h_eff: float   # hours room < effective_desired - deadband
+    warm_time_h_eff: float   # hours room > effective_desired + deadband
     ener_tot: float          # kWh
     peak_kw: float           # peak instantaneous electrical demand (kW)
     settling_time_h: float | None  # hours to last exit of deadband; None if never settled
@@ -85,6 +91,9 @@ class KpiBundle:
             "tdis_tot": self.tdis_tot,
             "cold_time_h": self.cold_time_h,
             "warm_time_h": self.warm_time_h,
+            "tdis_tot_eff": self.tdis_tot_eff,
+            "cold_time_h_eff": self.cold_time_h_eff,
+            "warm_time_h_eff": self.warm_time_h_eff,
             "ener_tot": self.ener_tot,
             "peak_kw": self.peak_kw,
             "settling_time_h": self.settling_time_h,
@@ -141,6 +150,9 @@ def compute_control_kpis(
             tdis_tot=0.0,
             cold_time_h=0.0,
             warm_time_h=0.0,
+            tdis_tot_eff=0.0,
+            cold_time_h_eff=0.0,
+            warm_time_h_eff=0.0,
             ener_tot=0.0,
             peak_kw=0.0,
             settling_time_h=None,
@@ -154,20 +166,38 @@ def compute_control_kpis(
     # cold/warm split this signed so a heat-mode failure mode (room cold)
     # vs cool-mode (room warm) is visible, matching the asymmetric KPI
     # split BOPTEST recommends for residential cases.
-    tdis_tot = 0.0
-    cold_h = 0.0
-    warm_h = 0.0
-    for h in history:
-        err = float(h.get("error", h.get("desired", 0.0) - h.get("room_temp", 0.0)))
-        # error sign convention in this bench: desired - room.  Positive
-        # error → room is cold (below desired); negative → warm.
-        signed_excess_cold = max(0.0, err - deadband_c)
-        signed_excess_warm = max(0.0, (-err) - deadband_c)
-        tdis_tot += (signed_excess_cold + signed_excess_warm) * dt_hours
-        if signed_excess_cold > 0.0:
-            cold_h += dt_hours
-        if signed_excess_warm > 0.0:
-            warm_h += dt_hours
+    # Dual-reference comfort.  We accumulate the BOPTEST-style discomfort
+    # integral against TWO references:
+    #   • user frame      (``error`` = user_desired − room): the occupant's
+    #     true comfort cost — how far the room is from what was asked.
+    #   • effective frame (``error_effective`` = effective_desired − room):
+    #     controller tracking quality — how well it tracks the (qref-biased)
+    #     target it was actually given.
+    # ``tdis_tot − tdis_tot_eff`` isolates the supervisor's intentional
+    # reference displacement from any genuine tracking failure.  Controllers
+    # without a supervisor (no ``error_effective`` key) fall back to the user
+    # error, so the two frames coincide.  See the desired-vs-effective-desired
+    # branch design notes.
+    def _accumulate_discomfort(err_key: str) -> tuple[float, float, float]:
+        tdis = cold = warm = 0.0
+        for h in history:
+            if err_key in h:
+                err = float(h[err_key])
+            else:
+                err = float(h.get("error", h.get("desired", 0.0) - h.get("room_temp", 0.0)))
+            # error sign convention in this bench: desired - room.  Positive
+            # error → room is cold (below desired); negative → warm.
+            signed_excess_cold = max(0.0, err - deadband_c)
+            signed_excess_warm = max(0.0, (-err) - deadband_c)
+            tdis += (signed_excess_cold + signed_excess_warm) * dt_hours
+            if signed_excess_cold > 0.0:
+                cold += dt_hours
+            if signed_excess_warm > 0.0:
+                warm += dt_hours
+        return tdis, cold, warm
+
+    tdis_tot, cold_h, warm_h = _accumulate_discomfort("error")
+    tdis_eff, cold_eff_h, warm_eff_h = _accumulate_discomfort("error_effective")
 
     # Energy: ener_tot is the cumulative_kwh at the last tick.  peak_kw
     # is the peak per-tick kWh divided by per-tick hours.  Both depend on
@@ -214,6 +244,9 @@ def compute_control_kpis(
         tdis_tot=round(tdis_tot, 4),
         cold_time_h=round(cold_h, 3),
         warm_time_h=round(warm_h, 3),
+        tdis_tot_eff=round(tdis_eff, 4),
+        cold_time_h_eff=round(cold_eff_h, 3),
+        warm_time_h_eff=round(warm_eff_h, 3),
         ener_tot=round(ener_tot, 4),
         peak_kw=round(peak_kw, 4),
         settling_time_h=round(settling, 3) if settling is not None else None,

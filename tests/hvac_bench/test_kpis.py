@@ -117,6 +117,52 @@ class TestControlKpisComfort:
         assert b.cold_time_h == 0.0
 
 
+class TestControlKpisDualReference:
+    """Effective-frame KPIs decompose discomfort into tracking-failure vs
+    intentional (supervisor) reference displacement."""
+
+    def test_effective_falls_back_to_user_when_absent(
+        self, bench_metrics, num_regression
+    ):
+        # No ``error_effective`` key (no supervisor) → both frames coincide.
+        history = _fixed_history(n_ticks=96, error=1.5)
+        b = compute_control_kpis(history, tick_minutes=15.0)
+        bench_metrics["tdis_tot"] = b.tdis_tot
+        bench_metrics["tdis_tot_eff"] = b.tdis_tot_eff
+        check_bench_metrics(num_regression, bench_metrics)
+        assert b.tdis_tot_eff == b.tdis_tot
+        assert b.cold_time_h_eff == b.cold_time_h
+        assert b.warm_time_h_eff == b.warm_time_h
+
+    def test_effective_isolates_displacement_from_tracking(
+        self, bench_metrics, num_regression
+    ):
+        # Room sits 1.5°C warm vs USER, but the PI tracks its qref-biased
+        # target perfectly (error_effective=0).  User frame charges the full
+        # displacement; effective frame is clean — proving the decomposition.
+        history = [
+            {
+                "tick": t, "room_temp": 21.5, "desired": 20.0, "error": -1.5,
+                "effective_desired": 21.5, "error_effective": 0.0,
+                "hp_setpoint": 22.0, "cumulative_kwh": 0.01 * (t + 1),
+            }
+            for t in range(96)  # 24h at 15-min ticks
+        ]
+        b = compute_control_kpis(history, tick_minutes=15.0)
+        bench_metrics["tdis_tot"] = b.tdis_tot
+        bench_metrics["tdis_tot_eff"] = b.tdis_tot_eff
+        bench_metrics["warm_time_h"] = b.warm_time_h
+        bench_metrics["warm_time_h_eff"] = b.warm_time_h_eff
+        check_bench_metrics(num_regression, bench_metrics)
+        # User frame: 1.5 warm, excess 1.0 K over 24h → 24 K·h, 24h warm.
+        assert b.tdis_tot == pytest.approx(24.0, abs=0.01)
+        assert b.warm_time_h == pytest.approx(24.0, abs=0.01)
+        # Effective frame: perfect tracking → no discomfort charged.
+        assert b.tdis_tot_eff == 0.0
+        assert b.warm_time_h_eff == 0.0
+        assert b.cold_time_h_eff == 0.0
+
+
 class TestControlKpisEnergy:
     def test_total_kwh_tracks_cumulative(self, bench_metrics, num_regression):
         # 96 ticks, 0.01 kWh per tick → final cumulative_kwh = 0.96

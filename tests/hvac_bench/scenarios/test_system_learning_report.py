@@ -32,6 +32,8 @@ Per scenario, pinned per cell:
   Performance (chatter == HP beeps; comfort band = ±1°F per the 1°F-step UI):
     comfort_pct_1f          fraction of ticks within ±1°F of user setpoint
     ctrl_comfort_pct_1f     same, restricted to HP-active ticks
+    comfort_pct_1f_eff      same vs the qref-effective reference (tracking
+    ctrl_comfort_pct_1f_eff   quality); gap to user-frame = qref displacement
     hp_changes_per_day      HP integer-setpoint transitions / day (beep proxy)
     total_itae, ctrl_violations, worst_undershoot, worst_overshoot
 
@@ -219,9 +221,14 @@ def _learning_report(result: FullStackResult, desired_c: float) -> dict[str, flo
         m[f"{key}_post_fill_drift_per_day"] = pf.drift_per_day if pf else _NAN
 
     # ── Performance: comfort (±1°F) + chatter (HP setpoint changes/day) ──
+    # Dual reference: comfort vs the USER setpoint (true occupant cost) and vs
+    # the qref-EFFECTIVE reference the PI actually tracked (tracking quality).
+    # The gap between them is qref's intentional reference displacement; a good
+    # design drives BOTH up.  See desired-vs-effective-desired branch notes.
     hist = result.history
     n_in_band = n_total = 0
     n_ctrl_in_band = n_ctrl = 0
+    n_in_band_eff = n_ctrl_in_band_eff = 0
     hp_changes = 0
     prev_sp = None
     worst_under = worst_over = 0.0
@@ -230,9 +237,13 @@ def _learning_report(result: FullStackResult, desired_c: float) -> dict[str, flo
         if room is None:
             continue
         dev = room - desired_c
+        eff = h.get("effective_desired_c")
+        dev_eff = room - (desired_c if eff is None else eff)
         n_total += 1
         if abs(dev) <= _BAND_1F_C:
             n_in_band += 1
+        if abs(dev_eff) <= _BAND_1F_C:
+            n_in_band_eff += 1
         if dev < 0:
             worst_under = max(worst_under, -dev)
         else:
@@ -241,6 +252,8 @@ def _learning_report(result: FullStackResult, desired_c: float) -> dict[str, flo
             n_ctrl += 1
             if abs(dev) <= _BAND_1F_C:
                 n_ctrl_in_band += 1
+            if abs(dev_eff) <= _BAND_1F_C:
+                n_ctrl_in_band_eff += 1
         sp = h.get("hp_setpoint")
         if sp is not None and prev_sp is not None and sp != prev_sp:
             hp_changes += 1
@@ -250,6 +263,9 @@ def _learning_report(result: FullStackResult, desired_c: float) -> dict[str, flo
     n_days = result.n_ticks * _TICK_MINUTES / (60.0 * 24.0)
     m["comfort_pct_1f"] = (n_in_band / n_total) if n_total else _NAN
     m["ctrl_comfort_pct_1f"] = (n_ctrl_in_band / n_ctrl) if n_ctrl else _NAN
+    # Effective-frame comfort: how well the PI tracked the qref-biased target.
+    m["comfort_pct_1f_eff"] = (n_in_band_eff / n_total) if n_total else _NAN
+    m["ctrl_comfort_pct_1f_eff"] = (n_ctrl_in_band_eff / n_ctrl) if n_ctrl else _NAN
     m["hp_changes_per_day"] = (hp_changes / n_days) if n_days else _NAN
     m["total_itae"] = result.total_itae
     m["ctrl_violations"] = float(result.ctrl_violations)
