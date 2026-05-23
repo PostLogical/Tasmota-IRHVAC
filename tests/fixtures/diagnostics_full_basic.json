@@ -97,7 +97,7 @@
     "greybox_bridge": null,
     "greybox_buffer": {
       "hp_off_pct": null,
-      "max_size": 6000,
+      "max_size": 10000,
       "min_leverage": null,
       "total": 0
     },
@@ -109,14 +109,14 @@
       "condition_rating": "insufficient_data",
       "correlated_pairs": [],
       "eligible": 0,
-      "max_size": 2000,
+      "max_size": 10000,
       "total": 0
     },
     "observation_buffer_heat": {
       "condition_rating": "insufficient_data",
       "correlated_pairs": [],
       "eligible": 0,
-      "max_size": 2000,
+      "max_size": 10000,
       "total": 0
     },
     "outdoor_temp": 5.0,
