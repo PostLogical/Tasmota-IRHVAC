@@ -143,6 +143,10 @@ class FullStackConfig:
     # Outdoor/solar schedule overrides (callable: minute -> value)
     outdoor_schedule: Callable[[float], float] | None = None
     solar_schedule: Callable[[float], float] | None = None
+    # Optional time-varying user setpoint (callable: minute -> °C). None keeps
+    # the constant ``desired_c`` (default — no behavior change for callers that
+    # don't set it). Used for reference step-test / square-wave excitation.
+    desired_schedule: Callable[[float], float] | None = None
 
     # Disturbances to inject
     disturbances: list[Disturbance] = field(default_factory=list)
@@ -748,6 +752,9 @@ def run_full_stack(
             adapter._sim_clock += dt_seconds
             adapter._entity._attr_current_temperature = sensor_reading
             pi._inputs.outdoor_temp = model.outdoor_temp
+            # Optional time-varying user setpoint (reference step-test).
+            if config.desired_schedule is not None:
+                pi._desired_temp = config.desired_schedule(minute)
 
             # Update model input entity states via the bench's MockStates registry.
             # delta_from_room inputs need a temperature unit advertised so the
