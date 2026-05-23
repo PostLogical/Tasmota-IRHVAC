@@ -769,15 +769,18 @@ class PIController:
             n_features=_n_buf_features,
             feature_order=self._feature_order,
             model_inputs=self._model_inputs,
+            max_size=10000,
         )
         self._observation_buffer_cool = DiversityAwareBuffer(
             n_features=_n_buf_features,
             feature_order=self._feature_order,
             model_inputs=self._model_inputs,
+            max_size=10000,
         )
         # Grey-box buffer: mode-agnostic, admits HP-off, temp-quantile-stratified.
         self._greybox_buffer = GreyboxBuffer(
             solar_entity=find_solar_entity(self._model_inputs),
+            max_size=10000,
         )
         # Cached serializations — refreshed only at batch time (every 12h) to
         # avoid serializing thousands of observations on every state write (60s).
@@ -5958,6 +5961,14 @@ class PIController:
                 upstream_rej = obs_clamped_reason
             elif not hp_observation_usable:
                 upstream_rej = "hp_uncertain"
+            elif not (abs(self._room_temp_rate) < 0.02):
+                # Equilibrium-only admission: don't spend buffer capacity on
+                # transient observations the batch WLS won't regress anyway
+                # (|room_rate| < 0.02 matches the WLS eligibility threshold).
+                # With the enlarged buffer this lets it hold a much longer
+                # window of usable near-equilibrium obs (variance reduction
+                # over more diurnal cycles → β_solar converges).
+                upstream_rej = "non_equilibrium"
             else:
                 active_buffer = self._observation_buffer_heat if is_heating else self._observation_buffer_cool
                 wls_result = active_buffer.add(obs)
