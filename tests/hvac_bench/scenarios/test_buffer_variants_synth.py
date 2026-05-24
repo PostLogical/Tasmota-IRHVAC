@@ -99,6 +99,11 @@ class TestBufferVariantsSynth:
                 # land in one CSV row.
                 bench_metrics[f"{vname}__{sname}__outdoor_delta"] = od
                 bench_metrics[f"{vname}__{sname}__solar"] = solar
+                # Truth siblings (from run config) → analyzer judges toward-truth.
+                bench_metrics[f"{vname}__{sname}__outdoor_delta_truth"] = (
+                    r.true_coefs.get("outdoor_delta", float("nan")))
+                bench_metrics[f"{vname}__{sname}__solar_truth"] = (
+                    r.true_coefs.get("Solar Proxy", float("nan")))
                 post_fill = summarize_post_fill(
                     r, bias_tols=_POST_FILL_BIAS_TOL, std_tols=_POST_FILL_STD_TOL,
                 )
