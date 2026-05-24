@@ -12,6 +12,7 @@
     "vendor": "FUJITSU_AC"
   },
   "pi_controller": {
+    "_current_room_temp_c": null,
     "_effective_desired_c": null,
     "_greybox": {
       "reason": "buffer empty",

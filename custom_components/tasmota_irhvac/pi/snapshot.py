@@ -1373,6 +1373,14 @@ class TickOutput:
     # stage 2+.
     observation: ObservationContext | None = None
     events: tuple[TickEvent, ...] = ()
+    # The zone's OWN controlled room temperature (°C) this tick — the
+    # `current_c` the PI regulates (`_sensor_filtered`), matching what the
+    # WLS observation buffer stores. Distinct from the model-input sensor
+    # readings in `_observation.raw_readings`, where a zone's only
+    # `sensor.*_temperature` may be an ADJACENT zone (future_work #116).
+    # None when no reading is available (e.g. sensor filter disabled, or
+    # before the first sensor reading). Serialized as `_current_room_temp_c`.
+    current_room_temp_c: float | None = None
     # Over-temperature regime gate state — True when the gate forced HP
     # to its idle setpoint and froze the integrator on this tick.
     # Visible in debug bundles for post-deployment verification.
@@ -1463,6 +1471,7 @@ class TickOutput:
         out["_supervisor_nudge_c"] = self.supervisor_nudge_c
         out["_qref_bias"] = self.qref_bias
         out["_hp_estimated_active_state"] = self.hp_estimated_active_state
+        out["_current_room_temp_c"] = self.current_room_temp_c
         return out
 
     @staticmethod
@@ -1570,6 +1579,7 @@ class TickOutput:
             supervisor_nudge_c=data.get("_supervisor_nudge_c", 0.0),
             qref_bias=data.get("_qref_bias", 0.0),
             hp_estimated_active_state=data.get("_hp_estimated_active_state", True),
+            current_room_temp_c=data.get("_current_room_temp_c"),
         )
 
     @classmethod

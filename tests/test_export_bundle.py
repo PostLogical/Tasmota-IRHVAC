@@ -78,6 +78,9 @@ def test_profile_filter_comfort_keeps_pi_state():
     assert keep("ff_offset")
     assert keep("hp_setpoint")
     assert keep("desired_temp")
+    # Own controlled room temp (#116) rides the `_` metadata prefix, so the
+    # comfort profile carries it — comfort assertions need room temperature.
+    assert keep("_current_room_temp_c")
     assert not keep("rls_model")
 
 

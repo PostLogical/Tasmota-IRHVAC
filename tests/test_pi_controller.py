@@ -3936,6 +3936,45 @@ class TestSensorFilter:
         assert "sensor_filtered" in attrs
         assert attrs["sensor_filtered"] is not None
 
+    @pytest.mark.asyncio
+    async def test_own_room_temp_on_tick_output(self):
+        """The tick output carries the zone's own controlled room temp —
+        `_sensor_filtered` — so bundles record it explicitly (#116)."""
+        config = make_pi_config({"pi_sensor_filter_tau": 120})
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 20.0
+        pi._hp_setpoint = 20.0
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 20.5
+        pi._pi_last_tick_time = 0.0
+        pi._monotonic = lambda v=900.0: v
+        await pi._pi_tick()
+
+        tick = pi._build_tick_output()
+        assert pi._sensor_filtered is not None
+        assert tick.current_room_temp_c == round(pi._sensor_filtered, 3)
+        assert tick.to_dict()["_current_room_temp_c"] == tick.current_room_temp_c
+
+    @pytest.mark.asyncio
+    async def test_own_room_temp_none_when_filter_disabled(self):
+        """With the sensor filter off, `_sensor_filtered` is None, so the
+        own-temp tick field is None rather than a stale/raw value."""
+        config = make_pi_config({"pi_sensor_filter_tau": 0})
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        pi._desired_temp = 20.0
+        pi._hp_setpoint = 20.0
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 19.5
+        pi._pi_last_tick_time = 900.0
+        pi._monotonic = lambda v=1800.0: v
+        await pi._pi_tick()
+
+        tick = pi._build_tick_output()
+        assert pi._sensor_filtered is None
+        assert tick.current_room_temp_c is None
+
 
 class TestOneSidedAntiWindup:
     """Tests for integral behavior when error opposes mode direction.

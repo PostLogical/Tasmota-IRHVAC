@@ -572,6 +572,17 @@ def test_tick_output_to_dict_includes_underscore_fields():
     assert "_ts_mono" in d
     assert "_ts_wall" in d
     assert "_lag_filter" in d
+    # Own controlled room temp (future_work #116); None on an empty tick.
+    assert "_current_room_temp_c" in d
+    assert d["_current_room_temp_c"] is None
+
+
+def test_tick_output_roundtrip_with_current_room_temp():
+    """The zone's own controlled room temp survives serialization (#116)."""
+    tick = dataclasses.replace(_minimal_tick(), current_room_temp_c=20.61)
+    d = tick.to_dict()
+    assert d["_current_room_temp_c"] == 20.61
+    assert TickOutput.from_dict(d) == tick
 
 
 def test_tick_output_to_dict_has_legacy_top_level_keys():

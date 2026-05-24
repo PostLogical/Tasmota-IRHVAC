@@ -30,6 +30,7 @@ move is usually:
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -41,34 +42,27 @@ SEVERITY_STATISTICAL = "STATISTICAL"
 
 
 def extract_room_temp_c(tick: dict) -> float | None:
-    """Pull room temperature out of a tick dict, returning Celsius.
+    """Return the zone's OWN controlled room temperature in Celsius, or None.
 
-    Production bundles store sensor values in `_observation.raw_readings`
-    as a FLAT dict keyed by entity_id (e.g. `'sensor.X_air_temperature'`).
-    The Tasmota-IRHVAC integration converts F→C on read so values land in
-    Celsius — but we detect by value range to be robust to config variants
-    where conversion might fail (e.g. a sensor reporting raw F).
+    Reads the top-level `_current_room_temp_c` field (future_work #116) — the
+    controller's internal °C measurement (`_sensor_filtered`, i.e. the
+    `current_c` the PI regulates, matching what the observation buffers
+    store). It is authoritative and already Celsius, so it is returned
+    verbatim.
 
-    Strategy: find unique key ending in `_temperature` (any prefix). If
-    its value lies in [5, 35] treat as Celsius; in [40, 100] treat as
-    Fahrenheit and convert. Reject ambiguous values (>100 or <-50) since
-    those signal a unit-config bug we shouldn't silently paper over.
+    Returns None when the field is absent (bundles predating #116) or
+    non-finite. There is deliberately NO fallback to
+    `_observation.raw_readings`: model inputs are EXOGENOUS by design (solar,
+    outdoor, adjacent-zone temperatures), so a `sensor.*_temperature` there
+    is never the zone's own controlled sensor — guessing from it returned a
+    neighbour's temperature, which is exactly the bug #116 fixes. Pre-#116
+    bundles simply skip temperature-dependent assertions rather than score
+    the wrong zone.
     """
-    obs = tick.get("_observation") or {}
-    raw = obs.get("raw_readings") or {}
-    # Flat dotted keys like 'sensor.kitchen_air_sensor_temperature'
-    candidates = [v for k, v in raw.items()
-                  if k.startswith("sensor.")
-                  and k.endswith("_temperature")
-                  and isinstance(v, (int, float))]
-    if len(candidates) != 1:
-        return None
-    val = candidates[0]
-    if 5 <= val <= 35:
-        return val  # Celsius
-    if 40 <= val <= 100:
-        return (val - 32) * 5 / 9  # Fahrenheit
-    return None  # implausible — surface as missing data
+    own = tick.get("_current_room_temp_c")
+    if isinstance(own, (int, float)) and math.isfinite(own):
+        return float(own)
+    return None
 
 
 def extract_desired_c(tick: dict) -> float | None:

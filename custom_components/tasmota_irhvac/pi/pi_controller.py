@@ -4211,6 +4211,15 @@ class PIController:
             supervisor_nudge_c=round(self._ref_governor.nudge_c, 3),
             qref_bias=round(self._qref_biaser.bias, 4),
             hp_estimated_active_state=self._hp_estimated_active_state,
+            # The zone's own controlled room temp (°C) — `current_c` the PI
+            # regulates — so bundles record it explicitly rather than
+            # leaving consumers to guess from model-input sensors, one of
+            # which may be an adjacent zone (future_work #116).
+            current_room_temp_c=(
+                round(self._sensor_filtered, 3)
+                if self._sensor_filtered is not None
+                else None
+            ),
         )
         # Consume pending events: each event is published on exactly one
         # TickOutput.  HA may call ``async_write_ha_state`` (which calls
