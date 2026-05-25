@@ -557,7 +557,12 @@ _TAU_SEARCH_MAX = 28800.0
 _TAU_SEARCH_MAX_BY_ROLE: dict[str, float] = {
     "solar": 39600.0,         # 11h — Forssell-Ljung diurnal identifiability
     "heat_source": 3600.0,    # 1h — convective response of radiators / stoves
-    "adjacent_zone": 43200.0, # 12h — party-wall conduction timescale
+    "adjacent_zone": 14400.0, # 4h — inter-zone coupling is TRANSPORT (air +
+                              # interior-partition conduction), not solar STORAGE:
+                              # the ISO 13786 time lag of a party wall is a few
+                              # hours at most, air coupling far less. 12h was
+                              # external-heavy-wall territory and let the detector
+                              # rail into the near-diurnal band (future_work #115).
 }
 
 # Optimum lands within this fraction of either rail → flag as
