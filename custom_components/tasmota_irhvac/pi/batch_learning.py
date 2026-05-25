@@ -537,32 +537,40 @@ _PHI = (math.sqrt(5) - 1) / 2  # ≈ 0.618
 _TAU_SEARCH_MIN = 0.0
 _TAU_SEARCH_MAX = 28800.0
 
-# Per-role upper rails for the tau search (seconds).  Set at the
-# Forssell-Ljung 1999 / Raue 2009 practical-identifiability ceiling for
-# the input's signal bandwidth.  For a periodic input at angular frequency
-# ω, an EMA with τ attenuates the amplitude by 1/√(1+(ωτ)²); above the
-# rail the surviving amplitude is too small to identify the lag from data
-# in the presence of typical sensor noise.
+# Per-role upper rails for the tau search (seconds) — all at the common
+# practical-IDENTIFIABILITY ceiling of 11h.  The detected τ is the lag of a
+# model input's effect on the ROOM TEMPERATURE, and that effect is mediated by
+# the building thermal MASS: heat that raises the room is stored in the walls
+# and released back over the building time constant, independent of what put it
+# there (2R2C / RC heat-dynamics models, Bacher & Madsen 2011).  So τ is a
+# property of the mass, ~the same for every input — NOT the source's own
+# response time.  The old per-role rails ("1h stove convective response",
+# "4h party-wall conduction") measured the wrong quantity and truncated real,
+# identifiable lags (e.g. a stove whose room-temp effect identifies cleanly
+# around its wall time constant, several hours).
 #
-# Solar is fundamentally diurnal (24h period, ω=2π/24h).  At τ=12h the
-# EMA passes 30% of the diurnal amplitude — still identifiable for typical
-# residential SNR (σ_noise≈0.1°C, solar peak room effect ≈1°C).  Above
-# τ=12h the EMA approaches DC.  Set at 11h with a small margin from the
-# 12h identifiability landmark; serves the full range of residential
-# building masses (light-frame ~4-8h true τ → interior optimum; heavy-
-# mass brick/concrete ~12-24h true τ → rail-hit, accepted by the
-# boundary-hit handling in `_detect_optimal_tau`).
+# Real residential time constants are long — surveys report ≈15-55h in winter
+# and <1-18h in summer — so the true τ routinely EXCEEDS what is identifiable.
+# From daily-forced data an EMA beyond ~11-12h is near-DC (Forssell-Ljung 1999
+# diurnal identifiability limit: a diurnal input's amplitude attenuates by
+# 1/√(1+(ωτ)²), ω=2π/24h, passing ~30% at 12h and approaching DC beyond), so a
+# longer lag cannot be identified regardless of the true physics — it would
+# need engineered excitation (PRBS / self-excitation).  Hence a single 11h
+# ceiling for every role.
 #
-# Inputs with no role match fall back to ``_TAU_SEARCH_MAX``.
+# A genuine rail-hit (boundary_hit) therefore means the input's (τ, coefficient)
+# pair is NOT identifiable.  Such an input confounds the joint regression, so it
+# is held OUT of the fit by the boundary_hit guard in `weighted_least_squares`
+# (exclusion, per Raue 2009 — NOT shrinkage: these are physical-truth FF
+# coefficients fit from equilibrium / HP-active data, not parameters to bias
+# toward a prior).  Inputs with no role match fall back to ``_TAU_SEARCH_MAX``.
 _TAU_SEARCH_MAX_BY_ROLE: dict[str, float] = {
-    "solar": 39600.0,         # 11h — Forssell-Ljung diurnal identifiability
-    "heat_source": 3600.0,    # 1h — convective response of radiators / stoves
-    "adjacent_zone": 14400.0, # 4h — inter-zone coupling is TRANSPORT (air +
-                              # interior-partition conduction), not solar STORAGE:
-                              # the ISO 13786 time lag of a party wall is a few
-                              # hours at most, air coupling far less. 12h was
-                              # external-heavy-wall territory and let the detector
-                              # rail into the near-diurnal band (future_work #115).
+    "solar": 39600.0,         # 11h — common identifiability ceiling (see above)
+    "heat_source": 39600.0,   # 11h — was 1h; the lag is wall-mediated, not the
+                              #       source's own response (future_work #115)
+    "adjacent_zone": 39600.0, # 11h — was 4h (f61edd8); the per-role cap is
+                              #       superseded — a >11h lag is excluded by the
+                              #       guard, not pre-truncated by the rail (#115)
 }
 
 # Optimum lands within this fraction of either rail → flag as
@@ -958,9 +966,12 @@ def _detect_optimal_tau(
         # it discards strong evidence for "long lag exists" because we
         # can't pin the exact value.  Accept τ_opt, flag boundary_hit so
         # downstream knows the precise value is unreliable.
-        # The rail itself is set per-role to a literature-grounded
-        # building thermal timescale (e.g. solar=6h ≈ slow_tau of typical
-        # 2R2C residential — see _TAU_SEARCH_MAX_BY_ROLE).
+        # The rail itself is set per-role to a literature-grounded building
+        # thermal timescale (solar 11h ≈ Forssell-Ljung diurnal identifiability
+        # ceiling — see _TAU_SEARCH_MAX_BY_ROLE).  Acting on the flag:
+        # weighted_least_squares holds a boundary_hit input out of the joint
+        # fit for the batch (#115), so the unreliable rail value can't
+        # collapse the other coefficients.
         return LagTauDiagnostic(
             tau=tau_opt, tau_opt_raw=tau_opt,
             bic_gain=bic_gain, bic_threshold=bic_threshold,
@@ -2384,9 +2395,10 @@ def weighted_least_squares(
         )
 
     held: set[int] = set()
-    # Frozen features (from per-feature gating) are treated as held so
-    # batch WLS matches the online RLS partial model — both estimators
-    # see the same features, preventing batch-online oscillation.
+    # Frozen features (from per-feature gating) are treated as held: batch
+    # WLS is the sole coefficient estimator (online RLS removed in 4d7e77a),
+    # and ``frozen`` is the persistent staged-admission record (Bacher-Madsen
+    # forward selection) — a feature not yet admitted is held at its prior.
     _frozen = frozen_features or set()
     active_input_indices: list[int] = []
     for feat_idx, m_input in enumerate(m_inputs):
@@ -2397,6 +2409,31 @@ def weighted_least_squares(
         entity_id = input_entity_ids[feat_idx]
         if not entity_id:
             held.add(coeff_idx)
+            continue
+        # #115: a lag pinned at its search rail (boundary_hit) is the Raue
+        # 2009 practical-non-identifiability signal — the input's true τ
+        # exceeds the 11h identifiability ceiling (see _TAU_SEARCH_MAX_BY_ROLE),
+        # so its (τ, coefficient) pair cannot be identified from this data.  An
+        # unidentifiable input confounds the joint regression (the railed EMA
+        # is a poorly-determined regressor that redistributes the other
+        # coefficients), so hold it OUT of THIS batch's joint solve — its
+        # coefficient stays at the prior, like any held feature; the lag
+        # estimate and diagnostics are untouched (no τ=0 misspecification).
+        # This is exclusion of an unidentifiable parameter (Raue 2009), NOT
+        # shrinkage — these are physical-truth FF coefficients.  Role-agnostic:
+        # the rail is a common 11h ceiling, so any role can trip it.  Gated on
+        # `accepted`: a bic_failed rail-hit falls back to the configured
+        # lag_tau (the railed EMA is never applied), so it is not this case.
+        # Completes #100 (`boundary_hit` introduced by 4fb20b7, accept-at-rail
+        # by d986505) by acting on the flag.
+        diag = detected_tau_diagnostics.get(m_input.get("name", entity_id))
+        if diag is not None and diag.accepted and diag.boundary_hit:
+            held.add(coeff_idx)
+            _LOGGER.info(
+                "Lag-tau for %s railed at %.0fs (boundary_hit, "
+                "non-identifiable) — holding out of joint fit this batch",
+                m_input.get("name", entity_id), diag.tau,
+            )
             continue
         if feature_obs_counts[coeff_idx] < max(min_observations, 10):
             held.add(coeff_idx)

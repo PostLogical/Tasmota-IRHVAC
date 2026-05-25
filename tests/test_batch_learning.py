@@ -3149,6 +3149,235 @@ class TestWLSDetectedTau:
         assert "stove" in result.detected_tau_diagnostics
 
 
+class TestBoundaryHitJointFitGuard:
+    """A rail-pinned (`boundary_hit`) model input is held out of the joint fit.
+
+    future_work #115 — completes the #100 `boundary_hit` flag (introduced by
+    `4fb20b7`, accept-at-rail by `d986505`) by acting on it.  A lag pinned at
+    its search rail is the Raue 2009 practical-non-identifiability signal: the
+    input is EMA-filtered at a near-diurnal τ → near-DC.  In the real failure
+    (dining-room debug bundle, reconstructed buffer) a *railed adjacent zone*
+    became collinear with the legitimately-detected *solar* input and
+    redistributed solar's coefficient (sign-flip).  Outdoor is well-protected
+    by the time-of-day features; the dramatic victim is a fellow daily-shaped
+    MODEL INPUT.  The guard holds the railed input out of *this batch's* joint
+    solve (coefficient stays at the prior, like any held feature) while
+    leaving the lag estimate untouched (no τ=0 misspecification; the column
+    still appears in `full_X` for VIF/diagnostics).  Trigger is `accepted AND
+    boundary_hit` — the only case where the railed EMA is actually applied to
+    the solve, hence the only one that collapses the fit.
+
+    NOTE on test fidelity: the *natural* low-SNR railing seen in real data is
+    not reliably reproducible in clean synthetic data — for an input to rail
+    with `accepted=True` it needs a BIC-significant long-lag signal, but a
+    feature collinear-enough-with-solar-to-collapse-it is also redundant
+    enough for BIC to reject (so it wouldn't rail).  The real data only hit
+    both at once via low SNR.  So the collapse-and-recovery test drives the
+    rail directly (as the repo's existing boundary_hit tests do), and the
+    contract tests use a genuine long lag (the reliable rail trigger).
+    """
+
+    def _railed_obs(self, *, role, tau_true_h=20.0, n_obs=200, seed=31337):
+        """Single rail-capable input whose TRUE lag exceeds its role rail, so
+        ``_detect_optimal_tau`` rails (accepted + boundary_hit) on real data.
+
+        A 20 h true lag sits beyond every rail (solar 11 h, adjacent_zone 4 h),
+        so smoothing improves the fit monotonically up to the rail → the
+        optimum pins at the boundary.  The strong y∝-2.5·lagged relationship
+        keeps BIC passing.  (Triggering railing deterministically is the
+        point here; physical realism of the lag is exercised in the bench.)
+        """
+        import random
+        rng = random.Random(seed)
+        dt = 900.0
+        tau_true = tau_true_h * 3600.0
+        raw = [max(0.0, math.sin(2 * math.pi * i / 96)) + rng.gauss(0, 0.08)
+               for i in range(n_obs)]
+        lagged = [raw[0]]
+        for i in range(1, n_obs):
+            alpha = 1 - math.exp(-dt / tau_true)
+            lagged.append(alpha * raw[i] + (1 - alpha) * lagged[-1])
+        obs = []
+        for i in range(n_obs):
+            od = rng.uniform(-5, 15)
+            y = 0.3 * od - 2.5 * lagged[i] + rng.gauss(0, 0.05)
+            obs.append(Observation(
+                timestamp=float(i), wall_time=1713650000.0 + i * dt,
+                hp_setpoint=20.0 + y, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=20.0 + od, room_rate=0.005,
+                raw_readings={"sensor.x": raw[i]},
+                clamped=False,
+            ))
+        model_inputs = [{"entity_id": "sensor.x", "name": "x", "input_role": role}]
+        feature_order = ["intercept", "outdoor_delta", "x", "sin_hour", "cos_hour"]
+        return obs, model_inputs, feature_order
+
+    def _solar_victim_obs(self, *, n_obs=288, seed=5):
+        """Three-input scenario mirroring the real #115 mechanism.
+
+        outdoor (well-identified) + a LEGITIMATE solar (true β=-2.5, short
+        lag) + a daily-shaped adjacent zone collinear with solar (no true
+        effect — a co-driven confound).  When a near-DC (railed) adjacent
+        enters the active set it is collinear with solar and collapses solar's
+        coefficient; the guard holds the railed adjacent so solar survives.
+        """
+        import random
+        rng = random.Random(seed)
+        dt = 900.0
+
+        def _ema(src, h):
+            a = 1 - math.exp(-dt / (h * 3600.0))
+            out = [src[0]]
+            for i in range(1, n_obs):
+                out.append(a * src[i] + (1 - a) * out[-1])
+            return out
+
+        sun = [max(0.0, math.sin(2 * math.pi * i / 96)) for i in range(n_obs)]
+        solar_eff = _ema(sun, 3.0)        # legitimate short solar lag
+        adj_daily = _ema(sun, 8.0)        # adjacent room tracks the sun (daily)
+        obs = []
+        for i in range(n_obs):
+            day = 2 * math.pi * i / 96
+            week = 2 * math.pi * i / (96 * 5)
+            od = -8.0 + 5.0 * math.sin(day) + 3.0 * math.sin(week) + rng.gauss(0, 0.3)
+            y = -0.2 * od - 2.5 * solar_eff[i] + rng.gauss(0, 0.05)  # adj: no true effect
+            obs.append(Observation(
+                timestamp=float(i), wall_time=1713650000.0 + i * dt,
+                hp_setpoint=20.0 + y, current_c=20.0, desired_c=20.0,
+                outdoor_temp_c=20.0 + od, room_rate=0.005,
+                raw_readings={
+                    "sensor.solar": sun[i] + rng.gauss(0, 0.03),
+                    "sensor.adj": 18.0 + 3.0 * adj_daily[i] + rng.gauss(0, 0.05),
+                },
+                clamped=False,
+            ))
+        model_inputs = [
+            {"entity_id": "sensor.solar", "name": "solar", "input_role": "solar"},
+            {"entity_id": "sensor.adj", "name": "adj", "input_role": "adjacent_zone"},
+        ]
+        feature_order = ["intercept", "outdoor_delta", "solar", "adj",
+                         "sin_hour", "cos_hour"]
+        return obs, model_inputs, feature_order
+
+    def test_railed_adjacent_collapse_of_solar_is_prevented(self):
+        """The real #115 mechanism: a railed adjacent collapses SOLAR, guarded.
+
+        (a) Admitted — a near-DC adjacent in the active set collapses solar's
+            coefficient (true −2.5 → near zero).  (b) Guarded — the same
+            adjacent rails (accepted+boundary_hit), the guard holds it, and
+            solar recovers to its true value.
+        """
+        from unittest.mock import patch as _patch
+        import custom_components.tasmota_irhvac.pi.batch_learning as bl
+        obs, model_inputs, feature_order = self._solar_victim_obs()
+        prior = [0.0, -0.2, -2.0, 0.0, 0.0, 0.0]  # solar prior near truth
+
+        # (a) ADMITTED: force the near-DC adjacent into the solve (no
+        #     detection → guard inert).  Solar collapses.
+        mi_admit = [dict(model_inputs[0]),
+                    {**model_inputs[1], "lag_tau": 14400.0}]
+        admitted = bl.weighted_least_squares(
+            obs, n_features=6, current_beta=prior, feature_order=feature_order,
+            model_inputs=mi_admit, detect_lag=False,
+        )
+        assert admitted is not None
+        assert 3 not in admitted.held_features  # adjacent admitted (no guard)
+        assert abs(admitted.beta_batch[2]) < 1.5  # solar collapsed far below |−2.5|
+
+        # (b) GUARDED: adjacent's lag rails (accepted+boundary_hit); solar's is
+        #     legitimate (interior).  Guard holds the railed adjacent.
+        def _fake_tau(observations, y, w, entity_id, delta_from_room=False,
+                      base_X=None, tod_cols=None, input_role=None):
+            if entity_id == "sensor.adj":
+                return bl.LagTauDiagnostic(
+                    tau=14400.0, tau_opt_raw=14400.0, bic_gain=20.0,
+                    bic_threshold=5.0, r2_improvement=0.3, beta_at_tau=-1.0,
+                    n_eff=len(observations), accepted=True, reject_reason="",
+                    search_max_used=14400.0, boundary_hit=True,
+                )
+            return bl.LagTauDiagnostic(
+                tau=10800.0, tau_opt_raw=10800.0, bic_gain=80.0,
+                bic_threshold=5.0, r2_improvement=0.6, beta_at_tau=-2.5,
+                n_eff=len(observations), accepted=True, reject_reason="",
+                search_max_used=39600.0, boundary_hit=False,
+            )
+
+        with _patch.object(bl, "_detect_optimal_tau", side_effect=_fake_tau):
+            guarded = bl.weighted_least_squares(
+                obs, n_features=6, current_beta=prior, feature_order=feature_order,
+                model_inputs=model_inputs, detect_lag=True,
+            )
+        assert guarded is not None
+        assert 3 in guarded.held_features  # railed adjacent held out of the solve
+        # Solar recovers to its true value (the guard removed the collinear
+        # near-DC adjacent from the joint solve).
+        assert guarded.beta_batch[2] == pytest.approx(-2.5, abs=0.3)
+
+    @pytest.mark.parametrize("role", ["solar", "adjacent_zone"])
+    def test_real_railing_input_is_held(self, role):
+        """On REAL data (no mock), an input whose lag genuinely rails is held.
+
+        Rails are a common 11h identifiability ceiling for every role (the τ is
+        a wall-mass property; real residential τ can exceed 11h but is then
+        unidentifiable from daily-forced data).  A true lag beyond 11h trips
+        boundary_hit and the input is held out of the joint fit — role-agnostic
+        (the guard keys off ``boundary_hit``, not the role).
+        """
+        rail_s = 39600.0  # 11h common ceiling for every role
+        obs, model_inputs, feature_order = self._railed_obs(role=role)
+        result = weighted_least_squares(
+            obs, n_features=5, feature_order=feature_order,
+            model_inputs=model_inputs, detect_lag=True,
+        )
+        assert result is not None
+        diag = result.detected_tau_diagnostics["x"]
+        # Sanity: the input genuinely rails — else the test proves nothing.
+        assert diag.accepted is True
+        assert diag.boundary_hit is True
+        assert diag.search_max_used == pytest.approx(rail_s)
+        assert 2 in result.held_features  # index 2 = first model input
+
+    def test_non_railed_input_not_held(self):
+        """A short interior lag (1.5 h ≪ 11 h rail) is NOT boundary_hit → the
+        guard must not fire; the feature is admitted normally."""
+        obs, model_inputs, feature_order = self._railed_obs(role="solar", tau_true_h=1.5)
+        result = weighted_least_squares(
+            obs, n_features=5, feature_order=feature_order,
+            model_inputs=model_inputs, detect_lag=True,
+        )
+        assert result is not None
+        diag = result.detected_tau_diagnostics["x"]
+        assert diag.boundary_hit is False
+        assert 2 not in result.held_features
+
+    def test_boundary_hit_only_acts_when_accepted(self):
+        """`boundary_hit` with `accepted=False` (BIC failed) → NOT held.
+
+        When the search is rejected the railed EMA is never applied (the input
+        falls back to its configured lag_tau), so it is not the collapse
+        mechanism.  The guard's `accepted` clause excludes this case.
+        """
+        from unittest.mock import patch as _patch
+        import custom_components.tasmota_irhvac.pi.batch_learning as bl
+        obs, model_inputs, feature_order = self._railed_obs(role="solar")
+        fake = bl.LagTauDiagnostic(
+            tau=0.0, tau_opt_raw=bl._TAU_SEARCH_MAX_BY_ROLE["solar"] * 0.999,
+            bic_gain=0.1, bic_threshold=5.0, r2_improvement=0.01,
+            beta_at_tau=-2.5, n_eff=200, accepted=False,
+            reject_reason="bic_failed",
+            search_max_used=bl._TAU_SEARCH_MAX_BY_ROLE["solar"], boundary_hit=True,
+        )
+        with _patch.object(bl, "_detect_optimal_tau", return_value=fake):
+            result = bl.weighted_least_squares(
+                obs, n_features=5, feature_order=feature_order,
+                model_inputs=model_inputs, detect_lag=True,
+            )
+        assert result is not None
+        # The input has ample variance, so the only reason it could be held is
+        # the guard — and the guard must not fire on a rejected search.
+        assert 2 not in result.held_features
+
+
 class TestAutoLagTauDeltaFromRoom:
     """Auto lag-tau detection for delta_from_room model inputs.
 
