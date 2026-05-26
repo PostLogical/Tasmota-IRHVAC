@@ -540,12 +540,6 @@ SERVICE_TO_METHOD = {
             vol.Required("enabled"): cv.boolean,
         }),
     },
-    "set_debug_capture": {
-        "method": "async_set_debug_capture",
-        "schema": IRHVAC_SERVICE_SCHEMA.extend({
-            vol.Required("full_p"): cv.boolean,
-        }),
-    },
     "set_event_log_enabled": {
         "method": "async_set_event_log_enabled",
         "schema": IRHVAC_SERVICE_SCHEMA.extend({
@@ -1904,14 +1898,6 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
         if pi is None:
             return
         pi.set_subsystem(subsystem, enabled)
-        self.async_schedule_update_ha_state()
-
-    async def async_set_debug_capture(self, full_p: bool) -> None:
-        """Toggle power-user debug captures (full RLS P matrix in diagnostics)."""
-        pi = self._pi
-        if pi is None:  # pragma: no cover — service handler defensive guard
-            return
-        pi.set_debug_capture(full_p=full_p)
         self.async_schedule_update_ha_state()
 
     async def async_set_event_log_enabled(self, enabled: bool) -> None:

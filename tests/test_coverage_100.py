@@ -620,9 +620,8 @@ class TestPIControllerCoverageGaps:
             beta_blended=[2.3, 0.4],
             blend_gains=[0.5, 0.5],
         )
-        # The P-aware loop should skip index 0 (inf SE)
+        # The blend-gain loop should skip index 0 (inf SE)
         rls = pi._rls_heat
-        original_P = rls.P[:]
         for i, val in enumerate(result.beta_blended):
             if i < rls.n:
                 rls.beta[i] = val * rls.feature_scales[i]
@@ -962,7 +961,7 @@ class TestRLSModelCoverageGaps:
     def test_seed_to_beta(self):
         """seed_to_beta converts correctly (line 293)."""
         from custom_components.tasmota_irhvac.pi.rls_model import RLSModel
-        rls = RLSModel(n_inputs=1, p_init=100.0)
+        rls = RLSModel(n_inputs=1)
         result = rls.seed_to_beta(1, 0.3)
         assert result == -0.3 * rls.feature_scales[1]
 
@@ -1806,21 +1805,20 @@ class TestFinalElevenLines:
     # needs m_full > min_observations + 5 AND residual > threshold.
     # Let me verify with more extreme data.)
 
-    # ── pi_controller 914: P-aware update skips inf SE ──
+    # ── pi_controller: batch applies blended coefficients (inf-SE present) ──
 
     @patch("custom_components.tasmota_irhvac.pi.pi_controller.weighted_least_squares")
     @patch("custom_components.tasmota_irhvac.pi.pi_controller.compute_blended_update")
     def test_p_aware_update_inf_se_via_batch(self, mock_blend, mock_wls):
-        """P-aware update skips coefficient with inf SE (line 914).
+        """Batch applies blended coefficients even when a coefficient has inf SE.
 
-        Call through _run_batch_analysis so the actual code at line 914 executes.
+        Call through _run_batch_analysis so the apply path executes.
         """
         entity = _make_pi()
         pi = entity._pi
         entity._attr_hvac_mode = HVACMode.HEAT
         _populate_buffer(pi, n=50)
         rls = pi._rls_heat
-        original_P0 = rls.P[0]
 
         result = BatchResult(
             n_total=50, n_eligible=50,
@@ -1837,8 +1835,9 @@ class TestFinalElevenLines:
 
         pi._run_batch_analysis()
 
-        # P[0] should be unchanged (inf SE → line 914 skips it)
-        assert rls.P[0] == original_P0
+        # The intercept (inf SE) is still written — no per-coefficient skip
+        # after the P-aware path was removed.
+        assert rls.beta[0] == pytest.approx(2.3 * rls.feature_scales[0])
 
     # ── pi_controller 1796: cool RLS matures on feature unlock ──
 
@@ -1855,7 +1854,7 @@ class TestFinalElevenLines:
         entity = _make_pi()
         pi = entity._pi
         # Replace RLS with one that has 4 features but only 2 coeff names
-        pi._rls_heat = RLSModel(n_inputs=3, p_init=100.0)
+        pi._rls_heat = RLSModel(n_inputs=3)
         pi._rls_heat.observation_count = 100
         # model_inputs is empty → coeff_names = ["intercept", "outdoor_delta"] = 2
         pi._drift_correction_signs = [[1]*5, [-1]*5, [1]*5, [1]*5]
@@ -2330,8 +2329,12 @@ class TestRemainingPIControllerGaps:
         assert pi._pi_ki == 0.02  # line 831
 
     @patch("custom_components.tasmota_irhvac.pi.pi_controller.weighted_least_squares")
-    def test_batch_p_aware_inf_se(self, mock_wls):
-        """P-aware update skips coefficient with inf SE (line 914)."""
+    def test_batch_captures_std_err_including_non_finite(self, mock_wls):
+        """Applying a batch captures its per-coefficient std_err (inf included).
+
+        The captured std_err feeds the save-seeds (uncertain) flag; a
+        non-finite entry marks a non-estimable coefficient.
+        """
         entity = _make_pi()
         pi = entity._pi
         entity._attr_hvac_mode = HVACMode.HEAT
@@ -2346,10 +2349,8 @@ class TestRemainingPIControllerGaps:
             blend_gains=[0.5, 0.5],
         )
         mock_wls.return_value = mock_result
-        original_P0 = pi._rls_heat.P[0]
         pi._run_batch_analysis()
-        # P[0] should be unchanged (skipped due to inf SE)
-        assert pi._rls_heat.P[0] == original_P0
+        assert pi._last_batch_std_err_heat == [float("inf"), 0.05]
 
     @patch("custom_components.tasmota_irhvac.pi.pi_controller.weighted_least_squares")
     def test_batch_insufficient_eligible(self, mock_wls):
@@ -2504,18 +2505,40 @@ class TestRemainingSmallGaps:
         obj = MagicMock(spec=[])  # no raw_readings attribute
         assert obs_raw_reading(obj, "sensor.test") == 0.0
 
-    # ── health_checks.py line 345: uncertain coefficient ──
-    def test_coefficient_summary_uncertain(self):
-        """Coefficient summary marks uncertain entries (line 345)."""
+    # ── health_checks.py build_coefficient_summary: uncertain flag ──
+    def test_coefficient_summary_flags_uncertain_by_std_err(self):
+        """Flags coefficients whose batch std_err rivals their magnitude;
+        leaves well-determined and ~zero coefficients unflagged."""
         from custom_components.tasmota_irhvac.pi.health_checks import build_coefficient_summary
         result = build_coefficient_summary(
-            coeff_names=["intercept", "outdoor_delta"],
-            coefficients={0: 2.5, 1: 0.1},
-            seeds=[2.0, 0.3],
-            uncertainties=[0.1, 100.0],  # second has very high P_ii
-            feature_scales=[1.0, 1.0],
+            coeff_names=["intercept", "outdoor_delta", "solar", "near_zero"],
+            coefficients={0: 2.5, 1: 0.1, 2: -4.0, 3: 0.0},
+            seeds=[2.0, 0.3, -3.5, 0.0],
+            std_errors=[0.1, 100.0, 0.05, 50.0],
         )
-        assert "(uncertain)" in result
+        parts = {s.split(":")[0].strip(): s for s in result.split(";")}
+        assert "(uncertain)" in parts["outdoor_delta"]   # se ≫ |coeff|
+        assert "(uncertain)" not in parts["solar"]        # se ≪ |coeff|
+        assert "(uncertain)" not in parts["near_zero"]    # |coeff| ≈ 0 → skip
+
+    def test_coefficient_summary_nonestimable_and_missing_std_err(self):
+        """Non-finite std_err → flagged (non-estimable); missing → unflagged."""
+        from custom_components.tasmota_irhvac.pi.health_checks import build_coefficient_summary
+        flagged = build_coefficient_summary(
+            coeff_names=["intercept", "outdoor_delta"],
+            coefficients={0: 2.5, 1: 0.4},
+            seeds=[2.0, 0.3],
+            std_errors=[0.1, float("inf")],
+        )
+        assert "(uncertain)" in flagged
+        # No batch std_err yet (empty) → can't assess → unflagged.
+        unflagged = build_coefficient_summary(
+            coeff_names=["intercept", "outdoor_delta"],
+            coefficients={0: 2.5, 1: 0.4},
+            seeds=[2.0, 0.3],
+            std_errors=[],
+        )
+        assert "(uncertain)" not in unflagged
 
     # ── health_checks.py line 526: intercept absorbing with unclamped coeff ──
     def test_intercept_absorbing_unclamped(self):

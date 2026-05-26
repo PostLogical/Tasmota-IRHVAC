@@ -229,14 +229,6 @@ class TestRLSFeatureScalesPadding:
         model = RLSModel(n_inputs=2)
         assert model.feature_scales == [1.0, 1.0, 1.0]
 
-    def test_uniform_P_regardless_of_scales(self):
-        """P initialization should be uniform — normalization handles scale balance."""
-        model = RLSModel(n_inputs=2, feature_scales=[5.0], p_init=10.0)
-        # All P diagonals should be p_init (uniform), regardless of feature scales
-        assert model.P[0 * 3 + 0] == pytest.approx(10.0)
-        assert model.P[1 * 3 + 1] == pytest.approx(10.0)
-        assert model.P[2 * 3 + 2] == pytest.approx(10.0)
-
 
 class TestFeatureScaleRescaling:
     """Tests for rescale_features similarity transform and from_dict scale migration."""
@@ -292,12 +284,10 @@ class TestFeatureScaleRescaling:
             feature_scales=list(scales),
         )
         beta_before = list(model.beta)
-        P_before = list(model.P)
 
         model.rescale_features(list(scales))
 
         assert model.beta == pytest.approx(beta_before, abs=1e-15)
-        assert model.P == pytest.approx(P_before, abs=1e-15)
 
     def test_from_dict_applies_scale_transform(self):
         """from_dict should detect scale changes and apply similarity transform."""
@@ -359,27 +349,3 @@ class TestFeatureScaleRescaling:
             feature_scales=list(scales),
         )
         assert restored.beta == pytest.approx(model.beta, abs=1e-10)
-
-
-class TestPValidation:
-    """Tests for P matrix validation in from_dict()."""
-
-    def test_from_dict_resets_negative_p_diagonal(self):
-        """Restoring a model with negative P diagonal should reset P."""
-        model = RLSModel(n_inputs=2, seed_coefficients=[0.0, 0.3, -2.0])
-        data = model.as_dict()
-        # Corrupt P diagonal to simulate persisted broken state
-        n = model.n
-        data["P"][0] = -55539.0  # Negative intercept P diagonal
-        data["P"][n + 1] = -0.07  # Negative outdoor_delta P diagonal
-
-        restored = RLSModel.from_dict(
-            data, n_inputs=2,
-            seed_coefficients=[0.0, 0.3, -2.0],
-        )
-        diag = restored.get_covariance_diagonal()
-        for i, d in enumerate(diag):
-            assert d > 0, f"P diagonal[{i}] = {d} should be positive after reset"
-            assert d == pytest.approx(restored.p_init), (
-                f"P diagonal[{i}] = {d} should equal p_init={restored.p_init}"
-            )

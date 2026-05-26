@@ -213,12 +213,6 @@
         "outdoor_delta": 0.25,
         "sin_hour": "<NORMALIZED_SUBTREE>"
       },
-      "heat_uncertainty": {
-        "cos_hour": "<NORMALIZED_SUBTREE>",
-        "intercept": 1.0,
-        "outdoor_delta": 1.0,
-        "sin_hour": "<NORMALIZED_SUBTREE>"
-      },
       "last_gain_vector": null,
       "last_residual": null,
       "learning_suppressed": false,

@@ -10,7 +10,8 @@ Stages (from `~/.claude/plans/why-don-t-you-give-dynamic-chipmunk.md`):
 - Stage 2: controller.last_tick populated after tick(); SCHEMA_VERSION=2
   (v1 used `leverage_score` fields on ObservationContext; v2 renamed
   them and TickOutput._migrate_v1_to_v2 reads v1 files transparently)
-- Stage 3: set_debug_capture service toggles full_p_heat/cool fields
+- Stage 3: (removed in #117 — the set_debug_capture / full_p service and the
+  RLS P matrix it dumped were deleted along with the dead online-RLS machinery)
 - Stage 4: get_full_diagnostics() reduced to last_tick.diagnostics().to_dict()
 - Stage 5: sensor-feeding getters read from last_tick
 - Stage 6: get_diagnostic_dump path removed entirely (no consumer)
@@ -141,60 +142,6 @@ async def test_null_controller_last_tick_compat(hass, setup_integration):
 
     assert pi.last_tick is not None
     assert pi.last_tick.SCHEMA_VERSION == 2
-
-
-# ── Stage 3: set_debug_capture service ────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_debug_capture_service_toggles_full_p(hass, setup_pi_integration):
-    """set_debug_capture(full_p=True) makes full_p_heat/cool appear in diagnostics.
-
-    Stage 3: COMPLETE.
-    """
-    from custom_components.tasmota_irhvac.const import DOMAIN
-    from custom_components.tasmota_irhvac.diagnostics import (
-        async_get_config_entry_diagnostics,
-    )
-
-    from .conftest import get_climate_entity
-
-    entry = await setup_pi_integration({"pi_tau_estimate": 60})
-    climate = get_climate_entity(hass, entry)
-
-    # Initially: no full_p
-    diag = await async_get_config_entry_diagnostics(hass, entry)
-    pi_diag = diag["pi_controller"]
-    assert "full_p_heat" not in pi_diag
-    assert "full_p_cool" not in pi_diag
-
-    # Call service: full_p=True
-    await hass.services.async_call(
-        DOMAIN,
-        "set_debug_capture",
-        {"full_p": True, "entity_id": climate.entity_id},
-        blocking=True,
-    )
-
-    # After service call: full_p_heat and full_p_cool present
-    diag = await async_get_config_entry_diagnostics(hass, entry)
-    pi_diag = diag["pi_controller"]
-    assert "full_p_heat" in pi_diag
-    assert "full_p_cool" in pi_diag
-    # Should be square matrices
-    n = len(pi_diag["full_p_heat"])
-    assert all(len(row) == n for row in pi_diag["full_p_heat"])
-
-    # Toggle off again
-    await hass.services.async_call(
-        DOMAIN,
-        "set_debug_capture",
-        {"full_p": False, "entity_id": climate.entity_id},
-        blocking=True,
-    )
-    diag = await async_get_config_entry_diagnostics(hass, entry)
-    assert "full_p_heat" not in diag["pi_controller"]
-    assert "full_p_cool" not in diag["pi_controller"]
 
 
 # ── Stage 4: get_full_diagnostics() reduced to one-liner ─────────────

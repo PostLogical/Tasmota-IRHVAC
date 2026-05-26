@@ -150,8 +150,8 @@ class TestZeroOffsetBandNarrowing:
         # observations → tighter parameter estimates.  Multi-coefficient,
         # truth-agnostic, decoupled from FF-vs-integral controller mechanics.
         #
-        # Note: ``batch_covariance_trace`` (RLS prior) is constant since
-        # online RLS was removed; we use the batch-side equivalent.
+        # Note: the per-batch RLS P trace (a constant prior) was removed with
+        # online RLS; we use the batch-side equivalent.
         # Sum σ̂² over identifiable features only — held features (sin/cos
         # nuisance regressors during low-diversity buffer state) get inf
         # σ̂ as a sentinel.  Excluding them gives the trace of the

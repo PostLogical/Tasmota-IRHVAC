@@ -69,7 +69,6 @@ def test_rls_model_snapshot_roundtrip():
     r = RLSModelSnapshot(
         heat_seeds={"intercept": 0.1, "outdoor_delta": 0.04},
         cool_seeds={"intercept": -0.1, "outdoor_delta": -0.05},
-        heat_uncertainty={"intercept": 0.01, "outdoor_delta": 0.02},
         heat_observation_count=42, cool_observation_count=10,
         learning_suppressed=False, manual_suppress_reason="",
         last_residual=0.05, last_gain_vector=(0.1, 0.05),
@@ -83,7 +82,7 @@ def test_rls_model_snapshot_roundtrip():
 def test_rls_model_snapshot_with_none_residual_and_gain():
     """Online RLS removed in pre45; last_residual/gain may be None."""
     r = RLSModelSnapshot(
-        heat_seeds={}, cool_seeds={}, heat_uncertainty={},
+        heat_seeds={}, cool_seeds={},
         heat_observation_count=0, cool_observation_count=0,
         learning_suppressed=False, manual_suppress_reason="",
         last_residual=None, last_gain_vector=None,
@@ -752,29 +751,5 @@ def test_diagnostics_bundle_to_dict_merges_multicollinearity():
     assert len(d["observation_buffer_heat"]["correlated_pairs"]) == 1
     # Cool buffer also has its (empty) heavies merged
     assert d["observation_buffer_cool"]["condition_rating"] == "insufficient_data"
-
-
-def test_diagnostics_bundle_full_p_omitted_by_default():
-    bundle = DiagnosticsBundle(
-        tick=_minimal_tick(),
-        heat_multicollinearity=_empty_multicollinearity(),
-        cool_multicollinearity=_empty_multicollinearity(),
-    )
-    d = bundle.to_dict()
-    assert "full_p_heat" not in d
-    assert "full_p_cool" not in d
-
-
-def test_diagnostics_bundle_full_p_present_when_set():
-    bundle = DiagnosticsBundle(
-        tick=_minimal_tick(),
-        heat_multicollinearity=_empty_multicollinearity(),
-        cool_multicollinearity=_empty_multicollinearity(),
-        full_p_heat=((1.0, 0.0), (0.0, 1.0)),
-        full_p_cool=((1.0, 0.0), (0.0, 1.0)),
-    )
-    d = bundle.to_dict()
-    assert d["full_p_heat"] == [[1.0, 0.0], [0.0, 1.0]]
-    assert d["full_p_cool"] == [[1.0, 0.0], [0.0, 1.0]]
 
 

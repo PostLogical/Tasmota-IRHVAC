@@ -122,7 +122,6 @@ from ..const import (
     SIGNAL_PI_BATCH_COMPLETE,
 )
 
-from ..const import DEFAULT_RLS_P_INIT
 from .rls_model import RLSModel
 from .pi_stored_data import PIExtraStoredData
 from .model_input_manager import (
@@ -789,6 +788,12 @@ class PIController:
         self._greybox_buffer_cache: list[dict[str, Any]] = []
         self._batch_analysis_timer: CALLBACK_TYPE | None = None
         self._last_batch_result: BatchResult | None = None
+        # Per-mode batch WLS standard errors (physical units), captured when a
+        # batch is applied to that mode's coefficients.  Feeds the save-seeds
+        # repair's "(uncertain)" flag (build_coefficient_summary).  Transient
+        # (not persisted): empty until the first batch runs for the mode.
+        self._last_batch_std_err_heat: list[float] = []
+        self._last_batch_std_err_cool: list[float] = []
         self._last_greybox_result: GreyboxResult | None = None
         self._last_greybox_bridge: GreyboxBridgeResult | None = None
         self._last_greybox_timestamp_iso: str | None = None
@@ -866,11 +871,6 @@ class PIController:
         self._prev_auto_perturb_state: str | None = None
         self._prev_boundary_posterior_mean: float | None = None
         self._prev_plant_id_sources: dict[str, str] = {}
-        # Power-user debug toggle: when True, diagnostics include full RLS
-        # P matrix off-diagonals. Default off (saves log size). Toggled via
-        # the `tasmota_irhvac.set_debug_capture` service. Persisted so the
-        # setting survives restarts.
-        self._debug_capture_full_p: bool = False
         # Opt-in persistent event log (Stage 9). When True, fire_dispatcher
         # writes each published TickOutput to a JSONL file under
         # <config>/tasmota_irhvac/log/. Default off; configured via the
@@ -1430,6 +1430,14 @@ class PIController:
                     lo, hi = clamp
                     rls.beta[i] = max(lo, min(hi, rls.beta[i]))
 
+            # Capture this mode's batch std_err (physical units) alongside the
+            # coefficients it just wrote — feeds the save-seeds "(uncertain)"
+            # flag and stays in sync with the deployed beta for this mode.
+            if is_heating:
+                self._last_batch_std_err_heat = list(result.beta_std_err)
+            else:
+                self._last_batch_std_err_cool = list(result.beta_std_err)
+
             # observation_count = batch n_eligible.  Used by the FF
             # seed→learned blend to ramp up trust as data accumulates.
             if result.n_eligible > rls.observation_count:
@@ -1797,7 +1805,6 @@ class PIController:
             plant_id_enabled=self._pi_plant_id_enabled,
             detected_lag_tau=dict(self._detected_lag_tau),
             detected_lag_tau_counts=dict(self._detected_lag_tau_count),
-            debug_capture_full_p=self._debug_capture_full_p,
             pi_event_log_enabled=self._pi_event_log_enabled,
             saved_at_wallclock=dt_util.utcnow().isoformat(),
             cusum_pos=self._cusum_pos,
@@ -1991,8 +1998,6 @@ class PIController:
         self._pi_ff_enabled = data.ff_enabled
         self._pi_batch_wls_enabled = data.batch_wls_enabled
         self._pi_plant_id_enabled = data.plant_id_enabled
-        # Restore power-user debug capture toggle
-        self._debug_capture_full_p = data.debug_capture_full_p
         self._pi_event_log_enabled = data.pi_event_log_enabled
         # Restore CUSUM anomaly-detection state.  Without this, every
         # restart resets the accumulators (delaying detection) and
@@ -2090,8 +2095,6 @@ class PIController:
                 old_val_phys = rls_model.beta[i] / scale
                 rls_model.beta[i] = new_seeds[i] * scale  # Store in normalized space
                 rls_model.beta_seed[i] = new_seeds[i] * scale
-                # Reset P for this coefficient — uniform, normalization handles scaling
-                rls_model.P[i * rls_model.n + i] = DEFAULT_RLS_P_INIT
                 _LOGGER.info(
                     "Seed changed for coefficient %d: %.4f → %.4f (learned was %.4f, reset)",
                     i, old_seeds[i], new_seeds[i], old_val_phys,
@@ -3029,8 +3032,7 @@ class PIController:
             coeff_names=coeff_names,
             coefficients=heat_coeffs,
             seeds=self._heat_seeds,
-            uncertainties=self._rls_heat.get_covariance_diagonal(),
-            feature_scales=self._rls_heat.feature_scales,
+            std_errors=self._last_batch_std_err_heat,
         )
 
         result = check_save_seeds_repair(
@@ -3528,24 +3530,6 @@ class PIController:
             self._log_prefix, self._pi_event_log_enabled,
         )
 
-    def set_debug_capture(self, *, full_p: bool) -> None:
-        """Toggle debug captures (power-user surface for deep debugging).
-
-        Currently exposes only `full_p`: when enabled, diagnostics include
-        the full RLS P matrix (heat + cool, off-diagonals included). Adds
-        ~200 floats per snapshot — negligible for occasional debugging,
-        meaningful if event-logged every tick. Default off.
-
-        Persisted via `PIExtraStoredData.debug_capture_full_p` so the
-        setting survives restarts. Wired through the
-        `tasmota_irhvac.set_debug_capture` service.
-        """
-        self._debug_capture_full_p = bool(full_p)
-        _LOGGER.info(
-            "%sDebug capture: full_p=%s",
-            self._log_prefix, self._debug_capture_full_p,
-        )
-
     def _advance_health_grace_period(self) -> None:
         """Track the per-tick grace-period state machine for the comfort check.
 
@@ -3929,10 +3913,6 @@ class PIController:
                 coeff_names[i]: round(self._coef_in_seed_space(self._rls_cool, i), 4)
                 for i in range(min(len(coeff_names), self._rls_cool.n))
             },
-            heat_uncertainty={
-                coeff_names[i]: round(self._rls_heat.get_covariance_diagonal()[i], 4)
-                for i in range(min(len(coeff_names), len(self._rls_heat.beta)))
-            },
             heat_observation_count=self._rls_heat.observation_count,
             cool_observation_count=self._rls_cool.observation_count,
             learning_suppressed=self._manual_ff_suppress,
@@ -4306,32 +4286,16 @@ class PIController:
 
         Always rebuilds the underlying TickOutput so the result is fresh
         (not the cached `last_tick` which sensors read between dispatcher
-        signals). Includes multicollinearity heavies and — when
-        `set_debug_capture(full_p=True)` has been called — the full RLS
-        P matrices.
+        signals). Includes multicollinearity heavies (κ / VIF / correlated
+        pairs).
         """
         fresh_tick = self._build_tick_output()
         heat_mc = self._compute_multicollinearity_stats(self._observation_buffer_heat)
         cool_mc = self._compute_multicollinearity_stats(self._observation_buffer_cool)
-        full_p_heat: tuple[tuple[float, ...], ...] | None = None
-        full_p_cool: tuple[tuple[float, ...], ...] | None = None
-        if self._debug_capture_full_p:
-            n_heat = self._rls_heat.n
-            full_p_heat = tuple(
-                tuple(self._rls_heat.P[i * n_heat + j] for j in range(n_heat))
-                for i in range(n_heat)
-            )
-            n_cool = self._rls_cool.n
-            full_p_cool = tuple(
-                tuple(self._rls_cool.P[i * n_cool + j] for j in range(n_cool))
-                for i in range(n_cool)
-            )
         return DiagnosticsBundle(
             tick=fresh_tick,
             heat_multicollinearity=heat_mc,
             cool_multicollinearity=cool_mc,
-            full_p_heat=full_p_heat,
-            full_p_cool=full_p_cool,
         )
 
     # ── Public API (for vendor subclasses via entity._pi) ────────────
@@ -4475,9 +4439,6 @@ class PIController:
                 for i in range(n)
             ]
             self._rls_heat.beta = heat_norm
-            for i in range(n):
-                for j in range(n):
-                    self._rls_heat.P[i * n + j] = DEFAULT_RLS_P_INIT if i == j else 0.0
             self._rls_heat.observation_count = 0
             # Seed reset re-freezes features marked frozen_at_init
             for i, frozen in enumerate(self._features.frozen_mask()):
@@ -4492,9 +4453,6 @@ class PIController:
                 for i in range(n)
             ]
             self._rls_cool.beta = cool_norm
-            for i in range(n):
-                for j in range(n):
-                    self._rls_cool.P[i * n + j] = DEFAULT_RLS_P_INIT if i == j else 0.0
             self._rls_cool.observation_count = 0
             # Seed reset re-freezes features marked frozen_at_init
             for i, frozen in enumerate(self._features.frozen_mask()):

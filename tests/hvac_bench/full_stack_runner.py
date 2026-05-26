@@ -210,7 +210,6 @@ class CheckpointState:
 
     # Learning state
     ff_fraction: float  # current |FF| / (|FF| + |integral|)
-    covariance_trace: float  # current tr(P)
     buffer_utilization: float  # current buffer len / max
 
     # Access to PI internals
@@ -300,13 +299,10 @@ class FullStackResult:
 
     # ── Learning metrics ─────────────────────────────────────────────
     daily_ff_fraction: list[float]  # |FF| / (|FF| + |integral|)
-    daily_covariance_trace: list[float]  # tr(P) from RLS
     daily_buffer_utilization: list[float]  # buffer len / max_size
 
     # Per-batch snapshots
     batch_kappa: list[float]  # condition number at each batch
-    batch_covariance_trace: list[float]  # tr(P) at each batch (RLS prior;
-    # constant since online RLS removed — kept for back-compat)
     # Per-coefficient WLS standard errors at each batch.  Sum-of-squared
     # entries gives the trace of the WLS covariance matrix — same content
     # as tr(P) for the batch path.  Decreases as the buffer accumulates
@@ -661,13 +657,11 @@ def run_full_stack(
     daily_cold_violations: list[int] = []
     daily_warm_violations: list[int] = []
     daily_ff_fraction: list[float] = []
-    daily_covariance_trace: list[float] = []
     daily_buffer_utilization: list[float] = []
     daily_setpoint_limited_pct: list[float] = []
     daily_rapid_sp_changes: list[int] = []
 
     batch_kappa: list[float] = []
-    batch_covariance_trace: list[float] = []
     batch_std_err_trajectory: list[list[float]] = []
 
     checkpoint_data: list[dict] = []
@@ -949,10 +943,7 @@ def run_full_stack(
                 _snapshot_coefs(pi, batch_count, config.model_inputs,
                                 true_coefs, coef_trajectory, mode=config.mode)
 
-                # κ and covariance trace at batch time
-                rls = _mode_rls(pi, config.mode)
-                p_diag = rls.get_covariance_diagonal()
-                batch_covariance_trace.append(sum(p_diag))
+                # κ at batch time
                 kappa = pi._cached_kappa
                 batch_kappa.append(kappa if kappa is not None else float("inf"))
 
@@ -1008,9 +999,6 @@ def run_full_stack(
                     day_ff_sum / day_ff_plus_int_sum
                     if day_ff_plus_int_sum > 0 else 0.0
                 )
-                rls = _mode_rls(pi, config.mode)
-                p_diag = rls.get_covariance_diagonal()
-                daily_covariance_trace.append(sum(p_diag))
                 buf = _mode_buf(pi, config.mode)
                 buf_max = getattr(buf, "_max_size", 500)
                 daily_buffer_utilization.append(
@@ -1058,8 +1046,6 @@ def run_full_stack(
                     )
 
                     # Learning state for checkpoint
-                    rls_cp = _mode_rls(pi, config.mode)
-                    p_diag_cp = rls_cp.get_covariance_diagonal()
                     ff_a = abs(pi._ff_offset)
                     int_a = abs(pi._pi_integral)
                     denom_cp = ff_a + int_a
@@ -1088,7 +1074,6 @@ def run_full_stack(
                         total_itae=total_itae,
                         total_violations=total_violations,
                         ff_fraction=ff_a / denom_cp if denom_cp > 0 else 0.0,
-                        covariance_trace=sum(p_diag_cp),
                         buffer_utilization=(
                             len(buf_cp) / buf_max_cp if buf_max_cp > 0 else 0.0
                         ),
@@ -1170,10 +1155,8 @@ def run_full_stack(
         daily_warm_violations=daily_warm_violations,
         # Learning
         daily_ff_fraction=daily_ff_fraction,
-        daily_covariance_trace=daily_covariance_trace,
         daily_buffer_utilization=daily_buffer_utilization,
         batch_kappa=batch_kappa,
-        batch_covariance_trace=batch_covariance_trace,
         batch_std_err_trajectory=batch_std_err_trajectory,
         # Equipment
         daily_setpoint_limited_pct=daily_setpoint_limited_pct,
@@ -1559,17 +1542,13 @@ def print_full_stack_summary(
           f"off={result.ticks_hp_off})")
 
     # ── Learning health ─────────────────────────────────────────────
-    if result.batch_kappa or result.batch_covariance_trace:
+    if result.batch_kappa:
         print(f"\n{'Learning health':<22}")
         print("-" * 58)
         if result.batch_kappa:
             print(f"{'κ first / last':<22}"
                   f"{result.batch_kappa[0]:>11.2f} / "
                   f"{result.batch_kappa[-1]:<11.2f}")
-        if result.batch_covariance_trace:
-            print(f"{'tr(P) first / last':<22}"
-                  f"{result.batch_covariance_trace[0]:>11.4g} / "
-                  f"{result.batch_covariance_trace[-1]:<11.4g}")
         if result.daily_buffer_utilization:
             print(f"{'Buffer fill (final)':<22}"
                   f"{result.daily_buffer_utilization[-1]:>11.1%}")

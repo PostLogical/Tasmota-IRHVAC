@@ -93,7 +93,6 @@ class RLSModelSnapshot:
     # don't need to track the negation convention; see rls_model.py:281.
     heat_seeds: dict[str, float]
     cool_seeds: dict[str, float]
-    heat_uncertainty: dict[str, float]
     heat_observation_count: int
     cool_observation_count: int
     learning_suppressed: bool
@@ -121,7 +120,6 @@ class RLSModelSnapshot:
         return {
             "heat_seeds": dict(self.heat_seeds),
             "cool_seeds": dict(self.cool_seeds),
-            "heat_uncertainty": dict(self.heat_uncertainty),
             "heat_observation_count": self.heat_observation_count,
             "cool_observation_count": self.cool_observation_count,
             "learning_suppressed": self.learning_suppressed,
@@ -142,7 +140,6 @@ class RLSModelSnapshot:
         return cls(
             heat_seeds=dict(data["heat_seeds"]),
             cool_seeds=dict(data["cool_seeds"]),
-            heat_uncertainty=dict(data["heat_uncertainty"]),
             heat_observation_count=data["heat_observation_count"],
             cool_observation_count=data["cool_observation_count"],
             learning_suppressed=data["learning_suppressed"],
@@ -1616,7 +1613,7 @@ class TickOutput:
             ),
             rls_model=RLSModelSnapshot(
                 heat_seeds={}, cool_seeds={},
-                heat_uncertainty={}, heat_observation_count=0,
+                heat_observation_count=0,
                 cool_observation_count=0, learning_suppressed=False,
                 manual_suppress_reason="",
                 last_residual=None, last_gain_vector=None,
@@ -1673,16 +1670,11 @@ class DiagnosticsBundle:
     The HA diagnostics endpoint returns `bundle.to_dict()`, which merges
     multicollinearity stats into the per-buffer snapshots so the wire
     format matches the legacy `get_full_diagnostics()` shape exactly.
-
-    Optional `full_p_heat` / `full_p_cool` populate when the
-    `set_debug_capture(full_p=True)` service has been called (Stage 3).
     """
 
     tick: TickOutput
     heat_multicollinearity: MulticollinearityStats
     cool_multicollinearity: MulticollinearityStats
-    full_p_heat: tuple[tuple[float, ...], ...] | None = None
-    full_p_cool: tuple[tuple[float, ...], ...] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         out = self.tick.to_dict()
@@ -1694,10 +1686,6 @@ class DiagnosticsBundle:
             **out["observation_buffer_cool"],
             **self.cool_multicollinearity.to_dict(),
         }
-        if self.full_p_heat is not None:
-            out["full_p_heat"] = [list(row) for row in self.full_p_heat]
-        if self.full_p_cool is not None:
-            out["full_p_cool"] = [list(row) for row in self.full_p_cool]
         return out
 
 

@@ -2773,7 +2773,7 @@ class TestSeedChangeDetection:
 
     @pytest.mark.asyncio
     async def test_seed_change_resets_coefficient(self):
-        """Changed seed should reset coefficient and increase P diagonal."""
+        """Changed seed should reset coefficient to the new seed."""
         from tests.test_pi_controller import FakePIEntity
         config = make_pi_config()
         entity = FakePIEntity(config)
@@ -2794,9 +2794,6 @@ class TestSeedChangeDetection:
         # Coefficient should be reset to new seed (in physical units via get_coefficients)
         coeffs = pi._rls_heat.get_coefficients()
         assert coeffs[1] == pytest.approx(0.5)
-        # P diagonal should be reset to uniform P_INIT
-        from custom_components.tasmota_irhvac.const import DEFAULT_RLS_P_INIT
-        assert pi._rls_heat.P[1 * pi._rls_heat.n + 1] == pytest.approx(DEFAULT_RLS_P_INIT)
 
     @pytest.mark.asyncio
     async def test_unchanged_seed_preserves_learned(self):
@@ -2809,7 +2806,6 @@ class TestSeedChangeDetection:
         n = pi._rls_heat.n
         scale = pi._rls_heat.feature_scales[1]
         pi._rls_heat.beta = [0.1, 0.42 * scale] + [0.0] * (n - 2)
-        old_P = pi._rls_heat.P[1 * pi._rls_heat.n + 1]
 
         old_seeds = [0.0, 0.3] + [0.0] * (n - 2)
         new_seeds = [0.0, 0.3] + [0.0] * (n - 2)  # Same
@@ -2817,7 +2813,6 @@ class TestSeedChangeDetection:
         pi._apply_seed_changes(old_seeds, new_seeds, pi._rls_heat)
 
         assert pi._rls_heat.get_coefficients()[1] == pytest.approx(0.42)  # Preserved
-        assert pi._rls_heat.P[1 * pi._rls_heat.n + 1] == old_P  # Not reset
 
     @pytest.mark.asyncio
     async def test_empty_old_seeds_skips(self):

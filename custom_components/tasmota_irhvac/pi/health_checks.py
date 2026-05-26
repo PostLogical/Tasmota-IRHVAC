@@ -10,6 +10,7 @@ Tuning-repair functions (check_slope_divergence_repair, etc.) return
 
 from __future__ import annotations
 
+import math
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
@@ -303,44 +304,46 @@ def build_coefficient_summary(
     coeff_names: list[str],
     coefficients: dict[int, float],
     seeds: list[float],
-    uncertainties: list[float],
-    feature_scales: list[float],
+    std_errors: list[float],
     uncertainty_ratio_threshold: float = 1.0,
 ) -> str:
     """Build human-readable coefficient summary with uncertainty flags.
 
-    Flags coefficients where uncertainty (√P_ii / scale) exceeds the
-    coefficient magnitude — meaning the estimate is not well-determined
-    and saving it as a seed would anchor the system to a noisy value.
+    Flags coefficients where the batch WLS standard error rivals or exceeds
+    the coefficient magnitude (coefficient of variation > threshold) — the
+    estimate is not well-determined and saving it as a seed would anchor the
+    system to a noisy value.
 
     Args:
         coeff_names: Feature names [intercept, outdoor_delta, ...].
         coefficients: Physical-unit coefficients {index: value}.
         seeds: Current seed values (physical units).
-        uncertainties: P diagonal values (normalized space).
-        feature_scales: Feature scale factors.
-        uncertainty_ratio_threshold: Flag when uncertainty/|coeff| > this.
+        std_errors: Per-coefficient standard error in physical units, from the
+            most recent batch WLS for this mode.  A non-finite entry marks a
+            non-estimable coefficient (always flagged uncertain).  Empty/short
+            when no batch has run yet for this mode — those coefficients are
+            left unflagged (can't assess without an estimate).
+        uncertainty_ratio_threshold: Flag when std_err/|coeff| > this.
 
     Returns:
         Multi-line string like:
           outdoor_delta: 0.35 → 0.42
-          Solar Proxy: -4.00 → -3.12 ⚠ uncertain
+          Solar Proxy: -4.00 → -3.12 (uncertain)
     """
     lines = []
     for i in range(1, len(coeff_names)):  # skip intercept
         name = coeff_names[i] if i < len(coeff_names) else f"coeff_{i}"
         value = coefficients.get(i, 0.0)
         seed = seeds[i] if i < len(seeds) else 0.0
-        scale = feature_scales[i] if i < len(feature_scales) else 1.0
 
-        # Uncertainty in physical units: √P_ii / scale
-        p_ii = uncertainties[i] if i < len(uncertainties) else 0.0
-        uncertainty_phys = (p_ii ** 0.5) / scale if scale != 0 else 0.0
-
-        # Flag if uncertainty exceeds coefficient magnitude
+        se = std_errors[i] if i < len(std_errors) else None
+        # Flag when the standard error rivals the coefficient magnitude (high
+        # coefficient of variation) or the coefficient is non-estimable
+        # (non-finite std_err).  No std_err yet → can't assess → don't flag.
         uncertain = (
-            abs(value) > 1e-6
-            and uncertainty_phys / abs(value) > uncertainty_ratio_threshold
+            se is not None
+            and abs(value) > 1e-6
+            and (not math.isfinite(se) or se / abs(value) > uncertainty_ratio_threshold)
         )
 
         line = f"{name}: {seed:.3f} → {value:.3f}"

@@ -247,19 +247,6 @@ class TestWrongSeedsConvergence:
                 f"last week={last_week_ff:.2%}"
             )
 
-    def test_covariance_does_not_collapse(self, bench_metrics, num_regression):
-        """RLS covariance trace should not collapse to zero."""
-        config = self._make_config(n_days=30)
-        result = run_full_stack(config)
-
-        if result.batch_covariance_trace:
-            min_trace = min(result.batch_covariance_trace)
-            bench_metrics["min_trace"] = min_trace
-            check_bench_metrics(num_regression, bench_metrics)
-            assert min_trace > 1e-6, (
-                f"Covariance collapsed: min tr(P)={min_trace:.2e}"
-            )
-
     def test_no_long_violation_streaks(self, bench_metrics, num_regression):
         """No more than 5 hours of consecutive violations.
 
@@ -1283,16 +1270,7 @@ class TestMultiYearStability:
                 round(s, 6) for s in late_solars
             })
 
-            # Minimum covariance trace in last 30 days — catches general
-            # P-matrix collapse beyond the solar-specific freeze.  tr(P) is
-            # stored alongside coef_trajectory in result.batch_covariance_trace
-            # (same per-batch indexing), not on the trajectory snapshots.
-            if len(result.batch_covariance_trace) >= 60:
-                bench_metrics["min_covariance_trace_late"] = min(
-                    result.batch_covariance_trace[-60:]
-                )
-
-        # ── Monthly trajectory checkpoints (12 × 3 coefs + 12 cov traces) ─
+        # ── Monthly trajectory checkpoints (12 × 3 coefs) ─
         # 12h batches over 365 days → ~730 snapshots; every 60th ≈ monthly.
         # Indices [60, 120, ..., 720] give 12 end-of-month checkpoints.
         if len(result.coef_trajectory) >= 720:
@@ -1302,10 +1280,6 @@ class TestMultiYearStability:
                 bench_metrics[f"m{month:02d}_outdoor_delta"] = snap.get("outdoor_delta", 0.0)
                 bench_metrics[f"m{month:02d}_solar"] = snap.get("Solar Proxy", 0.0)
                 bench_metrics[f"m{month:02d}_intercept"] = snap.get("intercept", 0.0)
-                if idx < len(result.batch_covariance_trace):
-                    bench_metrics[f"m{month:02d}_cov_trace"] = (
-                        result.batch_covariance_trace[idx]
-                    )
 
         check_bench_metrics(num_regression, bench_metrics)
 

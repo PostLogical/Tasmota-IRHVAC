@@ -15,8 +15,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from ..const import DEFAULT_RLS_P_INIT
-
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -41,7 +39,6 @@ class RLSModel:
         self,
         n_inputs: int,
         seed_coefficients: list[float] | None = None,
-        p_init: float = DEFAULT_RLS_P_INIT,
         coeff_clamps: list[tuple[float, float] | None] | None = None,
         feature_scales: list[float] | None = None,
     ) -> None:
@@ -51,7 +48,6 @@ class RLSModel:
             n_inputs: Number of input features (excluding intercept).
             seed_coefficients: Initial β vector [intercept, β₁, β₂, ...] in
                               physical units. Length n_inputs + 1. Defaults to zeros.
-            p_init: Initial covariance diagonal value (uniform for all dimensions).
             coeff_clamps: List of (min, max) tuples per coefficient in physical
                          units, or None.
             feature_scales: Typical magnitude of each feature [1, scale₁, ...].
@@ -61,7 +57,6 @@ class RLSModel:
                            physical units for prediction and external access.
         """
         self.n: int = n_inputs + 1  # +1 for intercept
-        self.p_init: float = p_init
 
         # Feature scales: normalize features to O(1) before RLS math.
         # This gives truly balanced learning rates across all dimensions.
@@ -84,12 +79,6 @@ class RLSModel:
 
         # Seed values in normalized space (for seed change detection)
         self.beta_seed: list[float] = list(self.beta)
-
-        # Covariance matrix P (n × n, stored as flat list row-major)
-        # Uniform initialization — feature normalization handles scale balance.
-        self.P: list[float] = [0.0] * (self.n * self.n)
-        for i in range(self.n):
-            self.P[i * self.n + i] = p_init
 
         # Coefficient clamps in normalized space
         self.coeff_clamps: list[tuple[float, float] | None]
@@ -150,20 +139,14 @@ class RLSModel:
         """
         return -seed * self.feature_scales[index]
 
-    def get_covariance_diagonal(self) -> list[float]:
-        """Return diagonal of P (uncertainty per coefficient)."""
-        return [self.P[i * self.n + i] for i in range(self.n)]
-
     def rescale_features(self, old_scales: list[float]) -> None:
         """Apply similarity transform when feature scales change.
 
-        Adjusts beta and P so that physical predictions and learning
-        dynamics are preserved after a scale change.  Call after
-        constructing with new scales but before any new updates.
+        Adjusts the (normalized) coefficients so that physical predictions are
+        preserved after a scale change.  Call after constructing with new
+        scales but before reading predictions.
 
-        Math:
-            beta_norm_new[i] = beta_norm_old[i] * (new_scale[i] / old_scale[i])
-            P_new[i,j] = P_old[i,j] * (new_s[i]/old_s[i]) * (new_s[j]/old_s[j])
+        Math: beta_norm_new[i] = beta_norm_old[i] * (new_scale[i] / old_scale[i])
         """
         n = self.n
         for i in range(min(len(old_scales), n)):
@@ -172,17 +155,11 @@ class RLSModel:
                 continue
             self.beta[i] *= ratio
             self.beta_seed[i] *= ratio
-            for j in range(n):
-                ratio_j = self.feature_scales[j] / old_scales[j] if old_scales[j] != 0 else 1.0
-                self.P[i * n + j] *= ratio * ratio_j
-                if i != j:
-                    self.P[j * n + i] *= ratio * ratio_j
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize model state to dict (beta in normalized space)."""
         result: dict[str, Any] = {
             "beta": list(self.beta),
-            "P": list(self.P),
             "observation_count": self.observation_count,
             "feature_scales": list(self.feature_scales),
         }
@@ -194,7 +171,7 @@ class RLSModel:
     def from_dict(cls, data: dict[str, Any], n_inputs: int, **kwargs: Any) -> RLSModel:
         """Restore model from serialized dict.
 
-        Beta and P are stored in normalized space. Handles length mismatches
+        Beta is stored in normalized space. Handles length mismatches
         when model inputs are added/removed, and feature scale changes
         (e.g. user edited typical_value between restarts).
         """
@@ -213,22 +190,6 @@ class RLSModel:
                     model.beta[i] = float(beta[i])
                 _LOGGER.info("RLS restore: stored %d coefficients, model needs %d — truncating",
                            len(beta), model.n)
-        if "P" in data:
-            P = data["P"]
-            if len(P) == model.n * model.n:
-                model.P = [float(v) for v in P]
-                # Validate P diagonals — a persisted non-PD matrix perpetuates
-                # coefficient divergence across restarts.
-                if any(model.P[i * model.n + i] <= 0 for i in range(model.n)):
-                    _LOGGER.warning(
-                        "RLS restore: negative P diagonal detected, "
-                        "resetting to initial P"
-                    )
-                    model.P = [0.0] * (model.n * model.n)
-                    for i in range(model.n):
-                        model.P[i * model.n + i] = model.p_init
-            else:
-                _LOGGER.info("RLS restore: covariance matrix size mismatch, using initial P")
         if "observation_count" in data:
             model.observation_count = int(data["observation_count"])
         if "frozen" in data:
@@ -236,7 +197,7 @@ class RLSModel:
             for i in range(min(len(frozen), model.n)):
                 model.frozen[i] = bool(frozen[i])
         # Detect feature scale changes and apply similarity transform so
-        # beta and P remain consistent with the new normalization.
+        # beta remains consistent with the new normalization.
         old_scales = data.get("feature_scales")
         if old_scales and len(old_scales) == model.n:
             scales_changed = any(

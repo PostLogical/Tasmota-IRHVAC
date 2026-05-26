@@ -88,7 +88,7 @@ class TestLearningReset:
 
     @pytest.mark.asyncio
     async def test_reset_seeds_only(self, hass, setup_pi_integration):
-        """Seeds target resets RLS beta/P/frozen but leaves integral untouched."""
+        """Seeds target resets RLS beta/frozen but leaves integral untouched."""
         entry = await setup_pi_integration()
         entity = get_climate_entity(hass, entry)
         pi = entity._pi
@@ -97,8 +97,6 @@ class TestLearningReset:
         pi._pi_integral = 25.0
         pi._rls_heat.beta[0] = 99.0
         pi._rls_heat.observation_count = 100
-        # Corrupt P off-diagonal
-        pi._rls_heat.P[1] = 5.0
 
         await hass.services.async_call(
             DOMAIN, "learning_reset",
@@ -109,10 +107,6 @@ class TestLearningReset:
         assert pi._rls_heat.beta[0] == 0.0
         assert pi._rls_heat.observation_count == 0
         assert pi._pi_integral == 25.0  # Untouched
-        # P should be reset to diagonal
-        from custom_components.tasmota_irhvac.pi.pi_controller import DEFAULT_RLS_P_INIT
-        assert pi._rls_heat.P[0] == DEFAULT_RLS_P_INIT  # diagonal
-        assert pi._rls_heat.P[1] == 0.0  # off-diagonal cleared
         # Model input features should be re-frozen (indices 2+)
         for i in range(2, n):
             assert pi._rls_heat.frozen[i] is True
@@ -359,8 +353,6 @@ class TestLearningSnapshots:
         pi._rls_heat.frozen[0] = True
         pi._pi_integral = 15.0
         pi._manual_override_heat[1] = True
-        # Set a non-default P diagonal value
-        pi._rls_heat.P[0] = 999.0
 
         await hass.services.async_call(
             DOMAIN, "learning_save",
@@ -378,7 +370,6 @@ class TestLearningSnapshots:
         pi._rls_heat.frozen[0] = False
         pi._pi_integral = 0.0
         pi._manual_override_heat[1] = None
-        pi._rls_heat.P[0] = 1.0
 
         await hass.services.async_call(
             DOMAIN, "learning_restore",
@@ -396,7 +387,6 @@ class TestLearningSnapshots:
         assert pi._rls_heat.frozen[0] is True
         assert pi._pi_integral == 15.0
         assert pi._manual_override_heat[1] is True
-        assert pi._rls_heat.P[0] == 999.0
 
     @pytest.mark.asyncio
     async def test_max_three_slots(self, hass, setup_pi_integration):
