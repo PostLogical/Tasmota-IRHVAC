@@ -1168,7 +1168,7 @@ class PIController:
         coeff_dict = rls.get_coefficients()
         current_phys = [coeff_dict[i] for i in range(rls.n)]
 
-        # Partial model: frozen features held — matches online RLS.
+        # Partial model: frozen features held (excluded from this WLS fit).
         # Coefficients from this run get applied via compute_blended_update.
         frozen_set = self._get_frozen_feature_set(rls)
         result = weighted_least_squares(
@@ -5380,9 +5380,9 @@ class PIController:
             seeds = self._heat_seeds if is_heating else self._cool_seeds
 
             # Blend seed prediction with learned prediction based on data seen.
-            # observation_count reflects max(online RLS ticks, batch n_eligible)
-            # so this works in both online+batch and batch-only modes.
-            # Anchors to seeds until enough data has informed the model.
+            # observation_count reflects the batch's n_eligible (batch is the
+            # sole estimator). Anchors to seeds until enough data has informed
+            # the model.
             MIN_OBS_FOR_FULL_TRUST = 50
             seed_offset = sum(s * xi for s, xi in zip(seeds, x))
             rls_offset = rls.predict(x)

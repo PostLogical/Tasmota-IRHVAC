@@ -1,11 +1,10 @@
-"""Offline batch learning for RLS feedforward model.
+"""Batch learning for the feedforward coefficient model.
 
 Standalone module — no Home Assistant dependencies. Periodically analyzes
-accumulated near-equilibrium observations via weighted least squares (WLS)
-and reports how the batch estimate compares to the current online RLS model.
-
-Observation-only mode: logs recommendations but does not modify the model.
-Set apply_updates=True to enable automatic model updates.
+accumulated near-equilibrium observations via weighted least squares (WLS).
+The batch is the sole coefficient estimator (online RLS was removed); the
+caller fuses its result toward a scalar prior and writes the blended
+coefficients to the deployed model each cycle.
 
 References:
 - Ljung, L. "System Identification: Theory for the User" — batch estimation
@@ -2948,11 +2947,11 @@ def compare_and_report(
 MAX_STEP_ABS = 1.0
 
 # Prior standard deviation for the current model's coefficients.
-# Represents "moderate confidence" in the online RLS estimate.
-# When the batch std_err is much smaller than this, the batch dominates;
-# when batch std_err is comparable or larger, the current model holds.
-# This is a scalar prior — a more precise version would use the RLS
-# covariance diagonal, but that requires plumbing it through the caller.
+# Represents "moderate confidence" in the model's current (deployed)
+# coefficients.  When the batch std_err is much smaller than this, the batch
+# dominates; when batch std_err is comparable or larger, the current model
+# holds.  This is a single scalar prior shared across coefficients; a more
+# precise version would use per-coefficient priors.
 DEFAULT_PRIOR_STD = 1.0
 
 

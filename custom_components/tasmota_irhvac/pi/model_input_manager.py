@@ -219,7 +219,7 @@ class ModelInputManager:
 
             # Delta-from-room: convert entity temp to °C and subtract room temp.
             # _raw_for_obs gets the °C absolute temp (for batch WLS);
-            # self.values gets the delta (for online RLS / lag filter).
+            # self.values gets the delta (for prediction / lag filter).
             if m_input.get("delta_from_room") and room_temp_c is not None:
                 unit = entity_states[entity_id][2]
                 if unit not in (UnitOfTemperature.CELSIUS, UnitOfTemperature.FAHRENHEIT):
