@@ -95,6 +95,17 @@ def _truth_for(metric, keys, row):
     sib = f"{metric}_truth"
     if sib in keys:
         return _f(row.get(sib))
+    # A coefficient VALUE sampled at a point in time — ``X_final`` /
+    # ``X_at_fill`` / ``X_at_unlock`` / ``X_traj_dNN`` — shares its
+    # coefficient's ``X_truth`` sibling (system_learning_report et al.).  This
+    # is what lets us judge a raw coef move toward/away truth instead of
+    # punting to the "eyeball" flag.  Exclude ``_err`` columns (those are
+    # already truth-distances, judged lower-better) and ``_tau`` (lag has no
+    # clean truth).
+    if "_err" not in metric and "_tau" not in metric:
+        mch = re.match(r"(.+?)_(?:final|at_fill|at_unlock|traj_d\d+)$", metric)
+        if mch and f"{mch.group(1)}_truth" in keys:
+            return _f(row.get(f"{mch.group(1)}_truth"))
     low = metric.lower()
     if low.startswith(("beta_solar", "traj_solar")) or low == "solar_proxy_final":
         for c in _SOLAR_TRUTH_COLS:
