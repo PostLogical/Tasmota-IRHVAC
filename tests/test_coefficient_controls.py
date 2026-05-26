@@ -19,54 +19,6 @@ class TestRLSFrozenMask:
         model = RLSModel(n_inputs=2, seed_coefficients=[0.0, 0.3, -2.0])
         assert model.frozen == [False, False, False]
 
-    def test_frozen_coefficient_unchanged_by_update(self):
-        """A frozen coefficient should not change during update."""
-        model = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.3])
-        model.frozen[1] = True  # Freeze outdoor_delta
-
-        beta_before = model.beta[1]
-        for _ in range(50):
-            model.update([1.0, 10.0], 5.0)
-
-        assert model.beta[1] == beta_before
-
-    def test_unfrozen_coefficient_still_learns(self):
-        """Unfrozen coefficients should still update when others are frozen."""
-        model = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.3])
-        model.frozen[1] = True  # Freeze outdoor_delta
-
-        beta0_before = model.beta[0]
-        for _ in range(50):
-            model.update([1.0, 10.0], 5.0)
-
-        # Intercept should have moved (absorbing the error)
-        assert model.beta[0] != beta0_before
-
-    def test_freeze_all_prevents_all_learning(self):
-        """Freezing all coefficients should prevent any changes."""
-        model = RLSModel(n_inputs=1, seed_coefficients=[0.5, 0.3])
-        model.frozen = [True, True]
-
-        beta_before = list(model.beta)
-        for _ in range(50):
-            model.update([1.0, 10.0], 5.0)
-
-        assert model.beta == beta_before
-
-    def test_frozen_still_increments_observation_count(self):
-        """Observation count should still increment even with frozen coefficients."""
-        model = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.3])
-        model.frozen = [True, True]
-        model.update([1.0, 10.0], 5.0)
-        assert model.observation_count == 1
-
-    def test_frozen_still_returns_residual(self):
-        """Update should still return the correct residual when frozen."""
-        model = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.3])
-        model.frozen = [True, True]
-        residual = model.update([1.0, 10.0], 5.0)
-        assert residual == pytest.approx(2.0)  # 5.0 - (0 + 0.3*10)
-
     def test_frozen_serialization_round_trip(self):
         """Frozen state should survive serialization."""
         model = RLSModel(n_inputs=2, seed_coefficients=[1.0, 0.3, -2.0])
@@ -93,43 +45,6 @@ class TestRLSFrozenMask:
         # Restore with more inputs
         restored = RLSModel.from_dict(data, n_inputs=2)
         assert restored.frozen == [True, False, False]
-
-    def test_unfreeze_resumes_learning(self):
-        """Unfreezing a coefficient should allow it to learn again."""
-        model = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.3])
-        model.frozen[1] = True
-
-        # Update while frozen — no change
-        for _ in range(10):
-            model.update([1.0, 10.0], 5.0)
-        beta_frozen = model.beta[1]
-
-        # Unfreeze and update
-        model.frozen[1] = False
-        for _ in range(50):
-            model.update([1.0, 10.0], 5.0)
-
-        assert model.beta[1] != beta_frozen
-
-    def test_frozen_multivariate_selective(self):
-        """Freezing one coefficient in a multivariate model should only affect that one."""
-        import random
-        random.seed(42)
-
-        model = RLSModel(n_inputs=2, seed_coefficients=[0.0, 0.2, -1.0])
-        model.frozen[1] = True  # Freeze outdoor_delta
-
-        beta1_before = model.beta[1]
-        for _ in range(100):
-            outdoor = random.uniform(0, 20)
-            solar = random.uniform(0, 1)
-            y = 0.5 + 0.4 * outdoor - 3.5 * solar
-            model.update([1.0, outdoor, solar], y)
-
-        # outdoor_delta frozen at seed
-        assert model.beta[1] == beta1_before
-        # intercept and solar should have learned
-        assert model.beta[2] != -1.0
 
 
 # ── PIController coefficient API (unit tests via integration) ────────

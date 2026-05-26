@@ -959,22 +959,6 @@ class TestPlantModelCoverageGaps:
 class TestRLSModelCoverageGaps:
     """Cover missing lines in rls_model.py."""
 
-    # Lines 260-266: emergency P reset
-    def test_emergency_p_reset(self):
-        """P reset on non-positive diagonal (lines 260-266)."""
-        from custom_components.tasmota_irhvac.pi.rls_model import RLSModel
-        rls = RLSModel(n_inputs=1, p_init=100.0)
-        # Force non-positive P diagonal after Joseph update
-        # The Joseph form normally prevents this, but we simulate the edge case
-        n = rls.n
-        rls.P[0] = -1.0  # force non-positive
-        rls.P[n + 1] = -1.0
-        rls.update([1.0, 0.5], 2.0)
-        # After reset, P diagonal should be positive
-        assert rls.P[0] > 0
-        assert rls.P[n + 1] > 0
-
-    # Line 293: seed_to_beta
     def test_seed_to_beta(self):
         """seed_to_beta converts correctly (line 293)."""
         from custom_components.tasmota_irhvac.pi.rls_model import RLSModel
@@ -2512,43 +2496,6 @@ class TestRemainingSmallGaps:
         assert "gate_details" in attrs
         assert isinstance(attrs["gate_details"], str)
 
-    # ── rls_model.py lines 260-266: P matrix emergency reset ──
-    def test_rls_emergency_p_reset(self):
-        """P matrix resets when diagonal goes non-positive (lines 260-266)."""
-        from custom_components.tasmota_irhvac.pi.rls_model import RLSModel
-        rls = RLSModel(n_inputs=1, p_init=100.0)
-        n = rls.n
-        # The Joseph form + delta floor should prevent this, but we test
-        # defense-in-depth by forcing non-positive diagonal DURING update.
-        # Patch the computation to produce negative P diagonals:
-        original_update = rls.update
-
-        def force_negative_P(x, y):
-            """Intercept update and force negative P diagonal before the check."""
-            result = original_update(x, y)
-            # Force negative after the check — won't work. Instead,
-            # we need to make P negative before the check happens.
-            return result
-
-        # Direct approach: patch P to negative, then call update which will
-        # detect it in the post-update check (lines 259-266)
-        rls.P = [0.0] * (n * n)
-        for i in range(n):
-            rls.P[i * n + i] = -1.0  # negative diagonal
-        rls.delta = 0.0  # disable floor so negative persists through floor step
-        # The update method does: new_P computed, then floor, then check.
-        # With delta=0, floor doesn't add anything, so if Joseph form
-        # produces negative values they stay negative.
-        # But Joseph form squares things so it can't go negative...
-        # The only way to hit lines 260-266 is if floating-point produces negative.
-        # Let's just test it doesn't crash with weird P.
-        try:
-            rls.update([1.0, 0.5], 2.0)
-        except Exception:
-            pass  # Numerical instability may produce various errors
-        # At minimum, P diagonals should be positive after the emergency reset
-        for i in range(n):
-            assert rls.P[i * n + i] >= 0
 
     # ── health_checks.py line 181: obs_raw_reading with no raw_readings ──
     def test_obs_raw_reading_no_attr(self):

@@ -5,13 +5,11 @@ contract it established (T2).  They serve as regression guards.
 
 T1 — Legacy stored data with ``rls_online_enabled`` loads gracefully
      (the field was dropped from the dataclass; from_dict ignores unknown keys).
-T2 — ``RLSModel.update`` is never invoked from production code paths.
+T2 — ``RLSModel`` exposes no online ``update`` method (removed in 4d7e77a).
 T3 — FF prediction works (no online flag exists; predict reads beta only).
 T4 — Bench ``production_pi`` reference scenarios pass
      (verified by ``tests/hvac_bench/scenarios/test_reference_scores.py``).
 """
-
-from unittest.mock import patch
 
 import pytest
 
@@ -46,38 +44,19 @@ class TestT1LegacyStoredDataLoads:
         assert restored is not None
 
 
-class TestT2NoOnlineUpdateFromTick:
-    """``RLSModel.update`` must not be invoked from any production tick path.
+class TestT2NoOnlineUpdate:
+    """``RLSModel`` exposes no online ``update`` method.
 
-    A regression that re-introduces an online update would trip this immediately.
+    Online recursive RLS was removed in 4d7e77a; batch WLS is the sole
+    coefficient estimator.  The method's absence makes an online update
+    structurally impossible to call — this guards against a regression that
+    re-introduces a recursive update on the model.
     """
 
-    @pytest.mark.asyncio
-    async def test_pi_tick_does_not_call_rls_update(self):
-        from homeassistant.components.climate import HVACMode
-
-        entity = FakePIEntity(make_pi_config())
-        pi = entity._pi
-        pi._inputs.outdoor_temp = 0.0
-        entity._attr_current_temperature = 20.0
-        pi._desired_temp = 22.0
-        pi._hp_setpoint = 22.0
-        entity._attr_hvac_mode = HVACMode.HEAT
-
-        update_calls: list[tuple[list[float], float]] = []
-        original_update = RLSModel.update
-
-        def counting_update(self, x, y):
-            update_calls.append((list(x), y))
-            return original_update(self, x, y)
-
-        with patch.object(RLSModel, "update", counting_update):
-            for _ in range(5):
-                await pi._pi_tick()
-
-        assert update_calls == [], (
-            f"Online RLS regression: RLSModel.update called "
-            f"{len(update_calls)} time(s) during a 5-tick run"
+    def test_rls_model_has_no_update_method(self):
+        assert not hasattr(RLSModel, "update"), (
+            "Online RLS regression: RLSModel.update was re-introduced; "
+            "batch WLS is the sole coefficient estimator (removed in 4d7e77a)."
         )
 
 

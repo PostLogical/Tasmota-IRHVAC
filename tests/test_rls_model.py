@@ -1,4 +1,12 @@
-"""Tests for the RLS (Recursive Least Squares) feedforward model."""
+"""Tests for the feedforward coefficient model (RLSModel).
+
+RLSModel holds the deployed feedforward coefficients (fit by batch WLS and
+written into ``beta``) and evaluates predictions.  It no longer learns online
+— the recursive ``update`` path was removed in 4d7e77a — so these tests cover
+prediction, seed/scale handling, serialization, and the frozen flag.  Tests
+that emulate a batch-written coefficient assign ``beta`` directly, exactly as
+the controller does each learning cycle.
+"""
 
 import pytest
 from custom_components.tasmota_irhvac.pi.pi_controller import RLSModel
@@ -29,190 +37,43 @@ class TestRLSPrediction:
         assert model.predict(x) == pytest.approx(1.5)
 
 
-class TestRLSUpdate:
-    """Tests for RLS coefficient updates."""
-
-    def test_update_adjusts_coefficients(self):
-        """After update, prediction should be closer to observed value."""
-        model = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.3])
-        x = [1.0, 10.0]
-
-        # Seed predicts 3.0, observed is 5.0
-        prediction_before = model.predict(x)
-        assert prediction_before == pytest.approx(3.0)
-
-        model.update(x, 5.0)
-
-        prediction_after = model.predict(x)
-        # Should be closer to 5.0 than before
-        assert abs(prediction_after - 5.0) < abs(prediction_before - 5.0)
-
-    def test_update_returns_residual(self):
-        """Update should return the pre-update residual."""
-        model = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.3])
-        x = [1.0, 10.0]
-        residual = model.update(x, 5.0)
-        assert residual == pytest.approx(2.0)  # 5.0 - 3.0
-
-    def test_multiple_updates_converge(self):
-        """Repeated observations should converge to the true relationship."""
-        # True: offset = 0.5 + 0.4*outdoor_delta
-        model = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.2])  # Wrong seeds
-
-        # Feed 200 observations of the true relationship (P_init=1 needs more data)
-        for i in range(200):
-            outdoor = float(i % 25)
-            x = [1.0, outdoor]
-            y = 0.5 + 0.4 * outdoor
-            model.update(x, y)
-
-        # Coefficients should be close to [0.5, 0.4]
-        assert model.beta[0] == pytest.approx(0.5, abs=0.15)
-        assert model.beta[1] == pytest.approx(0.4, abs=0.05)
-
-    def test_multivariate_convergence(self):
-        """Multi-input model should converge to true coefficients.
-
-        Note: always-on seed shrinkage pulls toward seeds, so convergence
-        is slightly limited when seeds are far from truth.  Solar seed=-1.0
-        vs truth=-3.5 means the regularized estimate is biased toward seed.
-        """
-        # True: offset = 1.0 + 0.35*outdoor - 3.5*solar
-        model = RLSModel(n_inputs=2, seed_coefficients=[0.0, 0.2, -1.0])
-
-        import random
-        random.seed(42)
-        for _ in range(200):
-            outdoor = random.uniform(0, 20)
-            solar = random.uniform(0, 1)
-            x = [1.0, outdoor, solar]
-            y = 1.0 + 0.35 * outdoor - 3.5 * solar + random.gauss(0, 0.1)
-            model.update(x, y)
-
-        assert model.beta[0] == pytest.approx(1.0, abs=0.3)
-        assert model.beta[1] == pytest.approx(0.35, abs=0.05)
-        # Wider tolerance: seed shrinkage (δ=0.001) pulls toward seed=-1.0
-        assert model.beta[2] == pytest.approx(-3.5, abs=0.5)
-
-    def test_observation_count_increments(self):
-        """Observation count should increment on each update."""
-        model = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.3])
-        assert model.observation_count == 0
-        model.update([1.0, 5.0], 2.0)
-        assert model.observation_count == 1
-        model.update([1.0, 10.0], 4.0)
-        assert model.observation_count == 2
-
-
-class TestRLSCoefficientClamps:
-    """Tests for coefficient clamping."""
-
-    def test_clamp_prevents_wrong_sign(self):
-        """Coefficient should not go outside clamp range."""
-        model = RLSModel(
-            n_inputs=1,
-            seed_coefficients=[0.0, 0.3],
-            coeff_clamps=[None, (-1.0, 0.0)],  # outdoor must be negative (heating needs more when cold)
-        )
-        # Wait — seed is 0.3 (positive). The clamp should force it to 0.0.
-        # Actually the clamp is applied after updates, not on seed.
-        # Let's do an update that would push it positive:
-        model.beta[1] = -0.2  # Start within clamp
-        x = [1.0, 10.0]
-        # Observation that would push coefficient positive
-        for _ in range(100):
-            model.update(x, -20.0)  # Very negative observation
-
-        # Coefficient should be clamped to [-1.0, 0.0]
-        assert model.beta[1] >= -1.0
-        assert model.beta[1] <= 0.0
-
-    def test_no_clamp_allows_any_value(self):
-        """Without clamp, coefficients can take any value."""
-        model = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.0])
-        for _ in range(50):
-            model.update([1.0, 10.0], 5.0)
-        # No clamp on index 1, should be positive
-        assert model.beta[1] > 0
-
-
-class TestRLSRidgeRegularization:
-    """Tests for ridge regularization preventing covariance explosion."""
-
-    def test_covariance_stays_bounded(self):
-        """P diagonal should not grow unbounded."""
-        model = RLSModel(n_inputs=2, delta=0.001, p_init=10.0)
-
-        # Only update on one input dimension
-        for _ in range(500):
-            x = [1.0, 5.0, 0.0]  # Solar always 0 → its covariance could blow up
-            model.update(x, 2.0)
-
-        # P diagonal for solar (index 2) should be bounded, not infinite
-        diag = model.get_covariance_diagonal()
-        assert all(d < 1000 for d in diag), f"Covariance exploded: {diag}"
-
-
-class TestRLSVariableForgetting:
-    """Tests for variable forgetting factor."""
-
-    def test_small_residual_slow_forgetting(self):
-        """When model predicts well (small normalized residual), λ stays near base."""
-        model = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.3],
-                        lambda_base=0.999, lambda_min=0.995)
-
-        # Good prediction: residual ≈ 0, so normalized_sq / 9 ≈ 0 → λ ≈ lambda_base
-        x = [1.0, 10.0]
-        y = 3.0  # Matches prediction well (0 + 0.3*10 = 3.0)
-        residual = model.update(x, y)
-        assert abs(residual) < 0.1
-
-    def test_large_residual_fast_forgetting(self):
-        """When model predicts poorly (large normalized residual), λ drops toward min."""
-        model = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.3],
-                        lambda_base=0.999, lambda_min=0.995)
-
-        x = [1.0, 10.0]
-        # Bad prediction: predicted = 0 + 0.3*10 = 3.0, observed = 10.0 → residual = 7.0
-        residual = model.update(x, 10.0)
-        assert abs(residual) > 5.0  # Model was way off
-
-
 class TestRLSSerialization:
     """Tests for model serialization/deserialization."""
 
     def test_round_trip(self):
-        """Model should survive serialization round trip."""
+        """Model should survive serialization round trip (beta + observation_count)."""
         model = RLSModel(n_inputs=2, seed_coefficients=[1.0, 0.3, -2.0])
-        model.update([1.0, 5.0, 0.5], 3.0)
-        model.update([1.0, 10.0, 0.8], 4.0)
+        # Coefficients are written by the batch; emulate by assigning beta directly.
+        model.beta = [1.1, 0.42, -1.8]
+        model.observation_count = 7
 
         data = model.as_dict()
         restored = RLSModel.from_dict(data, n_inputs=2)
 
         assert restored.beta == pytest.approx(model.beta, abs=1e-10)
-        assert restored.P == pytest.approx(model.P, abs=1e-10)
         assert restored.observation_count == model.observation_count
 
     def test_from_dict_input_added(self):
         """Adding inputs should preserve old coefficients and seed new ones."""
-        # Old model had 1 input (intercept + outdoor_delta = 2 coefficients)
+        # Old model had 1 input (intercept + outdoor_delta = 2 coefficients).
         old_model = RLSModel(n_inputs=1, seed_coefficients=[0.5, 0.35])
-        old_model.update([1.0, 10.0], 4.0)  # Learn something
+        # Emulate a batch-written coefficient (differs from the seed).
+        old_model.beta[1] = 0.42
+        old_model.observation_count = 1
         old_data = old_model.as_dict()
 
-        # New model has 2 inputs (added solar)
+        # New model has 2 inputs (added solar).
         restored = RLSModel.from_dict(
             old_data, n_inputs=2,
             seed_coefficients=[0.0, 0.3, -4.0],  # Seeds for new model
         )
 
-        # Old coefficients preserved (intercept and outdoor_delta)
+        # Old coefficients preserved (intercept and outdoor_delta).
         assert restored.beta[0] == pytest.approx(old_model.beta[0], abs=0.01)
         assert restored.beta[1] == pytest.approx(old_model.beta[1], abs=0.01)
-        # New input gets seed value
+        # New input gets seed value.
         assert restored.beta[2] == pytest.approx(-4.0)
-        # Observation count preserved
+        # Observation count preserved.
         assert restored.observation_count == 1
 
     def test_from_dict_input_removed(self):
@@ -308,30 +169,8 @@ class TestRLSSeedPadding:
         assert model.beta[2] == 0.0
 
 
-class TestRLSZeroDenominator:
-    """Tests for RLS update returning early when denominator is zero (line 186)."""
-
-    def test_update_zero_vector(self):
-        """Update with all-zero feature vector should return residual without updating."""
-        model = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.0], p_init=0.0)
-        # With P=0 and x=0, denom = lambda + x'Px = lambda + 0
-        # We need denom == 0, so set lambda_base such that lam computes to 0.
-        # Actually, with p_init=0 the P matrix is all zeros, so Px = [0,0], xPx = 0.
-        # lam = lambda_base - (lambda_base - lambda_min) * blend
-        # With residual = y - 0 = y, abs_residual/threshold >= 1 → blend = 1 → lam = lambda_min
-        # So denom = lambda_min + 0 = lambda_min. Need lambda_min = 0.
-        model2 = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.0],
-                          p_init=0.0, lambda_base=0.0, lambda_min=0.0)
-        beta_before = list(model2.beta)
-        residual = model2.update([0.0, 0.0], 5.0)
-        # Should return residual without modifying beta
-        assert residual == 5.0
-        assert model2.beta == beta_before
-        assert model2.observation_count == 0  # Should not increment
-
-
 class TestRLSGetCoefficients:
-    """Tests for get_coefficients method (line 224)."""
+    """Tests for get_coefficients method."""
 
     def test_get_coefficients_returns_dict(self):
         """get_coefficients should return a dict mapping index to value."""
@@ -343,60 +182,9 @@ class TestRLSGetCoefficients:
         assert coeffs[2] == pytest.approx(-2.0)
         assert len(coeffs) == 3
 
-    def test_get_coefficients_after_update(self):
-        """get_coefficients should reflect updated values."""
-        model = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.3])
-        model.update([1.0, 10.0], 5.0)
-        coeffs = model.get_coefficients()
-        # After update, coefficients should have changed from seeds
-        assert coeffs[0] != 0.0 or coeffs[1] != 0.3
 
-
-class TestRLSBayesianRidge:
-    """Tests for Bayesian ridge anchoring toward seeds."""
-
-    def test_seed_anchor_resists_drift(self):
-        """With ambiguous data, coefficients should stay near seeds.
-
-        Two correlated inputs (simulating outdoor_delta and outdoor_rate both
-        tracking the same trend) should not cause one to absorb the other's
-        credit when Bayesian ridge is active.
-        """
-        # Seeds: intercept=0, outdoor_delta=0.35, outdoor_rate=0.28
-        model = RLSModel(n_inputs=2, seed_coefficients=[0.0, 0.35, 0.28])
-
-        import random
-        random.seed(42)
-
-        # Feed correlated data: rate ≈ -0.5 * delta (both from same trend)
-        for _ in range(100):
-            delta = random.uniform(5, 15)
-            rate = -0.5 * delta + random.gauss(0, 0.5)  # Correlated!
-            x = [1.0, delta, rate]
-            y = 0.35 * delta + 0.28 * rate  # True relationship
-            model.update(x, y)
-
-        # With Bayesian ridge, neither coefficient should collapse to zero
-        assert model.beta[1] > 0.1, f"outdoor_delta collapsed to {model.beta[1]}"
-        assert abs(model.beta[2]) > 0.05, f"outdoor_rate collapsed to {model.beta[2]}"
-
-    def test_clear_data_overrides_seed(self):
-        """With clear independent data, RLS should learn true values even if seeds are wrong."""
-        # Wrong seeds
-        model = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.1])
-
-        import random
-        random.seed(42)
-
-        # Clear data: true relationship is 0.5, not 0.1
-        for _ in range(200):
-            outdoor = random.uniform(0, 20)
-            x = [1.0, outdoor]
-            y = 0.5 * outdoor + random.gauss(0, 0.1)
-            model.update(x, y)
-
-        # Should learn close to true value despite wrong seed
-        assert model.beta[1] == pytest.approx(0.5, abs=0.1)
+class TestRLSBetaSeed:
+    """Tests for beta_seed (the prior anchor, set from config seeds)."""
 
     def test_beta_seed_stored_at_init(self):
         """beta_seed should be set from seed_coefficients at init."""
@@ -404,106 +192,18 @@ class TestRLSBayesianRidge:
         assert model.beta_seed == [0.5, 0.35, -4.0]
 
     def test_beta_seed_preserved_after_from_dict(self):
-        """from_dict should preserve beta_seed from current seeds, not stored beta."""
+        """from_dict should set beta_seed from current seeds, not stored beta."""
         model = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.35])
-        # Learn something different
-        for _ in range(50):
-            model.update([1.0, 10.0], 5.0)
+        # Emulate a batch-written coefficient that differs from the seed.
+        model.beta[1] = 0.8
         data = model.as_dict()
 
-        # Restore with same seeds
+        # Restore with same seeds.
         restored = RLSModel.from_dict(data, n_inputs=1, seed_coefficients=[0.0, 0.35])
-        # beta should be learned value
+        # beta should be the stored (learned) value.
         assert restored.beta[1] != 0.35
-        # beta_seed should be the seed, not the learned value
+        # beta_seed should be the seed, not the learned value.
         assert restored.beta_seed == [0.0, 0.35]
-
-
-class TestSeedShrinkage:
-    """Tests for Bayesian seed shrinkage in RLS update."""
-
-    def test_shrinkage_pulls_toward_seed(self):
-        """Coefficient drifted from seed should be pulled back over updates."""
-        model = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.5])
-        # Manually push beta away from seed
-        model.beta[1] = 2.0  # seed is 0.5
-
-        # Feed data consistent with beta=0.5 (so RLS also wants to go back)
-        # but even with ambiguous data, shrinkage should pull toward seed
-        drift_before = abs(model.beta[1] - model.beta_seed[1])
-        for _ in range(100):
-            model.update([1.0, 5.0], 2.5)  # y=2.5 is ambiguous
-        drift_after = abs(model.beta[1] - model.beta_seed[1])
-        assert drift_after < drift_before
-
-    def test_shrinkage_does_not_prevent_learning(self):
-        """With clear data, RLS should still converge despite shrinkage pull."""
-        # Seed says 0.5, true value is 2.0
-        model = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.5])
-
-        # Strong, consistent signal: y = 2.0 * x
-        for i in range(200):
-            x = float(1 + i % 10)
-            model.update([1.0, x], 2.0 * x)
-
-        learned = model.beta[1] / model.feature_scales[1]
-        # Should learn close to 2.0 despite seed=0.5 pulling back
-        assert abs(learned - 2.0) < 0.3
-
-    def test_frozen_coefficients_not_shrunk(self):
-        """Frozen coefficients should not be affected by shrinkage."""
-        model = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.5])
-        model.beta[1] = 2.0
-        model.frozen[1] = True
-
-        for _ in range(50):
-            model.update([1.0, 5.0], 3.0)
-
-        # Beta should not have moved at all (frozen)
-        assert model.beta[1] == 2.0
-
-    def test_shrinkage_symmetric_around_seed(self):
-        """Shrinkage pulls equally whether above or below seed."""
-        model_above = RLSModel(n_inputs=1, seed_coefficients=[0.0, 1.0])
-        model_below = RLSModel(n_inputs=1, seed_coefficients=[0.0, 1.0])
-
-        model_above.beta[1] = 2.0   # 1.0 above seed
-        model_below.beta[1] = 0.0   # 1.0 below seed
-
-        # Same neutral data
-        for _ in range(50):
-            model_above.update([1.0, 5.0], 5.0)
-            model_below.update([1.0, 5.0], 5.0)
-
-        drift_above = abs(model_above.beta[1] - model_above.beta_seed[1])
-        drift_below = abs(model_below.beta[1] - model_below.beta_seed[1])
-        # Both should have been pulled back roughly equally
-        assert abs(drift_above - drift_below) < 0.2
-
-    def test_zero_seed_shrinks_toward_zero(self):
-        """Feature seeded at 0 shrinks toward 0 when active."""
-        model = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.0])
-        model.beta[1] = 1.0  # drifted from seed=0
-
-        for _ in range(100):
-            model.update([1.0, 5.0], 0.0)  # feature active
-        # Should pull back toward 0
-        assert abs(model.beta[1]) < 1.0
-
-    def test_dormant_feature_not_shrunk(self):
-        """Inactive feature retains its learned coefficient (no data, no shrinkage).
-
-        Dormant features like a pellet stove off from March-October must keep
-        their learned coefficient.  P off-diagonal decoupling (not shrinkage)
-        prevents drift from active feature coupling.
-        """
-        model = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.0])
-        model.beta[1] = 1.0  # learned value
-
-        for _ in range(100):
-            model.update([1.0, 0.0], 0.0)  # feature inactive
-        # Should NOT be pulled back — dormant features keep their learning
-        assert model.beta[1] == 1.0
 
 
 class TestRLSFeatureScalesPadding:
@@ -549,9 +249,8 @@ class TestFeatureScaleRescaling:
             seed_coefficients=[1.0, 0.3, -4.0],
             feature_scales=list(old_scales),
         )
-        # Train a bit
-        for _ in range(10):
-            model.update([1.0, 8.0, 0.6], 3.0)
+        # Emulate batch-written coefficients (normalized space).
+        model.beta = [1.2, 4.5, -1.8]
 
         x = [1.0, 12.0, 0.4]
         pred_before = model.predict(x)
@@ -572,8 +271,7 @@ class TestFeatureScaleRescaling:
             seed_coefficients=[1.0, 0.3, -4.0],
             feature_scales=list(old_scales),
         )
-        for _ in range(10):
-            model.update([1.0, 8.0, 0.6], 3.0)
+        model.beta = [1.2, 4.5, -1.8]
 
         coeffs_before = model.get_coefficients()
 
@@ -609,8 +307,7 @@ class TestFeatureScaleRescaling:
             seed_coefficients=[1.0, 0.3, -4.0],
             feature_scales=list(old_scales),
         )
-        for _ in range(10):
-            model.update([1.0, 8.0, 0.6], 3.0)
+        model.beta = [1.2, 4.5, -1.8]
 
         x = [1.0, 12.0, 0.4]
         pred_original = model.predict(x)
@@ -646,15 +343,14 @@ class TestFeatureScaleRescaling:
         assert restored.beta == pytest.approx(model.beta, abs=1e-10)
 
     def test_from_dict_same_scales_no_transform(self):
-        """Same scales should not trigger transform."""
+        """Same scales should not trigger transform; beta round-trips exactly."""
         scales = [1.0, 10.0, 0.5]
         model = RLSModel(
             n_inputs=2,
             seed_coefficients=[1.0, 0.3, -4.0],
             feature_scales=list(scales),
         )
-        for _ in range(5):
-            model.update([1.0, 8.0, 0.6], 3.0)
+        model.beta = [1.2, 4.5, -1.8]
 
         data = model.as_dict()
         restored = RLSModel.from_dict(
@@ -663,136 +359,10 @@ class TestFeatureScaleRescaling:
             feature_scales=list(scales),
         )
         assert restored.beta == pytest.approx(model.beta, abs=1e-10)
-        assert restored.P == pytest.approx(model.P, abs=1e-10)
-
-
-class TestJosephFormPUpdate:
-    """Tests for the Joseph-form covariance update (Bierman 1977)."""
-
-    def test_joseph_form_regression_well_conditioned(self):
-        """On well-conditioned data, Joseph form should converge to the true
-        relationship.  Seed shrinkage (δ=0.001 pull toward seed) biases
-        the estimate, especially for the intercept (seed=0 vs truth=1)."""
-        import random
-        random.seed(42)
-        # True relationship: y = 1.0 + 0.35 * outdoor - 3.5 * solar
-        model = RLSModel(n_inputs=2, seed_coefficients=[0.0, 0.2, -1.0])
-        for _ in range(200):
-            outdoor = random.uniform(0, 20)
-            solar = random.uniform(0, 1)
-            x = [1.0, outdoor, solar]
-            y = 1.0 + 0.35 * outdoor - 3.5 * solar + random.gauss(0, 0.1)
-            model.update(x, y)
-
-        coeffs = model.get_coefficients()
-        # Intercept: seed=0 vs truth=1 → shrinkage bias toward 0
-        assert coeffs[0] == pytest.approx(1.0, abs=0.5)
-        assert coeffs[1] == pytest.approx(0.35, abs=0.05)
-        # Solar: seed=-1 vs truth=-3.5 → shrinkage bias toward -1
-        assert coeffs[2] == pytest.approx(-3.5, abs=0.5)
-
-    def test_p_stays_positive_definite_collinear(self):
-        """With r=0.95 correlated inputs, P diagonals must stay positive.
-
-        This is the exact scenario that caused the production bug:
-        7 coefficients, high multicollinearity, small N.
-        """
-        import random
-        random.seed(99)
-        # 5 inputs + intercept + outdoor_delta = 7 coefficients
-        model = RLSModel(
-            n_inputs=5,
-            seed_coefficients=[0.0, 0.35, -4.0, -8.0, 0.0, -0.5, 0.0],
-        )
-        for _ in range(50):
-            outdoor = random.uniform(5, 20)
-            # Make feature 4 (adjacent zone temp) highly correlated with outdoor
-            adjacent_temp = outdoor * 0.95 + random.gauss(0, 0.5)
-            solar = outdoor * 0.3 + random.gauss(0, 0.3)  # Also correlated
-            stove = 0.0  # dormant
-            boiler = 0.0  # dormant
-            x = [1.0, outdoor, solar, stove, boiler, adjacent_temp]
-            y = 0.35 * outdoor - 4.0 * solar + random.gauss(0, 0.5)
-            model.update(x, y)
-
-        diag = model.get_covariance_diagonal()
-        for i, d in enumerate(diag):
-            assert d > 0, f"P diagonal[{i}] = {d} is non-positive after {model.observation_count} collinear observations"
-
-    def test_p_symmetry_maintained(self):
-        """P matrix should remain symmetric after many updates."""
-        import random
-        random.seed(7)
-        model = RLSModel(n_inputs=3, seed_coefficients=[0.0, 0.3, -2.0, 1.0])
-        for _ in range(200):
-            x = [1.0, random.uniform(0, 20), random.uniform(0, 1),
-                 random.uniform(-1, 1)]
-            y = random.uniform(-5, 5)
-            model.update(x, y)
-
-        n = model.n
-        for i in range(n):
-            for j in range(i + 1, n):
-                assert model.P[i * n + j] == pytest.approx(
-                    model.P[j * n + i], abs=1e-12
-                ), f"P[{i},{j}]={model.P[i*n+j]} != P[{j},{i}]={model.P[j*n+i]}"
-
-
-class TestDormantFeatureDecoupling:
-    """Tests for K-zeroing to prevent dormant feature coefficient drift."""
-
-    def test_dormant_features_stay_at_learned_value(self):
-        """Features that are always zero should not drift from their value.
-
-        K[i] is zeroed when x[i]=0, preventing coefficient updates from
-        off-diagonal P coupling.  Dormant coefficients remain stable.
-        """
-        model = RLSModel(
-            n_inputs=3,
-            seed_coefficients=[0.0, 0.3, -4.0, -8.0],
-        )
-        # Feature 2 (solar, seed=-4.0) and feature 3 (stove, seed=-8.0) always zero
-        for _ in range(50):
-            x = [1.0, 10.0, 0.0, 0.0]
-            y = 3.0 + 0.1 * ((_ % 10) - 5)  # Some noise
-            model.update(x, y)
-
-        coeffs = model.get_coefficients()
-        # Solar and stove should stay at their seed values (K=0, no updates)
-        assert coeffs[2] == pytest.approx(-4.0, abs=0.01), (
-            f"Dormant solar drifted to {coeffs[2]}, expected -4.0"
-        )
-        assert coeffs[3] == pytest.approx(-8.0, abs=0.01), (
-            f"Dormant stove drifted to {coeffs[3]}, expected -8.0"
-        )
-
-    def test_intermittent_feature_still_learns(self):
-        """A feature that alternates on/off should still learn when active.
-
-        K[i]=0 only when x[i]=0; when active, normal learning proceeds.
-        """
-        # True: y = 0.3 * outdoor - 3.0 * stove
-        model = RLSModel(
-            n_inputs=2,
-            seed_coefficients=[0.0, 0.2, -1.0],
-        )
-        import random
-        random.seed(42)
-        for _ in range(200):
-            outdoor = random.uniform(5, 20)
-            stove = 1.0 if random.random() < 0.2 else 0.0  # 20% duty cycle
-            x = [1.0, outdoor, stove]
-            y = 0.3 * outdoor - 3.0 * stove + random.gauss(0, 0.2)
-            model.update(x, y)
-
-        coeffs = model.get_coefficients()
-        assert coeffs[2] == pytest.approx(-3.0, abs=1.0), (
-            f"Intermittent stove coefficient {coeffs[2]}, expected near -3.0"
-        )
 
 
 class TestPValidation:
-    """Tests for P matrix validation in from_dict() and update()."""
+    """Tests for P matrix validation in from_dict()."""
 
     def test_from_dict_resets_negative_p_diagonal(self):
         """Restoring a model with negative P diagonal should reset P."""
@@ -813,16 +383,3 @@ class TestPValidation:
             assert d == pytest.approx(restored.p_init), (
                 f"P diagonal[{i}] = {d} should equal p_init={restored.p_init}"
             )
-
-    def test_from_dict_preserves_valid_p(self):
-        """Restoring a model with valid P should preserve it."""
-        model = RLSModel(n_inputs=1, seed_coefficients=[0.0, 0.3])
-        for _ in range(10):
-            model.update([1.0, 5.0], 2.0)
-        data = model.as_dict()
-
-        restored = RLSModel.from_dict(
-            data, n_inputs=1,
-            seed_coefficients=[0.0, 0.3],
-        )
-        assert restored.P == pytest.approx(model.P, abs=1e-10)

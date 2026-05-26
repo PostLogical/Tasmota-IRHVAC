@@ -2988,9 +2988,12 @@ class TestSaveLearnedSeedsButton:
         entity = get_climate_entity(hass, entry)
         pi = entity._pi
 
-        # Give the RLS model some observations so available=True
-        pi._rls_heat.update([1.0, 10.0, 0.0, 0.0], 5.0)
-        pi._rls_cool.update([1.0, 10.0, 0.0, 0.0], 3.0)
+        # Emulate a learned model (batch writes beta + advances the counter)
+        # so available=True (has_rls_observations) and beta differs from seed.
+        pi._rls_heat.beta[1] = 0.42 * pi._rls_heat.feature_scales[1]
+        pi._rls_heat.observation_count = 1
+        pi._rls_cool.beta[1] = 0.30 * pi._rls_cool.feature_scales[1]
+        pi._rls_cool.observation_count = 1
 
         # Find the save button
         from custom_components.tasmota_irhvac.button import SaveLearnedSeedsButton
@@ -3058,10 +3061,11 @@ class TestSaveLearnedSeedsButton:
         entity = get_climate_entity(hass, entry)
         pi = entity._pi
 
-        # Give RLS observations
-        for _ in range(5):
-            pi._rls_heat.update([1.0, 10.0, 0.0, 0.0], 5.0)
-            pi._rls_cool.update([1.0, 10.0, 0.0, 0.0], 3.0)
+        # Emulate a learned model (batch writes beta + advances the counter).
+        pi._rls_heat.beta[1] = 0.42 * pi._rls_heat.feature_scales[1]
+        pi._rls_heat.observation_count = 5
+        pi._rls_cool.beta[1] = 0.30 * pi._rls_cool.feature_scales[1]
+        pi._rls_cool.observation_count = 5
 
         from custom_components.tasmota_irhvac.button import SaveLearnedSeedsButton
         from homeassistant.helpers.entity_platform import async_get_platforms
