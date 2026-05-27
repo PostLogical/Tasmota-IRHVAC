@@ -235,7 +235,10 @@ def main():
                 if not _changed(ov, nv):
                     continue
                 sym, kind = _verdict(m, ov, nv, _truth_for(m, keys, nrow or orow))
-                rel = (abs(nv - ov) / (abs(ov) + 1e-12)
+                # Relative move with a FLOORED, symmetric denominator: a
+                # near-zero baseline (drift ≈ 0) must not manufacture a giant %
+                # from a tiny absolute change (0 → 2e-4 is ~100%, not 4039%).
+                rel = (abs(nv - ov) / max(abs(ov), abs(nv), _ABS_FLOOR)
                        if (ov is not None and nv is not None) else math.inf)
                 tally[sym] += 1
                 if _sig(rel, ov, nv):
@@ -248,7 +251,9 @@ def main():
                 if kind == "UNCLASSIFIED":
                     unmapped.setdefault(m, (ov, nv))
                 if sym in ("✗", "?"):
-                    review.append((rel, short, m, ov, nv, kind))
+                    adl = (abs(nv - ov) if (ov is not None and nv is not None)
+                           else math.inf)
+                    review.append((adl, rel, short, m, ov, nv, kind))
 
     if verbose:
         for short, rows in sorted(per_file.items()):
@@ -262,13 +267,15 @@ def main():
           f"= no-change {tally['=']}  · neutral {tally['·']}  ? flag {tally['?']}")
     print(f"  ≥{pct:.0%} & ≥{abs_floor:g} : ✓ {sig['✓']}  ✗ {sig['✗']}  ? {sig['?']}   "
           f"(smaller = run-to-run noise)")
-    sig_rev = sorted((r for r in review if _sig(r[0], r[3], r[4])), reverse=True)
+    # Rank by ABSOLUTE delta — "how much it actually moved" — so a tiny-but-
+    # high-% near-zero move can't crowd out a genuinely large one.
+    sig_rev = sorted((r for r in review if _sig(r[1], r[4], r[5])), reverse=True)
     if sig_rev:
-        print(f"\n  ⚠ REVIEW — significant worse/unclassified, biggest first "
-              f"(top {min(_REVIEW_CAP, len(sig_rev))} of {len(sig_rev)}):")
-        for rel, short, m, ov, nv, kind in sig_rev[:_REVIEW_CAP]:
-            p = "  >>" if rel > 50 else f"{rel:>4.0%}"  # >>5000% ≈ from-zero/unlock
-            print(f"    [{p}] {short} :: {m}  {_fmt(ov)}→{_fmt(nv)}  [{kind}]")
+        print(f"\n  ⚠ REVIEW — significant worse/unclassified, biggest ABSOLUTE move "
+              f"first (top {min(_REVIEW_CAP, len(sig_rev))} of {len(sig_rev)}):")
+        for adl, rel, short, m, ov, nv, kind in sig_rev[:_REVIEW_CAP]:
+            print(f"    [Δ {adl:>9.3g}  {rel:>4.0%}] {short} :: {m}  "
+                  f"{_fmt(ov)}→{_fmt(nv)}  [{kind}]")
 
     if vanished:
         print(f"\n  ⊘ VALUE↔EMPTY ({len(vanished)}) — metric started/stopped computing "
