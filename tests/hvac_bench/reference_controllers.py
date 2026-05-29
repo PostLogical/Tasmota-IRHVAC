@@ -198,6 +198,15 @@ class _BatchAwarePIController:
     def set_desired_temp(self, temp_c):
         self._adapter.set_desired_temp(temp_c)
 
+    def apply_user_setpoint_change(self, temp_c, room_temp_c, outdoor_temp_c,
+                                   dt_seconds, model_inputs=None):
+        # Delegate so the runner's hasattr-check finds the production
+        # user-setpoint-change path and doesn't fall back to direct
+        # assignment + tick on this wrapper.
+        return self._adapter.apply_user_setpoint_change(
+            temp_c, room_temp_c, outdoor_temp_c, dt_seconds, model_inputs,
+        )
+
     def set_mode(self, mode):
         self._adapter.set_mode(mode)
 

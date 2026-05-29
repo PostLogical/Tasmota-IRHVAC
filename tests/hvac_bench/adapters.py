@@ -103,9 +103,15 @@ class TasmotaPIAdapter:
             if self._pi._smith is not None:
                 self._pi._smith.update_params(tau=gains.tau_fast, lag=gains.lag)
 
-    def tick(self, room_temp_c, outdoor_temp_c, dt_seconds,
-             model_inputs=None):
-        """Run one PI tick and return HP setpoint."""
+    def _apply_pre_tick_state(self, room_temp_c, outdoor_temp_c, dt_seconds,
+                              model_inputs=None):
+        """Stage sensor/outdoor/inputs/clock before a tick.
+
+        Shared by ``tick()`` and ``apply_user_setpoint_change()`` so both
+        tick paths see the same fresh state. Anything that resolves entity
+        state via ``hass.states.get`` is updated here (resolver-canonical
+        path per #84).
+        """
         self._sim_clock += dt_seconds
         self._entity._attr_current_temperature = room_temp_c
         self._pi._inputs.outdoor_temp = outdoor_temp_c
@@ -128,9 +134,56 @@ class TasmotaPIAdapter:
         # configured tick interval rather than the fallback.
         self._pi._pi_last_tick_time = self._sim_clock - dt_seconds
 
+    def tick(self, room_temp_c, outdoor_temp_c, dt_seconds,
+             model_inputs=None):
+        """Run one PI tick and return HP setpoint."""
+        self._apply_pre_tick_state(room_temp_c, outdoor_temp_c, dt_seconds,
+                                   model_inputs)
+
         sim_dt = _SIM_EPOCH + timedelta(seconds=self._sim_clock)
         with freeze_time(sim_dt):
             self._loop.run_until_complete(self._pi._pi_tick())
+
+        return float(self._pi._hp_setpoint)
+
+    def apply_user_setpoint_change(self, temp_c, room_temp_c, outdoor_temp_c,
+                                   dt_seconds, model_inputs=None):
+        """Drive a user-setpoint-change tick via production's set_temperature.
+
+        Mirrors what production does when a user changes the desired temp in
+        the HA UI: bumpless integral transfer (Åström-Hägglund §3.5), emit
+        SETPOINT_CHANGE_USER event, abort auto-perturb, cancel plant-id
+        observation, set power_mode=ON, then ``_pi_tick()``. See
+        ``PIController.set_temperature`` (pi_controller.py:2130).
+
+        This **replaces** (not supplements) the regular sensor-driven
+        ``tick()`` at this tick boundary. Rationale: in production,
+        ``set_temperature`` calls ``_pi_tick()`` unconditionally
+        (pi_controller.py:2174) while the 60s sensor-tick cooldown lives in
+        the sensor listener (pi_controller.py:4895-4899). So a user
+        setpoint change drives one tick at the user-change moment, and the
+        next sensor-driven tick is gated to be at least 60s later — two
+        ticks at the same instant never happen.
+
+        With the bench's default 3-min tick spacing (well above the 60s
+        cooldown), modeling "user changed setpoint at this boundary" as
+        the only tick at this boundary is faithful to production.
+
+        ASSUMPTION — fixed-interval bench ticks. If the bench is ever
+        changed to model sensor-driven ticks at variable cadence (e.g.,
+        Tasmota's 30s-or-on-change pattern), this "user-driven tick
+        replaces the sensor tick at this boundary" contract has to be
+        revisited: production fires one tick at the user-change moment
+        AND further sensor-driven ticks after the 60s cooldown elapses, so
+        the bench would need to model that two-tick pattern instead of
+        collapsing both into one boundary.
+        """
+        self._apply_pre_tick_state(room_temp_c, outdoor_temp_c, dt_seconds,
+                                   model_inputs)
+
+        sim_dt = _SIM_EPOCH + timedelta(seconds=self._sim_clock)
+        with freeze_time(sim_dt):
+            self._loop.run_until_complete(self._pi.set_temperature(temp_c))
 
         return float(self._pi._hp_setpoint)
 

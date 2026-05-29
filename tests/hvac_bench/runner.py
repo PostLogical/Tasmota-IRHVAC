@@ -108,7 +108,12 @@ def run_scenario(controller: HVACController, model: ThermalModel,
     history = []
     solar = 0.0
     stove = 0.0
-    last_desired = None
+    # Seed from the controller's current desired so a schedule that opens
+    # with the same value as the pre-loop ``set_desired_temp`` doesn't fire
+    # a spurious user-setpoint-change at tick 0 (would re-trigger bumpless
+    # transfer + emit a SETPOINT_CHANGE_USER event despite no actual
+    # change).
+    last_desired = controller.get_state().get("desired_temp")
 
     for tick in range(n_ticks):
         minute = tick * tick_interval_min
@@ -128,10 +133,11 @@ def run_scenario(controller: HVACController, model: ThermalModel,
             if v is not None:
                 stove = v
 
+        pending_setpoint = None
         if desired_fn is not None:
             v = desired_fn(minute)
             if v is not None and v != last_desired:
-                controller.set_desired_temp(v)
+                pending_setpoint = v
                 last_desired = v
 
         # Read sensor (with noise if configured)
@@ -144,13 +150,38 @@ def run_scenario(controller: HVACController, model: ThermalModel,
         if stove > 0:
             model_inputs["stove"] = stove
 
-        # Controller tick
-        hp_setpoint = controller.tick(
-            room_temp_c=sensor_reading,
-            outdoor_temp_c=model.outdoor_temp,
-            dt_seconds=dt_seconds,
-            model_inputs=model_inputs,
-        )
+        # Controller tick. When the schedule produced a new setpoint at this
+        # boundary, route through the production user-setpoint-change path
+        # (bumpless transfer + side effects + tick). This replaces the
+        # regular sensor-driven tick at this boundary because in production
+        # ``set_temperature`` ticks unconditionally and the 60s sensor-tick
+        # cooldown then suppresses any sensor tick that would otherwise
+        # fire in close succession — see
+        # ``TasmotaPIAdapter.apply_user_setpoint_change`` for the full
+        # rationale and the fixed-interval-ticks ASSUMPTION that this
+        # collapse relies on.
+        if pending_setpoint is not None and hasattr(
+            controller, "apply_user_setpoint_change"
+        ):
+            hp_setpoint = controller.apply_user_setpoint_change(
+                pending_setpoint,
+                room_temp_c=sensor_reading,
+                outdoor_temp_c=model.outdoor_temp,
+                dt_seconds=dt_seconds,
+                model_inputs=model_inputs,
+            )
+        else:
+            # Controllers without a user-setpoint-change path (textbook /
+            # bang-bang baselines) just take the direct assignment + tick;
+            # they have no bumpless/event state to keep coherent.
+            if pending_setpoint is not None:
+                controller.set_desired_temp(pending_setpoint)
+            hp_setpoint = controller.tick(
+                room_temp_c=sensor_reading,
+                outdoor_temp_c=model.outdoor_temp,
+                dt_seconds=dt_seconds,
+                model_inputs=model_inputs,
+            )
 
         # Advance thermal model with HP setpoint
         model.step(

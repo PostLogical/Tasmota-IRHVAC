@@ -571,6 +571,12 @@ def run_full_stack(
 
     adapter.set_desired_temp(config.desired_c)
     adapter.set_mode(config.mode)
+    # Track the schedule's last-emitted desired so we only fire the
+    # production user-setpoint-change path (set_temperature → bumpless
+    # transfer + side effects + tick) when the value actually changes.
+    # Initialized from the initial setpoint above (which uses direct
+    # assignment to model a persistence-restore).
+    last_scheduled_desired = config.desired_c
 
     # Resolve outdoor/solar schedules
     outdoor_fn = config.outdoor_schedule or (
@@ -746,9 +752,27 @@ def run_full_stack(
             adapter._sim_clock += dt_seconds
             adapter._entity._attr_current_temperature = sensor_reading
             pi._inputs.outdoor_temp = model.outdoor_temp
-            # Optional time-varying user setpoint (reference step-test).
+
+            # Detect a scheduled user setpoint change at this tick boundary.
+            # When the schedule emits a new value, drive the production
+            # ``set_temperature`` path (bumpless transfer + event + abort +
+            # cancel + power_mode + tick) instead of the regular
+            # ``_pi_tick``. This mirrors what production does on a HA-UI
+            # setpoint change and replaces (not supplements) the regular
+            # tick at this boundary — see
+            # ``TasmotaPIAdapter.apply_user_setpoint_change`` for the
+            # rationale, including the fixed-interval-ticks ASSUMPTION
+            # (bench's 3-min cadence > production's 60s sensor-tick
+            # cooldown, so user-driven and sensor-driven ticks never
+            # coincide). If the bench is ever switched to sensor-driven
+            # ticks at variable cadence, this collapse needs to be
+            # revisited.
+            pending_setpoint = None
             if config.desired_schedule is not None:
-                pi._desired_temp = config.desired_schedule(minute)
+                scheduled = config.desired_schedule(minute)
+                if scheduled != last_scheduled_desired:
+                    pending_setpoint = scheduled
+                    last_scheduled_desired = scheduled
 
             # Update model input entity states via the bench's MockStates registry.
             # delta_from_room inputs need a temperature unit advertised so the
@@ -764,7 +788,12 @@ def run_full_stack(
             # context (set before the loop) does the one-time patch setup.
             _sim_dt = _SIM_EPOCH + timedelta(seconds=adapter._sim_clock)
             _frozen.move_to(_sim_dt)
-            adapter._loop.run_until_complete(pi._pi_tick())
+            if pending_setpoint is not None:
+                adapter._loop.run_until_complete(
+                    pi.set_temperature(pending_setpoint)
+                )
+            else:
+                adapter._loop.run_until_complete(pi._pi_tick())
 
             hp_setpoint = float(pi._hp_setpoint)
 
