@@ -1585,20 +1585,29 @@ class TestPIMathContinued:
         assert pi_entity._pi._pi_integral != 0.0
 
     @pytest.mark.asyncio
-    async def test_on_remote_change_large_shift_zeros_integral(self, pi_entity):
-        """on_remote_change with >2°C shift should zero integral before tick."""
+    async def test_on_remote_change_large_shift_applies_bumpless(self, pi_entity):
+        """on_remote_change with >2°C shift applies bumpless math (no special zero branch).
+
+        The previous >2°C "zero integral" branch was removed; bumpless math
+        now applies uniformly for any |Δr|.  Pre-step integral is NOT zeroed —
+        bumpless adjusts it (and the subsequent tick + anti-windup may
+        further evolve it, so we just verify it isn't anywhere near zero).
+        """
         pi_entity._pi._desired_temp = 20.0
         pi_entity._pi._hp_setpoint = 22.0
-        pi_entity._pi._pi_integral = 50.0  # Large integral
+        pi_entity._pi._pi_integral = 50.0
         pi_entity._attr_current_temperature = 20.0
         pi_entity._attr_hvac_mode = HVACMode.HEAT
 
-        await pi_entity._pi.on_remote_change(25.0)  # 5°C shift > 2°C
+        await pi_entity._pi.on_remote_change(25.0)  # 5°C shift
 
         assert pi_entity._pi._desired_temp == 25.0
-        # Integral was zeroed before tick, then tick added small amount from error
-        # So integral should be much smaller than original 50.0
-        assert pi_entity._pi._pi_integral < 5.0
+        # Old behavior would have left integral ≈ 0 (zero branch + small
+        # post-tick growth).  New behavior preserves a substantial integral.
+        assert abs(pi_entity._pi._pi_integral) > 10.0, (
+            f"Bumpless should preserve a substantially non-zero integral "
+            f"(old code would have zeroed); got {pi_entity._pi._pi_integral}"
+        )
 
     @pytest.mark.asyncio
     async def test_on_remote_change_returns_false_when_paused(self, pi_entity):
@@ -2436,22 +2445,30 @@ class TestOnRemoteChangeStandalone:
         assert pi._pi_integral != 0.0
 
     @pytest.mark.asyncio
-    async def test_on_remote_change_large_shift_zeros(self):
-        """Large temp shift (>2°C) zeros integral before tick."""
+    async def test_on_remote_change_large_shift_applies_bumpless(self):
+        """Large temp shift (>2°C) applies bumpless math (no special zero branch).
+
+        The >2°C "zero integral" branch was removed; bumpless math now
+        applies uniformly for any |Δr|.
+        """
         config = make_pi_config()
         entity = FakePIEntity(config)
         pi = entity._pi
         pi._desired_temp = 20.0
         pi._hp_setpoint = 22.0
-        pi._pi_integral = 50.0  # Large integral
+        pi._pi_integral = 50.0
         entity._attr_current_temperature = 20.0
         entity._attr_hvac_mode = HVACMode.HEAT
 
-        await pi.on_remote_change(25.0)  # 5°C shift > 2°C
+        await pi.on_remote_change(25.0)  # 5°C shift
 
         assert pi._desired_temp == 25.0
-        # Integral was zeroed, then tick added small amount from error
-        assert pi._pi_integral < 5.0
+        # Bumpless math applies — integral is adjusted, not zeroed.
+        # Specifically: not anywhere near zero (the old behavior).
+        assert abs(pi._pi_integral) > 10.0, (
+            f"Bumpless should preserve a substantially non-zero integral; "
+            f"got {pi._pi_integral}"
+        )
 
 
 # ── async_reset_ff_seeds RLS beta reset ──────────────────────────────

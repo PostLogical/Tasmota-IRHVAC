@@ -101,23 +101,28 @@ async def test_set_temperature_bumpless_pcancel_partial_weight(
 
 
 @pytest.mark.asyncio
-async def test_set_temperature_bumpless_skipped_for_large_jump(
+async def test_set_temperature_bumpless_applies_for_large_jump(
     hass, setup_pi_integration,
 ):
-    """Setpoint jumps > 2°C zero the integral (regime-shift escape hatch).
+    """Bumpless math applies uniformly for any |Δr|, including >2°C jumps.
 
-    The bumpless math doesn't apply for jumps that imply a regime change
-    (e.g., 18°C → 25°C). Existing branch — preserve it.
+    Previously the >2°C branch zeroed the integral as a "regime-shift
+    escape hatch"; that branch was removed after empirical evaluation
+    showed it interfered with the controller's natural settling on large
+    setpoint changes without principled benefit.
     """
     kp, ki, b = 3.0, 0.15, 0.7
     _, pi = await _setup_pi(hass, setup_pi_integration, kp, ki, b)
-    pi._pi_integral = 5.0  # nonzero baseline so we can verify zeroing
+    pi._pi_integral = 5.0
     _stub_pi_tick(pi)
 
-    await pi.set_temperature(temperature=24.0)  # +3°C — over the 2°C threshold
+    await pi.set_temperature(temperature=24.0)  # +3°C — was the threshold case
 
-    assert pi._pi_integral == 0.0, (
-        f"Large setpoint jumps zero the integral; got {pi._pi_integral}"
+    # P-cancel formula: ΔI = (kp·b/ki)·(old − new) = 3·0.7/0.15·(21−24) = −42
+    expected_di = (kp * b / ki) * (21.0 - 24.0)
+    assert pi._pi_integral == pytest.approx(5.0 + expected_di, abs=1e-9), (
+        f"Bumpless ΔI should be {expected_di} (P-cancel applied for any |Δr|); "
+        f"integral {pi._pi_integral} vs expected {5.0 + expected_di}"
     )
 
 

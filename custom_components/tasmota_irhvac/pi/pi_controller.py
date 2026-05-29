@@ -2149,10 +2149,14 @@ class PIController:
             )
         self._auto_perturb.abort("user_setpoint_change")
         self._plant_id.cancel_observation()
-        # Bumpless transfer (Åström-Hägglund §3.5): the proportional term in
-        # a 2-DOF PI with setpoint weighting b is kp·(b·r − y); a setpoint
-        # jump Δr causes Δu_P = kp·b·Δr.  Cancel that with ΔI such that
-        # ki·ΔI = −Δu_P  →  ΔI = (kp·b/ki)·(r_old − r_new).
+        # Bumpless transfer on user setpoint change: 2-DOF PI with setpoint
+        # weighting b has u_P = kp·(b·r − y); a setpoint jump Δr causes
+        # Δu_P = kp·b·Δr.  Cancel that with ΔI = (kp·b/ki)·(r_old − r_new)
+        # so total (P+I) output is continuous across the step.  Applied
+        # uniformly for any |Δr| — the previous >2°C "zero integral"
+        # branch was removed after empirical evaluation showed it
+        # interfered with the controller's natural settling on large
+        # setpoint changes without principled benefit.
         if old_desired is not None:  # pragma: no branch — old_desired None only on first ever tick before persistence
             old_c = TemperatureConverter.convert(
                 old_desired, e.temperature_unit, UnitOfTemperature.CELSIUS,
@@ -2160,15 +2164,9 @@ class PIController:
             new_c = TemperatureConverter.convert(
                 temperature, e.temperature_unit, UnitOfTemperature.CELSIUS,
             )
-            if abs(old_c - new_c) > 2.0:
-                # Large regime shift — zero integral and reset Smith model
-                self._pi_integral = 0.0
-                if self._smith is not None:
-                    self._smith._initialized = False
-            else:
-                self._pi_integral += (
-                    self._pi_kp * self._pi_setpoint_weight / self._pi_ki
-                ) * (old_c - new_c)
+            self._pi_integral += (
+                self._pi_kp * self._pi_setpoint_weight / self._pi_ki
+            ) * (old_c - new_c)
         if e._attr_hvac_mode != HVACMode.OFF:
             e.power_mode = STATE_ON
         return await self._pi_tick()
@@ -2194,6 +2192,8 @@ class PIController:
         self._desired_temp = desired_in_entity_unit
         self._hp_setpoint = reported_temp_ir_unit
         # Bumpless transfer (P-cancel — see set_temperature for derivation).
+        # Applied uniformly for any |Δr|; the previous >2°C "zero integral"
+        # branch was removed alongside its set_temperature counterpart.
         if old_desired != desired_in_entity_unit:
             old_c = TemperatureConverter.convert(
                 old_desired, e.temperature_unit, UnitOfTemperature.CELSIUS,
@@ -2201,12 +2201,9 @@ class PIController:
             new_c = TemperatureConverter.convert(
                 desired_in_entity_unit, e.temperature_unit, UnitOfTemperature.CELSIUS,
             )
-            if abs(old_c - new_c) > 2.0:
-                self._pi_integral = 0.0
-            else:
-                self._pi_integral += (
-                    self._pi_kp * self._pi_setpoint_weight / self._pi_ki
-                ) * (old_c - new_c)
+            self._pi_integral += (
+                self._pi_kp * self._pi_setpoint_weight / self._pi_ki
+            ) * (old_c - new_c)
         return await self._pi_tick()
 
     async def pi_tick(self, now: datetime | None = None) -> bool:
