@@ -910,6 +910,8 @@ def run_full_stack(
                 "integration_frozen": getattr(pi, "_integration_frozen", False),
                 "hp_estimated_active_state": getattr(pi, "_hp_estimated_active_state", True),
                 "overtemp_regime": getattr(pi, "_overtemp_regime", False),
+                "sensor_filtered": getattr(pi, "_sensor_filtered", None),
+                "uncontrollable_entry_latch": getattr(pi, "_uncontrollable_entry_latch", False),
                 "supervisor_mode": getattr(getattr(pi, "_ref_governor", None), "mode", "NORMAL"),
                 "supervisor_nudge_c": getattr(getattr(pi, "_ref_governor", None), "nudge_c", 0.0),
                 "chatter_event_count": getattr(getattr(pi, "_chatter_monitor", None), "event_count", 0),

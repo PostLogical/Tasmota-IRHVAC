@@ -1382,10 +1382,6 @@ class TickOutput:
     # to its idle setpoint and froze the integrator on this tick.
     # Visible in debug bundles for post-deployment verification.
     overtemp_regime: bool = False
-    # Stable-conditions combined-bias EMA used as bumpless-transfer target
-    # at regime exit.  None until enough stable observations have populated
-    # it.  Visible in debug bundles for tuning the bumpless behavior.
-    stable_combined_bias_ema: float | None = None
     # Reference governor / chatter-supervisor state (see pi/ref_governor.py).
     # `effective_desired_c` is what the PI actually tracked this tick
     # (r_user + auto_perturb_offset + supervisor_nudge); the existing
@@ -1462,7 +1458,6 @@ class TickOutput:
         if self.events:
             out["_events"] = [e.to_dict() for e in self.events]
         out["_overtemp_regime"] = self.overtemp_regime
-        out["_stable_combined_bias_ema"] = self.stable_combined_bias_ema
         out["_effective_desired_c"] = self.effective_desired_c
         out["_supervisor_mode"] = self.supervisor_mode
         out["_supervisor_nudge_c"] = self.supervisor_nudge_c
@@ -1570,7 +1565,6 @@ class TickOutput:
                 TickEvent.from_dict(e) for e in data.get("_events", [])
             ),
             overtemp_regime=data.get("_overtemp_regime", False),
-            stable_combined_bias_ema=data.get("_stable_combined_bias_ema"),
             effective_desired_c=data.get("_effective_desired_c"),
             supervisor_mode=data.get("_supervisor_mode", "NORMAL"),
             supervisor_nudge_c=data.get("_supervisor_nudge_c", 0.0),

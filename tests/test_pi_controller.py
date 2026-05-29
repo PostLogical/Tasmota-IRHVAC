@@ -4229,6 +4229,11 @@ class TestConditionalIntegration:
         entity._attr_current_temperature = 19.0  # error = +2.0, room below target
         pi._pi_integral = -3.0  # simulate partial recovery
         pi._hp_setpoint = 20  # above room temp → HP is active
+        # Reset regime state — Phase 1 may have engaged it (rate-based gate
+        # fires from latch armed + rate not cooling); Phase 2 tests integration
+        # recovery, not regime behavior.
+        pi._overtemp_regime = False
+        pi._uncontrollable_entry_latch = False
         integral_phase2_start = pi._pi_integral
         for i in range(4, 8):
             pi._pi_last_tick_time = float(i * 900)
@@ -4264,6 +4269,10 @@ class TestConditionalIntegration:
         entity._attr_current_temperature = 19.0  # error = +2.0
         pi._pi_integral = -1.0  # small negative (mostly recovered)
         pi._hp_setpoint = 22  # FF pushed setpoint above room → HP active
+        # Reset regime state from prior phases (rate-based gate may have
+        # engaged it); this phase tests integration recovery, not regime.
+        pi._overtemp_regime = False
+        pi._uncontrollable_entry_latch = False
         integral_phase4_start = pi._pi_integral
         for i in range(12, 16):
             pi._pi_last_tick_time = float(i * 900)
@@ -4330,6 +4339,8 @@ class TestConditionalIntegration:
         config = make_pi_config()
         entity = FakePIEntity(config)
         pi = entity._pi
+        # Bypass first-tick cal_midpoint warmup — testing steady-state behavior.
+        pi._cal_midpoint_warmup_pending = False
         pi._desired_temp = 21.0
         pi._hp_setpoint = 16  # At minimum, below room temp
         entity._attr_hvac_mode = HVACMode.HEAT
@@ -4472,6 +4483,8 @@ class TestHPNoOutput:
         config = make_pi_config()
         entity = FakePIEntity(config)
         pi = entity._pi
+        # Bypass first-tick cal_midpoint warmup — testing steady-state behavior.
+        pi._cal_midpoint_warmup_pending = False
         pi._desired_temp = 21.0
         pi._hp_setpoint = 17  # below room
         entity._attr_hvac_mode = HVACMode.HEAT
@@ -4504,6 +4517,8 @@ class TestHPNoOutput:
         config = make_pi_config()
         entity1 = FakePIEntity(config)
         pi1 = entity1._pi
+        # Bypass first-tick cal_midpoint warmup — testing steady-state behavior.
+        pi1._cal_midpoint_warmup_pending = False
         pi1._desired_temp = 21.0
         entity1._attr_hvac_mode = HVACMode.HEAT
         pi1._hp_setpoint = 17
@@ -4515,6 +4530,8 @@ class TestHPNoOutput:
         # Phase 2: HP active (fresh controller, no filter lag)
         entity2 = FakePIEntity(config)
         pi2 = entity2._pi
+        # Bypass first-tick cal_midpoint warmup — testing steady-state behavior.
+        pi2._cal_midpoint_warmup_pending = False
         pi2._desired_temp = 21.0
         entity2._attr_hvac_mode = HVACMode.HEAT
         pi2._hp_setpoint = 23  # above room → HP active
@@ -4613,9 +4630,12 @@ class TestHPNoOutput:
         pi._desired_temp = 21.0
         pi._hp_setpoint = 17  # below room → HP has no output (clamped)
         entity._attr_hvac_mode = HVACMode.HEAT
-        # Room above desired by less than ENTER_C (1.0) so the over-temp regime
-        # gate doesn't fire — keeps this test focused on no_output specifically.
+        # Room above desired (HP commanded off) but with a meaningfully-cooling
+        # rate, so the rate-based regime gate stays dormant (the room is
+        # already recovering on its own — latch + integration freeze are
+        # sufficient).  Keeps this test focused on no_output specifically.
         entity._attr_current_temperature = 21.6
+        pi._room_temp_rate = -0.1   # cooling fast → regime won't engage
         pi._pi_integral = -1.0
         pi._inputs.outdoor_temp = 5.0
 
@@ -4777,6 +4797,8 @@ class TestHPNoOutput:
         config = make_pi_config()
         entity = FakePIEntity(config)
         pi = entity._pi
+        # Bypass first-tick cal_midpoint warmup — testing steady-state behavior.
+        pi._cal_midpoint_warmup_pending = False
         pi._desired_temp = 21.0
         pi._hp_setpoint = 18  # above min (16), but below room
         entity._attr_hvac_mode = HVACMode.HEAT
@@ -4824,6 +4846,8 @@ class TestHeadCalibrationZoneModel:
         config = make_pi_config()
         entity = FakePIEntity(config)
         pi = entity._pi
+        # Bypass first-tick cal_midpoint warmup — testing steady-state behavior.
+        pi._cal_midpoint_warmup_pending = False
         pi._desired_temp = 21.0
         pi._hp_setpoint = 20  # delta = 21.5 - 20 = 1.5 > midpoint(0.0)
         entity._attr_hvac_mode = HVACMode.HEAT
@@ -4856,6 +4880,8 @@ class TestHeadCalibrationZoneModel:
         config = make_pi_config()
         entity = FakePIEntity(config)
         pi = entity._pi
+        # Bypass first-tick cal_midpoint warmup — testing steady-state behavior.
+        pi._cal_midpoint_warmup_pending = False
         pi._desired_temp = 21.0
         pi._head_calibration_min_heat = -1.5
         pi._head_calibration_max_heat = -0.5
@@ -5004,6 +5030,8 @@ class TestHeadCalibrationZoneModel:
         config = make_pi_config()
         entity = FakePIEntity(config)
         pi = entity._pi
+        # Bypass first-tick cal_midpoint warmup — testing steady-state behavior.
+        pi._cal_midpoint_warmup_pending = False
         pi._desired_temp = 21.0
         pi._hp_setpoint = 21
         entity._attr_hvac_mode = HVACMode.HEAT

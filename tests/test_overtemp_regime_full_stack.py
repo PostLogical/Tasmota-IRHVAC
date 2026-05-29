@@ -104,7 +104,7 @@ async def test_post_solar_integrator_preserved_with_gate():
 
     # Phase 1: sun up, room hot, settle a few ticks so latch sets and regime
     # engages.
-    pi_interval_s = 900.0
+    pi_interval_s = 180.0
     last_change = pi._last_setpoint_change_time or 0.0
     mono = max(pi_interval_s, last_change + pi_interval_s)
     integral_history: list[float] = []
@@ -126,8 +126,10 @@ async def test_post_solar_integrator_preserved_with_gate():
         room_history.append(room_temp[0])
         solar_history.append(solar_signal[0])
 
-    # 4 ticks (1 hour) at sun up + room over-temp → latch sets, regime engages
-    for _ in range(4):
+    # 5 ticks at sun up + room over-temp → rate window fills (Option 2 guard) +
+    # latch sets + regime engages.  Was 4 ticks pre-Option-2; bumped to 5 so
+    # the rate-history-validity check passes on the final tick.
+    for _ in range(5):
         await tick()
 
     assert pi._uncontrollable_entry_latch is True, "Latch should set during sun-up over-temp"
@@ -168,12 +170,13 @@ async def test_post_solar_integrator_preserved_with_gate():
 
 
 @pytest.mark.asyncio
-async def test_bumpless_transfer_tightens_post_exit_bias():
-    """End-to-end: with EMA populated from a stable warm-up phase, bumpless
-    transfer at regime exit produces post-exit combined bias close to the
-    pre-disturbance equilibrium bias.  Without bumpless (EMA=None fallback),
-    post-exit bias depends on whatever I happened to be preserved at, which
-    can drift from equilibrium.
+async def test_regime_exit_preserves_integrator_end_to_end():
+    """End-to-end: the rate-based gate exits when room returns to desired
+    (overtemp_error ≤ 0), and at that moment preserves the integrator (frozen
+    carry-forward) — does NOT plant it to a target.  An earlier integral-set
+    design produced |I|=280 runaways under sustained-learning FF excursions
+    (1/Ki amplification of FF chronically pulled the integral away from
+    operating point each regime cycle).  Frozen leaves I bounded.
     """
     config = _make_solar_config()
     entity = _MockedSensorEntity(config)
@@ -190,7 +193,7 @@ async def test_bumpless_transfer_tightens_post_exit_bias():
 
     pi = entity._pi
     pi._desired_temp = desired_c
-    pi_interval_s = 900.0
+    pi_interval_s = 180.0
     last_change = pi._last_setpoint_change_time or 0.0
     mono = max(pi_interval_s, last_change + pi_interval_s)
 
@@ -206,10 +209,6 @@ async def test_bumpless_transfer_tightens_post_exit_bias():
     for _ in range(20):
         await tick()
 
-    # EMA should now be populated from the stable phase
-    assert pi._stable_combined_bias_ema is not None, "EMA never populated"
-    stable_bias_target = pi._stable_combined_bias_ema
-
     # Phase 2: solar comes on, room rises (force the regime to engage)
     solar_signal[0] = 1.0
     for _ in range(4):
@@ -217,22 +216,34 @@ async def test_bumpless_transfer_tightens_post_exit_bias():
         await tick()
     assert pi._overtemp_regime is True, "Regime didn't engage"
 
-    # Phase 3: sun goes down, room descends slowly back through EXIT
+    # Snapshot integral immediately before exit fires — frozen during the
+    # regime, so this is the value the carry-forward should preserve.
+    frozen_integral = pi._pi_integral
+
+    # Phase 3: sun goes down, room descends through desired (the new exit
+    # threshold, error<=0 — no +0.5 hysteresis).
     solar_signal[0] = 0.0
-    descent_ticks = 32
+    descent_ticks = 36
+    exit_integral = None
     for i in range(descent_ticks):
-        # Linear descent from ~25 to 22.4 (just inside EXIT band)
-        room_temp[0] = 25.0 - (25.0 - 22.4) * (i + 1) / descent_ticks
+        # Linear descent from ~25 down to 21.5 (well below desired so exit fires)
+        room_temp[0] = 25.0 - (25.0 - 21.5) * (i + 1) / descent_ticks
+        was_in_regime = pi._overtemp_regime
         await tick()
+        if was_in_regime and not pi._overtemp_regime and exit_integral is None:
+            # Capture the integral AT the exit tick before subsequent
+            # integration moves it.
+            exit_integral = pi._pi_integral
+            break
 
     # By the end, regime has exited
     assert pi._overtemp_regime is False, "Regime didn't exit"
+    assert exit_integral is not None, "Exit transition not captured"
 
-    # Combined bias post-exit should match the stable bias target
-    # (within tolerance for tick dynamics + leaky integrator).
-    combined_post_exit = pi._pi_ki * pi._pi_integral + pi._ff_offset
-    bias_gap = abs(combined_post_exit - stable_bias_target)
-    assert bias_gap < 0.5, (
-        f"Bumpless target missed: combined={combined_post_exit:.3f}, "
-        f"target={stable_bias_target:.3f}, gap={bias_gap:.3f}"
+    # Frozen carry-forward: integrator at exit ≈ frozen value (only the
+    # tiny leaky-decay step over the descent ticks moves it).
+    assert abs(exit_integral - frozen_integral) < 0.5, (
+        f"Integrator not preserved across exit: frozen={frozen_integral:.3f}, "
+        f"at-exit={exit_integral:.3f} — frozen carry-forward should leave I "
+        f"essentially unchanged across the regime episode"
     )

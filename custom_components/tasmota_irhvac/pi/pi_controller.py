@@ -89,8 +89,10 @@ from ..const import (
     CONF_PI_TAU_ESTIMATE,
     DEFAULT_OVERTEMP_REGIME_ENTER_C,
     DEFAULT_OVERTEMP_REGIME_EXIT_C,
+    DEFAULT_OVERTEMP_REGIME_RATE_THRESHOLD_C_PER_MIN,
+    DEFAULT_PATH4_SUSTAINED_MINUTES,
+    DEFAULT_PATH4_SUSTAINED_OVERTEMP_C,
     HP_ESTIMATED_HYSTERESIS_C,
-    STABLE_BIAS_EMA_ALPHA,
     DEFAULT_PI_BATCH_WLS_ENABLED,
     DEFAULT_PI_DEADBAND,
     DEFAULT_PI_ENABLED,
@@ -710,6 +712,23 @@ class PIController:
         # so the gate stays dormant in cold snap.
         self._uncontrollable_entry_latch: bool = False
 
+        # Event-driven + accumulator latch arming paths (#108 / disturbance recovery):
+        # - `_mode_just_flipped_to_heat` is a per-tick flag set in the mode-
+        #   change block when hvac_mode changes to HEAT; consumed by the
+        #   latch arming logic later in the tick.  Mode change has no
+        #   built-in bumpless transfer (unlike `set_temperature` /
+        #   `on_remote_change`, which apply Åström-Hägglund P-cancel on
+        #   setpoint deltas), so an explicit latch arming path is needed
+        #   to catch a flip-to-heat into a warm room.
+        # - `_sustained_overtemp_minutes` is the accumulated wall-clock time
+        #   (in minutes, integrated tick-by-tick) that overtemp_error has
+        #   been above DEFAULT_PATH4_SUSTAINED_OVERTEMP_C without a break.
+        #   Path 4 (sustained-disturbance) arms the latch when this hits
+        #   DEFAULT_PATH4_SUSTAINED_MINUTES; minute-keyed (not tick-keyed)
+        #   so the threshold survives cadence changes.
+        self._mode_just_flipped_to_heat: bool = False
+        self._sustained_overtemp_minutes: float = 0.0
+
         # Track previous HVAC mode to detect mode changes — over-temp regime
         # state and the latch are direction-aware (heat vs cool), so they must
         # be cleared when the mode flips to avoid stale state.
@@ -721,11 +740,19 @@ class PIController:
         # otherwise; matches original first-tick behavior).
         self._hp_estimated_active_state: bool = True
 
-        # Stable-conditions combined-bias EMA (`Ki·I + FF`) used as the target
-        # for bumpless transfer at over-temp regime exit.  None until enough
-        # stable observations populate it; bumpless falls back to preserve-I
-        # behavior when None.
-        self._stable_combined_bias_ema: float | None = None
+        # First-tick warmup guard for the cal_midpoint gate.  At construction,
+        # `_hp_setpoint` reflects the entity's target_temperature (the user's
+        # *desired*), NOT a command the controller has issued — the controller
+        # hasn't run a tick yet.  Evaluating the cal_midpoint gate's
+        # `current_to_setpoint_delta = current_c − hp_setpoint` against that
+        # stale init value gives a misleading "HP gauged idle" answer at tick 0
+        # (delta sees `room − target` instead of `room − actual_command`),
+        # which then spuriously arms the over-temp regime latch.  Skip the
+        # gate's update on the very first tick; the default
+        # `_hp_estimated_active_state = True` carries through.  By tick 1
+        # `_hp_setpoint` has been set by the controller's first computation
+        # and the gate evaluates against a real value.
+        self._cal_midpoint_warmup_pending: bool = True
 
         # HP thermostat deadband learning: the HP's internal thermostat has
         # its own hysteresis, so the compressor may still cycle even when
@@ -4180,7 +4207,6 @@ class PIController:
             observation=self._last_observation_context,
             events=tuple(self._pending_events),
             overtemp_regime=self._overtemp_regime,
-            stable_combined_bias_ema=self._stable_combined_bias_ema,
             # Reference governor / chatter supervisor diagnostics.
             effective_desired_c=(
                 round(self._last_effective_desired_c, 3)
@@ -5104,16 +5130,22 @@ class PIController:
         # Must run before the OFF early-return below.  Skip the reset on the
         # very first tick (prev=None initialization) — that's not a real mode
         # change, just the controller learning the initial mode.
+        # Reset the per-tick mode-flip-to-heat event flag.  Set below when
+        # the mode-change check fires AND new mode is HEAT.  Consumed by
+        # the latch-arming logic later in the tick.
+        self._mode_just_flipped_to_heat = False
         if (
             self._prev_hvac_mode is not None
             and e._attr_hvac_mode != self._prev_hvac_mode
         ):
             self._overtemp_regime = False
             self._uncontrollable_entry_latch = False
-            # Stable-bias EMA invalidated on mode change — different mode
-            # means different equilibrium bias.  Will repopulate from new
-            # stable observations.
-            self._stable_combined_bias_ema = None
+            # Reset Path 4's sustained-overtemp counter — the prior episode's
+            # accumulated time is direction-dependent (heat vs cool) and
+            # cannot carry across mode flips.
+            self._sustained_overtemp_minutes = 0.0
+            if e._attr_hvac_mode == HVACMode.HEAT:
+                self._mode_just_flipped_to_heat = True
         self._prev_hvac_mode = e._attr_hvac_mode
         if e._attr_hvac_mode == HVACMode.OFF:
             return self._passive_tick()
@@ -5516,7 +5548,19 @@ class PIController:
         # eliminates per-tick chatter at the boundary which would otherwise
         # let the integrator wind during what should be a single transition.
         cal_midpoint = (cal_min + cal_max) / 2.0
-        if is_heating:
+        # First-tick warmup: `_hp_setpoint` at construction reflects the
+        # entity's target_temperature, not a real controller-issued command.
+        # `current_to_setpoint_delta` evaluated against that stale init value
+        # would spuriously flip `_hp_estimated_active_state` to False on tick
+        # 0 (room is typically above target on startup, just because the user
+        # set a higher target than ambient), which then arms the over-temp
+        # regime latch.  Skip the update on the first tick; let the default
+        # `_hp_estimated_active_state = True` carry through.  On tick 1 the
+        # controller has assigned a real `_hp_setpoint` and the gate
+        # evaluates honestly.  See #108 design notes.
+        if self._cal_midpoint_warmup_pending:
+            self._cal_midpoint_warmup_pending = False
+        elif is_heating:
             if self._hp_estimated_active_state:
                 if current_to_setpoint_delta > cal_midpoint + HP_ESTIMATED_HYSTERESIS_C:
                     self._hp_estimated_active_state = False
@@ -5624,81 +5668,127 @@ class PIController:
             overtemp_error = user_desired_c - current_c     # >0 when over-cooled
         else:  # pragma: no cover — defensive: line 4670 returns False if neither
             overtemp_error = 0.0
-        # Update uncontrollable-entry latch.  Set when existing gate fires
-        # (we've "entered" the uncontrollable state).  Reset when room
-        # returns to or below desired (we've left the over-temp episode).
-        # Latch persists across transient existing-gate flicker, so my gate
-        # can fire even when FF momentarily nudges setpoint above current.
-        if not hp_estimated_active:
+        # Update uncontrollable-entry latch.  Three arming paths:
+        #   1. `not hp_estimated_active` — cal_midpoint observes HP idle
+        #      (room ≥ hp_setpoint + cal_midpoint + HYST).  Controller-state
+        #      path: integral has wound far enough that hp_setpoint dropped
+        #      to within ~0.3°C of room.  Catches sustained disturbance
+        #      late-stage and aggressive-heat-up overshoot late-stage.
+        #   2. Mode-flip-to-heat event: user just turned on heat mode in
+        #      a room already over desired.  No false positives — event-
+        #      driven on an explicit user action.  Mode change has no
+        #      built-in bumpless transfer, unlike setpoint changes (see
+        #      `set_temperature` and `on_remote_change` for the Åström-
+        #      Hägglund P-cancel bumpless that handles setpoint-down
+        #      naturally without needing a latch arming path).
+        #   3. Sustained-disturbance path: `overtemp_error` has exceeded
+        #      DEFAULT_PATH4_SUSTAINED_OVERTEMP_C (1.5°C) continuously for
+        #      DEFAULT_PATH4_SUSTAINED_MINUTES (30 min) of wall-clock time.
+        #      Thresholds chosen from the 2026-05-29 sweep to cleanly
+        #      separate strong external disturbances (party, oil_boiler)
+        #      from chronic FF mismatch up to 1.5× over-seed.  See const.py
+        #      for the data + future_work for the probe-based discriminator
+        #      that would close the cooking-tier gap.
+        # Reset when room returns to or below desired (we've left the
+        # over-temp episode).  Latch persists across transient flicker.
+        mode_flip_to_heat_event = (
+            self._mode_just_flipped_to_heat
+        )
+        # Path 4 (sustained): minute-integrated sustained overtemp.  Reset
+        # on any tick where overtemp drops to or below the threshold, so
+        # the counter only reflects continuous (not cumulative) episodes.
+        if overtemp_error > DEFAULT_PATH4_SUSTAINED_OVERTEMP_C:
+            self._sustained_overtemp_minutes += dt_seconds / 60.0
+        else:
+            self._sustained_overtemp_minutes = 0.0
+        path_4_sustained_disturbance = (
+            self._sustained_overtemp_minutes >= DEFAULT_PATH4_SUSTAINED_MINUTES
+        )
+        if (not hp_estimated_active
+                or (mode_flip_to_heat_event and overtemp_error > 0)
+                or path_4_sustained_disturbance):
             self._uncontrollable_entry_latch = True
         elif overtemp_error <= 0.0:
             self._uncontrollable_entry_latch = False
 
-        # Stable-bias EMA: track combined `Ki·I + FF` only when system is
-        # clearly in steady state (in deadband, no regime, no freeze).  Used
-        # at regime exit for bumpless transfer — restores integrator to a
-        # value matching pre-disturbance equilibrium bias.  Must be evaluated
-        # before the regime gate re-evaluates, so we use the current latched
-        # state (which reflects the END of the previous tick).
-        in_stable_conditions = (
-            abs_error < self._pi_deadband
-            and not self._overtemp_regime
-            and hp_estimated_active
-            and not self._integration_frozen
+        # Over-temp regime gate — rate-based redesign (#108).
+        #
+        # Entry: latch armed AND the room is NOT actively recovering on its own
+        #   (`room_temp_rate ≥ DEFAULT_OVERTEMP_REGIME_RATE_THRESHOLD_C_PER_MIN`,
+        #   default −0.02 °C/min).  The latch (set by `not hp_estimated_active`)
+        #   already implies a sustained controller ease-off; the rate filters
+        #   out cases where the room is recovering on its own and the regime
+        #   would be a no-op.  No absolute-temperature threshold (the legacy
+        #   `> 1.0` was a proxy that missed slow steady rises and tripped
+        #   chatter); the rate signal is the physically-grounded discriminator.
+        #
+        # Exit: `overtemp_error ≤ 0` — same event that resets the latch.
+        #   Unifying these removes the post-exit chatter window the legacy
+        #   `+0.5` hysteresis created (it was qref-effective-protection that
+        #   became obsolete when Bug 1 was fixed; see
+        #   project_qref_overtemp_bumpless_bugs).
+        #
+        # On exit: plant the integrator at the value that produces sp =
+        #   `ceil(room + cal_midpoint + HP_ESTIMATED_HYSTERESIS_C)` — the
+        #   lowest integer setpoint that keeps the HP nominally active.  All
+        #   inputs are instantaneous to this tick (no stale memory like the
+        #   removed bumpless EMA target), so the 1/Ki amplification mode is
+        #   bounded to one-shot use of current FF rather than a chronic loop.
+        #   Lets PI resume from a gentle starting point — prevents the
+        #   reheating-into-the-gate limit cycle the legacy design suffered.
+        #
+        # No debounce: the 5-tick `_room_temp_rate` is itself a noise filter.
+        #
+        # Rate-signal validity guard: the rate is computed from
+        # `_room_temp_history`, which grows from 0 → 5 entries over the first
+        # ~5 ticks.  Until the history is full, the rate is either undefined
+        # (history empty) or computed over a short window with σ_rate higher
+        # than the threshold's noise margin.  Don't trust the gate's input
+        # until the rate window is fully populated.  Belt-and-suspenders with
+        # the cal_midpoint warmup guard (which only covers tick 0): this
+        # extends the protection across the rest of the rate window for the
+        # sensor-recovery / restart / cold-install edge cases where the
+        # cal_midpoint guard wouldn't catch a stale signal.
+        enter_cond = (
+            self._uncontrollable_entry_latch
+            and len(self._room_temp_history) >= 5
+            and self._room_temp_rate
+            >= DEFAULT_OVERTEMP_REGIME_RATE_THRESHOLD_C_PER_MIN
         )
-        if in_stable_conditions:
-            current_combined = self._pi_ki * self._pi_integral + self._ff_offset
-            if self._stable_combined_bias_ema is None:
-                self._stable_combined_bias_ema = current_combined
-            else:
-                self._stable_combined_bias_ema = (
-                    STABLE_BIAS_EMA_ALPHA * current_combined
-                    + (1.0 - STABLE_BIAS_EMA_ALPHA)
-                    * self._stable_combined_bias_ema
-                )
-
+        exit_cond = overtemp_error <= 0.0
         if self._overtemp_regime:
-            # Active: stay until temperature returns to band.  No precondition
-            # check on exit — once we've decided HP shouldn't be running,
-            # the temperature recovery is the only signal that should release.
-            if overtemp_error < DEFAULT_OVERTEMP_REGIME_EXIT_C:
+            if exit_cond:
                 self._overtemp_regime = False
-                # Bumpless transfer: restore integrator to maintain the
-                # pre-disturbance stable bias with the current FF state.
-                # Without this, preserved I + drifted FF can produce small
-                # steady-state error post-exit until P+I corrects.
-                if self._stable_combined_bias_ema is not None:
-                    new_integral = (
-                        self._stable_combined_bias_ema - self._ff_offset
-                    ) / self._pi_ki
-                    _LOGGER.debug(
-                        "%sRegime exit bumpless: I %.2f → %.2f to maintain "
-                        "stable bias %.2f with current FF=%.2f",
-                        self._log_prefix, self._pi_integral, new_integral,
-                        self._stable_combined_bias_ema, self._ff_offset,
-                    )
-                    self._pi_integral = new_integral
+                # Frozen carry-forward: leave the integrator at whatever value
+                # the freeze held it at.  An earlier "integral-set" tried to
+                # plant I such that sp = ceil(room + 0.4) at exit; the bench
+                # showed that under sustained-learning FF excursions, the
+                # 1/Ki amplification of FF (chronic, not one-shot as we'd
+                # thought) drove |I| to 280+ across multi-day runs and pushed
+                # the room into comfort failures (cold_snap 2.4 °C undershoot).
+                # Frozen leaves I bounded — FF volatility shows up in the
+                # setpoint (combined bias = Ki·I + FF, FF dominates), which
+                # clamps harmlessly when extreme, rather than in I, which
+                # would take O(1/Ki) ticks to unwind.  The remaining
+                # post-exit transient — where PI's normal computation may
+                # briefly overshoot — is bounded by the rate-based gate's
+                # latch behaviour (the latch only re-arms when HP genuinely
+                # re-disengages).
                 _LOGGER.debug(
                     "%sOver-temp regime exit (room=%.2f°C, desired=%.2f°C, "
-                    "mode=%s)",
+                    "mode=%s) → I=%.2f preserved",
                     self._log_prefix, current_c, desired_c,
-                    "heat" if is_heating else "cool",
+                    "heat" if is_heating else "cool" if is_cooling else "off",
+                    self._pi_integral,
                 )
         else:
-            # Inactive: enter only when over-temp AND we have entered the
-            # uncontrollable state during this episode.  Latch precondition
-            # excludes cold-snap brief overshoot — HP commanded high in cold
-            # snap means existing gate doesn't fire, latch stays False.
-            if (
-                overtemp_error > DEFAULT_OVERTEMP_REGIME_ENTER_C
-                and self._uncontrollable_entry_latch
-            ):
+            if enter_cond:
                 self._overtemp_regime = True
                 _LOGGER.debug(
                     "%sOver-temp regime enter (room=%.2f°C, desired=%.2f°C, "
-                    "mode=%s) → HP forced to idle setpoint",
+                    "room_rate=%.3f°C/min) → HP forced to idle setpoint",
                     self._log_prefix, current_c, desired_c,
-                    "heat" if is_heating else "cool",
+                    self._room_temp_rate,
                 )
         if self._overtemp_regime:
             # Freeze integrator and exclude WLS observation for this tick.

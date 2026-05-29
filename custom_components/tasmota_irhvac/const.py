@@ -276,9 +276,24 @@ DEFAULT_PI_DEADBAND = 0.5
 # heat / over-cooled in cool), the integrator is frozen and the HP forced to
 # its idle setpoint regardless of FF state.  Defends against FF misprediction
 # (e.g., dissipating absorbed solar gain) overriding the cal_midpoint freeze.
-# Hysteresis: enter at 2× deadband, exit at 1× deadband.
-DEFAULT_OVERTEMP_REGIME_ENTER_C = 1.0
-DEFAULT_OVERTEMP_REGIME_EXIT_C = 0.5
+# Rate-based redesign (#108): entry no longer uses an absolute over-temp
+# threshold (the legacy 1.0 °C was a proxy for "trouble" the latch already
+# captures); entry now requires the latch armed AND the room not actively
+# recovering on its own.  Exit is unified with the latch-reset event
+# (overtemp_error ≤ 0).  The legacy ENTER/EXIT °C constants are kept only
+# because external diagnostic / replay code references them; the gate
+# itself no longer evaluates against them.
+DEFAULT_OVERTEMP_REGIME_ENTER_C = 1.0    # legacy diagnostic — not load-bearing
+DEFAULT_OVERTEMP_REGIME_EXIT_C = 0.5     # legacy diagnostic — not load-bearing
+
+# Rate threshold (°C/min) for over-temp regime entry: the regime engages when
+# the latch is armed AND `room_temp_rate ≥` this value (the room is NOT
+# actively cooling at meaningful pace beyond noise).  Default −0.02 °C/min
+# matches the WLS steady-state band (the codebase's existing notion of
+# "actually moving vs. noise") and is on the cooling side because the test is
+# "room is not recovering" — see #108 design notes.  Sized to sit just below
+# the 1σ rate-noise floor at 3-min ticks with σ_sensor=0.1°C.
+DEFAULT_OVERTEMP_REGIME_RATE_THRESHOLD_C_PER_MIN = -0.02
 
 # Hysteresis on the cal_midpoint gate: the per-tick `delta <= cal_midpoint`
 # check would otherwise chatter at the boundary, allowing per-tick integrator
@@ -286,14 +301,20 @@ DEFAULT_OVERTEMP_REGIME_EXIT_C = 0.5
 # the typical sensor noise σ (0.1°C).  See `feedback_test_noise_realism.md`.
 HP_ESTIMATED_HYSTERESIS_C = 0.3
 
-# Stable-conditions combined-bias EMA: smoothed average of `Ki·I + FF` taken
-# only when the system is clearly in steady state (in deadband, no regime,
-# no integration freeze).  Used at regime exit to restore the integrator to a
-# value that maintains the pre-disturbance equilibrium bias with the current
-# FF state.  α = 0.05 → effective averaging window of ~20 ticks (5h at 15-min
-# ticks).  Long enough to smooth tick-level noise, short enough to track
-# slow seasonal drift.
-STABLE_BIAS_EMA_ALPHA = 0.05
+# Path 4 (sustained external disturbance) latch-arming thresholds.
+# Catches sustained external disturbances (party, oil_boiler) without firing
+# on chronic FF mismatch.  Choices grounded in `local/tools/path4_threshold_sweep.py`
+# (2026-05-29): at production cadence with 2R2C scenarios, sustained
+# `overtemp_error > 1.5°C` for ≥30 min cleanly separates strong external
+# disturbances (party max-consec 129 min, oil_boiler 33 min) from chronic
+# FF over-prediction up to 1.5× over-seed (max-consec ≤ 21 min).  Per the
+# 2026-05-29 disturbance-literature memo, no purely-passive signal can
+# discriminate milder disturbances (cooking-tier, peak ≤ 1.5°C) from chronic
+# FF mismatch — they are mathematically aliased under feedback with a biased
+# model (Forssell-Ljung).  See future_work for the probe-based discriminator
+# that would close that gap.
+DEFAULT_PATH4_SUSTAINED_OVERTEMP_C = 1.5
+DEFAULT_PATH4_SUSTAINED_MINUTES = 30.0
 
 DEFAULT_PI_OUTDOOR_SEED_HEAT = 0.25
 DEFAULT_PI_OUTDOOR_SEED_COOL = 0.25
