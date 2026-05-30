@@ -148,7 +148,11 @@ RICHARDSON_SCORES: dict[
                 value_at_finest=6.006,
                 value_tolerance=0.05,
                 bound_max=0.10,
-                expected_in_regime=False,
+                # Flipped False→True in #126 (2026-05-30) Ki=0.7 retune.
+                # At higher Ki the controller is more responsive, the energy
+                # trajectory is cleaner across cadences, and the power-law
+                # fit succeeds (observed order ~0.87).
+                expected_in_regime=True,
             ),
             "peak_kw": SolutionVerificationExpectation(
                 value_at_finest=0.227,

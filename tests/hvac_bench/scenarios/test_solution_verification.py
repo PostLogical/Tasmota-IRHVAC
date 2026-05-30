@@ -111,20 +111,19 @@ def _combined_bound(report: RichardsonReport) -> float:
 # ── Locked-score regression ───────────────────────────────────────────────
 
 
-# qref's mode-aware bias parks the room at the deadband edge in steady state
-# (heating: ~+0.5°C up to user desired; cooling: ~-0.5°C down). Two scenarios
-# fail under this design:
-#   - lr_heat_with_solar / well_tuned_pi: solar gain pushes the room past the
-#     upper deadband edge because the HP keeps heating when solar should idle
-#     it. The fix is solar-aware HP-idle behavior (detect exogenous gain ≥
-#     heat-loss, command HP off rather than just lowering its setpoint).
-#   - lr_cool_step / well_tuned_pi: symmetric edge-effect under cooling bias
-#     without a disturbance to compound it — small drift, same root cause.
-# Remove these entries when solar-aware HP-idle lands.
-_QREF_DEADBAND_EDGE_XFAILS: set[tuple[str, str]] = {
-    ("lr_heat_with_solar", "well_tuned_pi"),
-    ("lr_cool_step", "well_tuned_pi"),
-}
+# #126 Ki=0.7 retune (2026-05-30) closed both prior xfails:
+#   - lr_heat_with_solar / well_tuned_pi — at Ki=0.7 the integral catches FF
+#     magnitude inside a solar event window; new tdis_tot=0.19 well within
+#     locked tolerance 0.253±0.10
+#   - lr_cool_step / well_tuned_pi — at Ki=0.7 the cool-side bias-edge
+#     drift is bounded; new tdis_tot=0.28 inside locked 0.224±0.10
+#
+# The structural worst case (warm-mild outdoor + solar) lives at
+# lr_heat_with_solar_warm and still has tdis_tot≈6 at every Ki — that's
+# the residual #109 architectural concern.  See future_work.md #109 for
+# the path forward.  Add a new xfail cell here when that scenario is
+# promoted to a CANONICAL_SCENARIO.
+_QREF_DEADBAND_EDGE_XFAILS: set[tuple[str, str]] = set()
 
 
 @pytest.mark.study

@@ -155,24 +155,11 @@ class TestTickIntervalSensitivity:
     they can't be trusted.
     """
 
-    @pytest.mark.xfail(
-        strict=False,
-        reason=(
-            "Q-feedback dt_factor fix (commit ea1cc50) shifted 30-min "
-            "comfort from within-5%-of-15min to 5.36% drift.  Real "
-            "cadence-coupling change from the fix.  This test asserted "
-            "<5% drift between cadences as a fidelity bound; the fix "
-            "improves controller behavior but slightly changes the "
-            "cadence-equivalence property.  Bound should be reconsidered "
-            "post-migration (raise to 6%? or restructure as 'comfort > "
-            "85% at all cadences')."
-        ),
-    )
     def test_tick_interval_sweep(self, bench_metrics, num_regression):
         """Comfort, coefficient, and integral should be similar across tick rates.
 
         5-min ticks are excluded from tight comfort checks — the
-        production PI's gains (Kp=1.5, Ki=0.15) are tuned for a
+        production PI's gains (Kp=1.5, Ki=0.70 post-#126) reflect a
         15-min nominal cadence (``pi_tick_fallback=900s``); at 5-min
         the post-hold action rate is ~50% faster, producing mild
         ringing that doubles mean absolute error. Mechanism is
@@ -180,6 +167,11 @@ class TestTickIntervalSensitivity:
         ``tests/hvac_bench/scenarios/test_pi_overcorrection_diagnosis.py``
         (Phase 3c). The sweep demonstrates the property; the diagnosis
         explains it.
+
+        The earlier xfail (post-`ea1cc50` q-feedback fix shifted drift
+        from <5% to 5.36%) is closed in #126 — at Ki=0.70 the
+        cadence-equivalence improves enough that the <5% bound holds
+        again.  See future_work #92 for the broader story.
         """
         results = {}
         for tick_min in [5.0, 10.0, 15.0, 30.0]:

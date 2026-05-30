@@ -231,7 +231,7 @@ DEFAULT_SUPPLEMENTAL_SEED = 3.0                # Typical pellet stove: warms roo
 # PID controller defaults
 DEFAULT_PI_ENABLED = False
 DEFAULT_PI_KP = 1.0
-DEFAULT_PI_KI = 0.20             # Optimized via 2R2C parameter sweep (Apr 2026)
+DEFAULT_PI_KI = 0.70             # Re-tuned 2026-05-30 (#126) for HEAD architecture (qref + 10000-obs buffer + regime gate redesign). See commit 8d0dd4a for prior tune.
 MIN_PI_KI = 0.01                 # Hard floor — ki=0 (P-only) breaks anti-windup, FF correction, and bumpless transfer; users wanting "no PI" should toggle pi_enabled instead
 DEFAULT_PI_KD = 0.0              # Literature + 72h replay: D contraindicated for quantized HVAC
 DEFAULT_PI_KD_FILTER_N = 8       # Derivative filter coefficient: Tf = Td/N. Higher N = less filtering.

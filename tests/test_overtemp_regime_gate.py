@@ -256,6 +256,12 @@ async def test_path4_does_not_arm_if_overtemp_drops_below_threshold():
     so a brief dip mid-episode prevents arming.  This is the intended
     behavior: the path measures *continuous* sustained overtemp, not
     cumulative.
+
+    Asserts on `_sustained_overtemp_minutes` directly (the Path 4 counter),
+    not on `_uncontrollable_entry_latch`, because other latch paths
+    (regime_probe `force_min_setpoint`, cal_midpoint saturation) may fire
+    incidentally at the production-default Ki=0.70.  This test is
+    specifically about Path 4's continuous-vs-cumulative semantics.
     """
     entity = _make_entity()
     pi = entity._pi
@@ -264,23 +270,29 @@ async def test_path4_does_not_arm_if_overtemp_drops_below_threshold():
     entity._attr_current_temperature = 21.6   # 1.6°C over → above threshold
     pi._hp_setpoint = 25
 
-    # 5 ticks sustained → counter at 15 min
+    # 5 ticks sustained → counter at 15 min, below 30 min arm threshold
     for i in range(5):
         await _tick(pi, mono=1000.0 + i * 180.0)
-    assert pi._uncontrollable_entry_latch is False
+    assert pi._sustained_overtemp_minutes == 15.0, (
+        f"After 5 ticks of 1.6°C overtemp: counter={pi._sustained_overtemp_minutes}"
+    )
 
     # Tick at minute 15: dip below threshold (room cools to 21.3°C = +1.3,
     # below the 1.5°C threshold) → counter resets
     entity._attr_current_temperature = 21.3
     await _tick(pi, mono=1000.0 + 5 * 180.0)
-    assert pi._uncontrollable_entry_latch is False
+    assert pi._sustained_overtemp_minutes == 0.0, (
+        f"Counter should reset on dip below threshold: {pi._sustained_overtemp_minutes}"
+    )
 
     # Resume overtemp.  Counter resets, needs 30 more minutes to arm.
     entity._attr_current_temperature = 21.6
     # 9 more ticks (27 min from reset) — still under threshold
     for i in range(9):
         await _tick(pi, mono=1000.0 + (6 + i) * 180.0)
-        assert pi._uncontrollable_entry_latch is False
+    assert pi._sustained_overtemp_minutes == 27.0, (
+        f"After dip + 9 ticks of 1.6°C: counter={pi._sustained_overtemp_minutes}"
+    )
 
 
 @pytest.mark.asyncio
@@ -662,7 +674,13 @@ async def test_regime_exit_preserves_integrator():
     pi._desired_temp = 22.0
     pi._overtemp_regime = True
     pi._uncontrollable_entry_latch = True
-    pre_integral = 6.7
+    # pre_integral sized so raw_setpoint stays well within [min, max] under
+    # the new Ki=0.70 default — otherwise back-calc anti-windup fires and
+    # masks the "regime exit doesn't touch the integrator" invariant under
+    # test.  At outdoor=5°C / desired=22 / room=22, FF ≈ 0.25*17 = 4.25 in
+    # heat.  With Ki=0.70 and integral=1.0: Ki*I = 0.7; raw_sp = 22 + 0 +
+    # 0.7 + 4.25 = 26.95 < 30 max → no saturation.
+    pre_integral = 1.0
     pi._pi_integral = pre_integral
     entity._attr_current_temperature = 22.0     # exactly at desired → exits
     pi._hp_setpoint = 22

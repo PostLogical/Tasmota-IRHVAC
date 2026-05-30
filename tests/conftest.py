@@ -107,7 +107,7 @@ def make_config(overrides=None):
         # PI defaults
         "pi_enabled": False,
         "pi_kp": 1.5,
-        "pi_ki": 0.15,
+        "pi_ki": 0.70,
         "pi_tick_fallback": 900,
         "pi_deadband": 0.5,
         "outdoor_temp_sensor": "",

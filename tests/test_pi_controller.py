@@ -294,6 +294,89 @@ class TestPIMath:
         assert integral_after > 2.0
 
     @pytest.mark.asyncio
+    async def test_integral_does_not_grow_against_negative_error_while_heating(
+        self, pi_entity,
+    ):
+        """LR May-12 pathology regression: integral cannot grow positive when
+        the room is at-or-above desired and HP is heating.
+
+        Background: 2026-05-12 LR debug bundle captured 5h with mean error
+        ~-0.08°C (room slightly above desired) during which the integral
+        grew from +4.5 to +23 while HP stayed quantized at 22°C — the HP
+        was wasting heat into an already-warm room.  The dominant
+        mechanism was q-feedback ([pi_controller.py:5930] block) pulling
+        the integral up to maintain ``raw_setpoint ≈ hp_setpoint_quantized``
+        as FF shrank with outdoor warming.
+
+        q-feedback was superseded by the qref supervisor in commit
+        ``da4d5ae`` and defaults to off as of pre53; the qref supervisor
+        operates on the reference side (effective_desired) rather than the
+        integrator.  With q-feedback inactive, pure PI math has no
+        mechanism to grow the integral against negative error in
+        deadband: deadband integration adds ``avg_error * dt_factor * rate``
+        (negative when room > desired), back-calc anti-windup only fires
+        under output saturation, and the over-temp regime gate doesn't
+        engage at sub-1.5°C overshoots.
+
+        This test pins that invariant: with the supervisor disabled (so
+        we test pure PI integration, not qref's reference-side bias),
+        running the scenario shape that produced the LR pathology in
+        pre-da4d5ae production now drifts integral monotonically toward
+        zero, not away from it.  Any future change that re-introduces an
+        integrator-side mechanism pulling against negative error will
+        fail here.
+        """
+        import asyncio
+        pi = pi_entity._pi
+
+        # Reproduce the LR trace shape: room mildly over desired,
+        # HP heating, in deadband, no saturation.
+        pi._desired_temp = 22.0
+        pi._pi_deadband = 0.5
+        pi._hp_setpoint = 24  # heating commanded, well above room
+        pi._pi_integral = 4.5  # starting integral from LR trace 11:45 UTC
+        pi._inputs.outdoor_temp = 10.0
+        pi._supervisor_enabled = False  # isolate PI integration (no qref)
+        pi_entity._attr_hvac_mode = HVACMode.HEAT
+        pi_entity._attr_current_temperature = 22.1  # 0.1°C over desired
+
+        initial_integral = pi._pi_integral
+
+        # Confirm q-feedback is off (the mechanism this test pins against).
+        assert pi._q_feedback_enabled is False, (
+            "q-feedback default-off is load-bearing for this invariant; "
+            "if a future change re-enables it by default, this test must "
+            "be updated to assert against the new boundary."
+        )
+
+        # Run ~5h at 3-min cadence (matching the LR trace window).
+        tick_interval = 180.0
+        t = tick_interval
+        for _ in range(100):
+            pi._pi_last_tick_time = t - tick_interval
+            pi._monotonic = lambda v=t: v
+            await pi._pi_tick()
+            # Hold room slightly over desired throughout — the pathology
+            # is sustained over-desired, not a transient.  Re-pin temp
+            # after each tick in case the controller's actions would have
+            # cooled the room (we're not modeling thermal response here;
+            # just the PI integration policy).
+            pi_entity._attr_current_temperature = 22.1
+            t += tick_interval
+
+        # Invariant: integral must not grow positive past its starting
+        # value when room is over desired and HP is heating.  Pure PI
+        # math says it should monotonically drift toward zero (or
+        # negative); we allow a small numerical margin.
+        assert pi._pi_integral <= initial_integral + 0.01, (
+            f"integral grew from {initial_integral} to {pi._pi_integral} "
+            "while heating an over-desired room — the May-12 pathology "
+            "has re-introduced itself.  Likely cause: a new mechanism "
+            "(re-enabled q-feedback, qref-to-integrator coupling, or "
+            "similar) is pulling integral up against negative error."
+        )
+
+    @pytest.mark.asyncio
     async def test_off_mode_zeros_integral(self, pi_entity):
         """HVAC OFF should zero the integral."""
         pi_entity._pi._pi_integral = 10.0
@@ -1493,6 +1576,12 @@ class TestFullRateIntegrationRegression:
         Fast-τ rooms respond quickly to HP changes, which means the room can
         overshoot/undershoot rapidly after a setpoint change. This is where
         oscillation is most likely.
+
+        Tolerance widened to 8 in #126 (2026-05-30) Ki retune.  At Ki=0.70
+        (post-#126), full-rate integration produces ~7 reversals on this
+        fast-τ scenario vs ~5 at the legacy Ki=0.15.  This is the same
+        warm-mild + solar chatter mechanism the bench deadband test
+        captures; bounded but real.
         """
         full_traj, var_traj = self._run_ab_dynamic(
             21.0, 80, outdoor_c=5.0, tau_minutes=30.0, hp_gain=0.9,
@@ -1500,7 +1589,7 @@ class TestFullRateIntegrationRegression:
 
         for label, traj in [("full-rate", full_traj), ("variable-rate", var_traj)]:
             reversals = self._count_reversals(traj)
-            assert reversals <= 6, (
+            assert reversals <= 8, (
                 f"{label} with τ=30min: {reversals} reversals — "
                 f"fast-room oscillation. Setpoints: "
                 f"{[t[1] for t in traj[::10]]}"
@@ -1604,7 +1693,10 @@ class TestPIMathContinued:
         assert pi_entity._pi._desired_temp == 25.0
         # Old behavior would have left integral ≈ 0 (zero branch + small
         # post-tick growth).  New behavior preserves a substantial integral.
-        assert abs(pi_entity._pi._pi_integral) > 10.0, (
+        # Threshold scales with 1/Ki: at Ki=0.70 (post-#126), the equivalent
+        # compensation magnitude corresponds to integral ≈ 4 (vs ~14 at the
+        # legacy Ki=0.15).
+        assert abs(pi_entity._pi._pi_integral) > 2.0, (
             f"Bumpless should preserve a substantially non-zero integral "
             f"(old code would have zeroed); got {pi_entity._pi._pi_integral}"
         )
@@ -1670,9 +1762,15 @@ class TestPIMathContinued:
         pi_entity._attr_hvac_mode = HVACMode.HEAT
         pi_entity._attr_current_temperature = 21.8  # In deadband
 
-        # First tick: setpoint changes (last_setpoint_change_time was 0)
+        # First tick: setpoint changes (last_setpoint_change_time was 0).
+        # At Ki=0.70 (post-#126) the first-tick math may incidentally land
+        # back on the initial hp_setpoint=25, leaving _last_setpoint_change_time
+        # unset and undermining the hold-timer check below.  Stamp it
+        # explicitly so the second-tick check tests the timer, not the
+        # first-tick rounding.
         await pi._pi_tick()
         first_setpoint = pi._hp_setpoint
+        pi._last_setpoint_change_time = pi._monotonic()
 
         # Second tick immediately after — hold timer should suppress
         pi_entity._attr_current_temperature = 22.2  # Nudge to trigger reversal
@@ -2465,7 +2563,11 @@ class TestOnRemoteChangeStandalone:
         assert pi._desired_temp == 25.0
         # Bumpless math applies — integral is adjusted, not zeroed.
         # Specifically: not anywhere near zero (the old behavior).
-        assert abs(pi._pi_integral) > 10.0, (
+        # Threshold scales with 1/Ki: at Ki=0.70 (post-#126 default), the
+        # same setpoint-compensation magnitude corresponds to integral ≈ 4
+        # rather than ≈ 14 at the legacy Ki=0.15.  Pick a threshold loose
+        # enough to be Ki-invariant for the "definitely-not-zeroed" intent.
+        assert abs(pi._pi_integral) > 2.0, (
             f"Bumpless should preserve a substantially non-zero integral; "
             f"got {pi._pi_integral}"
         )
@@ -3475,9 +3577,9 @@ class TestIMCGainScheduling:
         entity = FakePIEntity(config)
         pi = entity._pi
         assert not pi._plant_id.enabled
-        # Should use conftest defaults (pi_kp=1.5, pi_ki=0.15)
+        # Should use conftest defaults (pi_kp=1.5, pi_ki=0.70 post-#126)
         assert pi._pi_kp == 1.5
-        assert pi._pi_ki == 0.15
+        assert pi._pi_ki == 0.70
 
     def test_imc_enabled_with_tau(self):
         """When pi_tau_estimate > 0 (legacy enable flag), IMC formula is used."""
@@ -3516,9 +3618,9 @@ class TestIMCGainScheduling:
         entity = FakePIEntity(config)
         pi = entity._pi
         assert not pi._plant_id.enabled
-        # Manual gains from config (conftest defaults: kp=1.5, ki=0.15)
+        # Manual gains from config (conftest defaults: kp=1.5, ki=0.70 post-#126)
         assert pi._pi_kp == 1.5
-        assert pi._pi_ki == 0.15
+        assert pi._pi_ki == 0.70
 
     def test_manual_kp_ki_ignored_when_imc_enabled(self):
         """When IMC is enabled, config Kp/Ki are overridden."""

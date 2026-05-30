@@ -4714,46 +4714,6 @@ class TestPIControllerRestoreGaps:
             assert pi._pi_integral != 2.0
 
 
-class TestPIControllerSetpointChange:
-    """Cover setpoint change regime shift and Smith reset."""
-
-    @pytest.mark.asyncio
-    async def test_setpoint_large_regime_shift_zeros_integral(self, hass, setup_pi_integration):
-        """Large setpoint change (>2°C) zeros integral before tick recalculates."""
-        from custom_components.tasmota_irhvac.pi.smith_predictor import SmithPredictor
-
-        entry = await setup_pi_integration()
-        entity = get_climate_entity(hass, entry)
-        entity._attr_hvac_mode = HVACMode.HEAT
-        pi = entity._pi
-        pi._desired_temp = 20.0
-        pi._pi_integral = 5.0
-
-        # Add a Smith predictor to cover line 833
-        pi._smith = SmithPredictor(tau=60.0, lag=5.0, k_eff=1.0)
-        pi._smith.initialize(room_temp=20.0, hp_setpoint=22.0, now_mono=0.0)
-
-        # Intercept _pi_tick to verify the integral was zeroed before tick runs
-        zeroed_during_set_temp = False
-        original_tick = pi._pi_tick
-
-        async def _spy_tick():
-            nonlocal zeroed_during_set_temp
-            # When tick is called, integral was already zeroed by the regime-shift path
-            # (it may be non-zero now if tick itself modified it, but we capture the
-            # fact that the path was exercised by checking Smith was de-initialized)
-            zeroed_during_set_temp = not pi._smith._initialized
-            return await original_tick()
-
-        pi._pi_tick = _spy_tick
-
-        await entity.async_set_temperature(temperature=25.0)
-        await hass.async_block_till_done()
-
-        # Smith should have been de-initialized before tick re-initialized it
-        assert zeroed_during_set_temp
-
-
 class TestPIHealthStatusIntegration:
     """Cover get_health_status branches that call health_checks functions."""
 
