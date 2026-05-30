@@ -51,7 +51,7 @@ from .greybox_observer import (
     greybox_to_beta,
     log_greybox_result,
 )
-from .health_checks import AnomalyEvent, compute_mad_sigma, CUSUM_K, CUSUM_H, MIN_RESIDUALS_FOR_DETECTION, MIN_SIGMA_FLOOR, MIN_EVENT_DURATION_SEC, CUSUM_COOLDOWN_SEC, obs_raw_reading
+from .health_checks import AnomalyEvent, compute_mad_sigma, CUSUM_K, CUSUM_H, MIN_RESIDUALS_FOR_DETECTION, MIN_SIGMA_FLOOR, MIN_EVENT_DURATION_SEC, CUSUM_COOLDOWN_SEC, CUSUM_RESIDUAL_WINDOW_S, obs_raw_reading
 
 from ..const import (
     ATTR_DESIRED_TEMP,
@@ -881,7 +881,12 @@ class PIController:
         self._batch_cycle_count: int = 0
 
         # ── CUSUM anomaly detection state ───────────────────────────
-        self._residual_history: deque[float] = deque(maxlen=60)
+        # Residual history is time-based (age-evicted by CUSUM_RESIDUAL_WINDOW_S)
+        # rather than count-based, so the MAD-σ̂ window stays meaningful across
+        # variable production cadence (60s min, 15min max, ~3-5min typical).
+        # Entries are (mono_time, residual) tuples; oldest evicted on update.
+        # See health_checks.CUSUM_RESIDUAL_WINDOW_S for rationale.
+        self._residual_history: deque[tuple[float, float]] = deque()
         self._cusum_pos: float = 0.0
         self._cusum_neg: float = 0.0
         self._anomaly_events: list[AnomalyEvent] = []
@@ -1864,7 +1869,11 @@ class PIController:
                 if self._cusum_cooldown_until is not None
                 else 0.0
             ),
-            cusum_residual_history=list(self._residual_history),
+            # Persist as residual-only list (timestamps are mono_time, which
+            # resets across reboot — meaningless to persist). Restored residuals
+            # are timestamped to now on load so they evict over the next 12h
+            # window, providing warm σ̂ through the transition.
+            cusum_residual_history=[r for _, r in self._residual_history],
         )
 
     def restore_extra_stored_data(self, data: PIExtraStoredData) -> None:
@@ -2066,9 +2075,14 @@ class PIController:
             self._cusum_cooldown_until = None
         # Restore residual history so MAD has a warm scale immediately
         # rather than blanking detection for the first 10 post-restart ticks.
+        # Mono_time isn't preserved across reboot, so timestamp each restored
+        # residual as "now" — they'll evict naturally over the next 12h window.
         if data.cusum_residual_history:
             self._residual_history.clear()
-            self._residual_history.extend(data.cusum_residual_history)
+            restore_mono = self._monotonic()
+            self._residual_history.extend(
+                (restore_mono, float(r)) for r in data.cusum_residual_history
+            )
         # Restore lag filter states
         if data.lag_filter_states:
             self._inputs.restore_lag_states(data.lag_filter_states)
@@ -4685,7 +4699,13 @@ class PIController:
         # Capture for the typed tick output. Sticky across ticks: holds
         # the most-recent prediction residual until next observation.
         self._last_residual = residual
-        self._residual_history.append(residual)
+        self._residual_history.append((now_mono, residual))
+        # Time-based eviction: drop observations older than the configured
+        # window.  Variable production cadence (60s-15min) means count-based
+        # eviction can't deliver a stable time horizon; age-based does.
+        cutoff = now_mono - CUSUM_RESIDUAL_WINDOW_S
+        while self._residual_history and self._residual_history[0][0] < cutoff:
+            self._residual_history.popleft()
 
         now = _now or self._utcnow_fn()
 
@@ -4699,8 +4719,9 @@ class PIController:
         if len(self._residual_history) < MIN_RESIDUALS_FOR_DETECTION:
             return
 
-        # Robust scale estimate
-        sigma = compute_mad_sigma(self._residual_history)
+        # Robust scale estimate (extract residual values from time-stamped tuples)
+        residual_values = [r for _, r in self._residual_history]
+        sigma = compute_mad_sigma(residual_values)
         if self._metrics.batch_model_rms is not None:
             sigma = max(sigma, 0.5 * self._metrics.batch_model_rms)
 

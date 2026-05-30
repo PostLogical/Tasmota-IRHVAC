@@ -25,6 +25,24 @@ MIN_RESIDUALS_FOR_DETECTION: int = 10  # minimum history for reliable MAD
 MIN_SIGMA_FLOOR: float = 0.05         # absolute σ floor (°C)
 MIN_EVENT_DURATION_SEC: float = 600.0  # 10 minutes wall-clock minimum
 CUSUM_COOLDOWN_SEC: float = 1800.0     # 30 minutes wall-clock cooldown
+# Residual history window for MAD-σ̂ estimation.  Time-based (not count-
+# based) so the window stays meaningful across the wide production tick
+# cadence range (60s minimum to 15min maximum, typically 3-5min average).
+#
+# 12h chosen from:
+#   - Jensen-Jones-Farmer-Champ-Woodall 2006 minimum: ≥200 obs at the
+#     stable end of cadence (3-5min) → 144-240 obs at 12h, above the
+#     stability threshold for Phase-I estimation.
+#   - House et al. 2006: HVAC settling time ~60min → 12h is 12× settling,
+#     well past steady-state.
+#   - Captures half a diurnal cycle (one full peak + one full trough) so
+#     small sustained residuals from diurnal FF mismatch fall inside the
+#     natural noise envelope rather than firing as anomalies.
+#   - Bench validated at 60s/3min/5min cadences: at 12h all three
+#     disturbance classes (party, oil_boiler 30-min step, cooking) are
+#     reliably detected; at 24h+ oil_boiler is lost.
+# See `local/tools/_133_cadence_sweep.txt` for the validation data.
+CUSUM_RESIDUAL_WINDOW_S: float = 12 * 3600.0
 
 
 @dataclass

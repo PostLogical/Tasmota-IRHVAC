@@ -316,11 +316,12 @@ class TestPIControllerCoverageGaps:
         entity = _make_pi()
         pi = entity._pi
         pi._metrics.batch_model_rms = 2.0
-        # Fill residual history
-        for _ in range(50):
-            pi._residual_history.append(0.01)
+        # Fill residual history (now time-stamped tuples)
+        mono_base = time.monotonic()
+        for i in range(50):
+            pi._residual_history.append((mono_base - 60.0 * (50 - i), 0.01))
         # Now feed a residual — should use batch RMS as floor
-        pi._update_cusum(0.1, time.monotonic(), True)
+        pi._update_cusum(0.1, mono_base, True)
         # Just verify it doesn't crash
 
     # Line 3551: outdoor temp state change with None new_state

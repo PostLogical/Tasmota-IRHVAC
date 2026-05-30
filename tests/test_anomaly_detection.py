@@ -92,7 +92,14 @@ def _make_cusum_controller():
 
     # Use object.__new__ to skip __init__
     ctrl = object.__new__(PIController)
-    ctrl._residual_history = deque(maxlen=60)
+    # Time-based eviction window (CUSUM_RESIDUAL_WINDOW_S=12h) lives on
+    # the production-config side; the deque itself is now unbounded with
+    # entries shaped (mono_time, residual).
+    ctrl._residual_history = deque()
+    # Need monotonic + utcnow for time-based eviction + cooldown logic
+    ctrl._monotonic = lambda: 0.0
+    from custom_components.tasmota_irhvac.pi.pi_controller import dt_util
+    ctrl._utcnow_fn = dt_util.utcnow
     ctrl._cusum_pos = 0.0
     ctrl._cusum_neg = 0.0
     ctrl._anomaly_events = []
@@ -111,9 +118,12 @@ def _feed_residuals(ctrl, residuals, sigma=0.15, start_mono=1000.0, tick_spacing
     then feeds the provided sequence with synthetic wall-clock time.
     """
     random.seed(123)
-    # Pre-fill with normal residuals to establish MAD baseline
+    # Pre-fill with normal residuals (time-stamped just before start_mono so
+    # they're still inside the 12h eviction window when feed begins)
+    prefill_mono = start_mono - tick_spacing
     for _ in range(MIN_RESIDUALS_FOR_DETECTION):
-        ctrl._residual_history.append(random.gauss(0, sigma))
+        ctrl._residual_history.append((prefill_mono, random.gauss(0, sigma)))
+        prefill_mono -= tick_spacing
 
     mono = start_mono
     base_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -246,9 +256,10 @@ class TestCusumFalsePositiveResistance:
         sigma = 0.15
         random.seed(88)
         # Pre-fill with 60 clean samples for well-calibrated MAD
+        # Time-stamped entries: (mono_time, residual)
         ctrl._residual_history.clear()
         for _ in range(60):
-            ctrl._residual_history.append(random.gauss(0, sigma))
+            ctrl._residual_history.append((0.0, random.gauss(0, sigma)))
 
         # +2σ for 2 ticks: z ≈ 2, accumulates (2-1)*2=2, well below h=10
         base = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -267,7 +278,7 @@ class TestCusumFalsePositiveResistance:
         random.seed(77)
         # Pre-fill with elevated noise so MAD adapts
         for _ in range(MIN_RESIDUALS_FOR_DETECTION):
-            ctrl._residual_history.append(random.gauss(0, sigma * 1.5))
+            ctrl._residual_history.append((0.0, random.gauss(0, sigma * 1.5)))
         # Continue with elevated noise
         mono = 1000.0
         base = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -291,9 +302,9 @@ class TestCusumClampedAndCooldown:
         # Set cooldown to 30 min from base
         ctrl._cusum_cooldown_until = base + timedelta(minutes=30)
 
-        # Pre-fill history
+        # Pre-fill history (time-stamped tuples)
         for _ in range(MIN_RESIDUALS_FOR_DETECTION):
-            ctrl._residual_history.append(random.gauss(0, sigma))
+            ctrl._residual_history.append((0.0, random.gauss(0, sigma)))
 
         # Feed large anomaly during cooldown (all within 20 minutes of base)
         mono = 1000.0
@@ -331,9 +342,10 @@ class TestCusumDetectionLatency:
         """Feed a step shift and return ticks until CUSUM crosses h."""
         ctrl = _make_cusum_controller()
         random.seed(42)
-        # Pre-fill with 60 clean samples for well-calibrated MAD
+        # Pre-fill with 60 clean samples for well-calibrated MAD (mono=0 keeps
+        # them inside the 12h window relative to the test's 1000+ mono base)
         for _ in range(60):
-            ctrl._residual_history.append(random.gauss(0, sigma))
+            ctrl._residual_history.append((0.0, random.gauss(0, sigma)))
 
         mono = 1000.0
         base = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -373,7 +385,7 @@ class TestCusumDetectionLatency:
         sigma = 0.15
         random.seed(42)
         for _ in range(60):
-            ctrl._residual_history.append(random.gauss(0, sigma))
+            ctrl._residual_history.append((0.0, random.gauss(0, sigma)))
 
         mono = 1000.0
         base = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -638,9 +650,12 @@ class TestCusumPersistence:
         pi._cusum_neg = 0.3
         cooldown = datetime(2026, 5, 9, 12, 0, 0, tzinfo=timezone.utc)
         pi._cusum_cooldown_until = cooldown
-        # Pre-fill some residual history.
+        # Pre-fill some residual history. Time-stamped tuples now:
+        # (mono_time, residual). Persist drops timestamps and reattaches
+        # current mono on restore (the deque shape is now (mono, residual)).
         pi._residual_history.clear()
-        pi._residual_history.extend([0.05, -0.03, 0.10, -0.08, 0.02])
+        residuals = [0.05, -0.03, 0.10, -0.08, 0.02]
+        pi._residual_history.extend((100.0, r) for r in residuals)
 
         # Round-trip through PIExtraStoredData.
         saved = pi.get_extra_stored_data()
@@ -650,7 +665,8 @@ class TestCusumPersistence:
         assert saved.cusum_cooldown_until_epoch == pytest.approx(
             cooldown.timestamp(),
         )
-        assert saved.cusum_residual_history == [0.05, -0.03, 0.10, -0.08, 0.02]
+        # Persist serializes residuals only (no timestamps).
+        assert saved.cusum_residual_history == residuals
 
         # Wipe live state, then restore.
         pi._cusum_pos = 0.0
@@ -661,7 +677,9 @@ class TestCusumPersistence:
         assert pi._cusum_pos == pytest.approx(7.5)
         assert pi._cusum_neg == pytest.approx(0.3)
         assert pi._cusum_cooldown_until == cooldown
-        assert list(pi._residual_history) == [0.05, -0.03, 0.10, -0.08, 0.02]
+        # Restored entries: residuals preserved, all timestamped to now (so
+        # they evict over the next 12h window — warm σ̂ post-restart).
+        assert [r for _, r in pi._residual_history] == residuals
 
     @pytest.mark.asyncio
     async def test_no_cooldown_round_trips_as_none(
@@ -701,10 +719,10 @@ class TestCusumPersistence:
         pi = get_climate_entity(hass, entry)._pi
 
         sigma = 0.15
-        # Pre-fill history so MAD is calibrated post-restore.
+        # Pre-fill history so MAD is calibrated post-restore (time-stamped tuples).
         history = [random.gauss(0, sigma) for _ in range(60)]
         pi._residual_history.clear()
-        pi._residual_history.extend(history)
+        pi._residual_history.extend((100.0, r) for r in history)
 
         # Simulate prior alarm: cooldown active 30 min from "now".
         base = datetime(2026, 5, 9, 12, 0, 0, tzinfo=timezone.utc)
