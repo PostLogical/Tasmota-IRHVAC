@@ -194,11 +194,15 @@ from .plant_model import GainUpdate
 _LOGGER = logging.getLogger(__name__)
 
 
-def _compute_prior_run_age_s(saved_at_wallclock: str) -> float | None:
-    """Seconds between `saved_at_wallclock` (ISO-8601 UTC) and now, or None.
+def _compute_prior_run_age_s(saved_at_wallclock: str, now: datetime) -> float | None:
+    """Seconds between `saved_at_wallclock` (ISO-8601 UTC) and ``now``, or None.
 
     Returns None when the input is empty (legacy stored data without the
     field) or unparseable. Negative ages (clock skew) are clamped to 0.
+
+    ``now`` is injected (rather than calling ``dt_util.utcnow()`` here) so
+    bench tests that inject a sim-coherent ``utcnow`` into ``PIController``
+    get a sim-coherent age. See ``PIController.__init__`` ``utcnow`` arg.
     """
     if not saved_at_wallclock:
         return None
@@ -208,7 +212,7 @@ def _compute_prior_run_age_s(saved_at_wallclock: str) -> float | None:
         return None
     if prior.tzinfo is None:
         prior = prior.replace(tzinfo=timezone.utc)
-    return max(0.0, (dt_util.utcnow() - prior).total_seconds())
+    return max(0.0, (now - prior).total_seconds())
 
 
 # Local wall-clock hours at which batch WLS analysis fires.  Single source
@@ -258,6 +262,7 @@ class PIController:
         *,
         kappa_threshold: float = DEFAULT_KAPPA_THRESHOLD,
         monotonic: Callable[[], float] = time.monotonic,
+        utcnow: Callable[[], datetime] = dt_util.utcnow,
         skip_tick_output: bool = False,
     ) -> None:
         """Initialize PI controller.
@@ -277,6 +282,21 @@ class PIController:
                 ``pi._monotonic`` post-construction; do NOT use module-level
                 ``mock.patch("time.monotonic")`` — those patches don't reach
                 the controller's bound callable.
+            utcnow: UTC wall-clock provider — defaults to ``dt_util.utcnow``.
+                Bench injects ``lambda: _SIM_EPOCH + timedelta(seconds=adapter._sim_clock)``
+                for sim-coherent wall-clock time. ``dt_util.utcnow`` is a
+                ``functools.partial(datetime.now, UTC)`` constructed at HA
+                import time, which captures ``datetime.now`` by reference
+                before freezegun's monkey-patch installs. The result:
+                ``freeze_time(...)`` does NOT intercept ``dt_util.utcnow()``
+                (it only catches direct ``datetime.now()`` calls). The
+                controller's CUSUM-cooldown timer and ISO-timestamp writes
+                rely on this seam — without injection, bench scenarios
+                that run 8 sim-hours in 2 wall-seconds see a 30-min
+                wall-clock cooldown that effectively never lifts within
+                the run. Tests that need to fix UTC should pass
+                ``utcnow=`` at construction or override ``pi._utcnow_fn``
+                post-construction.
             skip_tick_output: Bench-only seam.  When True, ``fire_dispatcher``
                 returns immediately without constructing a ``TickOutput`` or
                 publishing via the coordinator.  TickOutput construction is
@@ -289,6 +309,7 @@ class PIController:
         self._entity = entity
         self._kappa_threshold: float = float(kappa_threshold)
         self._monotonic: Callable[[], float] = monotonic
+        self._utcnow_fn: Callable[[], datetime] = utcnow
         self._skip_tick_output: bool = bool(skip_tick_output)
         self._log_prefix: str = ""  # set in async_added when entity_id is known
 
@@ -1116,7 +1137,9 @@ class PIController:
         self._pending_reload_payload = ControllerReloadPayload(
             reason="ha_start" if not self._hass.is_running else "integration_reload",
             restored_from_storage=restored,
-            prior_run_age_s=_compute_prior_run_age_s(prior_saved_wallclock),
+            prior_run_age_s=_compute_prior_run_age_s(
+                prior_saved_wallclock, self._utcnow_fn()
+            ),
         )
 
         # Timer and initial tick are set up by climate.py after this returns.
@@ -1262,7 +1285,7 @@ class PIController:
         if greybox is not None:
             log_greybox_result(greybox, log_prefix=self._log_prefix)
             self._last_greybox_result = greybox
-            self._last_greybox_timestamp_iso = dt_util.utcnow().isoformat()
+            self._last_greybox_timestamp_iso = self._utcnow_fn().isoformat()
 
             # Bridge: convert rate coefficients to WLS-compatible β
             bridge = greybox_to_beta(
@@ -1833,7 +1856,7 @@ class PIController:
             detected_lag_tau=dict(self._detected_lag_tau),
             detected_lag_tau_counts=dict(self._detected_lag_tau_count),
             pi_event_log_enabled=self._pi_event_log_enabled,
-            saved_at_wallclock=dt_util.utcnow().isoformat(),
+            saved_at_wallclock=self._utcnow_fn().isoformat(),
             cusum_pos=self._cusum_pos,
             cusum_neg=self._cusum_neg,
             cusum_cooldown_until_epoch=(
@@ -4664,7 +4687,7 @@ class PIController:
         self._last_residual = residual
         self._residual_history.append(residual)
 
-        now = _now or dt_util.utcnow()
+        now = _now or self._utcnow_fn()
 
         # Cooldown: suppress detection after a recent alarm
         if self._cusum_cooldown_until is not None:

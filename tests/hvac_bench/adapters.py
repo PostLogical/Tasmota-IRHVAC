@@ -61,6 +61,7 @@ class TasmotaPIAdapter:
             head_calibration_bounds=head_calibration_bounds,
             kappa_threshold=kappa_threshold,
             monotonic=lambda: self._sim_clock,
+            utcnow=lambda: _SIM_EPOCH + timedelta(seconds=self._sim_clock),
         )
         self._pi = self._entity._pi
         self._loop = asyncio.new_event_loop()
@@ -321,7 +322,7 @@ class _FakeBenchEntity(_PITestEntityRoomTempMixin):
 
     def __init__(self, config, head_calibration_bounds=None,
                  *, kappa_threshold=DEFAULT_KAPPA_THRESHOLD,
-                 monotonic=None, skip_tick_output=True):
+                 monotonic=None, utcnow=None, skip_tick_output=True):
         from custom_components.tasmota_irhvac.pi.pi_controller import PIController
 
         # Hand-rolled hass fake exposing only the bench-active controller
@@ -358,6 +359,8 @@ class _FakeBenchEntity(_PITestEntityRoomTempMixin):
         }
         if monotonic is not None:
             pi_kwargs["monotonic"] = monotonic
+        if utcnow is not None:
+            pi_kwargs["utcnow"] = utcnow
         self._pi = PIController(self, config, **pi_kwargs)
         self._sync_room_temp_to_pi()
         self._pi._pi_enabled = True

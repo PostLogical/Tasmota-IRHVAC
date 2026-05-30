@@ -133,17 +133,21 @@ def test_from_dict_bad_type_logs_exception(caplog):
 
 
 def test_compute_prior_run_age_s_returns_none_for_empty():
+    from datetime import datetime, timezone
     from custom_components.tasmota_irhvac.pi.pi_controller import (
         _compute_prior_run_age_s,
     )
-    assert _compute_prior_run_age_s("") is None
+    assert _compute_prior_run_age_s("", datetime.now(timezone.utc)) is None
 
 
 def test_compute_prior_run_age_s_returns_none_for_garbage():
+    from datetime import datetime, timezone
     from custom_components.tasmota_irhvac.pi.pi_controller import (
         _compute_prior_run_age_s,
     )
-    assert _compute_prior_run_age_s("not-an-iso-timestamp") is None
+    assert _compute_prior_run_age_s(
+        "not-an-iso-timestamp", datetime.now(timezone.utc)
+    ) is None
 
 
 def test_compute_prior_run_age_s_positive_for_past_timestamp():
@@ -151,11 +155,12 @@ def test_compute_prior_run_age_s_positive_for_past_timestamp():
     from custom_components.tasmota_irhvac.pi.pi_controller import (
         _compute_prior_run_age_s,
     )
-    past = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
-    age = _compute_prior_run_age_s(past)
+    now = datetime.now(timezone.utc)
+    past = (now - timedelta(hours=2)).isoformat()
+    age = _compute_prior_run_age_s(past, now)
     assert age is not None
-    # 2h ± a few seconds for test latency
-    assert 7195 <= age <= 7210
+    # 2h exactly (no test-latency drift since `now` is passed explicitly)
+    assert 7199 <= age <= 7201
 
 
 def test_compute_prior_run_age_s_clamps_negative_to_zero():
@@ -164,8 +169,9 @@ def test_compute_prior_run_age_s_clamps_negative_to_zero():
     from custom_components.tasmota_irhvac.pi.pi_controller import (
         _compute_prior_run_age_s,
     )
-    future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
-    assert _compute_prior_run_age_s(future) == 0.0
+    now = datetime.now(timezone.utc)
+    future = (now + timedelta(hours=1)).isoformat()
+    assert _compute_prior_run_age_s(future, now) == 0.0
 
 
 def test_compute_prior_run_age_s_treats_naive_iso_as_utc():
@@ -174,7 +180,8 @@ def test_compute_prior_run_age_s_treats_naive_iso_as_utc():
     from custom_components.tasmota_irhvac.pi.pi_controller import (
         _compute_prior_run_age_s,
     )
-    naive = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
-    age = _compute_prior_run_age_s(naive)
+    now = datetime.now(timezone.utc)
+    naive = now.replace(tzinfo=None).isoformat()
+    age = _compute_prior_run_age_s(naive, now)
     assert age is not None
-    assert 0.0 <= age <= 5.0
+    assert 0.0 <= age <= 1.0
