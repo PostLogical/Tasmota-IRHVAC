@@ -108,6 +108,13 @@ def _make_cusum_controller():
     ctrl._metrics = MagicMock()
     ctrl._metrics.batch_model_rms = None
     ctrl._pending_events = []  # Stage 8: event accumulator (used by _emit_event)
+    # #135 CUSUM-arming fields (off here — these tests focus on the CUSUM
+    # detector itself, not the downstream latch arming).  Setting enabled=
+    # False keeps `_update_cusum` from poking the arming state we don't
+    # otherwise initialize on this stripped-down stub.
+    ctrl._cusum_overtemp_arming_enabled = False
+    ctrl._cusum_armed_this_tick = False
+    ctrl._latch_armed_events = []
     return ctrl
 
 

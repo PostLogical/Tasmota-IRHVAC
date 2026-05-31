@@ -971,6 +971,7 @@ class TickEventKind(StrEnum):
     BOUNDARY_UPDATE = "boundary_update"
     CONTROLLER_RELOAD = "controller_reload"
     BUFFER_RESET = "buffer_reset"
+    OVERTEMP_LATCH_ARMED = "overtemp_latch_armed"
 
 
 # Per-kind payload dataclasses. Each is frozen+slotted; `to_dict()` keeps
@@ -1030,6 +1031,38 @@ class AnomalyDetectedPayload:
             mean_residual=data["mean_residual"],
             peak_cusum=data["peak_cusum"],
             tick_count=data["tick_count"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class LatchArmedPayload:
+    """Emitted when a trigger arms the over-temp regime latch.
+
+    The `trigger` field is the discriminator (see `LatchArmingTrigger`
+    enum in `health_checks.py`); `details` carries trigger-specific
+    extras as a JSON-friendly dict (e.g. CUSUM_ANOMALY records
+    `residual` and `peak_cusum`).
+    """
+    trigger: str                # LatchArmingTrigger value
+    mode: str                   # "heat" | "cool"
+    overtemp_error: float       # at arming time, against user_desired
+    details: dict[str, Any]     # trigger-specific extras
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "trigger": self.trigger,
+            "mode": self.mode,
+            "overtemp_error": self.overtemp_error,
+            "details": dict(self.details),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> LatchArmedPayload:
+        return cls(
+            trigger=data["trigger"],
+            mode=data["mode"],
+            overtemp_error=data["overtemp_error"],
+            details=dict(data.get("details", {})),
         )
 
 
@@ -1262,6 +1295,7 @@ TickEventPayload = (
     | BoundaryUpdatePayload
     | ControllerReloadPayload
     | BufferResetPayload
+    | LatchArmedPayload
 )
 
 
@@ -1276,6 +1310,7 @@ _PAYLOAD_BY_KIND: dict[TickEventKind, type[TickEventPayload]] = {
     TickEventKind.BOUNDARY_UPDATE: BoundaryUpdatePayload,
     TickEventKind.CONTROLLER_RELOAD: ControllerReloadPayload,
     TickEventKind.BUFFER_RESET: BufferResetPayload,
+    TickEventKind.OVERTEMP_LATCH_ARMED: LatchArmedPayload,
 }
 
 

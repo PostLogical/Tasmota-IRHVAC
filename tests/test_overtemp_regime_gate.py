@@ -299,8 +299,16 @@ async def test_path4_does_not_arm_if_overtemp_drops_below_threshold():
 async def test_path4_does_not_arm_below_threshold():
     """Cooking-tier scenario analog: room sustained above desired but ≤1.5°C
     (peak 1.18°C is the empirical cooking signature from path4_threshold_sweep).
-    Path 4 explicitly does NOT engage — this is the documented gap that
-    future_work's probe-based discriminator would close.
+    Path 4 explicitly does NOT engage in this regime — its counter only
+    accumulates above 1.5°C.
+
+    The cooking-tier *gap* (Path 4 missing this case) is now closed in
+    production by the CUSUM_ANOMALY trigger (#135), which can arm the
+    latch on sub-1.5°C overtemp episodes via sign-matched CUSUM events.
+    This test isolates Path 4's contract by asserting on
+    `_sustained_overtemp_minutes` directly (the Path 4 state), not on
+    the latch — the latch may be armed by CUSUM_ANOMALY in this scenario
+    (correct production behavior), but Path 4's own counter must stay 0.
     """
     entity = _make_entity()
     pi = entity._pi
@@ -314,8 +322,9 @@ async def test_path4_does_not_arm_below_threshold():
     # overtemp is below 1.5°C threshold so counter never increments.
     for i in range(20):
         await _tick(pi, mono=1000.0 + i * 180.0)
-        assert pi._uncontrollable_entry_latch is False, (
-            f"Path 4 incorrectly armed on sub-threshold overtemp at tick {i+1}"
+        assert pi._sustained_overtemp_minutes == 0.0, (
+            f"Path 4 counter incorrectly accumulated on sub-threshold "
+            f"overtemp at tick {i+1}: {pi._sustained_overtemp_minutes}"
         )
 
 

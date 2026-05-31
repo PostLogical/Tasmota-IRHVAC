@@ -51,7 +51,7 @@ from .greybox_observer import (
     greybox_to_beta,
     log_greybox_result,
 )
-from .health_checks import AnomalyEvent, compute_mad_sigma, CUSUM_K, CUSUM_H, MIN_RESIDUALS_FOR_DETECTION, MIN_SIGMA_FLOOR, MIN_EVENT_DURATION_SEC, CUSUM_COOLDOWN_SEC, CUSUM_RESIDUAL_WINDOW_S, obs_raw_reading
+from .health_checks import AnomalyEvent, LatchArmedEvent, LatchArmingTrigger, compute_mad_sigma, CUSUM_K, CUSUM_H, MIN_RESIDUALS_FOR_DETECTION, MIN_SIGMA_FLOOR, MIN_EVENT_DURATION_SEC, CUSUM_COOLDOWN_SEC, CUSUM_RESIDUAL_WINDOW_S, obs_raw_reading
 
 from ..const import (
     ATTR_DESIRED_TEMP,
@@ -83,10 +83,12 @@ from ..const import (
     CONF_PI_AUTO_PERTURB_WINDOW_START,
     CONF_PI_AUTO_PERTURB_WINDOW_END,
     CONF_PI_AUTO_PERTURB_RESEARCH_MODE,
+    CONF_CUSUM_OVERTEMP_ARMING_ENABLED,
     CONF_PI_BATCH_WLS_ENABLED,
     CONF_PI_FF_ENABLED,
     CONF_PI_PLANT_ID_ENABLED,
     CONF_PI_TAU_ESTIMATE,
+    DEFAULT_CUSUM_OVERTEMP_ARMING_ENABLED,
     DEFAULT_OVERTEMP_REGIME_ENTER_C,
     DEFAULT_OVERTEMP_REGIME_EXIT_C,
     DEFAULT_OVERTEMP_REGIME_RATE_THRESHOLD_C_PER_MIN,
@@ -154,6 +156,7 @@ from .snapshot import (
     LagFilterSnapshot,
     LagFilterState,
     LagTauDiagnostic as LagTauDiagnosticSnapshot,
+    LatchArmedPayload,
     LearningSnapshot,
     LearningSuppressionChangePayload,
     LearningSuppressionSnapshot,
@@ -892,6 +895,29 @@ class PIController:
         self._anomaly_events: list[AnomalyEvent] = []
         self._exclusion_count: int = 0
         self._cusum_cooldown_until: datetime | None = None
+
+        # ── CUSUM-driven over-temp arming (#135) ────────────────────
+        # Transient per-tick flag: set in `_update_cusum` when an alarm
+        # crosses with sign matching the active mode (heat→S-, cool→S+);
+        # consumed by the latch-arming block on the following tick (the
+        # latch block runs at line ~5712, before CUSUM at ~6114). 1-tick
+        # latency is bounded by the 30-min CUSUM cooldown.
+        self._cusum_armed_this_tick: bool = False
+        # Snapshot of CUSUM state AT FIRE TIME (residual + peak), captured
+        # in `_update_cusum` because the accumulators reset on alarm —
+        # by consumption time (next tick) they read 0. Used to populate
+        # LatchArmedEvent.details with accurate fire-time context.
+        self._cusum_arming_context: dict | None = None
+        # Cumulative attribution log: events recorded only when BOTH
+        # filters pass (sign + overtemp>0). Generic across all latch
+        # triggers — today only CUSUM_ANOMALY populates it; future
+        # backfill of HP_ESTIMATED_IDLE / MODE_FLIP_OVERTEMP /
+        # SUSTAINED_OVERTEMP uses the same list (see future_work #136).
+        self._latch_armed_events: list[LatchArmedEvent] = []
+        self._cusum_overtemp_arming_enabled: bool = config.get(
+            CONF_CUSUM_OVERTEMP_ARMING_ENABLED,
+            DEFAULT_CUSUM_OVERTEMP_ARMING_ENABLED,
+        )
 
         # Room temperature rate of change tracking (°C/min)
         self._room_temp_history: list[tuple[float, float]] = []  # [(monotonic_time, temp_c), ...]
@@ -4688,6 +4714,7 @@ class PIController:
         residual: float,
         now_mono: float,
         is_heating: bool,
+        is_cooling: bool = False,
         _now: datetime | None = None,
     ) -> None:
         """Feed one residual to the two-sided CUSUM anomaly detector.
@@ -4695,6 +4722,11 @@ class PIController:
         Runs on every buffer observation (every PI tick where clamped=False).
         Uses MAD-based robust scale estimation (Huber, 1981) and the
         CUSUM algorithm (Page, 1954; Basseville & Nikiforov, 1993).
+
+        Side-effect: when an alarm crosses with sign matching the active
+        mode (heat→S-, cool→S+) and `_cusum_overtemp_arming_enabled` is
+        True, sets `_cusum_armed_this_tick` for the latch-arming block
+        to consume on the following tick (#135 / CUSUM_ANOMALY trigger).
         """
         # Capture for the typed tick output. Sticky across ticks: holds
         # the most-recent prediction residual until next observation.
@@ -4732,7 +4764,9 @@ class PIController:
         self._cusum_pos = max(0.0, self._cusum_pos + z - CUSUM_K)
         self._cusum_neg = max(0.0, self._cusum_neg - z - CUSUM_K)
 
-        alarm_triggered = self._cusum_pos > CUSUM_H or self._cusum_neg > CUSUM_H
+        cusum_pos_crossed = self._cusum_pos > CUSUM_H
+        cusum_neg_crossed = self._cusum_neg > CUSUM_H
+        alarm_triggered = cusum_pos_crossed or cusum_neg_crossed
 
         if alarm_triggered:
             # CUSUM crossed threshold — record event and reset.
@@ -4740,6 +4774,28 @@ class PIController:
             # accumulators after detection to avoid massive accumulation
             # during prolonged anomalies.
             peak = max(self._cusum_pos, self._cusum_neg)
+
+            # CUSUM_ANOMALY trigger (#135): set per-tick flag for the
+            # latch arming block if the alarm sign matches the active
+            # mode. The overtemp_error > 0 second filter is applied at
+            # consumption time (in the latch block), so a sign-matched
+            # alarm with room currently below desired flips the flag but
+            # produces no latch arming. See `local/tools/_135_path5_fp_audit`
+            # for the design study.
+            if self._cusum_overtemp_arming_enabled:
+                sign_matches_mode = (
+                    (is_heating and cusum_neg_crossed)
+                    or (is_cooling and cusum_pos_crossed)
+                )
+                if sign_matches_mode:
+                    self._cusum_armed_this_tick = True
+                    # Snapshot fire-time context — accumulators are about
+                    # to reset, so capture peak now for the LatchArmedEvent
+                    # that will be recorded on next tick's consumption.
+                    self._cusum_arming_context = {
+                        "residual": round(residual, 3),
+                        "peak_cusum": round(peak, 1),
+                    }
             event = AnomalyEvent(
                 start_time=now,
                 start_mono=now_mono,
@@ -5709,35 +5765,51 @@ class PIController:
             overtemp_error = user_desired_c - current_c     # >0 when over-cooled
         else:  # pragma: no cover — defensive: line 4670 returns False if neither
             overtemp_error = 0.0
-        # Update uncontrollable-entry latch.  Three arming paths:
-        #   1. `not hp_estimated_active` — cal_midpoint observes HP idle
-        #      (room ≥ hp_setpoint + cal_midpoint + HYST).  Controller-state
-        #      path: integral has wound far enough that hp_setpoint dropped
-        #      to within ~0.3°C of room.  Catches sustained disturbance
-        #      late-stage and aggressive-heat-up overshoot late-stage.
-        #   2. Mode-flip-to-heat event: user just turned on heat mode in
-        #      a room already over desired.  No false positives — event-
-        #      driven on an explicit user action.  Mode change has no
-        #      built-in bumpless transfer, unlike setpoint changes (see
-        #      `set_temperature` and `on_remote_change` for the Åström-
-        #      Hägglund P-cancel bumpless that handles setpoint-down
-        #      naturally without needing a latch arming path).
-        #   3. Sustained-disturbance path: `overtemp_error` has exceeded
-        #      DEFAULT_PATH4_SUSTAINED_OVERTEMP_C (1.5°C) continuously for
-        #      DEFAULT_PATH4_SUSTAINED_MINUTES (30 min) of wall-clock time.
-        #      Thresholds chosen from the 2026-05-29 sweep to cleanly
-        #      separate strong external disturbances (party, oil_boiler)
-        #      from chronic FF mismatch up to 1.5× over-seed.  See const.py
-        #      for the data + future_work for the probe-based discriminator
-        #      that would close the cooking-tier gap.
+        # Update uncontrollable-entry latch.  Four arming triggers (see
+        # LatchArmingTrigger enum in health_checks.py):
+        #   HP_ESTIMATED_IDLE (was Path 1) — `not hp_estimated_active` —
+        #      cal_midpoint observes HP idle (room ≥ hp_setpoint +
+        #      cal_midpoint + HYST).  Controller-state path: integral has
+        #      wound far enough that hp_setpoint dropped to within ~0.3°C
+        #      of room.  Catches sustained disturbance late-stage and
+        #      aggressive-heat-up overshoot late-stage.
+        #   MODE_FLIP_OVERTEMP (was Path 3) — user just turned on heat
+        #      mode in a room already over desired.  No false positives —
+        #      event-driven on an explicit user action.  Mode change has
+        #      no built-in bumpless transfer, unlike setpoint changes
+        #      (see `set_temperature` and `on_remote_change` for the
+        #      Åström-Hägglund P-cancel bumpless that handles setpoint-
+        #      down naturally without needing a latch arming path).
+        #   SUSTAINED_OVERTEMP (was Path 4) — `overtemp_error` has
+        #      exceeded DEFAULT_PATH4_SUSTAINED_OVERTEMP_C (1.5°C)
+        #      continuously for DEFAULT_PATH4_SUSTAINED_MINUTES (30 min)
+        #      of wall-clock time.  Thresholds chosen from the 2026-05-29
+        #      sweep to cleanly separate strong external disturbances
+        #      (party, oil_boiler) from chronic FF mismatch up to 1.5×
+        #      over-seed.
+        #   CUSUM_ANOMALY (#135) — `_cusum_armed_this_tick` set last tick
+        #      by `_update_cusum` when a sign-matched alarm fired (heat→
+        #      S-, cool→S+), AND `overtemp_error > 0` here.  Two-filter
+        #      design from `local/tools/_135_path5_fp_audit`: 36 chronic
+        #      FPs / 7d unfiltered → 1 with two-filter, while retaining
+        #      100% per-disturbance detection.  Closes the sub-1.5°C
+        #      cooking-tier gap that SUSTAINED_OVERTEMP misses.
+        #
         # Reset when room returns to or below desired (we've left the
         # over-temp episode).  Latch persists across transient flicker.
+        #
+        # Future_work #136: rename `mode_flip_to_heat_event`,
+        # `path_4_sustained_disturbance`, and the underlying constants /
+        # test names to match the trigger nomenclature.  Backfill
+        # LatchArmedEvent emits for HP_ESTIMATED_IDLE / MODE_FLIP_OVERTEMP
+        # / SUSTAINED_OVERTEMP (today only CUSUM_ANOMALY emits).
         mode_flip_to_heat_event = (
             self._mode_just_flipped_to_heat
         )
-        # Path 4 (sustained): minute-integrated sustained overtemp.  Reset
-        # on any tick where overtemp drops to or below the threshold, so
-        # the counter only reflects continuous (not cumulative) episodes.
+        # SUSTAINED_OVERTEMP: minute-integrated sustained overtemp.
+        # Reset on any tick where overtemp drops to or below the
+        # threshold, so the counter only reflects continuous (not
+        # cumulative) episodes.
         if overtemp_error > DEFAULT_PATH4_SUSTAINED_OVERTEMP_C:
             self._sustained_overtemp_minutes += dt_seconds / 60.0
         else:
@@ -5745,12 +5817,63 @@ class PIController:
         path_4_sustained_disturbance = (
             self._sustained_overtemp_minutes >= DEFAULT_PATH4_SUSTAINED_MINUTES
         )
+        # CUSUM_ANOMALY: read-and-clear the per-tick flag set by
+        # _update_cusum last tick.  Overtemp gate (> 0) is applied here
+        # (not in CUSUM) because (a) it uses CURRENT overtemp_error not
+        # the value at CUSUM-fire time, and (b) keeps CUSUM concerned
+        # only with detection, not latch policy.
+        cusum_anomaly_arm = (
+            self._cusum_armed_this_tick and overtemp_error > 0
+        )
+        # Always clear the flag — consumed or not — so a stale True
+        # never carries across ticks.
+        self._cusum_armed_this_tick = False
+
         if (not hp_estimated_active
                 or (mode_flip_to_heat_event and overtemp_error > 0)
-                or path_4_sustained_disturbance):
+                or path_4_sustained_disturbance
+                or cusum_anomaly_arm):
             self._uncontrollable_entry_latch = True
         elif overtemp_error <= 0.0:
             self._uncontrollable_entry_latch = False
+
+        # Record CUSUM_ANOMALY arming for bench attribution + future
+        # Repairs.  Only CUSUM emits today; other triggers are silent
+        # (see future_work #136).  Use fire-time context (captured in
+        # _update_cusum) rather than current accumulator state — by now
+        # the accumulators have reset.  Falls back to current _last_residual
+        # if context wasn't captured (defensive — shouldn't happen).
+        if cusum_anomaly_arm:
+            mode_label = "heat" if is_heating else "cool"
+            now_utc = self._utcnow_fn()
+            details = self._cusum_arming_context or {
+                "residual": (
+                    round(self._last_residual, 3)
+                    if self._last_residual is not None
+                    else None
+                ),
+                "peak_cusum": 0.0,
+            }
+            self._latch_armed_events.append(LatchArmedEvent(
+                time=now_utc,
+                mono=now_mono,
+                trigger=LatchArmingTrigger.CUSUM_ANOMALY,
+                mode=mode_label,
+                overtemp_error=round(overtemp_error, 3),
+                details=details,
+            ))
+            self._emit_event(
+                TickEventKind.OVERTEMP_LATCH_ARMED,
+                LatchArmedPayload(
+                    trigger=LatchArmingTrigger.CUSUM_ANOMALY.value,
+                    mode=mode_label,
+                    overtemp_error=round(overtemp_error, 3),
+                    details=details,
+                ),
+            )
+        # Always clear the fire-time context — consumed or not — so it
+        # can't be replayed on a later tick.
+        self._cusum_arming_context = None
 
         # Over-temp regime gate — rate-based redesign (#108).
         #
@@ -6111,7 +6234,7 @@ class PIController:
         # CUSUM anomaly detection — requires valid feature vector (x).
         if x is not None and not obs_clamped:
             cusum_residual = (float(self._hp_setpoint) - desired_c) - rls.predict(x)
-            self._update_cusum(cusum_residual, now_mono, is_heating)
+            self._update_cusum(cusum_residual, now_mono, is_heating, is_cooling)
 
         # Midpoint-crossing hysteresis
         new_setpoint = self._hp_setpoint

@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import math
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
+from enum import StrEnum
 from typing import Any
 
 
@@ -57,6 +58,42 @@ class AnomalyEvent:
     mean_residual: float      # signed, physical units (°C)
     peak_cusum: float         # max(S⁺, S⁻) — severity measure
     mode: str                 # "heat" or "cool" at detection time
+
+
+class LatchArmingTrigger(StrEnum):
+    """Why the over-temp regime latch armed on a given tick.
+
+    Generic discriminator across all arming sources for
+    `_uncontrollable_entry_latch`. Each new trigger gets a stable string
+    value here; the event payload's `details` dict carries trigger-specific
+    extras (e.g. CUSUM_ANOMALY records residual + peak_cusum).
+
+    Currently only CUSUM_ANOMALY emits LatchArmedEvent. Backfilling the
+    other three is tracked in future_work #136 — they don't emit today
+    because their edge-detection semantics differ (continuous vs event vs
+    threshold-crossing) and each needs its own emit-site review.
+    """
+
+    HP_ESTIMATED_IDLE = "hp_estimated_idle"     # cal_midpoint inferred HP idle
+    MODE_FLIP_OVERTEMP = "mode_flip_overtemp"   # user flipped to HEAT in hot room
+    SUSTAINED_OVERTEMP = "sustained_overtemp"   # error > 1.5°C for 30+ min
+    CUSUM_ANOMALY = "cusum_anomaly"             # sign-matched CUSUM + overtemp gate
+
+
+@dataclass(frozen=True, slots=True)
+class LatchArmedEvent:
+    """A latch-arming event with attribution to a specific trigger.
+
+    Recorded post-hoc for bench analysis and any future Repairs check
+    that wants to know "which trigger fired N times this week."
+    """
+
+    time: datetime
+    mono: float
+    trigger: LatchArmingTrigger
+    mode: str                       # "heat" | "cool"
+    overtemp_error: float           # at arming time, against user_desired
+    details: dict[str, Any] = field(default_factory=dict)
 
 
 def compute_mad_sigma(residuals: deque[float] | list[float]) -> float:

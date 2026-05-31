@@ -209,6 +209,7 @@ CONF_PI_FF_ENABLED = "pi_ff_enabled"
 CONF_PI_BATCH_WLS_ENABLED = "pi_batch_wls_enabled"
 CONF_PI_PLANT_ID_ENABLED = "pi_plant_id_enabled"
 CONF_PI_MODEL_INPUTS = "pi_model_inputs"
+CONF_CUSUM_OVERTEMP_ARMING_ENABLED = "pi_cusum_overtemp_arming_enabled"
 
 # Subentry types
 SUBENTRY_MODEL_INPUT = "model_input"
@@ -348,6 +349,7 @@ DEFAULT_PI_INTERCEPT_SEED_COOL = 0.0
 DEFAULT_PI_FF_ENABLED = True
 DEFAULT_PI_BATCH_WLS_ENABLED = True
 DEFAULT_PI_PLANT_ID_ENABLED = True
+DEFAULT_CUSUM_OVERTEMP_ARMING_ENABLED = False  # #135: passive arming has three failure modes (chatter, σ̂-collapse, observation starvation). Off until active-probe redesign per future_work #138.
 
 # PI controller extra state attributes
 ATTR_HP_SETPOINT = "hp_setpoint"

@@ -331,6 +331,14 @@ class FullStackResult:
     daily_rapid_sp_changes: list[int]  # SP reversals within 30 min of each other
     total_rapid_sp_changes: int
 
+    # ── Over-temp latch arming events (#135) ─────────────────────────
+    # Attribution log for any trigger that armed the over-temp regime
+    # latch during the run.  Today only CUSUM_ANOMALY emits here; future
+    # backfill (future_work #136) would also surface HP_ESTIMATED_IDLE,
+    # MODE_FLIP_OVERTEMP, SUSTAINED_OVERTEMP.  Bench tests filter by
+    # `e.trigger == LatchArmingTrigger.CUSUM_ANOMALY` etc.
+    latch_armed_events: tuple = ()
+
 
 # ── Default weather schedules ────────────────────────────────────────────
 
@@ -1207,6 +1215,10 @@ def run_full_stack(
         boundary_stall_count=pi._boundary_estimator.stall_count,
         boundary_last_n_obs=(pi._boundary_estimator.last_result.n_observations
                              if pi._boundary_estimator.last_result else 0),
+        # Over-temp latch arming attribution (#135).  Snapshot as tuple
+        # so the result is immutable and the list reference doesn't tie
+        # the result to a live controller (pi GCs normally after return).
+        latch_armed_events=tuple(pi._latch_armed_events),
     )
 
 
