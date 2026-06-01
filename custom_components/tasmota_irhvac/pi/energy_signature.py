@@ -102,6 +102,15 @@ class EnergySignatureResult:
     intercept: float = float("nan")
     se_solar: float = float("nan")
     se_outdoor: float = float("nan")
+    # Standard errors on the storage and intercept coefficients.  Both are
+    # computed from the regression covariance matrix in the same call that
+    # produces se_solar / se_outdoor.  Exposed so downstream consumers can
+    # gate use of the derived τ = −b_storage·dt/β_outdoor on confidence:
+    # b_storage is only well-identified when window-to-window ΔT carries
+    # meaningful variance.  Non-zero intercept indicates regression bias
+    # (closed-cycle physics predicts intercept ≈ 0).
+    se_b_storage: float = float("nan")
+    se_intercept: float = float("nan")
     n_windows: int = 0          # fully-controlled windows used
     n_windows_total: int = 0    # full-coverage windows seen (controlled or not)
     window_days: int = 0
@@ -117,8 +126,11 @@ class EnergySignatureResult:
             "beta_solar": self.beta_solar,
             "beta_outdoor": self.beta_outdoor,
             "b_storage": self.b_storage,
+            "intercept": self.intercept,
             "se_solar": self.se_solar,
             "se_outdoor": self.se_outdoor,
+            "se_b_storage": self.se_b_storage,
+            "se_intercept": self.se_intercept,
             "n_windows": self.n_windows,
             "n_windows_total": self.n_windows_total,
             "window_days": self.window_days,
@@ -257,6 +269,8 @@ def estimate_energy_signature(
         intercept=float(coef[_C_INTERCEPT]),
         se_solar=float(se[_C_SOLAR]),
         se_outdoor=float(se[_C_OUTDOOR]),
+        se_b_storage=float(se[_C_STORAGE]),
+        se_intercept=float(se[_C_INTERCEPT]),
         n_windows=n_used,
         n_windows_total=n_total,
         window_days=window_days,

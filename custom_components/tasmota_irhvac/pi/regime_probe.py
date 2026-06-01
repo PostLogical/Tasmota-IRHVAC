@@ -149,6 +149,17 @@ class RegimeProbe:
         self._last_probe_delta: float | None = None
         self._last_probe_hp_contributing: bool | None = None
 
+        # Per-completed-probe diagnostics (additive; doesn't affect existing
+        # probe logic).  Exposed for downstream Phase 2 Option-B classifier
+        # (build empirical baseline of rate_change vs outdoor from probe
+        # history; compare new probe to baseline for additive-disturbance
+        # detection).  Outdoor temp at probe-time isn't tracked here — the
+        # tick() API doesn't carry it — so callers correlate by mono time.
+        self._last_baseline_avg: float | None = None
+        self._last_probe_avg: float | None = None
+        self._last_rate_change: float | None = None
+        self._last_probe_completion_mono: float | None = None
+
     # ── Properties ───────────────────────────────────────────────────
 
     @property
@@ -353,6 +364,12 @@ class RegimeProbe:
         self._probes_completed += 1
         self._last_probe_delta = current_to_setpoint_delta
         self._last_probe_hp_contributing = hp_was_contributing
+        # Phase 2 Option-B diagnostics: capture rate_change components so
+        # downstream consumers can build empirical baseline vs outdoor.
+        self._last_baseline_avg = baseline_avg
+        self._last_probe_avg = probe_avg
+        self._last_rate_change = rate_change
+        self._last_probe_completion_mono = now_mono
 
         if not hp_was_contributing:
             # HP was NOT contributing → transition is below this point
