@@ -17,6 +17,19 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
+# Self-starting CUSUM needs t→Normal transform. Use scipy.special (not
+# scipy.stats) — same math, much smaller import surface, and avoids
+# scipy.stats's eager doc generation in _new_distributions which can
+# conflict with coverage's numpy reload (scipy 1.16+ behavior).
+#   stdtr(df, x): Student-t CDF at x with df degrees of freedom
+#   ndtri(p):    inverse standard-normal CDF (= norm.ppf)
+try:
+    from scipy.special import ndtri as _ndtri
+    from scipy.special import stdtr as _stdtr
+    _SCIPY_AVAILABLE = True
+except ImportError:  # pragma: no cover — scipy is a hard dependency in this codebase
+    _SCIPY_AVAILABLE = False
+
 
 # ── CUSUM anomaly detection constants ────────────────────────────────
 # Basseville & Nikiforov (1993), Detection of Abrupt Changes
@@ -58,6 +71,261 @@ class AnomalyEvent:
     mean_residual: float      # signed, physical units (°C)
     peak_cusum: float         # max(S⁺, S⁻) — severity measure
     mode: str                 # "heat" or "cool" at detection time
+
+    @property
+    def sign_matches_mode(self) -> bool:
+        """True when residual sign indicates additive-in-mode disturbance.
+
+        Heating: residual<0 (room warmer than predicted → additive heat).
+        Cooling: residual>0 (room cooler than predicted → additive cooling).
+        Used by the over-temp latch trigger (with overtemp gate).
+        """
+        return (
+            (self.mode == "heat" and self.mean_residual < 0)
+            or (self.mode == "cool" and self.mean_residual > 0)
+        )
+
+    @property
+    def sign_inverse_mode(self) -> bool:
+        """True when residual sign indicates additive-against-mode disturbance.
+
+        Heating: residual>0 (room cooler than predicted → additive heat-loss).
+        Cooling: residual<0 (room warmer than predicted → additive heat).
+        Used by HA Repairs notification (open-window / unmodelled-input in
+        opposite direction from the current mode's expected disturbance).
+        """
+        return (
+            (self.mode == "heat" and self.mean_residual > 0)
+            or (self.mode == "cool" and self.mean_residual < 0)
+        )
+
+
+def event_in_overtemp(
+    event: AnomalyEvent, current_c: float, desired_c: float,
+) -> bool:
+    """Whether the controller was in overtemp/undertemp at event time.
+
+    "Overtemp" semantics flip with mode:
+      Heating mode: current > desired (room warmer than target)
+      Cooling mode: current < desired (room cooler than target)
+    """
+    if event.mode == "heat":
+        return current_c > desired_c
+    return current_c < desired_c  # cool
+
+
+def latch_qualifies(
+    event: AnomalyEvent, current_c: float, desired_c: float,
+) -> bool:
+    """Production over-temp latch arming trigger: sign-match AND overtemp.
+
+    Conservative — only fires on additive-heat-during-heating or
+    additive-cool-during-cooling. Mirrors the production two-filter at
+    pi_controller.py:5826 (when `_cusum_overtemp_arming_enabled` is True).
+    """
+    return event.sign_matches_mode and event_in_overtemp(event, current_c, desired_c)
+
+
+def repair_qualifies(
+    event: AnomalyEvent, current_c: float, desired_c: float,
+) -> bool:
+    """HA Repairs notification trigger: any unmodelled-input direction.
+
+    Catches both additive-in-mode (sign_matches + overtemp) AND
+    additive-against-mode (sign_inverse + undertemp). User should be
+    notified of unmodelled inputs in either direction — open window in
+    winter (sign_inverse + undertemp in heat mode) is just as valuable
+    to surface as cooking heat (sign_matches + overtemp in heat mode).
+
+    Latch arming uses only the sign_matches branch (safety-critical
+    overtemp). Repairs surfaces both for user awareness.
+    """
+    if event.sign_matches_mode and event_in_overtemp(event, current_c, desired_c):
+        return True
+    # Sign_inverse + undertemp/overtemp-mirror (depends on mode)
+    if event.mode == "heat":
+        return event.sign_inverse_mode and current_c < desired_c  # heat-loss case
+    return event.sign_inverse_mode and current_c > desired_c  # cooling-additive-heat
+
+
+# ── Self-starting Hawkins-Olwell CUSUM (replaces MAD path) ───────────
+#
+# The legacy MAD-based path (compute_mad_sigma + MIN_SIGMA_FLOOR) is
+# hyper-sensitive in quiet residual regimes: when MAD collapses below
+# the floor, σ̂ stops tracking the data and z-scores explode. Per the
+# #135 audit, 44% of historical CUSUM events fired at the σ̂ floor.
+# Two-filter (sign_matches_mode + overtemp) masks the actionable harm
+# but the underlying alarm spam remains.
+#
+# Hawkins-Olwell 1998 self-starting CUSUM:
+#   1. Maintain Welford running stats on a rolling window (12h here)
+#   2. Standardize new obs against PRE-update mean/σ̂:
+#      T = (x - mean_n) / sigma_n  (Student-t distributed under H0)
+#   3. Transform to Normal via scaled t-CDF then Φ⁻¹:
+#      U = Φ⁻¹(F_{n-1}(sqrt(n/(n+1)) · T))   ~ N(0,1) under H0
+#   4. CUSUM with K=0.5, H=4 (Hawkins canonical, ARL₀ ≈ 370)
+#   5. Suppress alarms during warmup (n < 20) — transform unstable
+#
+# References:
+# - Hawkins (1987) "Self-starting CUSUM charts for location and scale"
+# - Hawkins & Olwell (1998) "CUMULATIVE SUM CHARTS AND CHARTING FOR
+#   QUALITY IMPROVEMENT" §7.2
+# - arxiv:2509.07112 — rolling window for locally-stationary data
+
+CUSUM_K_HAWKINS: float = 0.5
+"""Reference value: half-sigma dead zone (Hawkins-Olwell canonical)."""
+
+CUSUM_H_HAWKINS: float = 4.0
+"""Threshold (multiples of σ̂): ARL₀ ≈ 370 (Hawkins-Olwell canonical)."""
+
+CUSUM_WARMUP_N: int = 20
+"""Min observations before alarms fire (transform unstable below this)."""
+
+# Rolling window for σ̂ estimation. Same 12h as the legacy MAD path so
+# the design rationale documented at CUSUM_RESIDUAL_WINDOW_S applies
+# (diurnal-cycle capture, Jensen-Jones-Farmer 2006 minimum, etc.).
+CUSUM_WINDOW_S: float = 12 * 3600.0
+
+
+@dataclass
+class SelfStartingCusumState:
+    """Hawkins-Olwell self-starting CUSUM state.
+
+    Replaces the MAD+floor σ̂ path. Welford running stats on a 12h
+    rolling window estimate mean and σ̂; the t→Normal transform makes
+    the standardized statistic exactly N(0,1) under H0 regardless of
+    σ̂'s sampling-error noise.
+
+    Persistence: `as_dict`/`from_dict` serialize alongside other PI
+    state so the chart doesn't have to re-warm-up after HA restart.
+
+    Window observations stored as ``(timestamp_mono, residual)`` pairs;
+    eviction is age-based at ``CUSUM_WINDOW_S``.
+    """
+
+    # CUSUM accumulators (persisted across ticks)
+    s_pos: float = 0.0
+    s_neg: float = 0.0
+    # Rolling window of (timestamp_mono, residual) — basis for Welford
+    # mean/variance computation each update. Deque so age-based eviction
+    # is O(1) at the front.
+    window: deque[tuple[float, float]] = field(default_factory=deque)
+
+    @property
+    def n(self) -> int:
+        """Current window size (= n in the Hawkins-Olwell formulas)."""
+        return len(self.window)
+
+    def as_dict(self) -> dict[str, Any]:
+        """Serialize for persistence."""
+        return {
+            "s_pos": self.s_pos,
+            "s_neg": self.s_neg,
+            "window": [(float(t), float(r)) for t, r in self.window],
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "SelfStartingCusumState":
+        """Restore from persisted state."""
+        state = cls(
+            s_pos=float(d.get("s_pos", 0.0)),
+            s_neg=float(d.get("s_neg", 0.0)),
+        )
+        for t, r in d.get("window", []):
+            state.window.append((float(t), float(r)))
+        return state
+
+    def reset_accumulators(self) -> None:
+        """Reset S⁺/S⁻ to 0 (after an alarm fires; Lucas-Crosier 1982).
+
+        Window is preserved — σ̂ continues to track residual distribution
+        across the alarm event.
+        """
+        self.s_pos = 0.0
+        self.s_neg = 0.0
+
+
+def update_self_starting_cusum(
+    state: SelfStartingCusumState,
+    residual: float,
+    now_mono: float,
+    k: float = CUSUM_K_HAWKINS,
+    h: float = CUSUM_H_HAWKINS,
+    warmup_n: int = CUSUM_WARMUP_N,
+    window_s: float = CUSUM_WINDOW_S,
+) -> tuple[bool, float, float]:
+    """Update self-starting CUSUM with one residual.
+
+    Steps (Hawkins-Olwell 1998 §7.2):
+      1. Evict window observations older than ``window_s`` seconds
+      2. Compute Welford mean and σ̂ on PRE-update window
+      3. Standardize: T = (residual - mean) / σ̂
+      4. Scale: T_scaled = sqrt(n/(n+1)) · T  (~ Student-t with n-1 dof)
+      5. Transform: U = Φ⁻¹(F_{n-1}(T_scaled))  ~ N(0,1) under H0
+      6. CUSUM update with U
+      7. Append (now_mono, residual) to window for next call
+      8. Alarm if max(S⁺, S⁻) > h AND n ≥ warmup_n
+
+    Returns:
+        (alarmed, U, sigma_hat) where U is the standardized statistic
+        (for diagnostics/logging) and sigma_hat is the pre-update σ̂
+        (NaN if n < 2).
+
+    Side effects:
+        Mutates ``state``. Caller is responsible for calling
+        ``state.reset_accumulators()`` after consuming an alarm.
+    """
+    # 1. Evict old observations from window
+    cutoff = now_mono - window_s
+    while state.window and state.window[0][0] < cutoff:
+        state.window.popleft()
+
+    n_pre = len(state.window)
+
+    # 2-3. Insufficient history → just append and return
+    if n_pre < 2:
+        state.window.append((now_mono, residual))
+        return False, 0.0, float("nan")
+
+    # Welford-style mean + variance from window (one pass; n ≤ ~240 at 3min
+    # cadence so O(n) per tick is sub-microsecond)
+    residuals = [r for _, r in state.window]
+    mean_pre = sum(residuals) / n_pre
+    var_pre = sum((r - mean_pre) ** 2 for r in residuals) / (n_pre - 1)
+    sigma_pre = math.sqrt(var_pre) if var_pre > 0 else 0.0
+
+    if sigma_pre <= 0:
+        # All residuals identical → can't standardize. Just append.
+        state.window.append((now_mono, residual))
+        return False, 0.0, sigma_pre
+
+    # 4. Standardize
+    T = (residual - mean_pre) / sigma_pre
+    T_scaled = math.sqrt(n_pre / (n_pre + 1)) * T
+
+    # 5. Transform Student-t → Normal via scipy.special (lightweight)
+    if _SCIPY_AVAILABLE:
+        cdf = float(_stdtr(n_pre - 1, T_scaled))
+        # Clip to avoid ndtri(0)=-∞ or ndtri(1)=+∞ from extreme T_scaled
+        cdf = max(min(cdf, 1.0 - 1e-12), 1e-12)
+        U = float(_ndtri(cdf))
+    else:  # pragma: no cover — scipy is required in this codebase
+        # Fallback: treat scaled T as Gaussian. Reasonable for n > 30.
+        U = T_scaled
+
+    # 6. CUSUM update
+    state.s_pos = max(0.0, state.s_pos + U - k)
+    state.s_neg = max(0.0, state.s_neg - U - k)
+
+    # 7. Append to window for next call
+    state.window.append((now_mono, residual))
+
+    # 8. Alarm gating: threshold AND warmup
+    alarmed = (
+        (state.s_pos > h or state.s_neg > h)
+        and len(state.window) >= warmup_n
+    )
+    return alarmed, U, sigma_pre
 
 
 class LatchArmingTrigger(StrEnum):
