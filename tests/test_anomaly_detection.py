@@ -141,16 +141,13 @@ def _make_cusum_controller():
 
     # Use object.__new__ to skip __init__
     ctrl = object.__new__(PIController)
-    # Time-based eviction window (CUSUM_RESIDUAL_WINDOW_S=12h) lives on
-    # the production-config side; the deque itself is now unbounded with
-    # entries shaped (mono_time, residual).
-    ctrl._residual_history = deque()
+    # Self-starting Hawkins-Olwell CUSUM state (12h rolling window for σ̂).
+    # See health_checks.SelfStartingCusumState for shape.
+    ctrl._cusum_state = SelfStartingCusumState()
     # Need monotonic + utcnow for time-based eviction + cooldown logic
     ctrl._monotonic = lambda: 0.0
     from custom_components.tasmota_irhvac.pi.pi_controller import dt_util
     ctrl._utcnow_fn = dt_util.utcnow
-    ctrl._cusum_pos = 0.0
-    ctrl._cusum_neg = 0.0
     ctrl._anomaly_events = []
     ctrl._exclusion_count = 0
     ctrl._cusum_cooldown_until = None
@@ -170,15 +167,17 @@ def _make_cusum_controller():
 def _feed_residuals(ctrl, residuals, sigma=0.15, start_mono=1000.0, tick_spacing=60.0):
     """Feed a sequence of residuals and return the controller.
 
-    Pre-fills residual history with normal data so MAD is calibrated,
-    then feeds the provided sequence with synthetic wall-clock time.
+    Pre-fills CUSUM rolling window with normal data so σ̂ is calibrated
+    above the warmup threshold, then feeds the provided sequence with
+    synthetic wall-clock time.
     """
     random.seed(123)
     # Pre-fill with normal residuals (time-stamped just before start_mono so
-    # they're still inside the 12h eviction window when feed begins)
+    # they're still inside the 12h eviction window when feed begins).
+    # Need ≥ CUSUM_WARMUP_N obs so alarms can fire after the prefill ends.
     prefill_mono = start_mono - tick_spacing
-    for _ in range(MIN_RESIDUALS_FOR_DETECTION):
-        ctrl._residual_history.append((prefill_mono, random.gauss(0, sigma)))
+    for _ in range(CUSUM_WARMUP_N + 5):
+        ctrl._cusum_state.window.append((prefill_mono, random.gauss(0, sigma)))
         prefill_mono -= tick_spacing
 
     mono = start_mono
@@ -203,7 +202,7 @@ class TestCusumDetectionShortTerm:
         assert len(ctrl._anomaly_events) >= 1
         event = ctrl._anomaly_events[0]
         assert event.mean_residual < 0
-        assert event.peak_cusum > CUSUM_H
+        assert event.peak_cusum > CUSUM_H_HAWKINS
 
     def test_window_open_spring(self):
         """Moderate negative step (-3σ) detected."""
@@ -257,7 +256,7 @@ class TestCusumDetectionLongTerm:
 
         assert len(ctrl._anomaly_events) >= 1
         event = ctrl._anomaly_events[0]
-        assert event.peak_cusum > CUSUM_H
+        assert event.peak_cusum > CUSUM_H_HAWKINS
 
     def test_gradual_drift_hidden_in_noise(self):
         """Small drift buried in noise should NOT trigger alarm."""
@@ -295,16 +294,25 @@ class TestCusumDetectionLongTerm:
 class TestCusumFalsePositiveResistance:
     """False positive resistance scenarios."""
 
-    def test_normal_operation_no_alarm(self):
-        """1000 ticks of N(0,σ) should not trigger alarm."""
+    def test_normal_operation_low_alarm_rate(self):
+        """1000 ticks of N(0,σ) should produce ARL₀-bounded alarm rate.
+
+        Hawkins canonical K=0.5/H=4 has ARL₀≈370 ticks vs Page K=1/H=10
+        which had ARL₀≈50,000. With Hawkins, expect 1000/370 ≈ 2.7 alarms
+        on average; bound at 12 for statistical fluctuation. This is by
+        design — Hawkins trades higher false-positive rate for faster
+        true-positive detection on small shifts.
+        """
         ctrl = _make_cusum_controller()
         sigma = 0.15
         random.seed(99)
         residuals = [random.gauss(0, sigma) for _ in range(1000)]
         _feed_residuals(ctrl, residuals, sigma=sigma)
 
-        # ARL₀ ≈ 50,000 — 1000 ticks is well below
-        assert len(ctrl._anomaly_events) == 0
+        n_alarms = len(ctrl._anomaly_events)
+        assert n_alarms < 12, (
+            f"expected ARL₀-bounded alarm count, got {n_alarms} in 1000 ticks"
+        )
 
     def test_setpoint_change_moderate_no_alarm(self):
         """Moderate transient (+2σ for 2 ticks) doesn't trigger with good MAD."""
@@ -313,9 +321,9 @@ class TestCusumFalsePositiveResistance:
         random.seed(88)
         # Pre-fill with 60 clean samples for well-calibrated MAD
         # Time-stamped entries: (mono_time, residual)
-        ctrl._residual_history.clear()
+        ctrl._cusum_state.window.clear()
         for _ in range(60):
-            ctrl._residual_history.append((0.0, random.gauss(0, sigma)))
+            ctrl._cusum_state.window.append((0.0, random.gauss(0, sigma)))
 
         # +2σ for 2 ticks: z ≈ 2, accumulates (2-1)*2=2, well below h=10
         base = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -328,13 +336,19 @@ class TestCusumFalsePositiveResistance:
         assert len(ctrl._anomaly_events) == 0
 
     def test_noisy_sensor(self):
-        """Elevated noise (1.5× normal) absorbed by MAD."""
+        """Elevated noise (1.5× normal) absorbed by self-starting σ̂.
+
+        With Hawkins canonical the noise is properly scaled by Welford
+        σ̂ so the standardized statistic stays N(0,1). Allow a few
+        alarms (ARL₀ ≈ 370 → ≈ 1.4 expected in 500 ticks; bound at 8
+        for statistical fluctuation).
+        """
         ctrl = _make_cusum_controller()
         sigma = 0.15
         random.seed(77)
-        # Pre-fill with elevated noise so MAD adapts
-        for _ in range(MIN_RESIDUALS_FOR_DETECTION):
-            ctrl._residual_history.append((0.0, random.gauss(0, sigma * 1.5)))
+        # Pre-fill with elevated noise so σ̂ adapts
+        for _ in range(CUSUM_WARMUP_N + 5):
+            ctrl._cusum_state.window.append((0.0, random.gauss(0, sigma * 1.5)))
         # Continue with elevated noise
         mono = 1000.0
         base = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -343,7 +357,7 @@ class TestCusumFalsePositiveResistance:
             ctrl._update_cusum(r, mono, is_heating=True, _now=base + timedelta(seconds=i*60))
             mono += 60.0
 
-        assert len(ctrl._anomaly_events) == 0
+        assert len(ctrl._anomaly_events) < 8
 
 
 class TestCusumClampedAndCooldown:
@@ -359,8 +373,8 @@ class TestCusumClampedAndCooldown:
         ctrl._cusum_cooldown_until = base + timedelta(minutes=30)
 
         # Pre-fill history (time-stamped tuples)
-        for _ in range(MIN_RESIDUALS_FOR_DETECTION):
-            ctrl._residual_history.append((0.0, random.gauss(0, sigma)))
+        for _ in range(CUSUM_WARMUP_N + 5):
+            ctrl._cusum_state.window.append((0.0, random.gauss(0, sigma)))
 
         # Feed large anomaly during cooldown (all within 20 minutes of base)
         mono = 1000.0
@@ -371,8 +385,10 @@ class TestCusumClampedAndCooldown:
 
         # Should NOT have detected — cooldown suppressed
         assert len(ctrl._anomaly_events) == 0
-        # But residuals should still accumulate in history
-        assert len(ctrl._residual_history) > MIN_RESIDUALS_FOR_DETECTION
+        # Cooldown also skips window updates (so disturbance residuals
+        # don't shift σ̂'s running mean — see comment in _update_cusum).
+        # Window size stays at the prefill count (CUSUM_WARMUP_N + 5).
+        assert len(ctrl._cusum_state.window) == CUSUM_WARMUP_N + 5
 
     def test_cooldown_expires(self):
         """After cooldown expires, detection resumes."""
@@ -401,7 +417,7 @@ class TestCusumDetectionLatency:
         # Pre-fill with 60 clean samples for well-calibrated MAD (mono=0 keeps
         # them inside the 12h window relative to the test's 1000+ mono base)
         for _ in range(60):
-            ctrl._residual_history.append((0.0, random.gauss(0, sigma)))
+            ctrl._cusum_state.window.append((0.0, random.gauss(0, sigma)))
 
         mono = 1000.0
         base = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -434,14 +450,20 @@ class TestCusumDetectionLatency:
         assert ticks <= 15
 
     def test_half_sigma_below_deadzone(self):
-        """0.5σ shift buried in noise should not trigger in 200 ticks."""
-        # z ≈ 0.5 < k=1.0 → expected CUSUM increment ≈ -0.5 per tick
-        # (decays, never accumulates)
+        """0.5σ shift right at K_HAWKINS=0.5 dead zone — slow accumulation,
+        bounded alarm count over 200 ticks.
+
+        With Hawkins K=0.5, a 0.5σ shift is RIGHT AT the dead zone.
+        Page CUSUM K=1.0 would fully absorb (z=0.5 < k=1.0 → -0.5/tick).
+        Hawkins (k=0.5) absorbs to net ~0 per tick on average; alarms
+        from random-noise variance occasionally cross h=4. Expect a
+        few alarms over 200 ticks rather than zero.
+        """
         ctrl = _make_cusum_controller()
         sigma = 0.15
         random.seed(42)
-        for _ in range(60):
-            ctrl._residual_history.append((0.0, random.gauss(0, sigma)))
+        for _ in range(CUSUM_WARMUP_N + 5):
+            ctrl._cusum_state.window.append((0.0, random.gauss(0, sigma)))
 
         mono = 1000.0
         base = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -451,7 +473,12 @@ class TestCusumDetectionLatency:
             ctrl._update_cusum(r, mono, is_heating=True, _now=now)
             mono += 60.0
 
-        assert len(ctrl._anomaly_events) == 0
+        # Hawkins K=0.5 means a sustained 0.5σ shift WILL eventually
+        # accumulate (it's right at the dead zone). Bound the count
+        # rather than asserting zero — ARL₁ at K=0.5/H=4 for δ=0.5σ
+        # is ~50-80 ticks per Hawkins tables, so over 200 ticks
+        # expect 2-4 alarms.
+        assert len(ctrl._anomaly_events) <= 6
 
 
 # ── Buffer exclusion ─────────────────────────────────────────────────
@@ -964,40 +991,40 @@ class TestCusumPersistence:
         pi = get_climate_entity(hass, entry)._pi
 
         # Set non-default CUSUM state.
-        pi._cusum_pos = 7.5
-        pi._cusum_neg = 0.3
+        pi._cusum_state.s_pos = 7.5
+        pi._cusum_state.s_neg = 0.3
         cooldown = datetime(2026, 5, 9, 12, 0, 0, tzinfo=timezone.utc)
         pi._cusum_cooldown_until = cooldown
-        # Pre-fill some residual history. Time-stamped tuples now:
+        # Pre-fill some window residuals. Time-stamped tuples now:
         # (mono_time, residual). Persist drops timestamps and reattaches
-        # current mono on restore (the deque shape is now (mono, residual)).
-        pi._residual_history.clear()
+        # current mono on restore.
+        pi._cusum_state.window.clear()
         residuals = [0.05, -0.03, 0.10, -0.08, 0.02]
-        pi._residual_history.extend((100.0, r) for r in residuals)
+        pi._cusum_state.window.extend((100.0, r) for r in residuals)
 
         # Round-trip through PIExtraStoredData.
         saved = pi.get_extra_stored_data()
         assert isinstance(saved, PIExtraStoredData)
-        assert saved.cusum_pos == pytest.approx(7.5)
-        assert saved.cusum_neg == pytest.approx(0.3)
+        assert saved.cusum_s_pos == pytest.approx(7.5)
+        assert saved.cusum_s_neg == pytest.approx(0.3)
         assert saved.cusum_cooldown_until_epoch == pytest.approx(
             cooldown.timestamp(),
         )
         # Persist serializes residuals only (no timestamps).
-        assert saved.cusum_residual_history == residuals
+        assert saved.cusum_window_residuals == residuals
 
         # Wipe live state, then restore.
-        pi._cusum_pos = 0.0
-        pi._cusum_neg = 0.0
+        pi._cusum_state.s_pos = 0.0
+        pi._cusum_state.s_neg = 0.0
         pi._cusum_cooldown_until = None
-        pi._residual_history.clear()
+        pi._cusum_state.window.clear()
         pi.restore_extra_stored_data(saved)
-        assert pi._cusum_pos == pytest.approx(7.5)
-        assert pi._cusum_neg == pytest.approx(0.3)
+        assert pi._cusum_state.s_pos == pytest.approx(7.5)
+        assert pi._cusum_state.s_neg == pytest.approx(0.3)
         assert pi._cusum_cooldown_until == cooldown
         # Restored entries: residuals preserved, all timestamped to now (so
         # they evict over the next 12h window — warm σ̂ post-restart).
-        assert [r for _, r in pi._residual_history] == residuals
+        assert [r for _, r in pi._cusum_state.window] == residuals
 
     @pytest.mark.asyncio
     async def test_no_cooldown_round_trips_as_none(
@@ -1037,23 +1064,23 @@ class TestCusumPersistence:
         pi = get_climate_entity(hass, entry)._pi
 
         sigma = 0.15
-        # Pre-fill history so MAD is calibrated post-restore (time-stamped tuples).
+        # Pre-fill window so σ̂ is warm post-restore (time-stamped tuples).
         history = [random.gauss(0, sigma) for _ in range(60)]
-        pi._residual_history.clear()
-        pi._residual_history.extend((100.0, r) for r in history)
+        pi._cusum_state.window.clear()
+        pi._cusum_state.window.extend((100.0, r) for r in history)
 
         # Simulate prior alarm: cooldown active 30 min from "now".
         base = datetime(2026, 5, 9, 12, 0, 0, tzinfo=timezone.utc)
         pi._cusum_cooldown_until = base + timedelta(minutes=30)
-        pi._cusum_pos = 0.0
-        pi._cusum_neg = 0.0
+        pi._cusum_state.s_pos = 0.0
+        pi._cusum_state.s_neg = 0.0
         pi._anomaly_events.clear()
 
         # Save → restore (simulates an HA restart within the cooldown).
         saved = pi.get_extra_stored_data()
         pi._cusum_cooldown_until = None  # would-be-erased on naive restart
-        pi._cusum_pos = 0.0
-        pi._cusum_neg = 0.0
+        pi._cusum_state.s_pos = 0.0
+        pi._cusum_state.s_neg = 0.0
         pi.restore_extra_stored_data(saved)
 
         # Feed a 5σ excursion at "now = base + 5 min" — within cooldown.

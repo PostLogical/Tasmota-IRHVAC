@@ -46,7 +46,21 @@ from tests.hvac_bench.disturbances import party
 # Audit empirical: 1 arm / 7d at perfect FF with two-filter design.
 # Budget = 5x headroom = 5 arms / 7d total. Sign-only design alone would
 # blow this (15/7d); unfiltered design even more (36/7d).
-CUSUM_PERFECT_FF_BUDGET = 5
+# Empirical chronic-FP rate at Hawkins canonical K=0.5/H=4. Bench
+# baseline 33/7d after the two-filter (#135 Phase 1 wire-up). Budget
+# 50 = ~1.5x empirical headroom — guards against regression where the
+# two-filter is dropped entirely (raw-CUSUM rate would be much higher,
+# 100+/7d).
+#
+# Under the previous Page CUSUM (K=1.0/H=10, ARL₀ ≈ 50,000) the empirical
+# was 1/7d and budget was 5. Hawkins is by design more sensitive — trade
+# higher FP rate for faster TP detection on small shifts (the #135 σ̂-
+# collapse and detection-latency problems both went away with Hawkins).
+# The actionable consequence — chronic latch-arming — is gated by
+# pi_cusum_overtemp_arming_enabled, which remains default-False until
+# Phase 2 lands the additive/multiplicative discriminator that turns
+# the higher-FP-rate detector into a safe action signal.
+CUSUM_PERFECT_FF_BUDGET = 50
 
 # Disturbance: party (10 people, 3h sustained, +2°C peak).  We use party
 # rather than cooking because production CUSUM has a 30-min cooldown
@@ -126,33 +140,43 @@ class TestCusumArmingDisturbance:
         config = _make_perfect_ff_config(n_days=PARTY_TEST_N_DAYS, with_party=True)
         result = run_full_stack(config)
 
-        events = _cusum_arms(result)
-        assert len(events) >= 1, (
-            "CUSUM trigger should arm at least once during party "
-            "disturbance (large sustained heat injection)"
-        )
-
-        # Attribution: every event needs context for later analysis.
+        all_events = _cusum_arms(result)
+        # Separate party-window arms from chronic-FP arms elsewhere in
+        # the run. Under Hawkins (#135 Phase 1) the chronic-FP rate is
+        # higher than under Page (validated in TestCusumArmingChronicFPBudget),
+        # so the run will contain BOTH disturbance-driven and noise-driven
+        # arms. This test specifically asserts the disturbance triggers
+        # at least one arm; chronic-FP rate is tested separately.
         party_start_s = PARTY_START_MIN * 60.0
         party_end_s = (PARTY_START_MIN + 180) * 60.0  # 3h duration
         recovery_tail_s = 4 * 3600.0  # 4h recovery tolerance
-        for ev in events:
+        window_lo = party_start_s - 60.0
+        window_hi = party_end_s + recovery_tail_s
+        party_events = [e for e in all_events if window_lo <= e.mono <= window_hi]
+        assert len(party_events) >= 1, (
+            f"CUSUM trigger should arm at least once during party "
+            f"disturbance (large sustained heat injection). "
+            f"Got {len(party_events)} arms in party window; "
+            f"{len(all_events)} total arms across the run."
+        )
+
+        # Attribution: every party-window event needs context.
+        for ev in party_events:
             assert ev.mode == "heat", f"wrong mode: {ev.mode}"
-            assert ev.details.get("residual", 0.0) < 0, (
-                f"heat-mode arming must have negative residual; "
-                f"got {ev.details.get('residual')}"
-            )
+            # Note: under Hawkins-Olwell self-starting CUSUM,
+            # sign_matches_mode flags shifts RELATIVE to the running window
+            # mean — not absolute residual sign. During a sustained
+            # disturbance the window adapts to the new level and recovery
+            # residuals (with absolute positive sign) can fire sign-matched
+            # "downward shift" alarms. The safety-critical filter is the
+            # overtemp_error > 0 gate below (absolute room temp), which is
+            # still satisfied throughout disturbance recovery.
             assert ev.overtemp_error > 0, (
                 f"overtemp gate failed: ev recorded with overtemp_error="
                 f"{ev.overtemp_error}; gate is supposed to reject ≤ 0"
             )
             assert ev.details.get("peak_cusum", 0.0) > 0, (
                 "peak_cusum should be populated in details"
-            )
-            # All arms must fall within disturbance + recovery window.
-            assert party_start_s - 60.0 <= ev.mono <= party_end_s + recovery_tail_s, (
-                f"CUSUM arm fired outside party window: ev.mono={ev.mono:.0f}s, "
-                f"window=[{party_start_s:.0f}, {party_end_s + recovery_tail_s:.0f}]s"
             )
 
     def test_cusum_disabled_no_arms_in_same_scenario(self):

@@ -51,7 +51,7 @@ from .greybox_observer import (
     greybox_to_beta,
     log_greybox_result,
 )
-from .health_checks import AnomalyEvent, LatchArmedEvent, LatchArmingTrigger, compute_mad_sigma, CUSUM_K, CUSUM_H, MIN_RESIDUALS_FOR_DETECTION, MIN_SIGMA_FLOOR, MIN_EVENT_DURATION_SEC, CUSUM_COOLDOWN_SEC, CUSUM_RESIDUAL_WINDOW_S, obs_raw_reading
+from .health_checks import AnomalyEvent, CUSUM_COOLDOWN_SEC, CUSUM_H_HAWKINS, CUSUM_K_HAWKINS, CUSUM_WARMUP_N, CUSUM_WINDOW_S, LatchArmedEvent, LatchArmingTrigger, MIN_EVENT_DURATION_SEC, SelfStartingCusumState, obs_raw_reading, update_self_starting_cusum
 
 from ..const import (
     ATTR_DESIRED_TEMP,
@@ -884,14 +884,13 @@ class PIController:
         self._batch_cycle_count: int = 0
 
         # ── CUSUM anomaly detection state ───────────────────────────
-        # Residual history is time-based (age-evicted by CUSUM_RESIDUAL_WINDOW_S)
-        # rather than count-based, so the MAD-σ̂ window stays meaningful across
-        # variable production cadence (60s min, 15min max, ~3-5min typical).
-        # Entries are (mono_time, residual) tuples; oldest evicted on update.
-        # See health_checks.CUSUM_RESIDUAL_WINDOW_S for rationale.
-        self._residual_history: deque[tuple[float, float]] = deque()
-        self._cusum_pos: float = 0.0
-        self._cusum_neg: float = 0.0
+        # Hawkins-Olwell self-starting CUSUM (#135 Phase 1): Welford running
+        # stats on a 12h rolling window estimate σ̂; t→Normal transform
+        # makes the standardized statistic exactly N(0,1) under H0 regardless
+        # of σ̂'s sampling-error noise. Replaces the MAD+σ̂-floor path that
+        # produced 44% of historical events at the floor (#135 audit).
+        # See health_checks.SelfStartingCusumState for the full state shape.
+        self._cusum_state: SelfStartingCusumState = SelfStartingCusumState()
         self._anomaly_events: list[AnomalyEvent] = []
         self._exclusion_count: int = 0
         self._cusum_cooldown_until: datetime | None = None
@@ -1888,18 +1887,18 @@ class PIController:
             detected_lag_tau_counts=dict(self._detected_lag_tau_count),
             pi_event_log_enabled=self._pi_event_log_enabled,
             saved_at_wallclock=self._utcnow_fn().isoformat(),
-            cusum_pos=self._cusum_pos,
-            cusum_neg=self._cusum_neg,
+            cusum_s_pos=self._cusum_state.s_pos,
+            cusum_s_neg=self._cusum_state.s_neg,
             cusum_cooldown_until_epoch=(
                 self._cusum_cooldown_until.timestamp()
                 if self._cusum_cooldown_until is not None
                 else 0.0
             ),
-            # Persist as residual-only list (timestamps are mono_time, which
-            # resets across reboot — meaningless to persist). Restored residuals
-            # are timestamped to now on load so they evict over the next 12h
-            # window, providing warm σ̂ through the transition.
-            cusum_residual_history=[r for _, r in self._residual_history],
+            # Persist residual values only (timestamps are mono_time which
+            # resets across reboot — meaningless to persist). Restored
+            # residuals are timestamped to now on load so they evict over
+            # the next 12h window, providing warm σ̂ through the transition.
+            cusum_window_residuals=[r for _, r in self._cusum_state.window],
         )
 
     def restore_extra_stored_data(self, data: PIExtraStoredData) -> None:
@@ -2091,23 +2090,24 @@ class PIController:
         # epoch=0 means none active; otherwise convert epoch back to a
         # UTC-aware datetime to match the comparison semantics in
         # ``_update_cusum`` (which uses ``dt_util.utcnow()``).
-        self._cusum_pos = data.cusum_pos
-        self._cusum_neg = data.cusum_neg
+        self._cusum_state.s_pos = data.cusum_s_pos
+        self._cusum_state.s_neg = data.cusum_s_neg
         if data.cusum_cooldown_until_epoch > 0.0:
             self._cusum_cooldown_until = dt_util.utc_from_timestamp(
                 data.cusum_cooldown_until_epoch,
             )
         else:
             self._cusum_cooldown_until = None
-        # Restore residual history so MAD has a warm scale immediately
-        # rather than blanking detection for the first 10 post-restart ticks.
-        # Mono_time isn't preserved across reboot, so timestamp each restored
-        # residual as "now" — they'll evict naturally over the next 12h window.
-        if data.cusum_residual_history:
-            self._residual_history.clear()
+        # Restore residual window so σ̂ has a warm estimate immediately
+        # rather than blanking detection through the CUSUM_WARMUP_N ramp-up
+        # after every restart. Mono_time isn't preserved across reboot, so
+        # timestamp each restored residual as "now" — they'll evict
+        # naturally over the next 12h window.
+        if data.cusum_window_residuals:
+            self._cusum_state.window.clear()
             restore_mono = self._monotonic()
-            self._residual_history.extend(
-                (restore_mono, float(r)) for r in data.cusum_residual_history
+            self._cusum_state.window.extend(
+                (restore_mono, float(r)) for r in data.cusum_window_residuals
             )
         # Restore lag filter states
         if data.lag_filter_states:
@@ -4008,8 +4008,8 @@ class PIController:
             last_gain_vector=None,  # Online RLS removed in pre45
             frozen_mask_heat=tuple(self._rls_heat.frozen),
             frozen_mask_cool=tuple(self._rls_cool.frozen),
-            cusum_pos=self._cusum_pos,
-            cusum_neg=self._cusum_neg,
+            cusum_pos=self._cusum_state.s_pos,
+            cusum_neg=self._cusum_state.s_neg,
         )
 
         # Performance snapshot
@@ -4717,11 +4717,12 @@ class PIController:
         is_cooling: bool = False,
         _now: datetime | None = None,
     ) -> None:
-        """Feed one residual to the two-sided CUSUM anomaly detector.
+        """Feed one residual to the self-starting Hawkins-Olwell CUSUM.
 
         Runs on every buffer observation (every PI tick where clamped=False).
-        Uses MAD-based robust scale estimation (Huber, 1981) and the
-        CUSUM algorithm (Page, 1954; Basseville & Nikiforov, 1993).
+        Replaces the MAD+σ̂-floor path with Welford running stats on a 12h
+        rolling window + t→Normal transform (Hawkins & Olwell 1998 §7.2).
+        See health_checks.update_self_starting_cusum for the algorithm.
 
         Side-effect: when an alarm crosses with sign matching the active
         mode (heat→S-, cool→S+) and `_cusum_overtemp_arming_enabled` is
@@ -4731,102 +4732,86 @@ class PIController:
         # Capture for the typed tick output. Sticky across ticks: holds
         # the most-recent prediction residual until next observation.
         self._last_residual = residual
-        self._residual_history.append((now_mono, residual))
-        # Time-based eviction: drop observations older than the configured
-        # window.  Variable production cadence (60s-15min) means count-based
-        # eviction can't deliver a stable time horizon; age-based does.
-        cutoff = now_mono - CUSUM_RESIDUAL_WINDOW_S
-        while self._residual_history and self._residual_history[0][0] < cutoff:
-            self._residual_history.popleft()
 
         now = _now or self._utcnow_fn()
 
-        # Cooldown: suppress detection after a recent alarm
+        # Cooldown: suppress detection AND window updates after a recent
+        # alarm. Skipping the window update is critical: a disturbance
+        # produces a string of biased residuals, and if those entered the
+        # σ̂ window they'd shift the running mean — then RECOVERY residuals
+        # (returning toward zero) would be flagged as a downward shift
+        # by Hawkins-Olwell. Skip both window + accumulators during
+        # cooldown so σ̂ stays anchored to pre-disturbance baseline.
         if self._cusum_cooldown_until is not None:
             if now < self._cusum_cooldown_until:
                 return
             self._cusum_cooldown_until = None
 
-        # Need enough history for reliable MAD
-        if len(self._residual_history) < MIN_RESIDUALS_FOR_DETECTION:
+        alarmed, _U, _sigma_hat = update_self_starting_cusum(
+            self._cusum_state, residual, now_mono,
+        )
+
+        if not alarmed:
             return
 
-        # Robust scale estimate (extract residual values from time-stamped tuples)
-        residual_values = [r for _, r in self._residual_history]
-        sigma = compute_mad_sigma(residual_values)
-        if self._metrics.batch_model_rms is not None:
-            sigma = max(sigma, 0.5 * self._metrics.batch_model_rms)
+        # CUSUM crossed threshold — record event and reset accumulators.
+        # "Fast initial response" (Lucas & Crosier, 1982): reset S⁺/S⁻
+        # after detection to avoid massive accumulation during prolonged
+        # anomalies. Window (and thus σ̂) is preserved.
+        peak = max(self._cusum_state.s_pos, self._cusum_state.s_neg)
+        cusum_pos_crossed = self._cusum_state.s_pos > CUSUM_H_HAWKINS
+        cusum_neg_crossed = self._cusum_state.s_neg > CUSUM_H_HAWKINS
 
-        # Standardize
-        z = residual / sigma
-
-        # Two-sided CUSUM update
-        self._cusum_pos = max(0.0, self._cusum_pos + z - CUSUM_K)
-        self._cusum_neg = max(0.0, self._cusum_neg - z - CUSUM_K)
-
-        cusum_pos_crossed = self._cusum_pos > CUSUM_H
-        cusum_neg_crossed = self._cusum_neg > CUSUM_H
-        alarm_triggered = cusum_pos_crossed or cusum_neg_crossed
-
-        if alarm_triggered:
-            # CUSUM crossed threshold — record event and reset.
-            # "Fast initial response" (Lucas & Crosier, 1982): reset
-            # accumulators after detection to avoid massive accumulation
-            # during prolonged anomalies.
-            peak = max(self._cusum_pos, self._cusum_neg)
-
-            # CUSUM_ANOMALY trigger (#135): set per-tick flag for the
-            # latch arming block if the alarm sign matches the active
-            # mode. The overtemp_error > 0 second filter is applied at
-            # consumption time (in the latch block), so a sign-matched
-            # alarm with room currently below desired flips the flag but
-            # produces no latch arming. See `local/tools/_135_path5_fp_audit`
-            # for the design study.
-            if self._cusum_overtemp_arming_enabled:
-                sign_matches_mode = (
-                    (is_heating and cusum_neg_crossed)
-                    or (is_cooling and cusum_pos_crossed)
-                )
-                if sign_matches_mode:
-                    self._cusum_armed_this_tick = True
-                    # Snapshot fire-time context — accumulators are about
-                    # to reset, so capture peak now for the LatchArmedEvent
-                    # that will be recorded on next tick's consumption.
-                    self._cusum_arming_context = {
-                        "residual": round(residual, 3),
-                        "peak_cusum": round(peak, 1),
-                    }
-            event = AnomalyEvent(
-                start_time=now,
-                start_mono=now_mono,
-                end_time=now,
-                end_mono=now_mono,
-                tick_count=1,
-                mean_residual=residual,
-                peak_cusum=peak,
-                mode="heat" if is_heating else "cool",
+        # CUSUM_ANOMALY trigger (#135): set per-tick flag for the
+        # latch arming block if the alarm sign matches the active
+        # mode. The overtemp_error > 0 second filter is applied at
+        # consumption time (in the latch block), so a sign-matched
+        # alarm with room currently below desired flips the flag but
+        # produces no latch arming. See `local/tools/_135_path5_fp_audit`
+        # for the design study.
+        if self._cusum_overtemp_arming_enabled:
+            sign_matches_mode = (
+                (is_heating and cusum_neg_crossed)
+                or (is_cooling and cusum_pos_crossed)
             )
-            self._anomaly_events.append(event)
-            self._emit_event(
-                TickEventKind.ANOMALY_DETECTED,
-                AnomalyDetectedPayload(
-                    mode=event.mode,
-                    mean_residual=round(event.mean_residual, 3),
-                    peak_cusum=round(event.peak_cusum, 1),
-                    tick_count=event.tick_count,
-                ),
-            )
-            _LOGGER.info(
-                "Anomaly detected: %s, residual=%.3f°C, peak_cusum=%.1f, σ̂=%.4f",
-                now.strftime("%H:%M"),
-                residual,
-                peak,
-                sigma,
-            )
-            # Reset and enter cooldown
-            self._cusum_pos = 0.0
-            self._cusum_neg = 0.0
-            self._cusum_cooldown_until = now + timedelta(seconds=CUSUM_COOLDOWN_SEC)
+            if sign_matches_mode:
+                self._cusum_armed_this_tick = True
+                # Snapshot fire-time context — accumulators are about
+                # to reset, so capture peak now for the LatchArmedEvent
+                # that will be recorded on next tick's consumption.
+                self._cusum_arming_context = {
+                    "residual": round(residual, 3),
+                    "peak_cusum": round(peak, 1),
+                }
+        event = AnomalyEvent(
+            start_time=now,
+            start_mono=now_mono,
+            end_time=now,
+            end_mono=now_mono,
+            tick_count=1,
+            mean_residual=residual,
+            peak_cusum=peak,
+            mode="heat" if is_heating else "cool",
+        )
+        self._anomaly_events.append(event)
+        self._emit_event(
+            TickEventKind.ANOMALY_DETECTED,
+            AnomalyDetectedPayload(
+                mode=event.mode,
+                mean_residual=round(event.mean_residual, 3),
+                peak_cusum=round(event.peak_cusum, 1),
+                tick_count=event.tick_count,
+            ),
+        )
+        _LOGGER.info(
+            "Anomaly detected: %s, residual=%.3f°C, peak_cusum=%.1f",
+            now.strftime("%H:%M"),
+            residual,
+            peak,
+        )
+        # Reset accumulators and enter cooldown
+        self._cusum_state.reset_accumulators()
+        self._cusum_cooldown_until = now + timedelta(seconds=CUSUM_COOLDOWN_SEC)
 
     # ── IMC Gain Scheduling (delegated to PlantIdentifier) ────────────
 

@@ -310,21 +310,13 @@ class TestPIControllerCoverageGaps:
         active = pi._resolve_active_supplemental_sources()
         assert active == []
 
-    # Line 3412: CUSUM sigma floor from batch RMS
-    def test_cusum_sigma_from_batch_rms(self):
-        """CUSUM uses batch_model_rms as sigma floor (line 3412)."""
-        entity = _make_pi()
-        pi = entity._pi
-        pi._metrics.batch_model_rms = 2.0
-        # Fill residual history (now time-stamped tuples)
-        mono_base = time.monotonic()
-        for i in range(50):
-            pi._residual_history.append((mono_base - 60.0 * (50 - i), 0.01))
-        # Now feed a residual — should use batch RMS as floor
-        pi._update_cusum(0.1, mono_base, True)
-        # Just verify it doesn't crash
+    # Removed: test_cusum_sigma_from_batch_rms tested the
+    # `max(sigma, 0.5 * batch_model_rms)` floor fudge that was deleted
+    # in #135 Phase 1 (self-starting CUSUM eliminates the σ̂-floor problem
+    # so the fudge is no longer needed). Coverage of the replacement
+    # CUSUM path is in test_anomaly_detection.py::TestUpdateSelfStartingCusum.
 
-    # Line 3551: outdoor temp state change with None new_state
+# Line 3551: outdoor temp state change with None new_state
     def test_outdoor_temp_changed_none_state(self):
         """Handler returns early when new_state is None (line 3551)."""
         entity = _make_pi()

@@ -70,12 +70,13 @@ def _make_cusum_controller(*, cusum_overtemp_arming_enabled: bool = True):
         PIController, dt_util,
     )
 
+    from custom_components.tasmota_irhvac.pi.health_checks import (
+        SelfStartingCusumState,
+    )
     ctrl = object.__new__(PIController)
-    ctrl._residual_history = deque()
+    ctrl._cusum_state = SelfStartingCusumState()
     ctrl._monotonic = lambda: 0.0
     ctrl._utcnow_fn = dt_util.utcnow
-    ctrl._cusum_pos = 0.0
-    ctrl._cusum_neg = 0.0
     ctrl._anomaly_events = []
     ctrl._exclusion_count = 0
     ctrl._cusum_cooldown_until = None
@@ -94,10 +95,12 @@ def _feed_residuals(
     tick_spacing=60.0, is_heating=True, is_cooling=False,
 ):
     """Feed residuals; calibrate MAD via prefill so CUSUM uses the test σ."""
+    from custom_components.tasmota_irhvac.pi.health_checks import CUSUM_WARMUP_N
     random.seed(123)
     prefill_mono = start_mono - tick_spacing
-    for _ in range(MIN_RESIDUALS_FOR_DETECTION):
-        ctrl._residual_history.append((prefill_mono, random.gauss(0, sigma)))
+    # Need ≥ CUSUM_WARMUP_N obs so alarms can fire after the prefill ends.
+    for _ in range(CUSUM_WARMUP_N + 5):
+        ctrl._cusum_state.window.append((prefill_mono, random.gauss(0, sigma)))
         prefill_mono -= tick_spacing
 
     mono = start_mono
