@@ -71,6 +71,12 @@ class AnomalyEvent:
     mean_residual: float      # signed, physical units (°C)
     peak_cusum: float         # max(S⁺, S⁻) — severity measure
     mode: str                 # "heat" or "cool" at detection time
+    # Snapshot of room state at event time — used by event_in_overtemp
+    # and the repair_qualifies / latch_qualifies filter helpers.
+    # Defaults to 0.0 (= room at desired) for backwards-compatible
+    # construction in test fixtures that don't model temperature state.
+    current_c: float = 0.0
+    desired_c: float = 0.0
 
     @property
     def sign_matches_mode(self) -> bool:
@@ -100,35 +106,30 @@ class AnomalyEvent:
         )
 
 
-def event_in_overtemp(
-    event: AnomalyEvent, current_c: float, desired_c: float,
-) -> bool:
+def event_in_overtemp(event: AnomalyEvent) -> bool:
     """Whether the controller was in overtemp/undertemp at event time.
 
+    Uses the event's captured current_c/desired_c snapshot.
     "Overtemp" semantics flip with mode:
       Heating mode: current > desired (room warmer than target)
       Cooling mode: current < desired (room cooler than target)
     """
     if event.mode == "heat":
-        return current_c > desired_c
-    return current_c < desired_c  # cool
+        return event.current_c > event.desired_c
+    return event.current_c < event.desired_c  # cool
 
 
-def latch_qualifies(
-    event: AnomalyEvent, current_c: float, desired_c: float,
-) -> bool:
+def latch_qualifies(event: AnomalyEvent) -> bool:
     """Production over-temp latch arming trigger: sign-match AND overtemp.
 
     Conservative — only fires on additive-heat-during-heating or
     additive-cool-during-cooling. Mirrors the production two-filter at
-    pi_controller.py:5826 (when `_cusum_overtemp_arming_enabled` is True).
+    pi_controller.py (when `_cusum_overtemp_arming_enabled` is True).
     """
-    return event.sign_matches_mode and event_in_overtemp(event, current_c, desired_c)
+    return event.sign_matches_mode and event_in_overtemp(event)
 
 
-def repair_qualifies(
-    event: AnomalyEvent, current_c: float, desired_c: float,
-) -> bool:
+def repair_qualifies(event: AnomalyEvent) -> bool:
     """HA Repairs notification trigger: any unmodelled-input direction.
 
     Catches both additive-in-mode (sign_matches + overtemp) AND
@@ -140,12 +141,14 @@ def repair_qualifies(
     Latch arming uses only the sign_matches branch (safety-critical
     overtemp). Repairs surfaces both for user awareness.
     """
-    if event.sign_matches_mode and event_in_overtemp(event, current_c, desired_c):
+    if event.sign_matches_mode and event_in_overtemp(event):
         return True
     # Sign_inverse + undertemp/overtemp-mirror (depends on mode)
     if event.mode == "heat":
-        return event.sign_inverse_mode and current_c < desired_c  # heat-loss case
-    return event.sign_inverse_mode and current_c > desired_c  # cooling-additive-heat
+        # heat-loss case: room is cool (current < desired) AND residual indicates HP overcompensating
+        return event.sign_inverse_mode and event.current_c < event.desired_c
+    # cool mode: room is warm (current > desired) AND residual indicates AC undercooling
+    return event.sign_inverse_mode and event.current_c > event.desired_c
 
 
 # ── Self-starting Hawkins-Olwell CUSUM (replaces MAD path) ───────────

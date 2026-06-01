@@ -51,7 +51,7 @@ from .greybox_observer import (
     greybox_to_beta,
     log_greybox_result,
 )
-from .health_checks import AnomalyEvent, CUSUM_COOLDOWN_SEC, CUSUM_H_HAWKINS, CUSUM_K_HAWKINS, CUSUM_WARMUP_N, CUSUM_WINDOW_S, LatchArmedEvent, LatchArmingTrigger, MIN_EVENT_DURATION_SEC, SelfStartingCusumState, obs_raw_reading, update_self_starting_cusum
+from .health_checks import AnomalyEvent, CUSUM_COOLDOWN_SEC, CUSUM_H_HAWKINS, CUSUM_K_HAWKINS, CUSUM_WARMUP_N, CUSUM_WINDOW_S, LatchArmedEvent, LatchArmingTrigger, MIN_EVENT_DURATION_SEC, SelfStartingCusumState, obs_raw_reading, repair_qualifies, update_self_starting_cusum
 
 from ..const import (
     ATTR_DESIRED_TEMP,
@@ -3356,7 +3356,16 @@ class PIController:
                         ))
 
         # ── Anomalous observations (CUSUM) ─────────────────────────
+        # Filter to events that pass repair_qualifies — both-direction
+        # unmodelled-input detection (additive heat in heating, open
+        # window in heating, etc.). Per #135 Phase 1 + user request,
+        # this dramatically reduces HA Repairs notification spam vs
+        # the prior "every raw AnomalyEvent" wiring: raw Hawkins rate
+        # is ~30+/7d at perfect FF, filtered repair_qualifies rate is
+        # the much smaller subset that's actually actionable.
         for event in self._anomaly_events:
+            if not repair_qualifies(event):
+                continue
             # Cause hint based on mode and residual direction
             if event.mode == "heat":
                 direction = "unexpected heat loss" if event.mean_residual > 0 else "unexpected heat gain"
@@ -3387,7 +3396,9 @@ class PIController:
                     "mean_residual": f"{event.mean_residual:+.2f}",
                 },
             ))
-        # Clear surfaced events — they're now in the issue registry
+        # Clear ALL surfaced events (filtered or not) — they were
+        # observed in the run-up to this check; another batch's worth
+        # of fresh events will be collected for the next call.
         self._anomaly_events.clear()
 
         # ── Frequent exclusions escalation ─────────────────────────
@@ -4715,6 +4726,8 @@ class PIController:
         now_mono: float,
         is_heating: bool,
         is_cooling: bool = False,
+        current_c: float = 0.0,
+        desired_c: float = 0.0,
         _now: datetime | None = None,
     ) -> None:
         """Feed one residual to the self-starting Hawkins-Olwell CUSUM.
@@ -4792,6 +4805,8 @@ class PIController:
             mean_residual=residual,
             peak_cusum=peak,
             mode="heat" if is_heating else "cool",
+            current_c=current_c,
+            desired_c=desired_c,
         )
         self._anomaly_events.append(event)
         self._emit_event(
@@ -6219,7 +6234,10 @@ class PIController:
         # CUSUM anomaly detection — requires valid feature vector (x).
         if x is not None and not obs_clamped:
             cusum_residual = (float(self._hp_setpoint) - desired_c) - rls.predict(x)
-            self._update_cusum(cusum_residual, now_mono, is_heating, is_cooling)
+            self._update_cusum(
+                cusum_residual, now_mono, is_heating, is_cooling,
+                current_c=current_c, desired_c=desired_c,
+            )
 
         # Midpoint-crossing hysteresis
         new_setpoint = self._hp_setpoint

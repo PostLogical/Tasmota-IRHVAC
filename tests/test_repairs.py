@@ -670,11 +670,14 @@ class TestAnomalyCauseHints:
         pi = entity._pi
 
         now = datetime.now()
+        # Heating + pos residual = sign_inverse_mode; repair_qualifies
+        # requires undertemp (current < desired) for this branch.
         pi._anomaly_events.append(AnomalyEvent(
             start_time=now, start_mono=1000.0,
             end_time=now, end_mono=1000.0,
             tick_count=1, mean_residual=0.5,
             peak_cusum=12.0, mode="heat",
+            current_c=19.0, desired_c=20.0,
         ))
 
         issues = pi._check_tuning_health()
@@ -694,11 +697,14 @@ class TestAnomalyCauseHints:
         pi = entity._pi
 
         now = datetime.now()
+        # Heating + neg residual = sign_matches_mode; repair_qualifies
+        # requires overtemp (current > desired).
         pi._anomaly_events.append(AnomalyEvent(
             start_time=now, start_mono=1000.0,
             end_time=now, end_mono=1000.0,
             tick_count=1, mean_residual=-0.5,
             peak_cusum=12.0, mode="heat",
+            current_c=22.0, desired_c=20.0,
         ))
 
         issues = pi._check_tuning_health()
@@ -717,11 +723,19 @@ class TestAnomalyCauseHints:
         pi = entity._pi
 
         now = datetime.now()
+        # Cooling + pos residual = sign_matches_mode; repair_qualifies
+        # requires "overtemp" (current < desired in cool mode = AC
+        # under-cooling enough that room is dropping below setpoint).
+        # Wait — sign_matches_mode in cool means room cooler than predicted
+        # (more cooling effect than expected) → over-cooled (under-temp).
+        # The repair_qualifies "overtemp" semantic for cool mode is
+        # current < desired = under-temp in absolute terms.
         pi._anomaly_events.append(AnomalyEvent(
             start_time=now, start_mono=1000.0,
             end_time=now, end_mono=1000.0,
             tick_count=1, mean_residual=0.5,
             peak_cusum=12.0, mode="cool",
+            current_c=21.0, desired_c=22.0,
         ))
 
         issues = pi._check_tuning_health()
@@ -740,11 +754,14 @@ class TestAnomalyCauseHints:
         pi = entity._pi
 
         now = datetime.now()
+        # Cooling + neg residual = sign_inverse_mode in cool; repair_qualifies
+        # requires current > desired (room hotter than target in cool mode).
         pi._anomaly_events.append(AnomalyEvent(
             start_time=now, start_mono=1000.0,
             end_time=now, end_mono=1000.0,
             tick_count=1, mean_residual=-0.5,
             peak_cusum=12.0, mode="cool",
+            current_c=24.0, desired_c=22.0,
         ))
 
         issues = pi._check_tuning_health()

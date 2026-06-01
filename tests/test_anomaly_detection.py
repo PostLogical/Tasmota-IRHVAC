@@ -752,70 +752,62 @@ class TestAnomalyEventSignHelpers:
 class TestFilterHelpers:
     """event_in_overtemp / latch_qualifies / repair_qualifies."""
 
-    def _evt(self, mode: str, residual: float) -> AnomalyEvent:
+    def _evt(self, mode: str, residual: float, current_c: float = 20.0,
+             desired_c: float = 20.0) -> AnomalyEvent:
         now = datetime.now()
         return AnomalyEvent(
             start_time=now, start_mono=0, end_time=now,
             end_mono=0, tick_count=1, mean_residual=residual,
             peak_cusum=11.0, mode=mode,
+            current_c=current_c, desired_c=desired_c,
         )
 
     def test_overtemp_heat_mode(self):
         """Heating mode: overtemp = current > desired."""
-        e = self._evt("heat", -0.5)
-        assert event_in_overtemp(e, current_c=22.0, desired_c=20.0) is True
-        assert event_in_overtemp(e, current_c=19.0, desired_c=20.0) is False
+        assert event_in_overtemp(self._evt("heat", -0.5, current_c=22.0, desired_c=20.0)) is True
+        assert event_in_overtemp(self._evt("heat", -0.5, current_c=19.0, desired_c=20.0)) is False
         # Boundary: exactly equal is NOT overtemp (strict >)
-        assert event_in_overtemp(e, current_c=20.0, desired_c=20.0) is False
+        assert event_in_overtemp(self._evt("heat", -0.5, current_c=20.0, desired_c=20.0)) is False
 
     def test_overtemp_cool_mode(self):
         """Cooling mode: 'overtemp' (latch-condition) = current < desired."""
-        e = self._evt("cool", +0.5)
-        assert event_in_overtemp(e, current_c=19.0, desired_c=22.0) is True
-        assert event_in_overtemp(e, current_c=23.0, desired_c=22.0) is False
+        assert event_in_overtemp(self._evt("cool", +0.5, current_c=19.0, desired_c=22.0)) is True
+        assert event_in_overtemp(self._evt("cool", +0.5, current_c=23.0, desired_c=22.0)) is False
 
     def test_latch_qualifies_heat_additive_heat(self):
         """Heating + neg residual + overtemp → LATCH FIRES."""
-        e = self._evt("heat", -0.5)
-        assert latch_qualifies(e, current_c=22.0, desired_c=20.0) is True
+        assert latch_qualifies(self._evt("heat", -0.5, current_c=22.0, desired_c=20.0)) is True
 
     def test_latch_does_not_fire_without_overtemp(self):
         """Sign matches but not overtemp → no latch (room cold despite alarm)."""
-        e = self._evt("heat", -0.5)
-        assert latch_qualifies(e, current_c=19.0, desired_c=20.0) is False
+        assert latch_qualifies(self._evt("heat", -0.5, current_c=19.0, desired_c=20.0)) is False
 
     def test_latch_does_not_fire_wrong_sign(self):
         """Wrong-direction residual: NEVER arms latch even if overtemp."""
         # heat mode + pos residual = open-window case. Even if temp is over,
         # latch shouldn't fire (this means HP is over-correcting)
-        e = self._evt("heat", +0.5)
-        assert latch_qualifies(e, current_c=22.0, desired_c=20.0) is False
+        assert latch_qualifies(self._evt("heat", +0.5, current_c=22.0, desired_c=20.0)) is False
 
     def test_repair_qualifies_additive_heat(self):
         """Additive heat (heating, overtemp): notify user."""
-        e = self._evt("heat", -0.5)
-        assert repair_qualifies(e, current_c=22.0, desired_c=20.0) is True
+        assert repair_qualifies(self._evt("heat", -0.5, current_c=22.0, desired_c=20.0)) is True
 
     def test_repair_qualifies_additive_cooling_in_heat(self):
         """Open-window case (heating, undertemp, pos residual): notify user."""
-        e = self._evt("heat", +0.5)
-        assert repair_qualifies(e, current_c=19.0, desired_c=20.0) is True
+        assert repair_qualifies(self._evt("heat", +0.5, current_c=19.0, desired_c=20.0)) is True
 
     def test_repair_qualifies_additive_heat_in_cool(self):
         """Cooling mode, room warm, neg residual: heat source (sun, cooking)."""
-        e = self._evt("cool", -0.5)
-        assert repair_qualifies(e, current_c=23.0, desired_c=22.0) is True
+        assert repair_qualifies(self._evt("cool", -0.5, current_c=23.0, desired_c=22.0)) is True
 
     def test_repair_qualifies_additive_cooling_in_cool(self):
         """Cooling, room cold, pos residual: AC over-cooling / heat loss."""
-        e = self._evt("cool", +0.5)
-        assert repair_qualifies(e, current_c=19.0, desired_c=22.0) is True
+        assert repair_qualifies(self._evt("cool", +0.5, current_c=19.0, desired_c=22.0)) is True
 
     def test_repair_does_not_fire_when_no_unmodelled_input(self):
         """Sign and temp direction both inconsistent with any unmodelled input."""
         # heat mode + neg residual + undertemp = HP underperforming (control issue, not unmodelled)
-        e = self._evt("heat", -0.5)
-        assert repair_qualifies(e, current_c=19.0, desired_c=20.0) is False
+        assert repair_qualifies(self._evt("heat", -0.5, current_c=19.0, desired_c=20.0)) is False
 
 
 # ── Self-starting Hawkins-Olwell CUSUM ───────────────────────────────
