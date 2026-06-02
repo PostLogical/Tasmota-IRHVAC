@@ -1112,16 +1112,18 @@ class TestFitGreybox2R2CStageB:
             f"Expected ≥500 perturbation obs, got {n_perturb}"
         )
 
-    def test_stage_b_fires_when_perturbation_present(self):
-        """Stage B updates wall params when perturbation observations exist.
+    def test_bayesian_wall_params_move_toward_truth_with_perturbation(self):
+        """Bayesian joint fit moves wall params off the prior toward truth
+        when perturbation data adds Fisher information about wall mode.
 
-        With truth k_w = 1/30 ≠ K_W_FIXED = 1/50, the fitter's wall
-        params should END UP something other than the hard-fix because
-        Stage B kicked in. The exact value depends on identifiability;
-        this test only checks that Stage B was active.
+        With truth k_w = 1/30 ≠ K_W_PRIOR_MEAN = 1/50 and rich perturbation
+        excitation, the MAP estimate should land somewhere between the prior
+        and the MLE. Asserting "moved off prior" rather than "matches truth"
+        because the prior strength still anchors partially — the magnitude
+        of movement depends on data/prior variance ratio.
         """
         from custom_components.tasmota_irhvac.pi.greybox_observer import (
-            K_W_FIXED, MASS_RATIO_FIXED,
+            K_W_PRIOR_MEAN, MASS_RATIO_PRIOR_MEAN,
         )
         obs = self._generate_with_perturbation(n_days=21.0, tick_minutes=10.0)
         model_inputs = [
@@ -1130,23 +1132,29 @@ class TestFitGreybox2R2CStageB:
         ]
         result = fit_greybox(obs, model_inputs)
         assert result is not None and result.is_2r2c
-        # Stage B should have moved at least one wall param off the
-        # hard-fix, since truth differs from hard-fix and there's enough
-        # perturbation data to inform the fit.
+        # MAP estimate should not be exactly the prior mean — data has
+        # information that nudges it toward the truth (1/30 > 1/50).
         moved = (
-            abs(result.k_w - K_W_FIXED) > 1e-6
-            or abs(result.mass_ratio - MASS_RATIO_FIXED) > 1e-6
+            abs(result.k_w - K_W_PRIOR_MEAN) > 1e-6
+            or abs(result.mass_ratio - MASS_RATIO_PRIOR_MEAN) > 1e-6
         )
         assert moved, (
-            f"Stage B didn't update wall params: k_w={result.k_w} "
-            f"(K_W_FIXED={K_W_FIXED}), mass_ratio={result.mass_ratio} "
-            f"(MASS_RATIO_FIXED={MASS_RATIO_FIXED})"
+            f"Bayesian fit didn't move wall params off prior: "
+            f"k_w={result.k_w} (prior={K_W_PRIOR_MEAN}), "
+            f"mass_ratio={result.mass_ratio} (prior={MASS_RATIO_PRIOR_MEAN})"
         )
 
-    def test_stage_b_recovers_k_w_within_tolerance(self):
-        """Stage B's k_w estimate should be closer to truth than the hard-fix."""
+    def test_bayesian_k_w_closer_to_truth_than_prior(self):
+        """MAP estimate for k_w should be closer to truth than the prior mean.
+
+        Prior μ = 1/50; truth = 1/30. With enough perturbation data, the
+        MAP estimate should land between (or even past) μ on the truth side.
+        Inverse-variance-weighted average: MAP ≈ (Σ_data⁻¹·MLE + Σ_prior⁻¹·μ)
+        / (Σ_data⁻¹ + Σ_prior⁻¹). With rich data, weight shifts toward MLE
+        and thus toward truth.
+        """
         from custom_components.tasmota_irhvac.pi.greybox_observer import (
-            K_W_FIXED,
+            K_W_PRIOR_MEAN,
         )
         obs = self._generate_with_perturbation(n_days=21.0, tick_minutes=10.0)
         model_inputs = [
@@ -1157,17 +1165,21 @@ class TestFitGreybox2R2CStageB:
         assert result is not None and result.is_2r2c
 
         err_fitted = abs(result.k_w - self.K_W_TRUE)
-        err_hard_fix = abs(K_W_FIXED - self.K_W_TRUE)
-        assert err_fitted < err_hard_fix, (
-            f"Stage B k_w={result.k_w:.5f} farther from truth "
-            f"({self.K_W_TRUE:.5f}) than hard-fix {K_W_FIXED:.5f}"
+        err_prior = abs(K_W_PRIOR_MEAN - self.K_W_TRUE)
+        assert err_fitted < err_prior, (
+            f"Bayesian k_w={result.k_w:.5f} farther from truth "
+            f"({self.K_W_TRUE:.5f}) than prior mean {K_W_PRIOR_MEAN:.5f}"
         )
 
-    def test_stage_b_skipped_when_no_perturbation(self):
-        """Without perturbation observations, Stage B should NOT fire — wall
-        params should be exactly the hard-fix values."""
+    def test_bayesian_wall_params_stay_near_prior_without_perturbation(self):
+        """Without perturbation data, operational closed-loop data carries
+        little information about wall mode (Reynders 2014 / Annex 71 ST3).
+        MAP estimate should stay near prior mean — the Tikhonov penalty
+        dominates when the likelihood is uninformative about that parameter.
+        """
         from custom_components.tasmota_irhvac.pi.greybox_observer import (
-            K_W_FIXED, MASS_RATIO_FIXED,
+            K_W_PRIOR_MEAN, MASS_RATIO_PRIOR_MEAN,
+            K_W_PRIOR_SIGMA, MASS_RATIO_PRIOR_SIGMA,
         )
         obs = self._generate_with_perturbation(n_days=21.0, tick_minutes=10.0)
         # Strip the perturbation flag from all observations
@@ -1179,13 +1191,17 @@ class TestFitGreybox2R2CStageB:
         ]
         result = fit_greybox(obs, model_inputs)
         assert result is not None and result.is_2r2c
-        assert result.k_w == K_W_FIXED, (
-            f"Stage B fired without perturbation observations: "
-            f"k_w={result.k_w} != K_W_FIXED={K_W_FIXED}"
+        # Within 2σ of the prior — the data has some signal even without
+        # perturbation (the trajectory still includes natural setpoint
+        # changes and weather), but not enough to escape the prior band.
+        assert abs(result.k_w - K_W_PRIOR_MEAN) < 2 * K_W_PRIOR_SIGMA, (
+            f"k_w={result.k_w} wandered far from prior {K_W_PRIOR_MEAN} "
+            f"despite weak likelihood (2σ band: ±{2 * K_W_PRIOR_SIGMA})"
         )
-        assert result.mass_ratio == MASS_RATIO_FIXED, (
-            f"Stage B fired without perturbation observations: "
-            f"mass_ratio={result.mass_ratio} != MASS_RATIO_FIXED={MASS_RATIO_FIXED}"
+        assert abs(result.mass_ratio - MASS_RATIO_PRIOR_MEAN) < 2 * MASS_RATIO_PRIOR_SIGMA, (
+            f"mass_ratio={result.mass_ratio} wandered far from prior "
+            f"{MASS_RATIO_PRIOR_MEAN} despite weak likelihood "
+            f"(2σ band: ±{2 * MASS_RATIO_PRIOR_SIGMA})"
         )
 
 
@@ -1333,87 +1349,6 @@ class TestComputeDtMedianMinEdgeCases:
             ),
         ]
         assert _compute_dt_median_min(obs) is None
-
-
-class TestFitStageBWallDefensivePaths:
-    """Stage B wall-fit defensive branches.
-
-    Stage B is exercised for happy-path through ``TestFitGreybox2R2CStageB``;
-    these tests target the rejection branches reached only under specific
-    numerical or environmental conditions.
-    """
-
-    def _common_inputs(self, m: int = 30) -> dict:
-        """Build inputs sized for stage_b directly."""
-        t_air = [20.0 + i * 0.01 for i in range(m)]
-        t_out = [10.0] * m
-        solar = [0.0] * m
-        # Setpoint above current → active_prev = True for default; can override.
-        hp_setpoint_arr: list[float | None] = [22.0] * m
-        dt_min = [10.0] * m
-        # Half the obs are perturbation samples
-        perturb_indices = list(range(0, m, 2))
-        return dict(
-            perturb_indices=perturb_indices,
-            t_air=t_air, t_out=t_out, solar=solar,
-            hp_setpoint_arr=hp_setpoint_arr,
-            dt_min=dt_min,
-            c0=0.0, ua_c=0.01, k_c=0.04, alpha_total=0.05,
-            has_solar=True,
-        )
-
-    def test_stage_b_returns_none_when_scipy_unavailable(self, monkeypatch):
-        from custom_components.tasmota_irhvac.pi import greybox_observer as gb
-        monkeypatch.setattr(gb, "SCIPY_AVAILABLE", False)
-        inputs = self._common_inputs()
-        assert gb._fit_stage_b_wall(**inputs) is None
-
-    def test_stage_b_skips_zero_dt_in_perturb_subset(self):
-        """A perturb-subset tick with dt<=0 contributes a zero residual
-        (the loop continues without state propagation)."""
-        from custom_components.tasmota_irhvac.pi import greybox_observer as gb
-        inputs = self._common_inputs(m=30)
-        # Force dt[2]<=0 to exercise the dt<=0 branch.  Index 2 is in the
-        # default perturb_indices (every other tick) so the residuals
-        # path appends a 0.0 residual placeholder.
-        inputs["dt_min"][2] = 0.0
-        result = gb._fit_stage_b_wall(**inputs)
-        # We don't assert on parameter values here — only that the dt<=0
-        # path doesn't blow up the optimizer.
-        assert result is None or set(result.keys()) == {"k_w", "mass_ratio"}
-
-    def test_stage_b_active_false_branch_when_setpoint_below_air(self):
-        """active_prev=False fires the no-k_c b1 branch (line 953)."""
-        from custom_components.tasmota_irhvac.pi import greybox_observer as gb
-        inputs = self._common_inputs(m=30)
-        # hp_setpoint below current_c → active_prev = False at every tick.
-        inputs["hp_setpoint_arr"] = [10.0] * 30  # well below t_air[~20]
-        result = gb._fit_stage_b_wall(**inputs)
-        assert result is None or set(result.keys()) == {"k_w", "mass_ratio"}
-
-    def test_stage_b_returns_none_when_least_squares_raises(self, monkeypatch):
-        """If scipy.least_squares raises, the function logs and returns None."""
-        from custom_components.tasmota_irhvac.pi import greybox_observer as gb
-        def boom(*a, **kw):
-            raise RuntimeError("synthetic least_squares failure")
-        monkeypatch.setattr(gb, "_least_squares", boom)
-        inputs = self._common_inputs()
-        assert gb._fit_stage_b_wall(**inputs) is None
-
-    def test_stage_b_returns_huge_residuals_on_expm_failure(self, monkeypatch):
-        """If ``_expm`` raises inside residual_fn, the residual_fn returns
-        a large vector to steer the optimizer away from the failure point.
-        The outer least_squares still produces a result that we can inspect.
-        """
-        from custom_components.tasmota_irhvac.pi import greybox_observer as gb
-        def explode(*a, **kw):
-            raise RuntimeError("expm went sideways")
-        monkeypatch.setattr(gb, "_expm", explode)
-        inputs = self._common_inputs()
-        # The fit still attempts; the optimizer either fails or converges
-        # to whatever point the residual sentinel pushes it to.  We just
-        # need this to trigger the except branch without the test crashing.
-        gb._fit_stage_b_wall(**inputs)
 
 
 class TestFitGreybox2R2CDefensiveResidualPaths:

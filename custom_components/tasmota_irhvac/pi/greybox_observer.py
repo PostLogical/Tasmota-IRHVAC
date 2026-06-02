@@ -92,19 +92,66 @@ K_W_BOUNDS = (0.001, 0.2)
 # residential; allow margins for fit, gate to a tighter range.
 MASS_RATIO_BOUNDS = (1.0, 30.0)
 
-# 2R2C wall-mode parameters held at literature-typical residential values
-# (Bacher-Madsen 2011: mass_ratio 5-10, τ_couple 30-80 min). These are
-# NOT fitted from operational data — wall-mode identifiability requires
-# active excitation (Radecki-Hencey 2015 §IV; Marty-Stabat 2022; Reynders
-# 2014; Annex 71 ST3 negative result for closed-loop residential).
-# Hollick 2020 fixes capacity-related parameters at lit values for
-# occupied-home identification — same architectural choice here.
+# ── Bayesian priors for joint 2R2C fit (lit-grounded, configurable) ──
 #
-# Stage B identification (perturbation regime) can release these in a
-# separate fit when active perturbation data is available; see
-# project_greybox_redesign_evidence.md for the staged-fit architecture.
-MASS_RATIO_FIXED = 8.0           # Bacher-Madsen typical residential
-K_W_FIXED = 1.0 / 50.0            # τ_couple = 50 min — typical residential
+# Closed-loop operational residential data is partially under-determined
+# for 2R2C ID (Reynders 2014 §IV; Annex 71 ST3): envelope (ua_c) and HP
+# gain (k_c) are identifiable from typical weather variation, but wall
+# mode (k_w, mass_ratio) and α_solar have weak observability without
+# engineered excitation.
+#
+# Rather than hard-fixing wall mode at lit-typical values (the previous
+# Stage-A approach, equivalent to a σ→0 prior), use INFORMED Bayesian
+# priors with finite strength. This is the lit-canonical approach
+# (CTSM-R MAP estimation, Madsen et al. 2013; Pathak et al. 2019
+# "Estimating Buildings' Parameters over Time Including Prior Knowledge"
+# demonstrates ±0.02 R-value accuracy on real Pecan Street smart-
+# thermostat data using informed priors).
+#
+# The MAP estimate becomes a weighted average of MLE (data alone) and
+# prior mean, with weights = inverse-variance. Strong data → MAP near
+# MLE. Weak data → MAP near prior. For typical residential buildings
+# (~95% of the population per Bacher-Madsen) the lit-typical wall mode
+# prior matches reality closely; atypical buildings (deep masonry,
+# passive house) require either user-supplied priors, transfer learning
+# across seasons (posterior → next prior), or active-probe data (Phase
+# 2 future work, see /Users/robbyg/.claude/plans/modular-cuddling-duckling.md).
+#
+# Tikhonov penalty form: ½ · (θ - μ)² / σ² appended to data residuals.
+# scipy.optimize.least_squares minimizes the sum-of-squares of residuals;
+# scaling each prior term by 1/σ embeds the inverse-variance weighting.
+
+# c0: small bias offset around 0; data drives it on most buildings.
+C0_PRIOR_MEAN = 0.0
+C0_PRIOR_SIGMA = 0.01     # ±0.6°C/hr — generous, data dominates
+
+# ua_c: envelope rate. Default prior centered at lit-typical (τ=200 min);
+# at runtime, replaced with plant_id.tau_slow if confident (transfer-
+# learning from plant ID, per Pathak §4.2). σ wide — data is informative.
+UA_C_PRIOR_MEAN = 1.0 / 200.0
+UA_C_PRIOR_SIGMA = 0.005   # covers τ from ~100 to ~400 min with 2σ
+
+# k_c: HP gain rate. Bench profiles span 0.02-0.05; lit-typical 0.025-0.04.
+K_C_PRIOR_MEAN = 0.03
+K_C_PRIOR_SIGMA = 0.015     # covers 0.005-0.06 with 2σ
+
+# alpha_c: solar gain rate. Wide range across buildings (window area,
+# orientation, shading); keep prior loose so data can identify when
+# weather provides enough solar/outdoor decoupling.
+ALPHA_C_PRIOR_MEAN = 0.05
+ALPHA_C_PRIOR_SIGMA = 0.05   # covers 0.0-0.15 with 2σ
+
+# k_w: air↔wall coupling rate. The most under-determined from operational
+# data (Reynders 2014, Annex 71 ST3). Tight prior at lit-typical 1/50
+# (Bacher-Madsen "τ_couple ≈ 30-80 min residential"). σ small so prior
+# dominates absent strong data; data can still nudge.
+K_W_PRIOR_MEAN = 1.0 / 50.0    # τ_couple = 50 min
+K_W_PRIOR_SIGMA = 0.005         # covers τ from ~30 to ~100 min with 2σ
+
+# mass_ratio: C_wall/C_air. Also under-determined; tight prior at lit-
+# typical 8 (Bacher-Madsen "5-10 typical residential").
+MASS_RATIO_PRIOR_MEAN = 8.0
+MASS_RATIO_PRIOR_SIGMA = 3.0    # covers 2-14 with 2σ
 
 # ASHRAE Ch. 18 / bench convention: solar through a window splits ~30% to
 # the air node (convective) and ~70% to the wall node (radiative). Fixed
@@ -592,47 +639,85 @@ def _fit_greybox_2r2c(
     typical_dt = (Counter(nonzero_dts).most_common(1)[0][0]
                   if nonzero_dts else 0.0)
 
-    # Parameter packing — Stage A operational regime fit.
-    # mass_ratio and k_w are HARD-FIXED at literature values (constants);
-    # the optimizer fits only (c0, ua_c, k_c, [α_c]). Wall-mode params are
-    # not separately identifiable from operational closed-loop data
-    # (Bacher-Madsen 2011, Marty-Stabat 2022, Reynders 2014, Annex 71 ST3).
-    # Stage B (perturbation regime) handles wall-mode identification when
-    # active perturbation data is available; see
-    # project_greybox_redesign_evidence.md.
+    # Parameter packing — v2 Bayesian joint fit. ALL 6 RC parameters are
+    # FREE; closed-loop identifiability gaps on wall mode are addressed
+    # by informed Bayesian priors (Tikhonov penalty appended to residuals
+    # below), not by hard-fixing as the previous Stage-A did.
+    # CTSM-R MAP estimation (Madsen et al. 2013) / Pathak 2019 §3 — the
+    # MAP optimum is the inverse-variance-weighted average of likelihood
+    # (data) and prior, so wall mode stays near lit-typical absent strong
+    # data, but data can nudge when it's informative.
     if has_solar:
-        param_names = ["c0", "ua_c", "k_c", "alpha_c"]
+        param_names = ["c0", "ua_c", "k_c", "alpha_c", "k_w", "mass_ratio"]
         lower = [
             C0_BOUNDS[0], UA_C_BOUNDS[0], K_C_BOUNDS[0], ALPHA_C_BOUNDS[0],
+            K_W_BOUNDS[0], MASS_RATIO_BOUNDS[0],
         ]
         upper = [
             C0_BOUNDS[1], UA_C_BOUNDS[1], K_C_BOUNDS[1], ALPHA_C_BOUNDS[1],
+            K_W_BOUNDS[1], MASS_RATIO_BOUNDS[1],
+        ]
+        # Prior μ and σ in the same order as param_names. Used to append
+        # Tikhonov penalty terms (θ - μ)/σ to the data residuals; scipy's
+        # sum-of-squares loss makes this equivalent to MAP estimation
+        # under independent Gaussian priors.
+        prior_mu = [
+            C0_PRIOR_MEAN, UA_C_PRIOR_MEAN, K_C_PRIOR_MEAN, ALPHA_C_PRIOR_MEAN,
+            K_W_PRIOR_MEAN, MASS_RATIO_PRIOR_MEAN,
+        ]
+        prior_sigma = [
+            C0_PRIOR_SIGMA, UA_C_PRIOR_SIGMA, K_C_PRIOR_SIGMA, ALPHA_C_PRIOR_SIGMA,
+            K_W_PRIOR_SIGMA, MASS_RATIO_PRIOR_SIGMA,
         ]
     else:
-        param_names = ["c0", "ua_c", "k_c"]
-        lower = [C0_BOUNDS[0], UA_C_BOUNDS[0], K_C_BOUNDS[0]]
-        upper = [C0_BOUNDS[1], UA_C_BOUNDS[1], K_C_BOUNDS[1]]
+        param_names = ["c0", "ua_c", "k_c", "k_w", "mass_ratio"]
+        lower = [
+            C0_BOUNDS[0], UA_C_BOUNDS[0], K_C_BOUNDS[0],
+            K_W_BOUNDS[0], MASS_RATIO_BOUNDS[0],
+        ]
+        upper = [
+            C0_BOUNDS[1], UA_C_BOUNDS[1], K_C_BOUNDS[1],
+            K_W_BOUNDS[1], MASS_RATIO_BOUNDS[1],
+        ]
+        prior_mu = [
+            C0_PRIOR_MEAN, UA_C_PRIOR_MEAN, K_C_PRIOR_MEAN,
+            K_W_PRIOR_MEAN, MASS_RATIO_PRIOR_MEAN,
+        ]
+        prior_sigma = [
+            C0_PRIOR_SIGMA, UA_C_PRIOR_SIGMA, K_C_PRIOR_SIGMA,
+            K_W_PRIOR_SIGMA, MASS_RATIO_PRIOR_SIGMA,
+        ]
 
-    # Warm start from 1R1C result, with plant ID hint on ua_c if available.
+    # Plant ID transfer-learning: if plant_tau_slow is confidently known,
+    # replace the default ua_c prior with one centered at 1/tau_slow.
+    # Pathak 2019 §4.2 "Prior selection & transfer learning" — earlier
+    # season's posterior becomes next season's prior. Plant ID does its
+    # own probing, so its τ_slow estimate carries observational evidence
+    # that informs greybox without needing to re-probe.
     ua_c_init = r_1r1c.ua_c
     if plant_tau_slow is not None and plant_tau_slow > 0:
         ua_c_init = max(UA_C_BOUNDS[0], min(UA_C_BOUNDS[1], 1.0 / plant_tau_slow))
+        # Update ua_c prior mean (index 1 in param_names) to plant ID's
+        # estimate; keep σ at default (data can still override).
+        prior_mu[1] = ua_c_init
 
     if has_solar:
         x0 = [
             r_1r1c.c0, ua_c_init, r_1r1c.k_c,
             max(ALPHA_C_BOUNDS[0], r_1r1c.alpha_c),
+            K_W_PRIOR_MEAN, MASS_RATIO_PRIOR_MEAN,
         ]
     else:
-        x0 = [r_1r1c.c0, ua_c_init, r_1r1c.k_c]
+        x0 = [
+            r_1r1c.c0, ua_c_init, r_1r1c.k_c,
+            K_W_PRIOR_MEAN, MASS_RATIO_PRIOR_MEAN,
+        ]
     # Clamp warm-start values into bounds.
     for i, (lo, hi) in enumerate(zip(lower, upper)):
         x0[i] = max(lo, min(hi, x0[i]))
 
-    # Wall-mode params held constant (Stage A operational regime).
-    k_w = K_W_FIXED
-    mass_ratio = MASS_RATIO_FIXED
     n_data = m
+    n_priors = len(prior_mu)
 
     # Sim-error PEM residual: forward-simulate state x = [T_a, T_w] via
     # matrix-exponential with HP-as-feedback in A; data residual =
@@ -673,28 +758,28 @@ def _fit_greybox_2r2c(
             psi = np.zeros((2, 2))
         return eA, psi
 
-    # k_w and mass_ratio are constants in this fit (Stage A operational regime
-    # — see project_greybox_redesign_evidence.md). Build A matrices outside
-    # the residual function since wall structure doesn't change with the
-    # fitted params.
-    a_wall_rate_fixed = k_w / mass_ratio
+    # v2 Bayesian: k_w and mass_ratio are FREE parameters constrained
+    # by Tikhonov priors (appended to residuals below). A matrices must
+    # be rebuilt every iteration since wall structure varies with the
+    # fitted params now.
 
     def residual_fn(params: list[float]) -> list[float]:
         if has_solar:
-            c0, ua_c, k_c, alpha_total = params
+            c0, ua_c, k_c, alpha_total, k_w, mass_ratio = params
         else:
-            c0, ua_c, k_c = params
+            c0, ua_c, k_c, k_w, mass_ratio = params
             alpha_total = 0.0
         alpha_air = alpha_total * SOLAR_AIR_FRACTION
         alpha_wall = alpha_total * SOLAR_WALL_FRACTION
+        a_wall_rate = k_w / mass_ratio
 
         A_active = np.array([
-            [-(ua_c + k_c + k_w),  k_w               ],
-            [ a_wall_rate_fixed,  -a_wall_rate_fixed ],
+            [-(ua_c + k_c + k_w),  k_w           ],
+            [ a_wall_rate,        -a_wall_rate   ],
         ], dtype=float)
         A_inactive = np.array([
-            [-(ua_c + k_w),         k_w               ],
-            [ a_wall_rate_fixed,   -a_wall_rate_fixed ],
+            [-(ua_c + k_w),         k_w           ],
+            [ a_wall_rate,         -a_wall_rate   ],
         ], dtype=float)
 
         if typical_dt > 0:
@@ -703,8 +788,10 @@ def _fit_greybox_2r2c(
                 expA_inact, psi_inact = _expm_psi(A_inactive, typical_dt)
             except Exception:
                 # Numerical failure (e.g. expm overflow at extreme params):
-                # return large residuals so optimizer steers away.
-                return [1e6] * n_data
+                # return large residuals so optimizer steers away. Length
+                # must include prior terms so least_squares sees a
+                # consistent residual vector size across iterations.
+                return [1e6] * (n_data + n_priors)
         else:
             expA_act = expA_inact = np.eye(2)
             psi_act = psi_inact = np.zeros((2, 2))
@@ -738,7 +825,7 @@ def _fit_greybox_2r2c(
                         A_active if active_prev else A_inactive, dt,
                     )
                 except Exception:
-                    return [1e6] * n_data
+                    return [1e6] * (n_data + n_priors)
             if active_prev:
                 b1 = (c0 + ua_c * t_out[i - 1] + k_c * sp_prev
                       + alpha_air * solar[i - 1])
@@ -749,7 +836,19 @@ def _fit_greybox_2r2c(
             x = eA @ x + psi @ b
             residuals[i] = float(x[0] - t_air[i])
 
-        return residuals
+        # Tikhonov prior penalty terms appended to the data residuals.
+        # Each term is (θ_i − μ_i) / σ_i; scipy's sum-of-squares loss
+        # makes the contribution to the objective equal to ½·(θ_i−μ_i)²/σ_i²,
+        # i.e. the negative log of an independent Gaussian prior up to
+        # a constant. The MAP optimum is the inverse-variance-weighted
+        # blend of likelihood (data residuals) and priors. CTSM-R MAP /
+        # Pathak 2019 §3.1 BSSM (with the simplification that scipy's
+        # huber loss is a robust likelihood, not an exact Gaussian).
+        prior_residuals = [
+            (params[i] - prior_mu[i]) / prior_sigma[i]
+            for i in range(n_priors)
+        ]
+        return residuals + prior_residuals
 
     try:
         result = _least_squares(
@@ -773,18 +872,22 @@ def _fit_greybox_2r2c(
     ua_c = float(params_fit["ua_c"])
     k_c = float(params_fit["k_c"])
     alpha_total = float(params_fit.get("alpha_c", 0.0))
-    # k_w and mass_ratio held at constants in this fit
-    # (Stage A operational regime); see project_greybox_redesign_evidence.md.
+    # v2 Bayesian: k_w and mass_ratio are fitted (constrained by Tikhonov
+    # priors, see comments at parameter packing above).
+    k_w = float(params_fit["k_w"])
+    mass_ratio = float(params_fit["mass_ratio"])
 
     tau_fast, tau_slow = _natural_eigenvalues(ua_c, k_w, mass_ratio)
     tau_eff = tau_slow  # dominant for legacy consumers
     # residual_rms reflects data-fit quality (sim-error PEM units: °C of
-    # T_a prediction error, NOT °C/min like rate-residual). Existing gate
-    # threshold GATE_MAX_RMS = 0.02 °C/min is incompatible — see
-    # cadence-adaptive replacement.
+    # T_a prediction error). Strip the n_priors Tikhonov terms appended
+    # to result.fun before computing RMS — they're a regularization, not
+    # observation residuals, and would skew the metric used by quality
+    # gates and downstream diagnostics.
     if result.fun is not None and m > 0:
+        data_residuals = result.fun[:n_data] if len(result.fun) >= n_data else result.fun
         residual_rms = math.sqrt(
-            sum(float(r) * float(r) for r in result.fun) / m
+            sum(float(r) * float(r) for r in data_residuals) / m
         )
     else:
         residual_rms = 0.0
@@ -804,45 +907,14 @@ def _fit_greybox_2r2c(
         except Exception:
             pass
 
-    # ── Stage B: perturbation-regime wall-mode fit ───────────────────
-    # Stage A (above) hard-fixed (k_w, mass_ratio) at lit values because
-    # operational closed-loop data doesn't excite the wall mode (Bacher-
-    # Madsen 2011, Marty-Stabat 2022, Reynders 2014). When perturbation
-    # data is available — auto-perturbation cycles, plant-test step, etc.
-    # — the wall mode IS excited and (k_w, mass_ratio) become identifiable
-    # (empirically validated 2026-05-06; project_greybox_redesign_evidence.md).
-    #
-    # Stage B re-fits ONLY (k_w, mass_ratio) on the perturbation subset
-    # with Stage A's free params (c0, ua_c, k_c, α_total) frozen. If
-    # Stage B succeeds, its wall params replace the Stage A hard-fix in
-    # the returned GreyboxResult; otherwise Stage A's fixed values stand.
-    perturb_indices = [i for i, o in enumerate(eligible) if o.during_perturbation]
-    n_perturb = len(perturb_indices)
-    if n_perturb >= MIN_OBSERVATIONS_STAGE_B:
-        stage_b = _fit_stage_b_wall(
-            perturb_indices=perturb_indices,
-            t_air=t_air, t_out=t_out, solar=solar,
-            hp_setpoint_arr=hp_setpoint_arr, dt_min=dt_min,
-            c0=c0, ua_c=ua_c, k_c=k_c, alpha_total=alpha_total,
-            has_solar=has_solar,
-        )
-        if stage_b is not None:  # pragma: no branch — stage_b is None only when SCIPY missing or no perturbation obs
-            k_w_new = stage_b["k_w"]
-            mass_ratio_new = stage_b["mass_ratio"]
-            _LOGGER.info(
-                "Grey-box Stage B fit (n_perturb=%d): k_w %.5f→%.5f, "
-                "mass_ratio %.2f→%.2f",
-                n_perturb, k_w, k_w_new, mass_ratio, mass_ratio_new,
-            )
-            k_w = k_w_new
-            mass_ratio = mass_ratio_new
-            tau_fast, tau_slow = _natural_eigenvalues(ua_c, k_w, mass_ratio)
-            tau_eff = tau_slow
-    else:
-        _LOGGER.debug(
-            "Grey-box Stage B skipped (n_perturb=%d < %d threshold)",
-            n_perturb, MIN_OBSERVATIONS_STAGE_B,
-        )
+    # v2 Bayesian: Stage B perturbation-regime wall fit is GONE. k_w and
+    # mass_ratio are joint-fitted with Tikhonov priors above; when
+    # perturbation data is available it naturally increases the Fisher
+    # information on wall mode in the likelihood term, letting the MAP
+    # estimate move further from the prior. When perturbation data is
+    # absent, the prior dominates and we get lit-typical wall mode —
+    # the same end state Stage A's hard-fix produced, but reached
+    # principally through Bayesian inference rather than ad-hoc fixing.
 
     tau_agreement = None
     if plant_tau_slow is not None and plant_tau_slow > 0 and not math.isinf(tau_slow):
@@ -871,121 +943,6 @@ def _fit_greybox_2r2c(
         dt_median_min=typical_dt if typical_dt > 0 else None,
     )
 
-
-# Minimum perturbation observations required to attempt Stage B wall fit.
-# At 60s ticks, one perturb cycle of ~60-90 min = 60-90 observations; we
-# want ≥1 cycle's worth across multiple cycles. 100 ≈ 1.5 cycles minimum.
-MIN_OBSERVATIONS_STAGE_B = 100
-
-
-def _fit_stage_b_wall(
-    *,
-    perturb_indices: list[int],
-    t_air: list[float],
-    t_out: list[float],
-    solar: list[float],
-    hp_setpoint_arr: list[float | None],
-    dt_min: list[float],
-    c0: float,
-    ua_c: float,
-    k_c: float,
-    alpha_total: float,
-    has_solar: bool,
-) -> dict | None:
-    """Stage B wall-mode fit on perturbation observations.
-
-    With Stage A's free params (c0, ua_c, k_c, α_total) frozen, fit ONLY
-    (k_w, mass_ratio).
-
-    State is forward-simulated over ALL observations (using actual inputs
-    at each tick), so the wall correctly equilibrates during operational
-    periods. Residuals are summed only over the perturbation subset
-    (`during_perturbation=True`) — that's where the wall mode is excited
-    and its dynamics are observable. This is the cleanest formulation:
-    full-trajectory state propagation + regime-restricted loss.
-
-    Returns {"k_w": ..., "mass_ratio": ...} on success, None on failure.
-    """
-    if not SCIPY_AVAILABLE:
-        return None
-    import numpy as np
-
-    m = len(t_air)
-    n_pe = len(perturb_indices)
-    perturb_set = set(perturb_indices)
-
-    alpha_air = alpha_total * SOLAR_AIR_FRACTION
-    alpha_wall = alpha_total * SOLAR_WALL_FRACTION
-
-    def residual_fn(params: list[float]) -> list[float]:
-        k_w, mass_ratio = params
-        a_wall_rate = k_w / mass_ratio
-
-        A_active = np.array([
-            [-(ua_c + k_c + k_w), k_w],
-            [a_wall_rate, -a_wall_rate],
-        ], dtype=float)
-        A_inactive = np.array([
-            [-(ua_c + k_w), k_w],
-            [a_wall_rate, -a_wall_rate],
-        ], dtype=float)
-
-        # Forward-simulate over the FULL trajectory. State propagates
-        # correctly across operational gaps using their actual inputs.
-        x = np.array([t_air[0], t_air[0]], dtype=float)
-        residuals = []
-
-        for i in range(1, m):
-            dt = dt_min[i]
-            if dt <= 0:
-                if i in perturb_set:  # pragma: no branch — perturbation indices are a subset of all i; covered by full path
-                    residuals.append(0.0)
-                continue
-            sp_prev = hp_setpoint_arr[i - 1]
-            t_a_prev = t_air[i - 1]
-            active_prev = (sp_prev is not None) and (t_a_prev < sp_prev)
-            try:
-                A = A_active if active_prev else A_inactive
-                eA = _expm(A * dt)
-                psi = np.linalg.solve(A, eA - np.eye(2))
-            except Exception:
-                # Numerical failure — return large residuals to steer
-                # the optimizer away
-                return [1e6] * n_pe
-            if active_prev:
-                b1 = (c0 + ua_c * t_out[i - 1] + k_c * sp_prev
-                      + alpha_air * solar[i - 1])
-            else:
-                b1 = c0 + ua_c * t_out[i - 1] + alpha_air * solar[i - 1]
-            b2 = alpha_wall * solar[i - 1] / mass_ratio
-            b = np.array([b1, b2], dtype=float)
-            x = eA @ x + psi @ b
-            if i in perturb_set:
-                residuals.append(float(x[0] - t_air[i]))
-
-        # Pad to n_pe if any perturb-set members were skipped (dt<=0)
-        while len(residuals) < n_pe:
-            residuals.append(0.0)
-        return residuals
-
-    x0 = [K_W_FIXED, MASS_RATIO_FIXED]
-    lower = [K_W_BOUNDS[0], MASS_RATIO_BOUNDS[0]]
-    upper = [K_W_BOUNDS[1], MASS_RATIO_BOUNDS[1]]
-
-    try:
-        result = _least_squares(
-            residual_fn, x0,
-            bounds=(lower, upper),
-            method="trf",
-            loss="huber",
-            f_scale=0.1,  # °C state-error scale, like Stage A
-            max_nfev=200,
-        )
-    except Exception:
-        _LOGGER.exception("Grey-box Stage B (wall fit): least_squares failed")
-        return None
-
-    return {"k_w": float(result.x[0]), "mass_ratio": float(result.x[1])}
 
 
 def log_greybox_result(
