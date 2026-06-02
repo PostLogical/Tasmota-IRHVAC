@@ -817,6 +817,76 @@ class TestFitGreybox2R2C:
         assert bridge.beta[2] is not None
         assert abs(bridge.beta[2] - beta_solar_true) < 0.50
 
+    def test_2r2c_fit_is_order_invariant(self):
+        """fit_greybox must produce the same 2R2C result regardless of input
+        observation order.
+
+        The greybox buffer's get_all() returns observations in storage-slot
+        order, which after eviction (in-place slot overwrite at
+        batch_learning.py:1248,1284) ceases to track wall-clock order.
+        Three places in greybox_observer assume chronological order:
+        the 2R2C dispatch gate (timespan_days = last.ts - first.ts), the
+        cadence-adaptive median-dt helper, and the sim-error PEM matrix-
+        exp residual loop (dt = ts[i] - ts[i-1]). Without sorting at the
+        top of fit_greybox, a scrambled input either falls back to 1R1C
+        (negative timespan) or runs 2R2C with state propagation across
+        random time jumps — producing the catastrophic bound-pinning
+        collapse documented in project_buffer_fill_collapse_bug.md.
+        """
+        import random
+        obs_sorted = self._generate_2r2c_observations(n_days=21.0, tick_minutes=10.0)
+        # Caller's "buffer" — shuffled to simulate post-eviction slot order.
+        # Seed pinned for determinism; the shuffle disorder is what's
+        # important, not which permutation.
+        obs_shuffled = list(obs_sorted)
+        random.Random(20260602).shuffle(obs_shuffled)
+        # Sanity: the shuffle actually scrambles timestamps (avoid a
+        # degenerate permutation that happens to stay near sorted).
+        adj_negative = sum(
+            1 for i in range(1, len(obs_shuffled))
+            if obs_shuffled[i].timestamp <= obs_shuffled[i - 1].timestamp
+        )
+        assert adj_negative > len(obs_shuffled) // 3, (
+            "shuffle too tame to exercise the non-chronological code path"
+        )
+
+        model_inputs = [
+            {"name": "Solar Proxy", "entity_id": "sensor.solar_proxy", "input_role": "solar"},
+        ]
+        result_sorted = fit_greybox(obs_sorted, model_inputs)
+        result_shuffled = fit_greybox(obs_shuffled, model_inputs)
+
+        assert result_sorted is not None and result_sorted.is_2r2c, (
+            "control: chronological input must dispatch 2R2C"
+        )
+        assert result_shuffled is not None, (
+            "shuffled input must still produce a fit (sort makes dispatch "
+            "see a positive timespan)"
+        )
+        assert result_shuffled.is_2r2c, (
+            "shuffled input must dispatch 2R2C — bug symptom is fallback "
+            "to 1R1C from negative timespan_days at the dispatch gate"
+        )
+
+        # Free params: ua_c, k_c, alpha_c. Bayesian priors anchor k_w and
+        # mass_ratio, so don't lean on them for the order-invariance check.
+        # Tolerance: floating-point equivalence after sort would give bit-
+        # identical results in principle; the residual freedom comes from
+        # least_squares's iteration trace seeing a different observation
+        # ordering inside the residual vector. 1% headroom covers that.
+        assert abs(result_shuffled.ua_c - result_sorted.ua_c) / result_sorted.ua_c < 0.01, (
+            f"ua_c order-variant: sorted={result_sorted.ua_c:.6f} "
+            f"shuffled={result_shuffled.ua_c:.6f}"
+        )
+        assert abs(result_shuffled.k_c - result_sorted.k_c) / result_sorted.k_c < 0.01, (
+            f"k_c order-variant: sorted={result_sorted.k_c:.6f} "
+            f"shuffled={result_shuffled.k_c:.6f}"
+        )
+        assert abs(result_shuffled.alpha_c - result_sorted.alpha_c) / result_sorted.alpha_c < 0.01, (
+            f"alpha_c order-variant: sorted={result_sorted.alpha_c:.6f} "
+            f"shuffled={result_shuffled.alpha_c:.6f}"
+        )
+
 
 class TestGates2R2C:
     """Quality gates specific to 2R2C results."""

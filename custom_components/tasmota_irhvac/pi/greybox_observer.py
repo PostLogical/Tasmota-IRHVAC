@@ -290,6 +290,14 @@ def fit_greybox(
 
     # Filter to observations with valid outdoor temperature.
     eligible = [o for o in observations if o.outdoor_temp_c is not None]
+    # GreyboxBuffer.get_all() returns storage-slot order; SlevPolicy eviction
+    # overwrites slots in place (batch_learning.py:1248,1284), so post-fill
+    # the slot order no longer tracks wall-clock order. The 2R2C dispatch
+    # gate (timespan_days below), _compute_dt_median_min, and the sim-error
+    # PEM residual loop (dt = ts[i] - ts[i-1]) all require chronological
+    # ordering — without this sort, eviction produces catastrophic param
+    # collapse to bounds. project_buffer_fill_collapse_bug.md (#139).
+    eligible.sort(key=lambda o: o.timestamp)
 
     if len(eligible) < MIN_OBSERVATIONS:
         _LOGGER.debug(
