@@ -472,6 +472,10 @@ SERVICE_TO_METHOD = {
             {vol.Optional("mode"): vol.In(["heat", "cool"])}
         ),
     },
+    "reset_greybox_priors": {
+        "method": "async_reset_greybox_priors",
+        "schema": IRHVAC_SERVICE_SCHEMA,
+    },
     "set_coefficient": {
         "method": "async_set_coefficient",
         "schema": IRHVAC_SERVICE_SCHEMA.extend({
@@ -1891,6 +1895,16 @@ class TasmotaIrhvac(RestoreEntity, ClimateEntity):
     async def async_flush_observation_buffer(self, mode: str | None = None) -> None:
         """Clear observation buffer(s) and reset batch learning state."""
         await self._controller.async_flush_observation_buffer(mode=mode)
+
+    async def async_reset_greybox_priors(self) -> None:
+        """Reset the Pathak §4.2 grey-box prior chain to lit-typical defaults.
+
+        Use after renovation / equipment swap / sensor relocation, or when
+        diagnosing a chain that drifted. Discards persisted per-param
+        posteriors; preserves the observation buffer and last fit result.
+        Next batch starts a fresh chain from lit-typical priors.
+        """
+        await self._controller.async_reset_greybox_priors()
 
     async def async_set_subsystem(self, subsystem: str, enabled: bool) -> None:
         """Toggle a PI subsystem at runtime without reload."""

@@ -273,6 +273,13 @@ flush_observation_buffer:
             - heat
             - cool
 
+reset_greybox_priors:
+  name: Reset grey-box prior chain
+  description: Discard the persisted per-zone grey-box prior chain (Pathak §4.2 transfer learning) and return to lit-typical defaults. Use after major renovation / equipment swap / sensor relocation, or when troubleshooting suggests the chain has drifted. Preserves the observation buffer and last fit result; only clears accumulated posterior priors. Next batch starts a fresh chain.
+  target:
+    entity:
+      integration: tasmota_irhvac
+
 set_coefficient:
   name: Set coefficient
   description: Manually set an RLS feedforward coefficient value. The coefficient is identified by name (intercept, outdoor_delta, or model input name) and mode (heat/cool).

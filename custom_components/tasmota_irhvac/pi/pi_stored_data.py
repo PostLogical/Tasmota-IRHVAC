@@ -68,6 +68,7 @@ class PIExtraStoredData(ExtraStoredData):
     manual_override_heat: list[bool | None] = dataclasses.field(default_factory=list)
     manual_override_cool: list[bool | None] = dataclasses.field(default_factory=list)
     greybox_buffer: list[dict[str, Any]] = dataclasses.field(default_factory=list)  # Observation.as_dict()
+    greybox_prior_state: dict[str, Any] = dataclasses.field(default_factory=dict)  # PriorState.to_dict()
     batch_cycle_count: int = 0
     # Runtime subsystem toggles (persisted so they survive restarts)
     control_active: bool = True
@@ -143,6 +144,7 @@ class PIExtraStoredData(ExtraStoredData):
             "manual_override_heat": self.manual_override_heat,
             "manual_override_cool": self.manual_override_cool,
             "greybox_buffer": self.greybox_buffer,
+            "greybox_prior_state": self.greybox_prior_state,
             "batch_cycle_count": self.batch_cycle_count,
             "control_active": self.control_active,
             "ff_enabled": self.ff_enabled,
@@ -213,6 +215,7 @@ class PIExtraStoredData(ExtraStoredData):
                 manual_override_heat=restored.get("manual_override_heat", []),
                 manual_override_cool=restored.get("manual_override_cool", []),
                 greybox_buffer=restored.get("greybox_buffer", []),
+                greybox_prior_state=restored.get("greybox_prior_state", {}),
                 batch_cycle_count=int(restored.get("batch_cycle_count", 0)),
                 control_active=bool(restored.get("control_active", True)),
                 ff_enabled=bool(restored.get("ff_enabled", True)),

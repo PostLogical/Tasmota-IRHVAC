@@ -45,11 +45,13 @@ from .greybox_buffer import GreyboxBuffer
 from .greybox_observer import (
     GreyboxBridgeResult,
     GreyboxResult,
+    PriorState,
     SCIPY_AVAILABLE,
     find_solar_entity,
     fit_greybox,
     greybox_to_beta,
     log_greybox_result,
+    promote_posterior,
 )
 from .health_checks import AnomalyEvent, CUSUM_COOLDOWN_SEC, CUSUM_H_HAWKINS, CUSUM_K_HAWKINS, CUSUM_WARMUP_N, CUSUM_WINDOW_S, LatchArmedEvent, LatchArmingTrigger, MIN_EVENT_DURATION_SEC, SelfStartingCusumState, obs_raw_reading, repair_qualifies, update_self_starting_cusum
 
@@ -852,6 +854,14 @@ class PIController:
         self._last_greybox_bridge: GreyboxBridgeResult | None = None
         self._last_greybox_timestamp_iso: str | None = None
         self._greybox_has_been_good: bool = False
+        # Pathak §4.2 transfer learning: per-zone persistent priors. Updated
+        # by promote_posterior() after each passing batch fit. Cold start:
+        # all params None → lit-typical defaults apply. Default-ON; user can
+        # opt out via `pi_greybox_prior_chain_enabled=False`.
+        self._greybox_prior_state: PriorState = PriorState()
+        self._greybox_prior_chain_enabled: bool = config.get(
+            "pi_greybox_prior_chain_enabled", True,
+        )
         self._last_batch_timestamp: float | None = None
         self._last_batch_wallclock: str = ""  # ISO-8601 wall-clock time
         self._detected_lag_tau: dict[str, float] = {}  # input name → smoothed detected tau (seconds)
@@ -1302,18 +1312,41 @@ class PIController:
         # Grey-box uses its own buffer (includes HP-off observations).
         greybox_observations = self._greybox_buffer.get_all()
         gb_diag = self._greybox_buffer.get_diagnostics()
-        _LOGGER.info(
-            "%sGrey-box buffer: %d/%d obs, hp_off=%.1f%%, min_leverage=%s",
-            self._log_prefix,
-            gb_diag["total"], gb_diag["max_size"],
-            gb_diag.get("hp_off_pct") or 0.0,
-            gb_diag.get("min_leverage"),
+        # Log prior-chain state at fit start so the audit trail shows which
+        # params used persistent posteriors vs lit-typical defaults.
+        if self._greybox_prior_chain_enabled and self._greybox_prior_state.n_promotions > 0:
+            promoted = [
+                n for n in PriorState._PARAM_NAMES
+                if self._greybox_prior_state.is_promoted(n)
+            ]
+            _LOGGER.info(
+                "%sGrey-box buffer: %d/%d obs, hp_off=%.1f%%, "
+                "prior_chain=%d promotions, persisted=%s",
+                self._log_prefix,
+                gb_diag["total"], gb_diag["max_size"],
+                gb_diag.get("hp_off_pct") or 0.0,
+                self._greybox_prior_state.n_promotions,
+                ",".join(promoted) if promoted else "(none)",
+            )
+        else:
+            _LOGGER.info(
+                "%sGrey-box buffer: %d/%d obs, hp_off=%.1f%%, min_leverage=%s",
+                self._log_prefix,
+                gb_diag["total"], gb_diag["max_size"],
+                gb_diag.get("hp_off_pct") or 0.0,
+                gb_diag.get("min_leverage"),
+            )
+        fit_prior = (
+            self._greybox_prior_state
+            if self._greybox_prior_chain_enabled
+            else None
         )
         greybox = fit_greybox(
             greybox_observations,
             model_inputs=self._model_inputs,
             plant_tau_slow=plant.tau_slow.value if plant.tau_slow.confidence > 0 else None,
             plant_tau_slow_confidence=plant.tau_slow.confidence,
+            prior_state=fit_prior,
         )
         if greybox is not None:
             log_greybox_result(greybox, log_prefix=self._log_prefix)
@@ -1329,6 +1362,33 @@ class PIController:
             self._last_greybox_bridge = bridge
             if bridge.gates_passed:  # pragma: no branch — gates_passed False covered indirectly; defensive
                 self._greybox_has_been_good = True
+
+            # Pathak §4.2 transfer-learning chain: if this batch's posterior
+            # qualifies for promotion, persist it as next batch's prior.
+            # promote_posterior is a pure function with lit-grounded gates
+            # (gates pass, 2R2C, no railed params, std_err populated).
+            if self._greybox_prior_chain_enabled:
+                new_prior = promote_posterior(
+                    greybox,
+                    self._greybox_prior_state,
+                    bridge_gates_passed=bridge.gates_passed,
+                )
+                if new_prior is not self._greybox_prior_state:
+                    delta = [
+                        n for n in PriorState._PARAM_NAMES
+                        if (
+                            getattr(new_prior, n) is not None
+                            and getattr(new_prior, n)
+                            != getattr(self._greybox_prior_state, n)
+                        )
+                    ]
+                    _LOGGER.info(
+                        "%sGrey-box prior chain: promotion #%d — updated %s",
+                        self._log_prefix,
+                        new_prior.n_promotions,
+                        ",".join(delta) if delta else "(no-change)",
+                    )
+                    self._greybox_prior_state = new_prior
 
             # Cross-validation: compare grey-box β against WLS β
             if result.beta_batch:  # pragma: no branch — beta_batch empty only when WLS produced no params
@@ -1855,6 +1915,7 @@ class PIController:
             observation_buffer_heat=self._obs_buffer_heat_cache,
             observation_buffer_cool=self._obs_buffer_cool_cache,
             greybox_buffer=self._greybox_buffer_cache,
+            greybox_prior_state=self._greybox_prior_state.to_dict(),
             drift_correction_signs=self._drift_correction_signs,
             last_batch_result=(
                 {
@@ -1974,6 +2035,12 @@ class PIController:
                 solar_entity=find_solar_entity(self._model_inputs),
             )
             self._greybox_buffer_cache = data.greybox_buffer
+
+        # Restore grey-box prior chain. Missing → cold-start defaults.
+        if data.greybox_prior_state:
+            self._greybox_prior_state = PriorState.from_dict(
+                data.greybox_prior_state,
+            )
 
         # Restore head calibration bounds and probe state
         self._head_calibration_min_heat = data.head_calibration_min_heat
@@ -3001,6 +3068,26 @@ class PIController:
             TickEventKind.BUFFER_RESET,
             BufferResetPayload(buffer="greybox", reason=reason, before_count=before),
         )
+
+    def reset_greybox_priors(self, *, reason: str = "service_call") -> int:
+        """Reset the Pathak §4.2 prior chain to lit-typical defaults.
+
+        Used when the building genuinely changes (renovation, equipment
+        swap, sensor relocation) or when troubleshooting suggests the
+        chain has drifted. Returns the number of promotions discarded
+        for the audit log.
+
+        Does NOT clear the observation buffer or the last fit result;
+        only the persistent priors. Next batch fits with lit defaults
+        and starts a fresh chain.
+        """
+        before = self._greybox_prior_state.n_promotions
+        self._greybox_prior_state = PriorState()
+        _LOGGER.info(
+            "%sGrey-box prior chain reset (reason=%s; discarded %d promotions)",
+            self._log_prefix, reason, before,
+        )
+        return before
 
     def flush_observation_buffer(
         self, mode: str | None = None, *, reason: str = "service_call",
@@ -4268,6 +4355,11 @@ class PIController:
                 if self._last_greybox_bridge is not None else None
             ),
             greybox_buffer=self._greybox_buffer.get_diagnostics(),
+            greybox_prior_state=(
+                self._greybox_prior_state.to_dict()
+                if self._greybox_prior_chain_enabled
+                else None
+            ),
             boundary_estimator=be_diag,
             regime_probe=rp_diag,
             # Advance per-tick side-effect counters BEFORE building the
@@ -4574,6 +4666,10 @@ class PIController:
     async def async_flush_observation_buffer(self, mode: str | None = None) -> None:
         """Clear observation buffer(s) and reset batch learning state (service handler)."""
         self.flush_observation_buffer(mode=mode, reason="service_call")
+
+    async def async_reset_greybox_priors(self) -> None:
+        """Reset the Pathak §4.2 grey-box prior chain (service handler)."""
+        self.reset_greybox_priors(reason="service_call")
 
     def _reset_plant_id(self) -> None:
         """Abort active plant test, cancel observations, reset estimate to seeds.

@@ -171,6 +171,194 @@ MIN_TIMESPAN_DAYS_2R2C = 14.0
 MIN_HP_VARIANCE = 0.01
 
 
+# Lit-typical prior lookup. Used when ``PriorState`` has no promoted
+# value for a given parameter (cold start, or that param was railed and
+# never qualified for promotion).
+_LIT_PRIOR_MEAN: dict[str, float] = {
+    "c0":         C0_PRIOR_MEAN,
+    "ua_c":       UA_C_PRIOR_MEAN,
+    "k_c":        K_C_PRIOR_MEAN,
+    "alpha_c":    ALPHA_C_PRIOR_MEAN,
+    "k_w":        K_W_PRIOR_MEAN,
+    "mass_ratio": MASS_RATIO_PRIOR_MEAN,
+}
+_LIT_PRIOR_SIGMA: dict[str, float] = {
+    "c0":         C0_PRIOR_SIGMA,
+    "ua_c":       UA_C_PRIOR_SIGMA,
+    "k_c":        K_C_PRIOR_SIGMA,
+    "alpha_c":    ALPHA_C_PRIOR_SIGMA,
+    "k_w":        K_W_PRIOR_SIGMA,
+    "mass_ratio": MASS_RATIO_PRIOR_SIGMA,
+}
+_BOUNDS_BY_NAME: dict[str, tuple[float, float]] = {
+    "c0":         C0_BOUNDS,
+    "ua_c":       UA_C_BOUNDS,
+    "k_c":        K_C_BOUNDS,
+    "alpha_c":    ALPHA_C_BOUNDS,
+    "k_w":        K_W_BOUNDS,
+    "mass_ratio": MASS_RATIO_BOUNDS,
+}
+
+
+@dataclass(frozen=True)
+class PriorState:
+    """Per-zone persistent priors for greybox parameters — Pathak (2019)
+    §4.2 transfer learning: today's posterior is tomorrow's prior.
+
+    Each parameter is stored as ``(mu, sigma)`` or ``None`` (cold start /
+    never promoted). ``None`` entries fall back to lit-typical defaults
+    via :meth:`mu_for` and :meth:`sigma_for`.
+
+    Promotion is governed by :func:`promote_posterior` with lit-grounded
+    gates (no railed params per Reynders 2014; bridge gates pass;
+    least_squares converged). The dataclass itself is immutable —
+    promotion returns a new instance.
+
+    Serialization is via :meth:`to_dict` / :meth:`from_dict`; unknown
+    keys are ignored on restore so the schema can grow forward-compatibly.
+    """
+
+    c0:         tuple[float, float] | None = None
+    ua_c:       tuple[float, float] | None = None
+    k_c:        tuple[float, float] | None = None
+    alpha_c:    tuple[float, float] | None = None
+    k_w:        tuple[float, float] | None = None
+    mass_ratio: tuple[float, float] | None = None
+    n_promotions: int = 0
+
+    _PARAM_NAMES = ("c0", "ua_c", "k_c", "alpha_c", "k_w", "mass_ratio")
+
+    def mu_for(self, name: str) -> float:
+        """Return persisted μ for ``name``, or the lit-typical default if
+        this parameter has never been promoted."""
+        val = getattr(self, name, None)
+        return val[0] if val is not None else _LIT_PRIOR_MEAN[name]
+
+    def sigma_for(self, name: str) -> float:
+        """Return persisted σ for ``name``, or the lit-typical default if
+        this parameter has never been promoted."""
+        val = getattr(self, name, None)
+        return val[1] if val is not None else _LIT_PRIOR_SIGMA[name]
+
+    def is_promoted(self, name: str) -> bool:
+        """True iff this parameter has a persisted posterior (not lit default)."""
+        return getattr(self, name, None) is not None
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"n_promotions": self.n_promotions}
+        for name in self._PARAM_NAMES:
+            val = getattr(self, name)
+            if val is not None:
+                out[name] = [float(val[0]), float(val[1])]
+        return out
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "PriorState":
+        """Restore from serialized form. ``None`` or empty input → cold-start
+        defaults. Malformed entries for a single parameter are silently
+        dropped (that param falls back to lit default)."""
+        if not data:
+            return cls()
+        kwargs: dict[str, Any] = {}
+        for name in cls._PARAM_NAMES:
+            entry = data.get(name)
+            if entry is None:
+                continue
+            try:
+                mu, sigma = float(entry[0]), float(entry[1])
+                if math.isfinite(mu) and math.isfinite(sigma) and sigma > 0:
+                    kwargs[name] = (mu, sigma)
+            except (TypeError, ValueError, IndexError):
+                continue
+        n = data.get("n_promotions", 0)
+        try:
+            kwargs["n_promotions"] = max(0, int(n))
+        except (TypeError, ValueError):
+            kwargs["n_promotions"] = 0
+        return cls(**kwargs)
+
+
+def promote_posterior(
+    result: "GreyboxResult",
+    current_state: PriorState,
+    *,
+    bridge_gates_passed: bool,
+    least_squares_converged: bool = True,
+) -> PriorState:
+    """Pathak (2019) §4.2 transfer learning: promote a passing batch's
+    posterior to next batch's prior.
+
+    Lit-grounded promotion criteria (all must hold for the batch as a
+    whole; per-parameter gates apply below):
+
+      1. ``bridge_gates_passed`` — our standing quality bar
+      2. ``result.is_2r2c`` — only 2R2C fits expose all 6 envelope params
+      3. ``least_squares_converged`` — standard PEM gate (Ljung 1999)
+      4. ``param_std_err`` populated — Jacobian-derived posterior σ
+         must exist for the parameters we want to promote
+
+    Per-parameter (Reynders 2014, "rails are diagnosis"):
+      - A parameter at (within 1% of) either of its bounds is non-
+        identifiable; the artificially-tight σ from the bound clamp is
+        not a true posterior. **That parameter is not promoted** — its
+        existing prior survives. Other parameters from the same fit may
+        still promote independently.
+      - σ must be finite and > 0.
+
+    Returns a new :class:`PriorState` (the input is not mutated). If no
+    parameter qualifies, returns ``current_state`` unchanged.
+    """
+    if not bridge_gates_passed:
+        return current_state
+    if not least_squares_converged:
+        return current_state
+    if not result.is_2r2c:
+        return current_state
+    std_err = result.param_std_err or {}
+    if not std_err:
+        return current_state
+
+    values: dict[str, float | None] = {
+        "c0":         result.c0,
+        "ua_c":       result.ua_c,
+        "k_c":        result.k_c,
+        "alpha_c":    result.alpha_c,
+        "k_w":        result.k_w,
+        "mass_ratio": result.mass_ratio,
+    }
+
+    updates: dict[str, tuple[float, float]] = {}
+    for name, value in values.items():
+        if value is None:
+            continue
+        sigma = std_err.get(name)
+        if sigma is None or not math.isfinite(sigma) or sigma <= 0:
+            continue
+        lo, hi = _BOUNDS_BY_NAME[name]
+        # Rail detection: within 1% of bound span counts as railed. Reynders
+        # 2014 § non-identifiability: railed params have artificially tight
+        # σ from the bound clamp, not a true posterior.
+        rail_tol = max((hi - lo) * 0.01, 1e-9)
+        if value <= lo + rail_tol or value >= hi - rail_tol:
+            continue
+        updates[name] = (float(value), float(sigma))
+
+    if not updates:
+        return current_state
+
+    # Build new immutable state with the updated fields; non-updated params
+    # carry over from current_state (either persisted posterior or None).
+    return PriorState(
+        c0=updates.get("c0", current_state.c0),
+        ua_c=updates.get("ua_c", current_state.ua_c),
+        k_c=updates.get("k_c", current_state.k_c),
+        alpha_c=updates.get("alpha_c", current_state.alpha_c),
+        k_w=updates.get("k_w", current_state.k_w),
+        mass_ratio=updates.get("mass_ratio", current_state.mass_ratio),
+        n_promotions=current_state.n_promotions + 1,
+    )
+
+
 @dataclass
 class GreyboxResult:
     """Result of a grey-box energy balance fit (1R1C or 2R2C).
@@ -257,6 +445,7 @@ def fit_greybox(
     model_inputs: list[dict[str, Any]],
     plant_tau_slow: float | None = None,
     plant_tau_slow_confidence: float = 0.0,
+    prior_state: PriorState | None = None,
 ) -> GreyboxResult | None:
     """Fit a grey-box energy balance to observation buffer data.
 
@@ -322,7 +511,10 @@ def fit_greybox(
         return r_1r1c
 
     # Attempt 2R2C with 1R1C warm start.
-    r_2r2c = _fit_greybox_2r2c(eligible, model_inputs, r_1r1c, plant_tau_slow)
+    r_2r2c = _fit_greybox_2r2c(
+        eligible, model_inputs, r_1r1c, plant_tau_slow,
+        prior_state=prior_state,
+    )
     if r_2r2c is None:
         _LOGGER.info("Grey-box: 2R2C fit failed — falling back to 1R1C")
         return r_1r1c
@@ -575,6 +767,8 @@ def _fit_greybox_2r2c(
     model_inputs: list[dict[str, Any]],
     r_1r1c: GreyboxResult,
     plant_tau_slow: float | None = None,
+    *,
+    prior_state: PriorState | None = None,
 ) -> GreyboxResult | None:
     """Fit a 2R2C grey-box energy balance with forward-simulated wall state.
 
@@ -655,6 +849,12 @@ def _fit_greybox_2r2c(
     # MAP optimum is the inverse-variance-weighted average of likelihood
     # (data) and prior, so wall mode stays near lit-typical absent strong
     # data, but data can nudge when it's informative.
+    # Prior values come from PriorState (Pathak §4.2 transfer-learning
+    # chain). Lit-typical defaults apply for parameters that haven't been
+    # promoted yet (cold start) or that failed promotion (e.g. railed).
+    # The Tikhonov penalty (θ-μ)/σ stays identical in form; only the
+    # numbers change.
+    ps = prior_state if prior_state is not None else PriorState()
     if has_solar:
         param_names = ["c0", "ua_c", "k_c", "alpha_c", "k_w", "mass_ratio"]
         lower = [
@@ -665,18 +865,8 @@ def _fit_greybox_2r2c(
             C0_BOUNDS[1], UA_C_BOUNDS[1], K_C_BOUNDS[1], ALPHA_C_BOUNDS[1],
             K_W_BOUNDS[1], MASS_RATIO_BOUNDS[1],
         ]
-        # Prior μ and σ in the same order as param_names. Used to append
-        # Tikhonov penalty terms (θ - μ)/σ to the data residuals; scipy's
-        # sum-of-squares loss makes this equivalent to MAP estimation
-        # under independent Gaussian priors.
-        prior_mu = [
-            C0_PRIOR_MEAN, UA_C_PRIOR_MEAN, K_C_PRIOR_MEAN, ALPHA_C_PRIOR_MEAN,
-            K_W_PRIOR_MEAN, MASS_RATIO_PRIOR_MEAN,
-        ]
-        prior_sigma = [
-            C0_PRIOR_SIGMA, UA_C_PRIOR_SIGMA, K_C_PRIOR_SIGMA, ALPHA_C_PRIOR_SIGMA,
-            K_W_PRIOR_SIGMA, MASS_RATIO_PRIOR_SIGMA,
-        ]
+        prior_mu = [ps.mu_for(n) for n in param_names]
+        prior_sigma = [ps.sigma_for(n) for n in param_names]
     else:
         param_names = ["c0", "ua_c", "k_c", "k_w", "mass_ratio"]
         lower = [
@@ -687,14 +877,8 @@ def _fit_greybox_2r2c(
             C0_BOUNDS[1], UA_C_BOUNDS[1], K_C_BOUNDS[1],
             K_W_BOUNDS[1], MASS_RATIO_BOUNDS[1],
         ]
-        prior_mu = [
-            C0_PRIOR_MEAN, UA_C_PRIOR_MEAN, K_C_PRIOR_MEAN,
-            K_W_PRIOR_MEAN, MASS_RATIO_PRIOR_MEAN,
-        ]
-        prior_sigma = [
-            C0_PRIOR_SIGMA, UA_C_PRIOR_SIGMA, K_C_PRIOR_SIGMA,
-            K_W_PRIOR_SIGMA, MASS_RATIO_PRIOR_SIGMA,
-        ]
+        prior_mu = [ps.mu_for(n) for n in param_names]
+        prior_sigma = [ps.sigma_for(n) for n in param_names]
 
     # Plant ID transfer-learning: if plant_tau_slow is confidently known,
     # replace the default ua_c prior with one centered at 1/tau_slow.

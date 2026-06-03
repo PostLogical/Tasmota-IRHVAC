@@ -10,6 +10,7 @@ import math
 import pytest
 
 from custom_components.tasmota_irhvac.pi.greybox_observer import (
+    C0_BOUNDS,
     GATE_MAX_CV,
     GATE_MAX_RMS,
     GATE_MAX_TAU,
@@ -19,13 +20,20 @@ from custom_components.tasmota_irhvac.pi.greybox_observer import (
     GATE_MIN_TAU_FAST,
     GATE_MIN_TAU_SLOW,
     GATE_MIN_TAU_SEPARATION,
+    K_C_BOUNDS,
+    K_W_BOUNDS,
+    MASS_RATIO_BOUNDS,
     MIN_OBSERVATIONS_2R2C,
     MIN_TIMESPAN_DAYS_2R2C,
     SCIPY_AVAILABLE,
     SOLAR_AIR_FRACTION,
     SOLAR_WALL_FRACTION,
+    UA_C_BOUNDS,
+    UA_C_PRIOR_MEAN,
+    UA_C_PRIOR_SIGMA,
     GreyboxBridgeResult,
     GreyboxResult,
+    PriorState,
     _check_quality_gates,
     _delta_method_ratio_std,
     _natural_eigenvalues,
@@ -33,6 +41,7 @@ from custom_components.tasmota_irhvac.pi.greybox_observer import (
     fit_greybox,
     greybox_to_beta,
     log_greybox_result,
+    promote_posterior,
 )
 from custom_components.tasmota_irhvac.pi.batch_learning import Observation
 
@@ -1581,3 +1590,250 @@ class TestFitGreybox2R2CDefensiveResidualPaths:
         assert result is not None
         if result.is_2r2c:
             assert result.residual_rms == 0.0
+
+
+# ── PriorState + promote_posterior — Pathak §4.2 transfer-learning chain ────
+
+
+class TestPriorState:
+    """PriorState: per-zone persisted greybox priors with lit-default fallback."""
+
+    def test_default_init_has_no_promotions(self):
+        ps = PriorState()
+        assert ps.n_promotions == 0
+        for name in PriorState._PARAM_NAMES:
+            assert getattr(ps, name) is None
+            assert not ps.is_promoted(name)
+
+    def test_mu_for_falls_back_to_lit_default(self):
+        ps = PriorState()
+        # Cold start → lit defaults.
+        assert ps.mu_for("ua_c") == UA_C_PRIOR_MEAN
+        assert ps.sigma_for("ua_c") == UA_C_PRIOR_SIGMA
+
+    def test_mu_for_returns_persisted_value_when_promoted(self):
+        ps = PriorState(ua_c=(0.008, 0.002), n_promotions=1)
+        assert ps.mu_for("ua_c") == 0.008
+        assert ps.sigma_for("ua_c") == 0.002
+        assert ps.is_promoted("ua_c")
+        # Non-promoted params still fall back to lit defaults.
+        assert ps.mu_for("k_c") != 0.008
+        assert not ps.is_promoted("k_c")
+
+    def test_serialization_roundtrip(self):
+        ps = PriorState(
+            ua_c=(0.008, 0.002),
+            k_c=(0.04, 0.01),
+            k_w=(0.022, 0.003),
+            n_promotions=5,
+        )
+        restored = PriorState.from_dict(ps.to_dict())
+        assert restored == ps
+
+    def test_from_dict_handles_none_and_empty(self):
+        assert PriorState.from_dict(None) == PriorState()
+        assert PriorState.from_dict({}) == PriorState()
+
+    def test_from_dict_drops_malformed_entries(self):
+        # Bogus values for one param shouldn't poison the others.
+        data = {
+            "ua_c": [0.008, 0.002],     # ok
+            "k_c": ["not", "numeric"],   # malformed → dropped
+            "alpha_c": [float("nan"), 0.01],  # NaN → dropped
+            "k_w": [0.02, -1.0],         # negative σ → dropped
+            "n_promotions": 3,
+        }
+        ps = PriorState.from_dict(data)
+        assert ps.ua_c == (0.008, 0.002)
+        assert ps.k_c is None
+        assert ps.alpha_c is None
+        assert ps.k_w is None
+        assert ps.n_promotions == 3
+
+    def test_immutable(self):
+        ps = PriorState(ua_c=(0.008, 0.002))
+        with pytest.raises(Exception):
+            ps.n_promotions = 99  # type: ignore[misc]
+
+
+class TestPromotePosterior:
+    """promote_posterior() gates: lit-grounded only.
+
+    No CV thresholds — the Bayesian framework's wide-σ-on-non-identifiable
+    handles that. Three gates: gates_passed, least_squares_converged, no
+    railed params (Reynders 2014).
+    """
+
+    def _result(self, **overrides) -> GreyboxResult:
+        # A 2R2C result with all params + tight std_err that should
+        # qualify for promotion.
+        defaults = dict(
+            n_observations=2000, n_hp_on=1200, n_hp_off=800,
+            c0=0.001, ua_c=0.008, k_c=0.04, alpha_c=0.05,
+            tau_eff=125.0, residual_rms=0.005,
+            cost=1.0, n_function_evals=20,
+            param_std_err={
+                "c0": 0.0005, "ua_c": 0.001, "k_c": 0.002,
+                "alpha_c": 0.005, "k_w": 0.002, "mass_ratio": 1.0,
+            },
+            is_2r2c=True,
+            k_w=0.022, mass_ratio=8.0,
+            tau_fast=20.0, tau_slow=180.0,
+        )
+        defaults.update(overrides)
+        return GreyboxResult(**defaults)
+
+    def test_clean_fit_promotes_all_params(self):
+        result = self._result()
+        before = PriorState()
+        after = promote_posterior(result, before, bridge_gates_passed=True)
+        assert after.n_promotions == 1
+        assert after.ua_c == (0.008, 0.001)
+        assert after.k_c == (0.04, 0.002)
+        assert after.k_w == (0.022, 0.002)
+        assert after.mass_ratio == (8.0, 1.0)
+        assert after is not before  # immutable; new instance returned
+
+    def test_gates_failed_blocks_promotion(self):
+        result = self._result()
+        before = PriorState()
+        after = promote_posterior(result, before, bridge_gates_passed=False)
+        assert after is before  # unchanged
+
+    def test_optimizer_not_converged_blocks_promotion(self):
+        result = self._result()
+        before = PriorState()
+        after = promote_posterior(
+            result, before,
+            bridge_gates_passed=True, least_squares_converged=False,
+        )
+        assert after is before
+
+    def test_1r1c_result_blocks_promotion(self):
+        # 2R2C posterior shape is what we serialize; a 1R1C fit lacks
+        # the wall-mode params → no useful posterior to promote.
+        result = self._result(is_2r2c=False, k_w=None, mass_ratio=None,
+                              tau_fast=None, tau_slow=None)
+        before = PriorState()
+        after = promote_posterior(result, before, bridge_gates_passed=True)
+        assert after is before
+
+    def test_missing_std_err_blocks_promotion(self):
+        result = self._result(param_std_err={})
+        before = PriorState()
+        after = promote_posterior(result, before, bridge_gates_passed=True)
+        assert after is before
+
+    def test_railed_param_not_promoted_others_still_promote(self):
+        """Reynders 2014 — a railed param's σ is artificially tight from
+        the bound clamp, not a true posterior. Don't promote that ONE
+        param; others from the same fit are independent and still go."""
+        # Rail mass_ratio at upper bound; ua_c stays clean.
+        result = self._result(mass_ratio=MASS_RATIO_BOUNDS[1])
+        before = PriorState()
+        after = promote_posterior(result, before, bridge_gates_passed=True)
+        assert after.n_promotions == 1
+        assert after.ua_c is not None
+        assert after.mass_ratio is None  # railed → not promoted
+
+    def test_param_at_lower_bound_not_promoted(self):
+        """Same rule applies at the lower bound."""
+        result = self._result(ua_c=UA_C_BOUNDS[0])
+        before = PriorState()
+        after = promote_posterior(result, before, bridge_gates_passed=True)
+        assert after.ua_c is None  # railed lower
+        assert after.k_c is not None  # k_c was clean → promoted
+
+    def test_param_with_nan_std_err_not_promoted(self):
+        result = self._result(param_std_err={
+            "ua_c": float("nan"), "k_c": 0.002, "alpha_c": 0.005,
+            "k_w": 0.002, "mass_ratio": 1.0,
+        })
+        before = PriorState()
+        after = promote_posterior(result, before, bridge_gates_passed=True)
+        assert after.ua_c is None
+        assert after.k_c is not None
+
+    def test_all_params_railed_returns_unchanged(self):
+        # All params at bounds → no updates → input returned unchanged.
+        result = self._result(
+            c0=C0_BOUNDS[0],
+            ua_c=UA_C_BOUNDS[1],
+            k_c=K_C_BOUNDS[1],
+            alpha_c=0.0,  # at lower bound
+            k_w=K_W_BOUNDS[1],
+            mass_ratio=MASS_RATIO_BOUNDS[1],
+        )
+        before = PriorState()
+        after = promote_posterior(result, before, bridge_gates_passed=True)
+        assert after is before  # n_promotions NOT incremented
+
+    def test_successive_promotions_accumulate(self):
+        """Chain of promotions: each round overwrites with the new posterior
+        and increments n_promotions."""
+        result1 = self._result(ua_c=0.008)
+        result2 = self._result(ua_c=0.010)
+        result3 = self._result(ua_c=0.0095)
+        state = PriorState()
+        state = promote_posterior(result1, state, bridge_gates_passed=True)
+        state = promote_posterior(result2, state, bridge_gates_passed=True)
+        state = promote_posterior(result3, state, bridge_gates_passed=True)
+        assert state.n_promotions == 3
+        # ua_c reflects the latest posterior, not an average.
+        assert state.ua_c[0] == 0.0095
+
+    def test_partial_promotion_preserves_prior_promotions(self):
+        """If batch N rails mass_ratio but batch N+1 doesn't, the
+        N+1 batch should promote mass_ratio fresh (since prior was None)."""
+        state = PriorState()
+        # Batch 1: mass_ratio railed → only other params promoted.
+        r1 = self._result(mass_ratio=MASS_RATIO_BOUNDS[1])
+        state = promote_posterior(r1, state, bridge_gates_passed=True)
+        assert state.mass_ratio is None
+        assert state.ua_c is not None
+        ua_c_after_b1 = state.ua_c
+        # Batch 2: clean mass_ratio. ua_c also re-promoted.
+        r2 = self._result(mass_ratio=7.5)
+        state = promote_posterior(r2, state, bridge_gates_passed=True)
+        assert state.n_promotions == 2
+        assert state.mass_ratio == (7.5, 1.0)
+        # ua_c should have been re-promoted from batch 2's posterior
+        assert state.ua_c != ua_c_after_b1 or state.ua_c[0] == 0.008
+
+
+class TestFitGreyboxWithPriorState:
+    """End-to-end: fit_greybox accepts prior_state and uses it for the
+    Tikhonov penalty."""
+
+    def test_fit_with_default_prior_state_unchanged_behavior(self):
+        """prior_state=None (or default PriorState) should give the
+        same result as the no-arg call — backwards-compatible."""
+        from tests.test_greybox_observer import TestFitGreybox2R2C
+        gen = TestFitGreybox2R2C()
+        obs = gen._generate_2r2c_observations(n_days=21.0, tick_minutes=10.0)
+        mi = [{"name": "Solar Proxy", "entity_id": "sensor.solar_proxy",
+               "input_role": "solar"}]
+        r_no_arg = fit_greybox(obs, mi)
+        r_with_default = fit_greybox(obs, mi, prior_state=PriorState())
+        assert r_no_arg is not None and r_with_default is not None
+        # Same fit, same numerics (within optimizer tolerance).
+        assert abs(r_no_arg.ua_c - r_with_default.ua_c) < 1e-6
+
+    def test_sharp_prior_anchors_param_near_persisted_value(self):
+        """A very tight prior should anchor the fit near the persisted μ
+        even when the data alone would suggest a different value."""
+        from tests.test_greybox_observer import TestFitGreybox2R2C
+        gen = TestFitGreybox2R2C()
+        obs = gen._generate_2r2c_observations(n_days=21.0, tick_minutes=10.0)
+        mi = [{"name": "Solar Proxy", "entity_id": "sensor.solar_proxy",
+               "input_role": "solar"}]
+        # Build a prior that lies AWAY from truth (truth ua_c=0.01)
+        # but with very tight σ — fit should land between truth and prior,
+        # biased toward prior.
+        sharp_prior = PriorState(ua_c=(0.005, 0.0001))  # μ=0.005, σ=0.0001
+        r_anchored = fit_greybox(obs, mi, prior_state=sharp_prior)
+        r_lit = fit_greybox(obs, mi)
+        assert r_anchored is not None and r_lit is not None
+        # The sharply-prior'd fit should land closer to its prior than
+        # the lit-prior'd fit does.
+        assert abs(r_anchored.ua_c - 0.005) < abs(r_lit.ua_c - 0.005)

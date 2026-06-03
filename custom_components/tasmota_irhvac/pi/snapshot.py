@@ -1403,6 +1403,13 @@ class TickOutput:
 
     # Per-tick fields with day-1 defaults — populated by emitters in
     # stage 2+.
+    # Per-zone PriorState (Pathak §4.2 posterior chain). Surface lets
+    # UI and diagnostics show which envelope params have been promoted
+    # from prior batch posteriors and how many promotion cycles have
+    # fired. Cold-start fits read this as all-None → lit-typical priors.
+    # Defaulted to None so it doesn't break test helpers that construct
+    # TickOutput with positional/kwarg subsets.
+    greybox_prior_state: dict[str, Any] | None = None
     observation: ObservationContext | None = None
     events: tuple[TickEvent, ...] = ()
     # The zone's OWN controlled room temperature (°C) this tick — the
