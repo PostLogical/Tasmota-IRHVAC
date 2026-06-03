@@ -381,10 +381,16 @@ class TestGreybox2R2CRealCSV:
             )
 
     @pytest.mark.xfail(
-        reason="2R2C grey-box passes 0/119 gates per season on real CSV — "
-        "synthetic-spring 30/119 win did NOT transfer (verdict 2026-05-01). "
-        "τ_fast collapses to 700+ min and τ_slow to 100,000+ min, both far "
-        "outside plausible bands. See project_greybox_2r2c_real_csv_finding.md.",
+        reason="Living_room real-CSV: post-#139 buffer fix the 2R2C dispatch "
+        "rate jumped 26/120 → 92/120 (77%) and residual_rms gate now passes "
+        "everywhere, but 0/120 batches pass the FULL gate set. Dominant "
+        "remaining failures: hp_offset_diversity=106 (HP rarely on in "
+        "shoulder-season CSV), mass_ratio_plausible=66 and "
+        "tau_fast_plausible=61 — mass_ratio is genuinely free under v2 "
+        "Bayesian priors and the living_room data is moving it out of the "
+        "[2,15] band. Plausibility-band recalibration is the next lever; "
+        "see project_greybox_2r2c_real_csv_finding.md. Distinct mechanism "
+        "from test_recovers_* which now pass cleanly on lit-grounded data.",
         strict=True,
     )
     def test_gates_pass_at_least_once_per_season(self, bench_metrics, num_regression, real_csv_results):
@@ -424,21 +430,6 @@ class TestGreybox2R2CRealCSV:
                     f"out of plausible range"
                 )
 
-    @pytest.mark.xfail(
-        strict=False,
-        reason="Final-batch 1R1C at the 10000-obs buffer (2263777) → "
-        "bridge.tau_fast=None for the last batch, so `any_checked` stays "
-        "False (the assertion assumes the final batch is 2R2C; only the "
-        "real-CSV sibling guards `is_2r2c_dispatched and final_tau_fast is "
-        "not None`, but it reads the *last* batch which is 1R1C). The "
-        "6000→10000 buffer bump cut 2R2C dispatch sharply (lit-grounded "
-        "confirmed 120/120→26/120 in run 2026-05-25) and left final batches "
-        "1R1C. Confirmed by run for the lit-grounded sibling; this "
-        "multi-season real-CSV case is the same mechanism but not "
-        "individually re-run (hence strict=False). Greybox 2R2C ID is "
-        "default-OFF and already broken (see sibling xfails); τ_fast is only "
-        "consumed when gates pass, which they never do here.",
-    )
     def test_tau_fast_in_plausible_range_when_2r2c(self, bench_metrics, num_regression, real_csv_results):
         """Where 2R2C dispatched, the final τ_fast must land in the plant-ID
         plausible band (5–60 min). Verifies the dual-τ provider feeds
@@ -525,19 +516,6 @@ class TestGreybox2R2CLitGrounded:
                 f"{season}: 2R2C never dispatched — dispatch logic regression?"
             )
 
-    @pytest.mark.xfail(
-        reason="ua_c lands at ~14× underestimate of standard_residential "
-        "truth on real-CSV bench. Diagnosis: rate-convention bug — "
-        "production room_rate is 5-tick trailing FD (averaged); residual "
-        "evaluates instantaneous predicted rate at i. Magnitude-scale "
-        "bias preserves ratios (β_outdoor ≈ truth) but underestimates "
-        "raw RC params. residual_rms ≈ 0.0075 °C/min is below the "
-        "sensor-noise rate floor — fit is converging to sub-physical "
-        "scaled params. See project_greybox_rate_convention_bug.md "
-        "Probes 2/3 — greybox-on-synthetic-with-instantaneous-rate "
-        "recovers truth.",
-        strict=True,
-    )
     def test_recovers_ua_c(self, bench_metrics, num_regression, lit_grounded_results):
         """Recovered ua_c within 30% of truth (= 0.01 min⁻¹).
 
@@ -556,12 +534,6 @@ class TestGreybox2R2CLitGrounded:
             f"ua_c={ua_c:.5f} vs truth {_LIT_TRUE_UA_C} ({100 * rel_err:.0f}% off)"
         )
 
-    @pytest.mark.xfail(
-        reason="k_c underestimated by same factor as ua_c (rate-convention "
-        "bug); ratios preserved so β_outdoor ≈ truth despite raw param "
-        "scale being wrong. See test_recovers_ua_c.",
-        strict=True,
-    )
     def test_recovers_k_c(self, bench_metrics, num_regression, lit_grounded_results):
         """Recovered k_c within 30% of truth (= 0.025 min⁻¹). Free param."""
         r = lit_grounded_results["spring"]["fused"]
@@ -576,20 +548,6 @@ class TestGreybox2R2CLitGrounded:
             f"k_c={k_c:.5f} vs truth {_LIT_TRUE_K_C} ({100 * rel_err:.0f}% off)"
         )
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Last known-passing at a116154 (2026-05-06). Observed at 4cbb9ac "
-        "and HEAD (2026-05-15): 2R2C dispatched every batch — now ~26/120 "
-        "after the 6000→10000 buffer bump (2263777; see test_tau_fast_in_band); "
-        "on the dispatched batches the optimizer lands at "
-        "ua_c≈0.00044 (truth 0.01), k_c≈0.001 (truth 0.025), α_total≈0.00007 "
-        "(truth 0.05 — measured here, ≈700× under), with k_w=0.02 / mass_ratio=8 "
-        "pinned at Bayesian priors; residual_rms ≈ 0.55 °C/min (≈ 70× larger "
-        "than the rate-convention-bug residual cited by test_recovers_ua_c's "
-        "xfail). Root cause not yet diagnosed; may overlap with test_recovers_ua_c "
-        "but the much larger residual indicates at least one additional factor "
-        "not described there.",
-    )
     def test_recovers_alpha_total(self, bench_metrics, num_regression, lit_grounded_results):
         """Recovered α_total within 50% of truth (= 0.05). Free param.
 
@@ -611,21 +569,6 @@ class TestGreybox2R2CLitGrounded:
             f"({100 * rel_err:.0f}% off)"
         )
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Final batch dispatches 1R1C at the 10000-obs buffer → "
-        "bridge.tau_fast=None (greybox_observer.py:1303), so "
-        "`assert final_tau_fast is not None` fires. Confirmed by run "
-        "2026-05-25 (spring/fused): 2R2C dispatched on only 26/120 batches "
-        "and the last batch is 1R1C. The 6000→10000 buffer bump (2263777) "
-        "reduced HP-off diversity in the retained window, cutting 2R2C "
-        "dispatch from the pre-buffer-change 120/120 to 26/120; the 43.7 min "
-        "baseline is from the 6000-era when the final batch was 2R2C. The "
-        "test assumes the final batch is always 2R2C, which no longer holds. "
-        "Greybox 2R2C ID is default-OFF and already broken (sibling xfails); "
-        "τ_fast lands in band (29–44 min) on the batches that do dispatch, "
-        "but is gate-rejected (0/120 pass) so never consumed. Not #115.",
-    )
     def test_tau_fast_in_band(self, bench_metrics, num_regression, lit_grounded_results):
         """Final τ_fast in [5, 60] min plausible band."""
         r = lit_grounded_results["spring"]["fused"]
@@ -636,21 +579,6 @@ class TestGreybox2R2CLitGrounded:
             f"τ_fast={r.final_tau_fast:.1f} min outside [5, 60]"
         )
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Last known-passing at a116154 (2026-05-06). Observed at 4cbb9ac "
-        "and HEAD (2026-05-15): 2R2C dispatched every batch — now ~26/120 "
-        "after the 6000→10000 buffer bump (2263777; see test_tau_fast_in_band); "
-        "on the dispatched batches the optimizer lands at "
-        "ua_c≈0.00044 (truth 0.01), k_c≈0.001 (truth 0.025), α_total≈0.00007 "
-        "(truth 0.05), with k_w=0.02 / mass_ratio=8 pinned at Bayesian priors; "
-        "residual_rms ≈ 0.55 °C/min (≈ 70× larger than the rate-convention-bug "
-        "residual cited by test_recovers_ua_c's xfail). The slow eigenvalue "
-        "derived from these parameters lands at ≈ 21000 min — measured here, "
-        "outside [60, 3500]. Root cause not yet diagnosed; may overlap with "
-        "test_recovers_ua_c but the much larger residual indicates at least one "
-        "additional factor not described there.",
-    )
     def test_tau_slow_in_band(self, bench_metrics, num_regression, lit_grounded_results):
         """Final τ_slow in [60, 3500] min plausible band.
 
@@ -668,18 +596,14 @@ class TestGreybox2R2CLitGrounded:
 
     @pytest.mark.xfail(
         strict=True,
-        reason="Last known-passing at a116154 (2026-05-06). Observed at 4cbb9ac "
-        "and HEAD (2026-05-15): 2R2C dispatched every batch (120/120; now "
-        "~26/120 after the 6000→10000 buffer bump, 2263777); the dispatched "
-        "batches all fail the full gate set — measured here, 0/120 pass. "
-        "Optimizer lands at ua_c≈0.00044 (truth 0.01), k_c≈0.001 (truth 0.025), "
-        "α_total≈0.00007 (truth 0.05), with k_w=0.02 / mass_ratio=8 pinned at "
-        "Bayesian priors; residual_rms ≈ 0.55 °C/min (≈ 70× larger than the "
-        "rate-convention-bug residual cited by test_recovers_ua_c's xfail). "
-        "Recurring failed gates: param_precision_alpha_c, tau_slow_plausible, "
-        "residual_rms. Root cause not yet diagnosed; may overlap with "
-        "test_recovers_ua_c but the much larger residual indicates at least one "
-        "additional factor not described there.",
+        reason="Lit-grounded standard_residential spring real-CSV: post-#139 "
+        "buffer fix individual params recover near truth (ua_c 0.5% err, "
+        "k_c 0.05% err, α 15% err, τ_fast=37min, τ_slow=1919min — see "
+        "test_recovers_ua_c/k_c/alpha_total which now pass). But 0/120 "
+        "batches pass the FULL gate set. Likely culprit: hp_offset_diversity "
+        "(HP rarely cycles in shoulder-season real CSV) or tight "
+        "param_precision CV thresholds. Needs per-gate failure-count "
+        "capture (currently not in this test's bench_metrics) to localize.",
     )
     def test_gates_pass_at_least_once(self, bench_metrics, num_regression, lit_grounded_results):
         """At least one batch passes the full gate set on standard_residential
