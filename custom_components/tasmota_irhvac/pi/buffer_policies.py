@@ -367,6 +367,111 @@ class SlidingWindowPolicy:
         return True
 
 
+class TimeWindowPolicy:
+    """Time-windowed sliding admission — keep observations whose timestamps
+    are within ``window_seconds`` of the latest admitted observation; FIFO
+    eviction when ``max_size`` is reached as a memory safety net.
+
+    Unlike :class:`SlidingWindowPolicy` (fixed sample count → time-span
+    varies with sensor cadence: 60s ticks span ~7 days at N=10000, 15min
+    ticks span ~104 days at the same N), this policy guarantees a
+    consistent *time* coverage independent of cadence. That is the right
+    primitive for state-space (greybox 2R2C) identification, where the
+    fit's information content depends on time-span relative to the
+    dominant time constant τ_slow, not on raw sample count.
+
+    Window cutoff is computed from observation timestamps, NOT wall
+    clock. This handles persistence restore cleanly: the latest stored
+    observation defines "now", and older entries are pruned relative to
+    it. No clock injection at the buffer/policy boundary.
+
+    Pruning behavior: on every admission the buffer calls
+    :meth:`expired_indices` with the just-admitted observation's
+    timestamp; the returned indices are removed before the next add().
+    Cost is O(m) per scan plus O(m·n²) info-matrix rebuild only when
+    something was actually removed (most adds at low cadence don't
+    prune anything).
+
+    References:
+    - Bacher, P. & Madsen, H. (2011) — sliding-window MLE on operational
+      building data. Window is time-defined (days/weeks), not sample-
+      count-defined.
+    - CTSM-R user guide — `data.window` parameter is in time units.
+    - Ljung, L. (1999), *System Identification* §11.4 — recursive
+      estimation with finite-memory data windows; time-defined window
+      is the standard primitive.
+    """
+
+    name = "time_window"
+
+    def __init__(self, window_seconds: float) -> None:
+        if window_seconds <= 0:
+            raise ValueError(
+                f"window_seconds must be > 0; got {window_seconds}"
+            )
+        self.window_seconds = float(window_seconds)
+
+    # ── FIFO behavior when buffer is full (memory safety net) ────────
+    # When `len(buffer) >= max_size` the buffer calls find_evictee +
+    # should_admit. We behave like SlidingWindowPolicy here: candidate
+    # always wins, oldest gets evicted. The time-window pruning runs
+    # separately via `expired_indices` (called by the buffer after add).
+
+    def score_candidate(
+        self,
+        x: list[float],
+        info_inv: list[list[float]],
+        xtx: list[list[float]] | None,
+        n_buffered: int,
+    ) -> float:
+        return float("inf")
+
+    def find_evictee(
+        self,
+        observations: list["Observation"],
+        feature_vectors: list[list[float]],
+        info_inv: list[list[float]],
+        xtx: list[list[float]] | None,
+    ) -> EvicteeChoice:
+        m = len(observations)
+        if m == 0:
+            return EvicteeChoice(index=-1, score=float("inf"))
+        oldest_idx = 0
+        oldest_ts = observations[0].timestamp
+        for i in range(1, m):
+            if observations[i].timestamp < oldest_ts:
+                oldest_ts = observations[i].timestamp
+                oldest_idx = i
+        return EvicteeChoice(index=oldest_idx, score=oldest_ts)
+
+    def should_admit(
+        self,
+        candidate_score: float,
+        evictee_score: float,
+    ) -> bool:
+        return True
+
+    # ── Time-window pruning hook ─────────────────────────────────────
+
+    def expired_indices(
+        self,
+        observations: list["Observation"],
+        reference_timestamp: float,
+    ) -> list[int]:
+        """Indices (sorted descending) of observations older than the
+        time-window cutoff, where ``reference_timestamp`` is typically
+        the latest admitted observation's timestamp.
+
+        Descending order lets the caller ``del observations[idx]``
+        without shifting subsequent indices.
+        """
+        cutoff = reference_timestamp - self.window_seconds
+        return sorted(
+            (i for i, o in enumerate(observations) if o.timestamp < cutoff),
+            reverse=True,
+        )
+
+
 class AOptimalPolicy:
     """A-optimal sequential admission — minimize ``trace((X^T X)⁻¹)``.
 

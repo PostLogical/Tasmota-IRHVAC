@@ -827,10 +827,13 @@ class PIController:
             model_inputs=self._model_inputs,
             max_size=10000,
         )
-        # Grey-box buffer: mode-agnostic, admits HP-off, temp-quantile-stratified.
+        # Grey-box buffer: mode-agnostic, admits HP-off observations.
+        # Uses TimeWindowPolicy by default — contiguous recent obs (last
+        # ~7 days at any sensor cadence) since sim-error PEM needs
+        # chronological state propagation, not eviction-sparse sampling.
+        # Memory safety net via max_size kicks in only at sub-60s cadence.
         self._greybox_buffer = GreyboxBuffer(
             solar_entity=find_solar_entity(self._model_inputs),
-            max_size=10000,
         )
         # Cached serializations — refreshed only at batch time (every 12h) to
         # avoid serializing thousands of observations on every state write (60s).

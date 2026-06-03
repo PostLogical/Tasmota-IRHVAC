@@ -1177,6 +1177,30 @@ class DiversityAwareBuffer:
             self.recompute_info_matrix()
         return removed
 
+    def _apply_time_window_expiry(self, reference_timestamp: float) -> int:
+        """If the policy implements ``expired_indices`` (e.g. TimeWindowPolicy),
+        prune observations older than the time-window cutoff and rebuild the
+        info matrix. Returns the count removed.
+
+        Called from ``add()`` after admission so the just-admitted obs sets
+        the new cutoff. Cost is O(m) for the scan plus O(m·n²) for the
+        rebuild — only paid when something actually expired, which at
+        sensor cadence ≪ time-window is most adds → near-zero amortized.
+        """
+        expired_fn = getattr(self._policy, "expired_indices", None)
+        if expired_fn is None:
+            return 0
+        indices = expired_fn(self._buffer, reference_timestamp)
+        if not indices:
+            return 0
+        # indices is sorted descending → safe to del-in-place.
+        for idx in indices:
+            del self._buffer[idx]
+        # recompute_info_matrix rebuilds _feature_vectors + numpy view + XᵀX +
+        # info_inv from self._buffer; mirrors filter_inactive / exclude_time_range.
+        self.recompute_info_matrix()
+        return len(indices)
+
     def add(self, obs: Observation) -> BufferAddResult:
         """Add an observation, using the configured policy when full.
 
@@ -1205,6 +1229,9 @@ class DiversityAwareBuffer:
             if self._feature_vectors_np is not None:
                 self._feature_vectors_np[len(self._buffer) - 1] = x
             self._sherman_morrison_update(x)
+            # Time-window policies prune older-than-window after admission.
+            # No-op for policies without expired_indices.
+            self._apply_time_window_expiry(obs.timestamp)
             return BufferAddResult(
                 admitted=True,
                 candidate_score=cand_score,
@@ -1250,6 +1277,7 @@ class DiversityAwareBuffer:
                     if self._feature_vectors_np is not None:
                         self._feature_vectors_np[decision.evictee_index] = x
                     self._sherman_morrison_update(x)
+                    self._apply_time_window_expiry(obs.timestamp)
                     return BufferAddResult(
                         admitted=True,
                         candidate_score=decision.candidate_score,
@@ -1286,6 +1314,7 @@ class DiversityAwareBuffer:
             if self._feature_vectors_np is not None:
                 self._feature_vectors_np[evictee.index] = x
             self._sherman_morrison_update(x)
+            self._apply_time_window_expiry(obs.timestamp)
             return BufferAddResult(
                 admitted=True,
                 candidate_score=cand_score,

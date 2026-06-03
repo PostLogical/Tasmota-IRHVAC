@@ -17,6 +17,7 @@ from custom_components.tasmota_irhvac.pi.buffer_policies import (
     MinEigPolicy,
     SlevPolicy,
     SlidingWindowPolicy,
+    TimeWindowPolicy,
 )
 
 
@@ -665,6 +666,149 @@ class TestSlidingWindowBufferIntegration:
         r = buf.add(_make_obs(t=3.0, outdoor=5.0, solar=0.0))
         assert r.admitted is True
         assert r.evicted_timestamp == 0.0
+
+
+# ── TimeWindowPolicy: time-defined sliding window ────────────────────
+
+
+class TestTimeWindowPolicyContract:
+    """Unit-level contract for TimeWindowPolicy: FIFO when full, plus
+    expired_indices() prunes by time relative to the reference timestamp.
+    """
+
+    def test_init_rejects_non_positive_window(self):
+        with pytest.raises(ValueError, match="must be > 0"):
+            TimeWindowPolicy(window_seconds=0)
+        with pytest.raises(ValueError, match="must be > 0"):
+            TimeWindowPolicy(window_seconds=-1.0)
+
+    def test_find_evictee_returns_oldest(self):
+        """When buffer is full, behaves like FIFO (memory safety net)."""
+        policy = TimeWindowPolicy(window_seconds=60.0)
+        obs1 = _make_obs(t=10.0)
+        obs2 = _make_obs(t=5.0)
+        obs3 = _make_obs(t=20.0)
+        choice = policy.find_evictee(
+            observations=[obs1, obs2, obs3],
+            feature_vectors=[[1.0, 0.0]] * 3,
+            info_inv=[[1.0, 0.0], [0.0, 1.0]],
+            xtx=None,
+        )
+        assert choice.index == 1
+        assert choice.score == 5.0
+
+    def test_should_admit_always_true(self):
+        policy = TimeWindowPolicy(window_seconds=60.0)
+        assert policy.should_admit(0.0, 0.0) is True
+
+    def test_expired_indices_empty_buffer(self):
+        policy = TimeWindowPolicy(window_seconds=60.0)
+        assert policy.expired_indices([], reference_timestamp=100.0) == []
+
+    def test_expired_indices_all_within_window(self):
+        """Reference = 100, window = 60, all obs within [40, 100] kept."""
+        policy = TimeWindowPolicy(window_seconds=60.0)
+        observations = [_make_obs(t=ts) for ts in (40.0, 50.0, 100.0)]
+        assert policy.expired_indices(observations, reference_timestamp=100.0) == []
+
+    def test_expired_indices_some_older_than_cutoff(self):
+        """Reference = 100, window = 60 → cutoff = 40 → obs older than 40 expire."""
+        policy = TimeWindowPolicy(window_seconds=60.0)
+        observations = [
+            _make_obs(t=10.0),   # expired (10 < 40)
+            _make_obs(t=30.0),   # expired (30 < 40)
+            _make_obs(t=40.0),   # boundary: 40 < 40 is False → kept
+            _make_obs(t=50.0),   # kept
+            _make_obs(t=100.0),  # kept
+        ]
+        # Sorted descending so caller can `del observations[idx]` safely.
+        assert policy.expired_indices(observations, reference_timestamp=100.0) == [1, 0]
+
+    def test_expired_indices_uses_reference_not_wall_clock(self):
+        """Pruning is relative to passed reference, not system time —
+        critical for persistence-restore semantics."""
+        policy = TimeWindowPolicy(window_seconds=60.0)
+        # Observations with very old timestamps (e.g. restored from disk).
+        old_observations = [_make_obs(t=ts) for ts in (1000.0, 1010.0, 1050.0)]
+        # Reference = 1060 → cutoff = 1000 → first one (t=1000, equal) kept
+        # because the predicate is strict (`<`); 1010 and 1050 kept.
+        assert policy.expired_indices(old_observations, 1060.0) == []
+        # Reference = 1070 → cutoff = 1010 → t=1000 expires (idx 0).
+        assert policy.expired_indices(old_observations, 1070.0) == [0]
+
+
+class TestTimeWindowBufferIntegration:
+    """Buffer-level: time-window pruning on every add() via
+    `_apply_time_window_expiry`."""
+
+    def _buf(self, *, window_seconds: float, max_size: int = 100):
+        return DiversityAwareBuffer(
+            n_features=3, max_size=max_size,
+            feature_order=TEST_FEATURE_ORDER,
+            model_inputs=TEST_MODEL_INPUTS,
+            policy=TimeWindowPolicy(window_seconds=window_seconds),
+        )
+
+    def test_observations_within_window_retained(self):
+        buf = self._buf(window_seconds=100.0)
+        for ts in (0.0, 30.0, 60.0, 90.0):
+            buf.add(_make_obs(t=ts, outdoor=ts * 0.1))
+        # Latest = 90, window = 100, cutoff = -10 → all kept.
+        assert sorted(o.timestamp for o in buf.get_all()) == [0.0, 30.0, 60.0, 90.0]
+
+    def test_older_than_window_pruned_on_admission(self):
+        """Each new admission shifts the cutoff; obs older than window
+        from the new latest are pruned automatically."""
+        buf = self._buf(window_seconds=50.0)
+        buf.add(_make_obs(t=0.0))
+        buf.add(_make_obs(t=10.0))
+        buf.add(_make_obs(t=20.0))
+        # Latest=20, cutoff = -30 → all 3 kept.
+        assert len(buf.get_all()) == 3
+        # Now jump forward — latest=100, cutoff=50 → 0, 10, 20 all expire.
+        buf.add(_make_obs(t=100.0))
+        timestamps = sorted(o.timestamp for o in buf.get_all())
+        assert timestamps == [100.0]
+
+    def test_persistence_restore_semantics(self):
+        """Reference timestamp is the *latest admitted* obs, not wall clock.
+        Restored buffer with old timestamps should not auto-expire on the
+        next add unless that add itself shifts the window past them.
+        """
+        buf = self._buf(window_seconds=100.0)
+        # Pretend these came from persistence — already-old timestamps.
+        for ts in (1000.0, 1020.0, 1050.0, 1080.0):
+            buf.add(_make_obs(t=ts))
+        # Latest = 1080, cutoff = 980 → all 4 retained.
+        assert len(buf.get_all()) == 4
+
+    def test_max_size_safety_net(self):
+        """If sensor cadence is so dense that the time window holds more
+        than max_size obs, FIFO eviction kicks in to cap memory."""
+        # window=1000s, but only 5 slots. Densely-spaced observations
+        # would fit in the window count-wise too, except we exceed max_size.
+        buf = self._buf(window_seconds=1000.0, max_size=5)
+        for ts in range(8):
+            buf.add(_make_obs(t=float(ts)))
+        # All 8 are within the 1000s window. Buffer capped at 5 → FIFO kept
+        # the 5 newest (3..7).
+        timestamps = sorted(o.timestamp for o in buf.get_all())
+        assert len(timestamps) == 5
+        assert timestamps == [3.0, 4.0, 5.0, 6.0, 7.0]
+
+    def test_non_time_window_policy_unaffected(self):
+        """The `_apply_time_window_expiry` no-op for policies without
+        `expired_indices` — sliding-window/leverage/etc. behave unchanged.
+        """
+        buf = DiversityAwareBuffer(
+            n_features=3, max_size=100,
+            feature_order=TEST_FEATURE_ORDER,
+            model_inputs=TEST_MODEL_INPUTS,
+            policy=SlidingWindowPolicy(),
+        )
+        for ts in (0.0, 10.0, 100.0, 10000.0):
+            buf.add(_make_obs(t=ts))
+        assert len(buf.get_all()) == 4
 
 
 # ── SlevPolicy: probabilistic admission contract ─────────────────────
