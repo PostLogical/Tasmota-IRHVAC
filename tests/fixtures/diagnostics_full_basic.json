@@ -97,7 +97,7 @@
     "greybox_bridge": null,
     "greybox_buffer": {
       "hp_off_pct": null,
-      "max_size": 12000,
+      "max_size": 32000,
       "min_leverage": null,
       "total": 0
     },

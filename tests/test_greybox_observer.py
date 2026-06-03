@@ -1686,7 +1686,7 @@ class TestPromotePosterior:
     def test_clean_fit_promotes_all_params(self):
         result = self._result()
         before = PriorState()
-        after = promote_posterior(result, before, bridge_gates_passed=True)
+        after = promote_posterior(result, before)
         assert after.n_promotions == 1
         assert after.ua_c == (0.008, 0.001)
         assert after.k_c == (0.04, 0.002)
@@ -1694,18 +1694,12 @@ class TestPromotePosterior:
         assert after.mass_ratio == (8.0, 1.0)
         assert after is not before  # immutable; new instance returned
 
-    def test_gates_failed_blocks_promotion(self):
-        result = self._result()
-        before = PriorState()
-        after = promote_posterior(result, before, bridge_gates_passed=False)
-        assert after is before  # unchanged
-
     def test_optimizer_not_converged_blocks_promotion(self):
         result = self._result()
         before = PriorState()
         after = promote_posterior(
             result, before,
-            bridge_gates_passed=True, least_squares_converged=False,
+            least_squares_converged=False,
         )
         assert after is before
 
@@ -1715,13 +1709,13 @@ class TestPromotePosterior:
         result = self._result(is_2r2c=False, k_w=None, mass_ratio=None,
                               tau_fast=None, tau_slow=None)
         before = PriorState()
-        after = promote_posterior(result, before, bridge_gates_passed=True)
+        after = promote_posterior(result, before)
         assert after is before
 
     def test_missing_std_err_blocks_promotion(self):
         result = self._result(param_std_err={})
         before = PriorState()
-        after = promote_posterior(result, before, bridge_gates_passed=True)
+        after = promote_posterior(result, before)
         assert after is before
 
     def test_railed_param_not_promoted_others_still_promote(self):
@@ -1731,7 +1725,7 @@ class TestPromotePosterior:
         # Rail mass_ratio at upper bound; ua_c stays clean.
         result = self._result(mass_ratio=MASS_RATIO_BOUNDS[1])
         before = PriorState()
-        after = promote_posterior(result, before, bridge_gates_passed=True)
+        after = promote_posterior(result, before)
         assert after.n_promotions == 1
         assert after.ua_c is not None
         assert after.mass_ratio is None  # railed → not promoted
@@ -1740,7 +1734,7 @@ class TestPromotePosterior:
         """Same rule applies at the lower bound."""
         result = self._result(ua_c=UA_C_BOUNDS[0])
         before = PriorState()
-        after = promote_posterior(result, before, bridge_gates_passed=True)
+        after = promote_posterior(result, before)
         assert after.ua_c is None  # railed lower
         assert after.k_c is not None  # k_c was clean → promoted
 
@@ -1750,7 +1744,7 @@ class TestPromotePosterior:
             "k_w": 0.002, "mass_ratio": 1.0,
         })
         before = PriorState()
-        after = promote_posterior(result, before, bridge_gates_passed=True)
+        after = promote_posterior(result, before)
         assert after.ua_c is None
         assert after.k_c is not None
 
@@ -1765,7 +1759,7 @@ class TestPromotePosterior:
             mass_ratio=MASS_RATIO_BOUNDS[1],
         )
         before = PriorState()
-        after = promote_posterior(result, before, bridge_gates_passed=True)
+        after = promote_posterior(result, before)
         assert after is before  # n_promotions NOT incremented
 
     def test_successive_promotions_accumulate(self):
@@ -1775,9 +1769,9 @@ class TestPromotePosterior:
         result2 = self._result(ua_c=0.010)
         result3 = self._result(ua_c=0.0095)
         state = PriorState()
-        state = promote_posterior(result1, state, bridge_gates_passed=True)
-        state = promote_posterior(result2, state, bridge_gates_passed=True)
-        state = promote_posterior(result3, state, bridge_gates_passed=True)
+        state = promote_posterior(result1, state)
+        state = promote_posterior(result2, state)
+        state = promote_posterior(result3, state)
         assert state.n_promotions == 3
         # ua_c reflects the latest posterior, not an average.
         assert state.ua_c[0] == 0.0095
@@ -1788,13 +1782,13 @@ class TestPromotePosterior:
         state = PriorState()
         # Batch 1: mass_ratio railed → only other params promoted.
         r1 = self._result(mass_ratio=MASS_RATIO_BOUNDS[1])
-        state = promote_posterior(r1, state, bridge_gates_passed=True)
+        state = promote_posterior(r1, state)
         assert state.mass_ratio is None
         assert state.ua_c is not None
         ua_c_after_b1 = state.ua_c
         # Batch 2: clean mass_ratio. ua_c also re-promoted.
         r2 = self._result(mass_ratio=7.5)
-        state = promote_posterior(r2, state, bridge_gates_passed=True)
+        state = promote_posterior(r2, state)
         assert state.n_promotions == 2
         assert state.mass_ratio == (7.5, 1.0)
         # ua_c should have been re-promoted from batch 2's posterior

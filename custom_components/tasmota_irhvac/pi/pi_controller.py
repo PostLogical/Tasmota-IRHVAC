@@ -1365,13 +1365,15 @@ class PIController:
 
             # Pathak §4.2 transfer-learning chain: if this batch's posterior
             # qualifies for promotion, persist it as next batch's prior.
-            # promote_posterior is a pure function with lit-grounded gates
-            # (gates pass, 2R2C, no railed params, std_err populated).
+            # promote_posterior gates on envelope-fit quality only (2R2C
+            # dispatched, optimizer converged, std_err populated, no
+            # Reynders rails) — NOT bridge.gates_passed, which calibrates
+            # the WLS β-flow downstream and is too tight for prior-chain
+            # use; see docstring.
             if self._greybox_prior_chain_enabled:
                 new_prior = promote_posterior(
                     greybox,
                     self._greybox_prior_state,
-                    bridge_gates_passed=bridge.gates_passed,
                 )
                 if new_prior is not self._greybox_prior_state:
                     delta = [

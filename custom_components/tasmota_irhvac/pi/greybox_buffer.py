@@ -46,17 +46,25 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-# Default time window: 7 days. Sized so envelope τ_slow (up to ~58h
-# lit-typical max) can be identified from 3+ time constants of data.
-# At 60s cadence this is ~10080 obs (within default max_size); at 15min
-# cadence ~672 obs (well within bounds). With Pathak §4.2 posterior-
-# chain transfer learning, can be reduced to ~72h × n_batches later.
-DEFAULT_GREYBOX_WINDOW_SECONDS: float = 7.0 * 24.0 * 3600.0  # 7 days
+# Default time window: 21 days. Two hard requirements set the floor:
+#   1. ``MIN_TIMESPAN_DAYS_2R2C = 14`` (greybox_observer.py) — the 2R2C
+#      dispatch gate. A window < 14 days means 2R2C never dispatches,
+#      fits fall to 1R1C, and the prior chain never fires.
+#   2. Envelope τ_slow can reach ~58h (lit max); clean identification
+#      needs 5+ time constants ≈ 12 days. 14d barely covers it; 21d
+#      gives margin so the optimizer has signal in low-SNR weeks.
+# Three weeks balances both gates while staying well below the >60d
+# of historical data the eviction-sparse approach used to retain.
+# Future: with the Pathak §4.2 chain warmed up the prior carries old
+# information forward, so we could revisit downward — but the dispatch
+# gate is the hard floor that makes 21d the minimum sane default.
+DEFAULT_GREYBOX_WINDOW_SECONDS: float = 21.0 * 24.0 * 3600.0  # 21 days
 
-# Memory safety net. At 60s cadence × 7 days = 10080 obs; bump to
-# 12000 to give the time-window first-eviction priority. Above 12000
-# the FIFO falloff kicks in (only at sub-60s cadence — unusual).
-DEFAULT_GREYBOX_BUFFER_SIZE = 12000
+# Memory safety net. At 60s cadence × 21 days = 30240 obs.  Cap at
+# 32000 to give time-window first-eviction priority across all sensor
+# cadences ≥60s (the lower bound of what HA reasonably emits).  Above
+# 32000 the FIFO falloff kicks in.
+DEFAULT_GREYBOX_BUFFER_SIZE = 32000
 
 # Grey-box feature vector: 4 features for leverage scoring.
 _GREYBOX_N_FEATURES = 4

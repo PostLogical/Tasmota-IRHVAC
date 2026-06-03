@@ -282,7 +282,6 @@ def promote_posterior(
     result: "GreyboxResult",
     current_state: PriorState,
     *,
-    bridge_gates_passed: bool,
     least_squares_converged: bool = True,
 ) -> PriorState:
     """Pathak (2019) §4.2 transfer learning: promote a passing batch's
@@ -291,10 +290,9 @@ def promote_posterior(
     Lit-grounded promotion criteria (all must hold for the batch as a
     whole; per-parameter gates apply below):
 
-      1. ``bridge_gates_passed`` — our standing quality bar
-      2. ``result.is_2r2c`` — only 2R2C fits expose all 6 envelope params
-      3. ``least_squares_converged`` — standard PEM gate (Ljung 1999)
-      4. ``param_std_err`` populated — Jacobian-derived posterior σ
+      1. ``result.is_2r2c`` — only 2R2C fits expose all 6 envelope params
+      2. ``least_squares_converged`` — standard PEM gate (Ljung 1999)
+      3. ``param_std_err`` populated — Jacobian-derived posterior σ
          must exist for the parameters we want to promote
 
     Per-parameter (Reynders 2014, "rails are diagnosis"):
@@ -305,11 +303,19 @@ def promote_posterior(
         still promote independently.
       - σ must be finite and > 0.
 
+    Note: ``bridge.gates_passed`` is deliberately NOT a criterion here.
+    Those gates calibrate the WLS β-flow downstream (β_outdoor=-ua_c/k_c
+    going into the WLS regression); they're tight by design for that
+    consumer. The prior chain consumes the raw envelope parameters
+    directly, where Reynders rail detection + wide-σ-on-disagreement
+    are the correct safeguards. Smoke-test evidence: lit-grounded
+    parameter recovery within 7-14% of truth produced 0/120 bridge
+    gates passed — gating promotion on that would have blocked the
+    chain entirely despite excellent envelope identification.
+
     Returns a new :class:`PriorState` (the input is not mutated). If no
     parameter qualifies, returns ``current_state`` unchanged.
     """
-    if not bridge_gates_passed:
-        return current_state
     if not least_squares_converged:
         return current_state
     if not result.is_2r2c:
