@@ -752,6 +752,20 @@ def _detect_optimal_tau(
     if n_eff < 10:
         return None
 
+    # Convert the read-only inputs to numpy once — _compute_rss is called
+    # repeatedly during the τ search (~10× per _detect_optimal_tau, ~1900×
+    # per scenario), and these arrays don't change across calls. Fancy
+    # indexing then replaces a per-row Python copy in _compute_rss.
+    _np_path = _NUMPY_AVAILABLE and base_X is not None and tod_cols is not None
+    if _np_path:
+        base_X_np = np.asarray(base_X, dtype=float)
+        tod_cols_np = np.asarray(tod_cols, dtype=float)
+        y_values_np = np.asarray(y_values, dtype=float)
+        weights_np = np.asarray(weights, dtype=float)
+        current_c_np = np.asarray(
+            [o.current_c for o in observations], dtype=float,
+        ) if delta_from_room else None
+
     def _compute_rss(tau: float) -> float:
         """Weighted RSS from joint regression y ~ [1, od, sin, cos, filtered_input]."""
         filtered = _apply_retrospective_ema(observations, entity_id, tau)
@@ -773,19 +787,17 @@ def _detect_optimal_tau(
         if m < 10:
             return float("inf")
 
-        if _NUMPY_AVAILABLE and base_X is not None and tod_cols is not None:
-            # Build design matrix: [1, od, sin, cos, input]
+        if _np_path:
+            # Fancy-indexed design matrix build — no per-row Python copy.
+            rows_arr = np.asarray(rows, dtype=np.int64)
             X = np.empty((m, 5))
-            y_arr = np.empty(m)
-            w_arr = np.empty(m)
-            for j, i in enumerate(rows):
-                X[j, 0] = base_X[i][0]  # intercept
-                X[j, 1] = base_X[i][1]  # outdoor_delta
-                X[j, 2] = tod_cols[i][0]  # sin
-                X[j, 3] = tod_cols[i][1]  # cos
-                X[j, 4] = x_input[j]
-                y_arr[j] = y_values[i]
-                w_arr[j] = weights[i]
+            X[:, 0] = base_X_np[rows_arr, 0]   # intercept
+            X[:, 1] = base_X_np[rows_arr, 1]   # outdoor_delta
+            X[:, 2] = tod_cols_np[rows_arr, 0]  # sin
+            X[:, 3] = tod_cols_np[rows_arr, 1]  # cos
+            X[:, 4] = np.asarray(x_input, dtype=float)
+            y_arr = y_values_np[rows_arr]
+            w_arr = weights_np[rows_arr]
             # Weighted least squares: scale rows by sqrt(w)
             sw = np.sqrt(w_arr)
             Xw = X * sw[:, None]
