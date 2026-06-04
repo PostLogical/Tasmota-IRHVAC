@@ -972,6 +972,7 @@ class TickEventKind(StrEnum):
     CONTROLLER_RELOAD = "controller_reload"
     BUFFER_RESET = "buffer_reset"
     OVERTEMP_LATCH_ARMED = "overtemp_latch_armed"
+    GREYBOX_BATCH = "greybox_batch"
 
 
 # Per-kind payload dataclasses. Each is frozen+slotted; `to_dict()` keeps
@@ -1005,6 +1006,106 @@ class BatchRunPayload:
             recommend_update=data["recommend_update"],
             max_coeff_change_pct=data["max_coeff_change_pct"],
             n_outliers_excluded=data["n_outliers_excluded"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class GreyboxBatchPayload:
+    """Emitted at each weekly greybox batch fit (post-Convention-A fill-and-wipe
+    architecture).
+
+    Provides the chain-analysis context that post-processing the per-tick log
+    cannot derive on its own:
+      - Fit result + standard errors (so you can trend τ_hp, k_c, ua_c, k_w, mr
+        across batches).
+      - Chain prior state at fit time (before promotion) and which slots got
+        promoted with their new values.
+      - The handful of "did this batch behave" booleans (gates passed,
+        dispatched to 2R2C, chain promoted at all).
+
+    Observations themselves are NOT included — they're recoverable from the
+    per-tick log by filtering ``observation_context.gb_admitted == True``
+    over the batch window. Keeping the payload small ensures the event log
+    stays bounded (this fires once per week per zone).
+    """
+    # Buffer state at fit time
+    n_observations: int
+    timespan_seconds: float
+    # Dispatch outcome
+    dispatched_2r2c: bool
+    fit_succeeded: bool
+    fit_mode: str  # "heat" | "cool"
+    # Fit result summary (None when fit failed or fell back to 1R1C)
+    tau_hp: float | None
+    tau_hp_se: float | None
+    k_c: float | None
+    k_c_se: float | None
+    ua_c: float | None
+    ua_c_se: float | None
+    k_w: float | None
+    mass_ratio: float | None
+    residual_rms: float | None
+    # Bridge / promotion outcomes
+    bridge_gates_passed: bool
+    # Chain prior state at fit time: serialized dict of slot → (mean, sigma)
+    # Only includes slots that have been promoted at least once (i.e.
+    # slots actually carrying chained information). Empty {} means "no
+    # chain priors active yet — fit ran on lit defaults".
+    chain_prior_before: dict[str, list[float]]
+    # Slots that got promoted at the END of this batch fit, with their
+    # new (mean, sigma) values. Empty {} means "no promotion this batch
+    # (gates failed or chain disabled)".
+    chain_promoted_slots: dict[str, list[float]]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "n_observations": self.n_observations,
+            "timespan_seconds": self.timespan_seconds,
+            "dispatched_2r2c": self.dispatched_2r2c,
+            "fit_succeeded": self.fit_succeeded,
+            "fit_mode": self.fit_mode,
+            "tau_hp": self.tau_hp,
+            "tau_hp_se": self.tau_hp_se,
+            "k_c": self.k_c,
+            "k_c_se": self.k_c_se,
+            "ua_c": self.ua_c,
+            "ua_c_se": self.ua_c_se,
+            "k_w": self.k_w,
+            "mass_ratio": self.mass_ratio,
+            "residual_rms": self.residual_rms,
+            "bridge_gates_passed": self.bridge_gates_passed,
+            "chain_prior_before": {
+                k: list(v) for k, v in self.chain_prior_before.items()
+            },
+            "chain_promoted_slots": {
+                k: list(v) for k, v in self.chain_promoted_slots.items()
+            },
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> GreyboxBatchPayload:
+        return cls(
+            n_observations=int(data["n_observations"]),
+            timespan_seconds=float(data["timespan_seconds"]),
+            dispatched_2r2c=bool(data["dispatched_2r2c"]),
+            fit_succeeded=bool(data["fit_succeeded"]),
+            fit_mode=str(data["fit_mode"]),
+            tau_hp=data.get("tau_hp"),
+            tau_hp_se=data.get("tau_hp_se"),
+            k_c=data.get("k_c"),
+            k_c_se=data.get("k_c_se"),
+            ua_c=data.get("ua_c"),
+            ua_c_se=data.get("ua_c_se"),
+            k_w=data.get("k_w"),
+            mass_ratio=data.get("mass_ratio"),
+            residual_rms=data.get("residual_rms"),
+            bridge_gates_passed=bool(data["bridge_gates_passed"]),
+            chain_prior_before={
+                k: list(v) for k, v in (data.get("chain_prior_before") or {}).items()
+            },
+            chain_promoted_slots={
+                k: list(v) for k, v in (data.get("chain_promoted_slots") or {}).items()
+            },
         )
 
 
@@ -1296,6 +1397,7 @@ TickEventPayload = (
     | ControllerReloadPayload
     | BufferResetPayload
     | LatchArmedPayload
+    | GreyboxBatchPayload
 )
 
 
@@ -1311,6 +1413,7 @@ _PAYLOAD_BY_KIND: dict[TickEventKind, type[TickEventPayload]] = {
     TickEventKind.CONTROLLER_RELOAD: ControllerReloadPayload,
     TickEventKind.BUFFER_RESET: BufferResetPayload,
     TickEventKind.OVERTEMP_LATCH_ARMED: LatchArmedPayload,
+    TickEventKind.GREYBOX_BATCH: GreyboxBatchPayload,
 }
 
 

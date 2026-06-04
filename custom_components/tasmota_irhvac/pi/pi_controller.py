@@ -155,6 +155,7 @@ from .snapshot import (
     DriftDetection,
     FFContribution,
     FFContributionsSnapshot,
+    GreyboxBatchPayload,
     GreyboxSnapshot,
     HealthSnapshot,
     LagFilterSnapshot,
@@ -227,6 +228,15 @@ def _compute_prior_run_age_s(saved_at_wallclock: str, now: datetime) -> float | 
 # ``schedule_batch_analysis`` below; the bench's ``full_stack_runner``
 # imports it so changes here propagate to bench fidelity automatically.
 BATCH_WLS_HOURS: tuple[int, ...] = (7, 19)
+
+# Greybox is gated to weekly cadence within the unified batch-analysis
+# tick. WLS keeps the 12h cadence (operational dynamics benefit from
+# intra-day refresh); greybox identifies structural building params on
+# weeks-to-months timescales, so weekly is lit-canonical (CTSM-R, Sodja,
+# Yi 2019). 6.5d (vs exactly 7d) ensures the first 12h batch tick on the
+# 7th day fires; the half-day buffer absorbs clock-drift / startup-timing
+# edge cases.
+GREYBOX_MIN_INTERVAL_SECONDS: float = 6.5 * 24 * 3600.0
 
 
 class PIController:
@@ -838,10 +848,12 @@ class PIController:
             max_size=10000,
         )
         # Grey-box buffer: mode-agnostic, admits HP-off observations.
-        # Uses TimeWindowPolicy by default — contiguous recent obs (last
-        # ~7 days at any sensor cadence) since sim-error PEM needs
-        # chronological state propagation, not eviction-sparse sampling.
-        # Memory safety net via max_size kicks in only at sub-60s cadence.
+        # Fill-and-wipe semantics paired with the weekly-cadence gate
+        # below: fills throughout the week, gets cleared by
+        # ``_run_batch_analysis`` after each successful fit + chain
+        # promotion. Chain continuity (Pathak §4.2) carries structural
+        # parameter estimates across batches; the buffer never holds
+        # more than one week's observations under normal operation.
         self._greybox_buffer = GreyboxBuffer(
             solar_entity=find_solar_entity(self._model_inputs),
         )
@@ -861,6 +873,11 @@ class PIController:
         self._last_greybox_result: GreyboxResult | None = None
         self._last_greybox_bridge: GreyboxBridgeResult | None = None
         self._last_greybox_timestamp_iso: str | None = None
+        # Monotonic-clock timestamp of the last successful greybox fit, for
+        # the weekly-cadence gate. None = "never fit" → first batch tick
+        # always fires. Not persisted across restarts: chain prior carries
+        # forward, so losing the timer just means one extra fit on restart.
+        self._last_greybox_fit_time_mono: float | None = None
         self._greybox_has_been_good: bool = False
         # Pathak §4.2 transfer learning: per-zone persistent priors. Updated
         # by promote_posterior() after each passing batch fit. Cold start:
@@ -1318,16 +1335,51 @@ class PIController:
         # Run BEFORE fusion+blend so this cycle's grey-box can inform
         # the coefficient update (no one-cycle lag).
         # Grey-box uses its own buffer (includes HP-off observations).
-        greybox_observations = self._greybox_buffer.get_all()
+        #
+        # Weekly cadence gate (2026-06-04): the unified batch tick fires
+        # at WLS's 12h cadence, but greybox identifies structural building
+        # params and is gated to weekly here. Skip the greybox block
+        # (fit + bridge + chain promotion + diagnostics) when the last
+        # fit was <GREYBOX_MIN_INTERVAL_SECONDS ago. First fit (last ==
+        # None) always proceeds. WLS post-processing below the greybox
+        # block (drift tracking, batch-complete signal) is unaffected.
+        now_mono_for_gate = self._monotonic()
+        greybox_due = (
+            self._last_greybox_fit_time_mono is None
+            or now_mono_for_gate - self._last_greybox_fit_time_mono
+                >= GREYBOX_MIN_INTERVAL_SECONDS
+        )
+        if not greybox_due:
+            elapsed_h = (
+                (now_mono_for_gate - self._last_greybox_fit_time_mono) / 3600.0
+            )
+            _LOGGER.debug(
+                "%sGrey-box: skipped (elapsed %.1fh < %.1fh weekly cadence)",
+                self._log_prefix, elapsed_h,
+                GREYBOX_MIN_INTERVAL_SECONDS / 3600.0,
+            )
+
+        greybox_observations = self._greybox_buffer.get_all() if greybox_due else []
+        # Greybox prior slots (envelope shared + per-mode HP params).
+        _PROMOTION_SLOTS = (
+            *PriorState._ENVELOPE_PARAMS,
+            "k_c_heat", "tau_hp_heat", "k_c_cool", "tau_hp_cool",
+        )
+        # Snapshot the chain prior state BEFORE fit + promotion so the
+        # GREYBOX_BATCH event can capture before/after for chain analysis.
+        # Empty dict means "no slots promoted yet" (cold start / chain off).
+        chain_prior_before_snapshot: dict[str, list[float]] = {}
+        chain_promoted_slots: dict[str, list[float]] = {}
+        if greybox_due:
+            for slot in _PROMOTION_SLOTS:
+                val = getattr(self._greybox_prior_state, slot)
+                if val is not None:
+                    chain_prior_before_snapshot[slot] = [float(val[0]), float(val[1])]
         gb_diag = self._greybox_buffer.get_diagnostics()
         # Log prior-chain state at fit start so the audit trail shows which
         # params used persistent posteriors vs lit-typical defaults.  Iterates
         # all PriorState slots (envelope + per-mode HP) so the log shows
         # which slots are populated.
-        _PROMOTION_SLOTS = (
-            *PriorState._ENVELOPE_PARAMS,
-            "k_c_heat", "tau_hp_heat", "k_c_cool", "tau_hp_cool",
-        )
         if self._greybox_prior_chain_enabled and self._greybox_prior_state.n_promotions > 0:
             promoted = [
                 slot for slot in _PROMOTION_SLOTS
@@ -1379,6 +1431,11 @@ class PIController:
             log_greybox_result(greybox, log_prefix=self._log_prefix)
             self._last_greybox_result = greybox
             self._last_greybox_timestamp_iso = self._utcnow_fn().isoformat()
+            # Record monotonic timestamp for the weekly-cadence gate.
+            # Only successful fits count — a None result (insufficient data,
+            # solver failure) leaves the timer alone so the next batch tick
+            # gets another chance.
+            self._last_greybox_fit_time_mono = now_mono_for_gate
 
             # Bridge: convert rate coefficients to WLS-compatible β
             bridge = greybox_to_beta(
@@ -1412,6 +1469,10 @@ class PIController:
                             != getattr(self._greybox_prior_state, slot)
                         )
                     ]
+                    # Capture promoted slot values for the GREYBOX_BATCH event.
+                    for slot in delta:
+                        val = getattr(new_prior, slot)
+                        chain_promoted_slots[slot] = [float(val[0]), float(val[1])]
                     _LOGGER.info(
                         "%sGrey-box prior chain: promotion #%d — updated %s",
                         self._log_prefix,
@@ -1447,6 +1508,54 @@ class PIController:
                     self._pi_kp = gain_update.kp
                     self._pi_ki = gain_update.ki
                     self._imc_lambda = gain_update.imc_lambda
+
+        # Emit the GREYBOX_BATCH event for post-hoc chain analysis, then
+        # clear the buffer (fill-and-wipe) when a fit actually ran. Note:
+        # ``greybox`` is the result variable from the fit_greybox() call
+        # above — None when greybox_due was False (we skipped the fit) or
+        # when the fit itself returned None (insufficient data, solver
+        # failure). We only emit + clear on successful fit so a failed
+        # batch keeps its observations available for the next attempt.
+        if greybox_due and greybox is not None:
+            n_obs_consumed = len(greybox_observations)
+            if n_obs_consumed >= 2:
+                timespan_seconds = float(
+                    greybox_observations[-1].timestamp
+                    - greybox_observations[0].timestamp
+                )
+            else:
+                timespan_seconds = 0.0
+            gb_se = greybox.param_std_err or {}
+            self._emit_event(
+                TickEventKind.GREYBOX_BATCH,
+                GreyboxBatchPayload(
+                    n_observations=n_obs_consumed,
+                    timespan_seconds=timespan_seconds,
+                    dispatched_2r2c=bool(greybox.is_2r2c),
+                    fit_succeeded=True,
+                    fit_mode=fit_mode,
+                    tau_hp=greybox.tau_hp,
+                    tau_hp_se=gb_se.get("tau_hp"),
+                    k_c=greybox.k_c,
+                    k_c_se=gb_se.get("k_c"),
+                    ua_c=greybox.ua_c,
+                    ua_c_se=gb_se.get("ua_c"),
+                    k_w=greybox.k_w,
+                    mass_ratio=greybox.mass_ratio,
+                    residual_rms=greybox.residual_rms,
+                    bridge_gates_passed=(
+                        self._last_greybox_bridge is not None
+                        and self._last_greybox_bridge.gates_passed
+                    ),
+                    chain_prior_before=chain_prior_before_snapshot,
+                    chain_promoted_slots=chain_promoted_slots,
+                ),
+            )
+            # Fill-and-wipe: consumed observations are now reflected in
+            # the chain prior (if promoted) and persisted state. Drop
+            # them so next week starts fresh — zero observation overlap
+            # across batches; continuity carried by the PriorState chain.
+            self._greybox_buffer.clear()
 
         # ── Passive boundary estimation ──
         # Sweep candidate breakpoints over the greybox buffer to find

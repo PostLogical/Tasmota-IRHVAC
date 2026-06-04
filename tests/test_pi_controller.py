@@ -4734,8 +4734,12 @@ class TestHPNoOutput:
         assert ctx.min_incumbent_score is None
         assert ctx.rejection_reason is None
         # Greybox side: same observation accepted independently.
+        # Under fill-and-wipe architecture (2026-06-04), the greybox buffer
+        # has no leverage scoring — gb_score is always None, no eviction
+        # decisions, no min-incumbent comparisons. Just admission via the
+        # outdoor_temp_c gate.
         assert ctx.gb_admitted is True
-        assert ctx.gb_score is not None and ctx.gb_score > 0
+        assert ctx.gb_score is None
         assert ctx.gb_evicted_timestamp is None
         assert ctx.gb_min_incumbent_score is None
         assert ctx.gb_rejection_reason is None
@@ -4770,8 +4774,9 @@ class TestHPNoOutput:
         # Reason matches the upstream gate: HP definitely off → clamped no_output.
         assert ctx.rejection_reason == "no_output"
         # Greybox still receives the obs (HP-off is informative for greybox).
+        # Fill-and-wipe architecture (2026-06-04): no leverage score.
         assert ctx.gb_admitted is True
-        assert ctx.gb_score is not None
+        assert ctx.gb_score is None
 
     @pytest.mark.asyncio
     async def test_rejection_reason_overtemp_regime(self):

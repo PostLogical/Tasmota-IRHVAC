@@ -1,7 +1,20 @@
-"""Tests for GreyboxBuffer — leverage-scored grey-box observation buffer."""
+"""Tests for GreyboxBuffer — append-only fill-and-wipe buffer.
 
-import math
-import time
+2026-06-04 architecture: GreyboxBuffer no longer inherits from
+DiversityAwareBuffer and no longer carries leverage-scoring machinery.
+It is simply an observation list with:
+
+  * Hard admission gate: reject ``outdoor_temp_c is None``.
+  * FIFO drop on overflow (memory safety net only — normal weekly
+    fill-and-wipe never approaches max_size).
+  * ``clear()`` for the controller to call after each successful batch.
+  * Round-trippable persistence via ``as_list`` / ``from_list``.
+
+The prior leverage-policy test suite was removed when the inheritance
+dropped; those tests characterized behavior that no longer exists.
+"""
+
+from __future__ import annotations
 
 import pytest
 
@@ -11,407 +24,256 @@ from custom_components.tasmota_irhvac.pi.batch_learning import (
 )
 from custom_components.tasmota_irhvac.pi.greybox_buffer import (
     DEFAULT_GREYBOX_BUFFER_SIZE,
-    GreyboxBuffer as _GreyboxBuffer,
-    _GREYBOX_N_FEATURES,
+    GreyboxBuffer,
 )
-from custom_components.tasmota_irhvac.pi.buffer_policies import LeveragePolicy
-
-
-def GreyboxBuffer(*args, **kwargs):
-    """Test-local wrapper that pins ``policy=LeveragePolicy()`` by default.
-
-    The production default switched to ``SlevPolicy(alpha=0.0)`` on 2026-05-07
-    after the leverage-curation β_solar bias finding.  These tests were
-    authored to characterize leverage-policy retention behavior on the
-    grey-box feature space (full annual range, HP-off observations, equal-
-    score admission contract).  Pinning the policy here keeps the test
-    intent intact without sprinkling ``policy=LeveragePolicy()`` at every
-    construction site.
-    """
-    kwargs.setdefault("policy", LeveragePolicy())
-    return _GreyboxBuffer(*args, **kwargs)
-
-
-GreyboxBuffer.from_list = _GreyboxBuffer.from_list  # type: ignore[attr-defined]
 
 
 def _make_obs(
+    *,
+    timestamp: float = 0.0,
     outdoor_temp_c: float | None = 10.0,
     hp_setpoint: float | None = 22.0,
-    current_c: float = 21.0,
-    room_rate: float = 0.001,
-    wall_time: float | None = None,
+    current_c: float = 20.0,
     clamped_reason: str = "",
-    raw_readings: dict | None = None,
 ) -> Observation:
-    """Create a test observation with sensible defaults."""
+    """Construct an Observation with reasonable defaults for buffer tests."""
     return Observation(
-        timestamp=time.monotonic(),
-        wall_time=wall_time or time.time(),
+        timestamp=timestamp,
+        wall_time=timestamp,
         hp_setpoint=hp_setpoint,
         current_c=current_c,
-        desired_c=22.0,
+        desired_c=20.0,
         outdoor_temp_c=outdoor_temp_c,
-        room_rate=room_rate,
-        raw_readings=raw_readings or {},
-        clamped=bool(clamped_reason),
+        room_rate=0.0,
+        raw_readings={},
+        clamped=clamped_reason != "",
         clamped_reason=clamped_reason,
-        supplemental_active=False,
     )
 
 
-# ── Admission ────────────────────────────────────────────────────────
+# ── Admission ─────────────────────────────────────────────────────────
 
 
 class TestAdmission:
-    """Admission policy: everything with outdoor_temp_c, including HP-off."""
-
-    def test_admits_hp_on(self):
-        buf = GreyboxBuffer(max_size=100)
-        buf.add(_make_obs(outdoor_temp_c=5.0, hp_setpoint=22.0))
+    def test_admits_valid_observation(self):
+        buf = GreyboxBuffer()
+        result = buf.add(_make_obs())
+        assert isinstance(result, BufferAddResult)
+        assert result.admitted is True
+        assert result.rejection_reason is None
+        assert result.candidate_score is None  # no scoring under fill-and-wipe
+        assert result.evicted_timestamp is None
+        assert result.min_incumbent_score is None
         assert len(buf) == 1
 
-    def test_admits_hp_off_no_output(self):
-        buf = GreyboxBuffer(max_size=100)
-        buf.add(_make_obs(
-            outdoor_temp_c=5.0, hp_setpoint=None, clamped_reason="no_output",
-        ))
-        assert len(buf) == 1
-
-    def test_admits_passive_tick(self):
-        buf = GreyboxBuffer(max_size=100)
-        buf.add(_make_obs(
-            outdoor_temp_c=15.0, hp_setpoint=None, clamped_reason="no_output",
-        ))
-        assert len(buf) == 1
-
-    def test_admits_saturated(self):
-        buf = GreyboxBuffer(max_size=100)
-        buf.add(_make_obs(outdoor_temp_c=5.0, clamped_reason="saturated_high"))
-        assert len(buf) == 1
-
-    def test_rejects_no_outdoor_temp(self):
-        buf = GreyboxBuffer(max_size=100)
-        buf.add(_make_obs(outdoor_temp_c=None))
+    def test_rejects_observation_with_no_outdoor_temp(self):
+        """The energy balance has T_out in every term — without it the
+        observation cannot contribute and the buffer should reject."""
+        buf = GreyboxBuffer()
+        result = buf.add(_make_obs(outdoor_temp_c=None))
+        assert result.admitted is False
+        assert result.rejection_reason == "no_outdoor_temp"
         assert len(buf) == 0
 
-    def test_fills_to_max_size(self):
-        buf = GreyboxBuffer(max_size=200)
-        for i in range(300):
-            buf.add(_make_obs(outdoor_temp_c=float(i % 40 - 10)))
-        assert len(buf) == 200
+    def test_admits_hp_off_observation(self):
+        """HP-off observations carry information about ua_c (envelope
+        heat loss with no HP forcing) and must be retained."""
+        buf = GreyboxBuffer()
+        result = buf.add(_make_obs(
+            hp_setpoint=None,
+            clamped_reason="no_output",
+        ))
+        assert result.admitted is True
+        assert len(buf) == 1
 
 
-# ── Feature vector ───────────────────────────────────────────────────
+# ── Fill-and-wipe lifecycle ───────────────────────────────────────────
 
 
-class TestFeatureVector:
-    """Test the 4-feature grey-box leverage vector."""
+class TestFillAndWipe:
+    def test_get_all_returns_admitted_observations(self):
+        buf = GreyboxBuffer()
+        for i in range(5):
+            buf.add(_make_obs(timestamp=float(i)))
+        observations = buf.get_all()
+        assert len(observations) == 5
+        assert [o.timestamp for o in observations] == [0.0, 1.0, 2.0, 3.0, 4.0]
 
-    def test_hp_on_features(self):
-        buf = GreyboxBuffer(max_size=100)
-        obs = _make_obs(outdoor_temp_c=5.0, hp_setpoint=22.0, current_c=20.0, room_rate=0.01)
-        vec = buf._get_feature_vector(obs)
-        assert len(vec) == _GREYBOX_N_FEATURES
-        assert vec[0] == pytest.approx(5.0 - 20.0)  # outdoor_delta
-        assert vec[1] == pytest.approx(22.0 - 20.0)  # hp_offset
-        assert vec[2] == pytest.approx(0.0)  # solar (no entity)
-        assert vec[3] == pytest.approx(0.01)  # room_rate
+    def test_get_all_returns_snapshot_not_shared_reference(self):
+        """Iterating ``get_all()`` shouldn't be affected by concurrent
+        ``add()`` / ``clear()`` activity on the buffer."""
+        buf = GreyboxBuffer()
+        for i in range(3):
+            buf.add(_make_obs(timestamp=float(i)))
+        snapshot = buf.get_all()
+        buf.clear()
+        # snapshot is independent of the now-empty buffer
+        assert len(snapshot) == 3
+        assert len(buf) == 0
 
-    def test_hp_off_features(self):
-        buf = GreyboxBuffer(max_size=100)
-        obs = _make_obs(outdoor_temp_c=5.0, hp_setpoint=None, current_c=20.0)
-        vec = buf._get_feature_vector(obs)
-        assert vec[1] == pytest.approx(0.0)  # hp_offset = 0 when off
+    def test_clear_empties_buffer(self):
+        buf = GreyboxBuffer()
+        for i in range(10):
+            buf.add(_make_obs(timestamp=float(i)))
+        assert len(buf) == 10
+        buf.clear()
+        assert len(buf) == 0
+        assert buf.get_all() == []
 
-    def test_solar_entity_features(self):
-        buf = GreyboxBuffer(max_size=100, solar_entity="sensor.solar")
-        obs = _make_obs(outdoor_temp_c=5.0, raw_readings={"sensor.solar": 250.0})
-        vec = buf._get_feature_vector(obs)
-        assert vec[2] == pytest.approx(250.0)
-
-    def test_solar_entity_missing_reading(self):
-        buf = GreyboxBuffer(max_size=100, solar_entity="sensor.solar")
-        obs = _make_obs(outdoor_temp_c=5.0, raw_readings={})
-        vec = buf._get_feature_vector(obs)
-        assert vec[2] == pytest.approx(0.0)
-
-
-# ── Leverage-scored eviction ─────────────────────────────────────────
-
-
-class TestLeverageEviction:
-    """Leverage scoring retains diverse observations."""
-
-    def test_retains_diverse_temps(self):
-        """Buffer should retain observations across the full temp range."""
-        buf = GreyboxBuffer(max_size=200)
-        for i in range(500):
-            t = -20 + 50 * (i % 50) / 49
-            buf.add(_make_obs(outdoor_temp_c=t, wall_time=1_000_000.0 + i))
-        assert len(buf) == 200
-        temps = [o.outdoor_temp_c for o in buf.get_all()]
-        assert min(temps) < -15, f"Lost cold extreme: min={min(temps)}"
-        assert max(temps) > 25, f"Lost warm extreme: max={max(temps)}"
-
-    def test_retains_hp_off_via_leverage(self):
-        """HP-off observations have different feature vectors (hp_offset=0)
-        and should be retained naturally by leverage scoring."""
-        buf = GreyboxBuffer(max_size=200)
-        wt = 1_000_000.0
-        # 180 HP-on observations at various temps
-        for i in range(180):
-            buf.add(_make_obs(
-                outdoor_temp_c=float(i % 30 - 10),
-                hp_setpoint=22.0,
-                wall_time=wt + i,
-            ))
-        # 20 HP-off observations at same temps
-        for i in range(20):
-            buf.add(_make_obs(
-                outdoor_temp_c=float(i % 30 - 10),
-                hp_setpoint=None,
-                clamped_reason="no_output",
-                wall_time=wt + 180 + i,
-            ))
-        # Add more HP-on to force eviction
-        for i in range(200):
-            buf.add(_make_obs(
-                outdoor_temp_c=float(i % 30 - 10),
-                hp_setpoint=22.0,
-                wall_time=wt + 300 + i,
-            ))
-        hp_off = sum(1 for o in buf._buffer
-                     if o.hp_setpoint is None or o.clamped_reason == "no_output")
-        # Leverage should retain some HP-off (they have unique feature vectors)
-        assert hp_off > 0, "All HP-off observations were evicted"
-
-    def test_new_temp_range_replaces_redundant(self):
-        """Adding observations at a new temp range should evict redundant ones."""
-        buf = GreyboxBuffer(max_size=100)
-        # Fill with 100 obs all at 10°C
-        for i in range(100):
-            buf.add(_make_obs(outdoor_temp_c=10.0, wall_time=1_000_000.0 + i))
-        # Now add one at -20°C — high leverage, should be accepted
-        buf.add(_make_obs(outdoor_temp_c=-20.0, wall_time=1_000_100.0))
-        temps = [o.outdoor_temp_c for o in buf.get_all()]
-        assert -20.0 in temps, "High-leverage cold observation was rejected"
+    def test_can_refill_after_clear(self):
+        """The fill-and-wipe cycle: fill, clear, fill again — controller
+        does this each weekly batch."""
+        buf = GreyboxBuffer()
+        buf.add(_make_obs(timestamp=0.0))
+        buf.clear()
+        buf.add(_make_obs(timestamp=100.0))
+        observations = buf.get_all()
+        assert len(observations) == 1
+        assert observations[0].timestamp == 100.0
 
 
-# ── Simulated year ───────────────────────────────────────────────────
+# ── Memory safety: FIFO on overflow ───────────────────────────────────
 
 
-class TestSimulatedYear:
-    """Test with realistic seasonal data over a simulated year."""
+class TestMemorySafety:
+    def test_fifo_drops_oldest_when_full(self):
+        """If the buffer ever approaches max_size without a clear() (e.g.
+        controller bug or extreme cadence), the oldest is FIFO-dropped to
+        keep memory bounded."""
+        buf = GreyboxBuffer(max_size=3)
+        for i in range(5):
+            result = buf.add(_make_obs(timestamp=float(i)))
+            assert result.admitted is True
+        # Buffer caps at 3, oldest dropped first
+        assert len(buf) == 3
+        observations = buf.get_all()
+        assert [o.timestamp for o in observations] == [2.0, 3.0, 4.0]
 
-    def test_year_preserves_full_range(self):
-        """After a simulated year, buffer should cover the full temp range."""
-        buf = GreyboxBuffer(max_size=600)
-        base_wt = 1_000_000.0
-        for hour in range(8760):
-            day = hour / 24.0
-            seasonal = 7.5 + 17.5 * math.sin(2 * math.pi * (day - 80) / 365)
-            diurnal = 5.0 * math.sin(2 * math.pi * hour / 24)
-            outdoor = seasonal + diurnal
-
-            hp_on = outdoor < 15.0
-            buf.add(_make_obs(
-                outdoor_temp_c=outdoor,
-                hp_setpoint=22.0 if hp_on else None,
-                clamped_reason="" if hp_on else "no_output",
-                wall_time=base_wt + hour * 3600,
-            ))
-
-        assert len(buf) == 600
-        temps = [o.outdoor_temp_c for o in buf.get_all()]
-        assert min(temps) < -5, f"Lost winter data: min={min(temps)}"
-        assert max(temps) > 25, f"Lost summer data: max={max(temps)}"
-
-    def test_year_retains_hp_off(self):
-        """HP-off observations should survive a full year of data."""
-        buf = GreyboxBuffer(max_size=600)
-        base_wt = 1_000_000.0
-        for hour in range(8760):
-            day = hour / 24.0
-            outdoor = 7.5 + 17.5 * math.sin(2 * math.pi * (day - 80) / 365)
-            hp_on = outdoor < 15.0
-            buf.add(_make_obs(
-                outdoor_temp_c=outdoor,
-                hp_setpoint=22.0 if hp_on else None,
-                clamped_reason="" if hp_on else "no_output",
-                wall_time=base_wt + hour * 3600,
-            ))
-
-        hp_off = sum(1 for o in buf._buffer
-                     if o.hp_setpoint is None or o.clamped_reason == "no_output")
-        assert hp_off > 0, "No HP-off observations survived"
-        assert hp_off > 20, f"Only {hp_off} HP-off survived — too few"
+    def test_evicted_timestamp_reported_on_overflow(self):
+        """The eviction is reflected in the BufferAddResult so observability
+        tooling can record the unusual event."""
+        buf = GreyboxBuffer(max_size=2)
+        buf.add(_make_obs(timestamp=0.0))
+        buf.add(_make_obs(timestamp=1.0))
+        result = buf.add(_make_obs(timestamp=2.0))
+        assert result.admitted is True
+        assert result.evicted_timestamp == 0.0
 
 
-# ── Persistence ──────────────────────────────────────────────────────
+# ── Solar entity wiring ───────────────────────────────────────────────
 
 
-class TestPersistence:
-    """Serialization round-trip."""
+class TestSolarEntity:
+    def test_solar_entity_stored(self):
+        buf = GreyboxBuffer(solar_entity="sensor.solar_proxy")
+        assert buf.solar_entity == "sensor.solar_proxy"
 
-    def test_round_trip(self):
-        buf = GreyboxBuffer(max_size=200)
-        for i in range(150):
-            buf.add(_make_obs(
-                outdoor_temp_c=-10.0 + 40.0 * i / 149,
-                wall_time=1_000_000.0 + i,
-            ))
-
-        serialized = buf.as_list()
-        restored = GreyboxBuffer.from_list(serialized, max_size=200)
-
-        assert len(restored) == len(buf)
-        orig_temps = sorted(o.outdoor_temp_c for o in buf.get_all())
-        rest_temps = sorted(o.outdoor_temp_c for o in restored.get_all())
-        assert orig_temps == rest_temps
-
-    def test_skips_corrupt_entries(self):
-        buf = GreyboxBuffer(max_size=100)
-        buf.add(_make_obs(outdoor_temp_c=10.0))
-        serialized = buf.as_list()
-        serialized.append({"garbage": True})
-        serialized.append({"v": 1, "old": "format"})
-
-        restored = GreyboxBuffer.from_list(serialized, max_size=100)
-        assert len(restored) == 1
-
-    def test_truncates_to_max_size(self):
-        buf = GreyboxBuffer(max_size=200)
-        for i in range(200):
-            buf.add(_make_obs(
-                outdoor_temp_c=float(i % 40 - 10),
-                wall_time=1_000_000.0 + i,
-            ))
-        serialized = buf.as_list()
-        restored = GreyboxBuffer.from_list(serialized, max_size=100)
-        assert len(restored) == 100
-
-    def test_empty_round_trip(self):
-        buf = GreyboxBuffer(max_size=100)
-        serialized = buf.as_list()
-        restored = GreyboxBuffer.from_list(serialized, max_size=100)
-        assert len(restored) == 0
-
-    def test_solar_entity_preserved(self):
-        buf = GreyboxBuffer(solar_entity="sensor.solar")
-        buf.add(_make_obs(outdoor_temp_c=10.0, raw_readings={"sensor.solar": 100.0}))
-        serialized = buf.as_list()
-        restored = GreyboxBuffer.from_list(serialized, solar_entity="sensor.solar")
-        assert restored.solar_entity == "sensor.solar"
+    def test_solar_entity_settable(self):
+        buf = GreyboxBuffer()
+        assert buf.solar_entity is None
+        buf.solar_entity = "sensor.solar_proxy"
+        assert buf.solar_entity == "sensor.solar_proxy"
 
 
-# ── Diagnostics ──────────────────────────────────────────────────────
+# ── Diagnostics ───────────────────────────────────────────────────────
 
 
 class TestDiagnostics:
-    """Test diagnostic output."""
-
-    def test_diagnostics_empty(self):
+    def test_empty_buffer_diagnostics(self):
         buf = GreyboxBuffer(max_size=100)
         diag = buf.get_diagnostics()
         assert diag["total"] == 0
         assert diag["max_size"] == 100
         assert diag["hp_off_pct"] is None
+        assert diag["min_leverage"] is None  # retained as None for backward-compat
 
-    def test_diagnostics_with_data(self):
-        buf = GreyboxBuffer(max_size=300)
-        for i in range(200):
-            hp_off = i % 5 == 0
-            buf.add(_make_obs(
-                outdoor_temp_c=float(i % 40 - 10),
-                hp_setpoint=None if hp_off else 22.0,
-                clamped_reason="no_output" if hp_off else "",
-                wall_time=1_000_000.0 + i,
-            ))
+    def test_hp_off_percentage(self):
+        buf = GreyboxBuffer()
+        # 3 HP-on, 1 HP-off
+        for i in range(3):
+            buf.add(_make_obs(timestamp=float(i)))
+        buf.add(_make_obs(timestamp=4.0, hp_setpoint=None, clamped_reason="no_output"))
         diag = buf.get_diagnostics()
-        assert diag["total"] == 200
-        assert diag["hp_off_pct"] is not None
-        assert 15 < diag["hp_off_pct"] < 25
-        assert diag["min_leverage"] is not None
+        assert diag["total"] == 4
+        assert diag["hp_off_pct"] == 25.0
 
 
-# ── Solar entity config ──────────────────────────────────────────────
+# ── Persistence ───────────────────────────────────────────────────────
 
 
-class TestSolarEntity:
-    def test_setter(self):
-        buf = GreyboxBuffer(solar_entity="sensor.old")
-        assert buf.solar_entity == "sensor.old"
-        buf.solar_entity = "sensor.new"
-        assert buf.solar_entity == "sensor.new"
+class TestPersistence:
+    def test_round_trip_preserves_observations(self):
+        buf = GreyboxBuffer()
+        for i in range(5):
+            buf.add(_make_obs(timestamp=float(i), current_c=20.0 + i * 0.1))
+        snapshot = buf.as_list()
+        assert len(snapshot) == 5
+
+        restored = GreyboxBuffer.from_list(snapshot)
+        observations = restored.get_all()
+        assert len(observations) == 5
+        # Numeric fields round-trip cleanly
+        assert [o.timestamp for o in observations] == [0.0, 1.0, 2.0, 3.0, 4.0]
+        assert observations[0].current_c == pytest.approx(20.0)
+        assert observations[4].current_c == pytest.approx(20.4)
+
+    def test_round_trip_drops_invalid_observations(self):
+        """Persisted entries with corrupt fields are silently skipped on
+        restore so a single bad observation doesn't crash startup."""
+        buf = GreyboxBuffer()
+        buf.add(_make_obs(timestamp=0.0))
+        snapshot = buf.as_list()
+        # Inject a corrupt entry that's missing required fields
+        snapshot.append({"timestamp": "not_a_number"})
+
+        restored = GreyboxBuffer.from_list(snapshot)
+        assert len(restored.get_all()) == 1
+
+    def test_round_trip_drops_no_outdoor_temp_entries(self):
+        """If persisted state somehow contains an observation with
+        ``outdoor_temp_c=None``, it should not survive the restore
+        (same gate as live ``add()``)."""
+        buf = GreyboxBuffer()
+        buf.add(_make_obs(timestamp=0.0, outdoor_temp_c=20.0))
+        snapshot = buf.as_list()
+        # Hand-craft a serialized entry with outdoor_temp_c=None (uses
+        # the abbreviated schema keys produced by Observation.as_dict).
+        snapshot.append({
+            **snapshot[0],
+            "t": 1.0,
+            "ot": None,
+        })
+
+        restored = GreyboxBuffer.from_list(snapshot)
+        observations = restored.get_all()
+        assert len(observations) == 1
+        assert observations[0].timestamp == 0.0
+
+    def test_round_trip_respects_max_size(self):
+        """When restoring more entries than ``max_size`` allows, the
+        newest are retained (matches the FIFO-on-overflow rule of live
+        ``add()``)."""
+        buf = GreyboxBuffer()
+        for i in range(5):
+            buf.add(_make_obs(timestamp=float(i)))
+        snapshot = buf.as_list()
+
+        restored = GreyboxBuffer.from_list(snapshot, max_size=3)
+        observations = restored.get_all()
+        assert len(observations) == 3
+        assert [o.timestamp for o in observations] == [2.0, 3.0, 4.0]
 
 
-# ── get_all ──────────────────────────────────────────────────────────
+# ── Default size ──────────────────────────────────────────────────────
 
 
-class TestGetAll:
-    def test_returns_copy(self):
-        buf = GreyboxBuffer(max_size=100)
-        buf.add(_make_obs(outdoor_temp_c=10.0))
-        result = buf.get_all()
-        result.clear()
-        assert len(buf) == 1
-
-
-# ── BufferAddResult contract ─────────────────────────────────────────
-
-
-class TestAddReturnsDecision:
-    """Same admission-observability contract as DiversityAwareBuffer,
-    plus the greybox-specific `no_outdoor_temp` rejection reason that
-    fires before leverage is even computed.
-    """
-
-    def test_no_outdoor_temp_rejection_returns_named_reason(self):
-        buf = GreyboxBuffer(max_size=10)
-        r = buf.add(_make_obs(outdoor_temp_c=None))
-        # Structural check rather than isinstance — test_batch_learning.py
-        # reloads the module which replaces BufferAddResult in module
-        # globals, breaking isinstance against the frozen test import.
-        assert hasattr(r, "admitted")
-        assert r.admitted is False
-        assert r.rejection_reason == "no_outdoor_temp"
-        assert r.candidate_score is None
-        assert r.evicted_timestamp is None
-        assert r.min_incumbent_score is None
-        assert r.policy_name == "leverage"
-
-    def test_admitted_into_empty_buffer_returns_admitted(self):
-        buf = GreyboxBuffer(max_size=10)
-        r = buf.add(_make_obs(outdoor_temp_c=5.0))
-        assert r.admitted is True
-        assert r.rejection_reason is None
-        assert r.candidate_score is not None and r.candidate_score >= 0
-        assert r.evicted_timestamp is None
-        assert r.min_incumbent_score is None
-        assert r.policy_name == "leverage"
-
-    def test_full_buffer_with_higher_leverage_admits_and_reports_evicted(self):
-        buf = GreyboxBuffer(max_size=4)
-        for i in range(4):
-            buf.add(_make_obs(outdoor_temp_c=10.0 + i, room_rate=0.001))
-
-        r = buf.add(_make_obs(outdoor_temp_c=-30.0, room_rate=0.05))
-        assert r.admitted is True
-        assert r.candidate_score is not None
-        assert r.min_incumbent_score is not None
-        assert r.evicted_timestamp is not None
-        assert r.rejection_reason is None
-
-    def test_full_buffer_with_equal_score_rejects_with_policy_reason(self):
-        buf = GreyboxBuffer(max_size=4)
-        for i in range(4):
-            buf.add(_make_obs(outdoor_temp_c=10.0, room_rate=0.001))
-
-        r = buf.add(_make_obs(outdoor_temp_c=10.0, room_rate=0.001))
-        assert r.admitted is False
-        assert r.rejection_reason == "leverage_rejected"
-        assert r.candidate_score is not None
-        assert r.min_incumbent_score is not None
-        assert r.evicted_timestamp is None
-        assert len(buf) == 4
+class TestDefaults:
+    def test_default_max_size_is_memory_safety_cap(self):
+        """The default is a memory-safety upper bound, sized for many weeks
+        of high-cadence observations. Normal weekly fill-and-wipe never
+        approaches it."""
+        buf = GreyboxBuffer()
+        assert buf._max_size == DEFAULT_GREYBOX_BUFFER_SIZE
+        # Sanity: high enough to hold a week of 60s ticks (10 080) with
+        # a lot of headroom.
+        assert DEFAULT_GREYBOX_BUFFER_SIZE >= 20000

@@ -1,120 +1,87 @@
-"""Observation buffer for grey-box 1R1C/2R2C identification.
+"""Append-only observation buffer for grey-box 1R1C/2R2C identification.
 
-Subclass of DiversityAwareBuffer specialized for state-space (sim-error
-PEM) parameter identification. Defaults to ``TimeWindowPolicy`` —
-keeps observations within ``DEFAULT_GREYBOX_WINDOW_SECONDS`` of the
-latest admitted obs, with ``max_size`` as a memory safety net.
+Architecture (2026-06-04 redesign):
 
-Why time-window, not count-based:
-- Greybox 2R2C fit propagates state chronologically (sim-error PEM,
-  matrix-exp ZOH). What matters for identifiability is *time-span*
-  relative to the dominant time constant τ_slow, NOT raw sample count.
-- A count-based policy (SlevPolicy / SlidingWindowPolicy) covers wildly
-  different time-spans at different cadences: ``max_size=10000`` is ~7d
-  at 60s ticks but ~104d at 15min ticks. The former is too short for
-  envelope ID, the latter is wasted compute.
-- Bacher & Madsen (2011), CTSM-R, Ljung §11.4 all define the window in
-  time units.
-- Adjacent timestamps in the retained window are uniform-spaced at the
-  sensor cadence, so the per-fit dt-memoization cache in
-  ``_fit_greybox_2r2c`` hits on (essentially) every tick — preserves the
-  perf gains from the closed-form 2×2 expm path.
+Greybox uses **fill-and-wipe** semantics paired with the weekly-cadence
+gate in ``pi_controller``. Each tick admits an observation (rejecting
+those with no outdoor temperature); at each weekly batch fit, the
+controller consumes ``get_all()``, runs ``fit_greybox()``, promotes the
+posterior into the chain prior (Pathak §4.2), and calls ``clear()``.
+Next week starts with an empty buffer. Across batches there is zero
+observation overlap — continuity of structural parameter estimates is
+carried by the persisted ``PriorState`` chain prior, not by re-fitting
+shared observations.
 
-Key differences from the WLS DiversityAwareBuffer:
-- Feature vector: [outdoor_delta, hp_offset, solar, room_rate] — the
-  physical variables that matter for 1R1C/2R2C energy balance ID
-- Admits HP-off observations (critical for isolating ua_c)
-- Admits passive-tick observations (hvac_mode=OFF)
-- Single buffer per zone (mode-agnostic, not split by heat/cool)
-- Time-window default (7d) sized for non-transfer-learning fallback
-  operation; with Pathak §4.2 posterior-chain transfer learning ahead,
-  this can drop to ~72h once the prior carries forward.
+This replaces the older ``DiversityAwareBuffer`` inheritance with its
+time-window or leverage-scoring policies. That structure was inherited
+from WLS where intra-day operational refresh benefits from sliding-
+window admission scoring. None of it applies to greybox's structural-ID
+purpose:
 
-Standalone module — no Home Assistant dependencies.
+- No leverage scoring: there is no "which observations to evict when
+  full" decision — the controller wipes everything at batch boundary.
+- No D-optimal feature vector caching: nothing consumes it.
+- No info-matrix tracking: nothing consumes it.
+- No swappable policy abstraction: there is one behavior (append; cap
+  at max_size as memory safety; clear() at batch).
+
+Standalone module — no Home Assistant dependencies. Imports
+``BufferAddResult`` and ``Observation`` only for type-compatibility with
+the controller's existing observation-context plumbing.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
-from .batch_learning import BufferAddResult, DiversityAwareBuffer, Observation
-from .buffer_policies import TimeWindowPolicy
-
-if TYPE_CHECKING:
-    from .buffer_policies import BufferPolicy
+from .batch_learning import BufferAddResult, Observation
 
 _LOGGER = logging.getLogger(__name__)
 
-# Default time window: 21 days. Two hard requirements set the floor:
-#   1. ``MIN_TIMESPAN_DAYS_2R2C = 14`` (greybox_observer.py) — the 2R2C
-#      dispatch gate. A window < 14 days means 2R2C never dispatches,
-#      fits fall to 1R1C, and the prior chain never fires.
-#   2. Envelope τ_slow can reach ~58h (lit max); clean identification
-#      needs 5+ time constants ≈ 12 days. 14d barely covers it; 21d
-#      gives margin so the optimizer has signal in low-SNR weeks.
-# Three weeks balances both gates while staying well below the >60d
-# of historical data the eviction-sparse approach used to retain.
-# Future: with the Pathak §4.2 chain warmed up the prior carries old
-# information forward, so we could revisit downward — but the dispatch
-# gate is the hard floor that makes 21d the minimum sane default.
-DEFAULT_GREYBOX_WINDOW_SECONDS: float = 21.0 * 24.0 * 3600.0  # 21 days
-
-# Memory safety net. At 60s cadence × 21 days = 30240 obs.  Cap at
-# 32000 to give time-window first-eviction priority across all sensor
-# cadences ≥60s (the lower bound of what HA reasonably emits).  Above
-# 32000 the FIFO falloff kicks in.
+# Memory safety net only. Under the weekly fill-and-wipe cycle the
+# normal high-water mark is one week of observations: at 60 s sensor
+# cadence × 7 d ≈ 10 080. Cap at 32 000 leaves room for faster cadences
+# (e.g. ~20 s ticks for 7 d ≈ 30 240) without practical risk of touching
+# the FIFO drop path. If max_size is ever hit, the oldest observation is
+# dropped — but only as a guardrail; correctness relies on the
+# controller calling ``clear()`` each batch.
 DEFAULT_GREYBOX_BUFFER_SIZE = 32000
 
-# Grey-box feature vector: 4 features for leverage scoring.
-_GREYBOX_N_FEATURES = 4
-_GREYBOX_FEATURE_ORDER = ["outdoor_delta", "hp_offset", "solar", "room_rate"]
+
+_POLICY_NAME = "append_only"
 
 
-class GreyboxBuffer(DiversityAwareBuffer):
-    """Leverage-scored observation buffer for grey-box identification.
-
-    Uses the same D-optimal leverage scoring as the WLS buffer but with
-    a feature vector tailored for 1R1C energy balance identification:
-
-        [outdoor_delta, hp_offset, solar, room_rate]
-
-    Admits all observations with valid outdoor_temp_c, including HP-off
-    (clamped_reason="no_output") and passive-tick observations.  HP-off
-    observations are critical for isolating ua_c (envelope heat loss)
-    since hp_offset=0 removes k_c from the energy balance.
+class GreyboxBuffer:
+    """Append-only buffer holding observations for the current batch window.
 
     Usage::
 
-        buf = GreyboxBuffer()
-        buf.add(obs)                     # every tick (HP-on and HP-off)
-        observations = buf.get_all()     # feed to fit_greybox()
-        serialized = buf.as_list()       # persist
-        buf = GreyboxBuffer.from_list(serialized)  # restore
+        buf = GreyboxBuffer(solar_entity=...)
+
+        # Per tick:
+        result = buf.add(obs)         # admitted unless outdoor_temp_c is None
+
+        # At batch time (weekly cadence in production):
+        observations = buf.get_all()  # snapshot for fit_greybox()
+        # ... fit, promote chain prior ...
+        buf.clear()                   # wipe for next week
+
+        # Persistence:
+        snapshot = buf.as_list()
+        buf2 = GreyboxBuffer.from_list(snapshot, solar_entity=...)
     """
 
     def __init__(
         self,
         max_size: int = DEFAULT_GREYBOX_BUFFER_SIZE,
         solar_entity: str | None = None,
-        policy: "BufferPolicy | None" = None,
-        window_seconds: float = DEFAULT_GREYBOX_WINDOW_SECONDS,
     ) -> None:
-        # Default to TimeWindowPolicy for greybox; sim-error PEM needs
-        # contiguous recent observations, not eviction-sparse sampling.
-        # Callers can pass any policy explicitly (e.g. bench tests that
-        # exercise SlevPolicy / LeveragePolicy variants).
-        if policy is None:
-            policy = TimeWindowPolicy(window_seconds=window_seconds)
-        super().__init__(
-            n_features=_GREYBOX_N_FEATURES,
-            max_size=max_size,
-            feature_order=_GREYBOX_FEATURE_ORDER,
-            model_inputs=[],
-            policy=policy,
-        )
+        self._buffer: list[Observation] = []
+        self._max_size = int(max_size)
         self._solar_entity = solar_entity
 
+    # ── Solar entity (used by ``fit_greybox`` to find the solar input) ──
     @property
     def solar_entity(self) -> str | None:
         return self._solar_entity
@@ -123,13 +90,14 @@ class GreyboxBuffer(DiversityAwareBuffer):
     def solar_entity(self, value: str | None) -> None:
         self._solar_entity = value
 
+    # ── Append (with admission gate + memory safety) ────────────────────
     def add(self, obs: Observation) -> BufferAddResult:
-        """Admit an observation into the buffer.
+        """Admit ``obs`` into the buffer.
 
-        Returns a `BufferAddResult` describing the decision. Only rejects
-        observations with outdoor_temp_c=None up front; otherwise
-        delegates to the leverage-scored super().add(). Unlike the WLS
-        buffer, admits HP-off observations.
+        Rejects observations with ``outdoor_temp_c is None`` — the energy
+        balance has ``T_out`` in every term, so without it the observation
+        cannot contribute to the fit. Otherwise appends. If the buffer is
+        at ``max_size`` (safety net only), drops the oldest observation.
         """
         if obs.outdoor_temp_c is None:
             return BufferAddResult(
@@ -138,71 +106,52 @@ class GreyboxBuffer(DiversityAwareBuffer):
                 evicted_timestamp=None,
                 min_incumbent_score=None,
                 rejection_reason="no_outdoor_temp",
-                policy_name=self._policy.name,
-            )
-        return super().add(obs)
-
-    def _get_feature_vector(self, obs: Observation) -> list[float]:
-        """Build the 4-feature vector for grey-box leverage scoring.
-
-        [outdoor_delta, hp_offset, solar, room_rate]
-        """
-        outdoor_delta = (
-            (obs.outdoor_temp_c - obs.current_c)
-            if obs.outdoor_temp_c is not None
-            else 0.0
-        )
-        hp_offset = (
-            (obs.hp_setpoint - obs.current_c)
-            if obs.hp_setpoint is not None
-            and obs.clamped_reason != "no_output"
-            else 0.0
-        )
-        solar = (
-            obs.raw_readings.get(self._solar_entity, 0.0)
-            if self._solar_entity is not None
-            else 0.0
-        )
-        return [outdoor_delta, hp_offset, solar, obs.room_rate]
-
-    @classmethod
-    def from_list(  # type: ignore[override]
-        cls,
-        data: list[dict[str, Any]],
-        max_size: int = DEFAULT_GREYBOX_BUFFER_SIZE,
-        solar_entity: str | None = None,
-        policy: "BufferPolicy | None" = None,
-    ) -> "GreyboxBuffer":
-        """Deserialize from stored dicts, recomputing the info matrix.
-
-        Corrupt or unreadable entries are silently skipped.
-        """
-        buf = cls(max_size=max_size, solar_entity=solar_entity, policy=policy)
-        observations: list[Observation] = []
-        for d in data:
-            try:
-                obs = Observation.from_dict(d)
-                if obs.outdoor_temp_c is not None:
-                    observations.append(obs)
-            except (KeyError, TypeError, ValueError):
-                continue
-
-        n_skipped = len(data) - len(observations)
-        if n_skipped > 0:
-            _LOGGER.info(
-                "Grey-box buffer: skipped %d unreadable observations during restore",
-                n_skipped,
+                policy_name=_POLICY_NAME,
             )
 
-        if len(observations) > max_size:
-            observations = observations[-max_size:]
+        evicted_timestamp: float | None = None
+        if len(self._buffer) >= self._max_size:
+            # Memory safety net — should never trip under the weekly
+            # fill-and-wipe cycle. Log when it does so anomalous cadences
+            # are visible.
+            evicted_timestamp = self._buffer[0].timestamp
+            self._buffer.pop(0)
+            _LOGGER.warning(
+                "Grey-box buffer hit max_size=%d; dropping oldest observation. "
+                "Indicates either a missed clear() at batch boundary or a "
+                "cadence faster than 7d × max_size supports.",
+                self._max_size,
+            )
+        self._buffer.append(obs)
+        return BufferAddResult(
+            admitted=True,
+            candidate_score=None,
+            evicted_timestamp=evicted_timestamp,
+            min_incumbent_score=None,
+            rejection_reason=None,
+            policy_name=_POLICY_NAME,
+        )
 
-        buf._buffer = observations
-        buf.recompute_info_matrix()
-        return buf
+    # ── Consume / wipe ──────────────────────────────────────────────────
+    def get_all(self) -> list[Observation]:
+        """Snapshot of all observations currently held.
 
+        Returns a shallow copy so callers iterating the result are
+        insulated from concurrent ``add()`` or ``clear()`` activity.
+        """
+        return list(self._buffer)
+
+    def clear(self) -> None:
+        """Wipe the buffer. Called by the controller after a successful
+        batch fit + chain promotion."""
+        self._buffer.clear()
+
+    def __len__(self) -> int:
+        return len(self._buffer)
+
+    # ── Diagnostics for state logging ───────────────────────────────────
     def get_diagnostics(self) -> dict[str, Any]:
-        """Return diagnostic information for extra_state_attributes."""
+        """Buffer state for ``extra_state_attributes`` and batch logs."""
         total = len(self._buffer)
         hp_off_count = sum(
             1 for o in self._buffer
@@ -214,5 +163,53 @@ class GreyboxBuffer(DiversityAwareBuffer):
             "hp_off_pct": (
                 round(100 * hp_off_count / total, 1) if total > 0 else None
             ),
-            "min_leverage": round(self.get_min_leverage(), 6) if total > 0 else None,
+            # ``min_leverage`` field retained as None for backward-compat
+            # with diagnostic-snapshot consumers that read it. The leverage
+            # concept is meaningless under fill-and-wipe (no per-observation
+            # eviction score).
+            "min_leverage": None,
         }
+
+    # ── Persistence ─────────────────────────────────────────────────────
+    def as_list(self) -> list[dict[str, Any]]:
+        """Serialize the buffer's observations as a list of dicts using the
+        schema-versioned ``Observation.as_dict`` format. Persisted state
+        from this module is fully round-trippable with state persisted by
+        the prior DiversityAwareBuffer-backed implementation."""
+        return [o.as_dict() for o in self._buffer]
+
+    @classmethod
+    def from_list(
+        cls,
+        data: list[dict[str, Any]],
+        max_size: int = DEFAULT_GREYBOX_BUFFER_SIZE,
+        solar_entity: str | None = None,
+    ) -> "GreyboxBuffer":
+        """Restore from a serialized buffer.
+
+        Silently skips entries that fail to deserialize (corrupt persisted
+        state shouldn't crash the integration on restart). Drops entries
+        with ``outdoor_temp_c is None``. Caps to ``max_size`` (newest
+        retained — matches the FIFO-on-overflow rule of ``add()``).
+        """
+        buf = cls(max_size=max_size, solar_entity=solar_entity)
+        kept: list[Observation] = []
+        for d in data:
+            try:
+                obs = Observation.from_dict(d)
+            except (KeyError, TypeError, ValueError):
+                continue
+            if obs.outdoor_temp_c is None:
+                continue
+            kept.append(obs)
+        n_skipped = len(data) - len(kept)
+        if n_skipped > 0:
+            _LOGGER.info(
+                "Grey-box buffer: skipped %d unreadable / invalid "
+                "observations during restore",
+                n_skipped,
+            )
+        if len(kept) > max_size:
+            kept = kept[-max_size:]
+        buf._buffer = kept
+        return buf
