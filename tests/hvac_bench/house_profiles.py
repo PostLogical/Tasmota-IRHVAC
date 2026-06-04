@@ -6,161 +6,32 @@ to be representative, not exact — the goal is testing across a range of
 building types, not modeling a specific house.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-
-@dataclass(frozen=True)
-class HPCapacityCurve:
-    """Piecewise linear HP capacity factor vs outdoor temperature.
-
-    Real air-source heat pumps lose capacity in cold (heating) and at high
-    outdoor temps (cooling). Without this scaling, a fixed-gain bench
-    underestimates how often the HP rails in cold and overestimates control
-    authority during cold snaps — exactly the regime Tobit (#40) is meant
-    to handle. NEEP cold-climate ASHP datasets show ~50–70% of rated
-    heating capacity at design temp; standard ASHPs lose more. Cold-climate
-    hyper-heat units continue operating below design at reduced capacity
-    until a separate cutout temp.
-
-    Heating curve (mode="heat"):
-        outdoor ≤ heating_cutoff_t          → 0 (HP cannot heat at all)
-        heating_cutoff_t .. heating_design_t → linear 0 → heating_design_factor
-        heating_design_t .. heating_rated_t  → linear heating_design_factor → 1.0
-        heating_rated_t  .. heating_mild_t   → linear 1.0 → heating_mild_factor
-        outdoor ≥ heating_mild_t             → heating_mild_factor
-
-    Cooling curve (mode="cool"): mirror with opposite slope.
-
-    Defaults represent a typical residential ASHP rated at AHRI 7°C heating
-    / 35°C cooling, with capacity zeroed at -15°C heating / 46°C cooling
-    (heating_design_factor=0.0, heating_cutoff_t = heating_design_t — the
-    cliff used pre-#49). Cold-climate / hyper-heat curves set
-    heating_design_factor > 0 and a colder cutout.
-    """
-    heating_design_t: float = -15.0
-    heating_rated_t: float = 7.0
-    heating_mild_t: float = 20.0
-    heating_mild_factor: float = 1.15
-    # Capacity at design temp (0.0 = legacy cliff; CCASHPs typically 0.5-0.75).
-    heating_design_factor: float = 0.0
-    # Below this, capacity = 0. None ⇒ uses heating_design_t (legacy cliff).
-    heating_cutoff_t: float | None = None
-    cooling_mild_t: float = 18.0
-    cooling_rated_t: float = 35.0
-    cooling_design_t: float = 46.0
-    cooling_mild_factor: float = 1.15
-
-    @property
-    def heating_cutoff(self) -> float:
-        """Effective heating cutoff temp (below this, capacity = 0)."""
-        return self.heating_design_t if self.heating_cutoff_t is None else self.heating_cutoff_t
-
-    def factor(self, outdoor_c: float, mode: str = "heat") -> float:
-        """Capacity factor (≥ 0) at the given outdoor temperature."""
-        if mode == "heat":
-            cutoff = self.heating_cutoff
-            if outdoor_c <= cutoff:
-                return 0.0
-            if outdoor_c >= self.heating_mild_t:
-                return self.heating_mild_factor
-            if outdoor_c <= self.heating_design_t:
-                # Below design, partial capacity (CCASHP / hyper-heat regime).
-                span = self.heating_design_t - cutoff
-                if span <= 0:
-                    return 0.0
-                return self.heating_design_factor * (outdoor_c - cutoff) / span
-            if outdoor_c <= self.heating_rated_t:
-                span = self.heating_rated_t - self.heating_design_t
-                frac = (outdoor_c - self.heating_design_t) / span
-                return self.heating_design_factor + frac * (1.0 - self.heating_design_factor)
-            span = self.heating_mild_t - self.heating_rated_t
-            frac = (outdoor_c - self.heating_rated_t) / span
-            return 1.0 + frac * (self.heating_mild_factor - 1.0)
-        # cooling
-        if outdoor_c >= self.cooling_design_t:
-            return 0.0
-        if outdoor_c <= self.cooling_mild_t:
-            return self.cooling_mild_factor
-        if outdoor_c >= self.cooling_rated_t:
-            span = self.cooling_design_t - self.cooling_rated_t
-            return 1.0 - (outdoor_c - self.cooling_rated_t) / span
-        span = self.cooling_rated_t - self.cooling_mild_t
-        frac = (outdoor_c - self.cooling_mild_t) / span
-        return self.cooling_mild_factor + frac * (1.0 - self.cooling_mild_factor)
-
-
-# Default curves keyed for convenience.  STANDARD_HP_CAPACITY mirrors a
-# typical residential ASHP (no cold-climate spec); COLD_CLIMATE_HP_CAPACITY
-# represents a CCASHP that holds capacity well below design temp (NEEP
-# cold-climate listing typical: 75% at -15°C, ~50% at -25°C).
-STANDARD_HP_CAPACITY = HPCapacityCurve()
-
-COLD_CLIMATE_HP_CAPACITY = HPCapacityCurve(
-    heating_design_t=-25.0,
-    heating_rated_t=7.0,
-    heating_mild_t=20.0,
-    heating_mild_factor=1.10,
+# 2026-06-03 Stage 1e refactor: the bench used to define its own HPCapacityCurve
+# dataclass (single-design/rated/mild/cutoff parameterization, linear ramps
+# between). That implementation has been superseded by production's
+# CapacityProfile registry, which uses 10-anchor piecewise-linear curves sourced
+# directly from manufacturer engineering data (Fujitsu D&T Manuals, NEEP CCASHP
+# spec). The bench now imports from production so there's a single source of
+# truth — earlier 3-anchor linear approximations of the Fujitsu curves diverged
+# ~2% from the actual manufacturer table at intermediate temps (e.g. -10°C).
+#
+# API compatibility: production's CapacityProfile.factor(temp_c, mode) returns
+# the same scalar multiplier as the old HPCapacityCurve.factor — drop-in for
+# bench consumers (ThermalModel.step, scenario tests).
+from custom_components.tasmota_irhvac.pi.capacity_profiles import (
+    CapacityProfile,
+    get_profile as _get_capacity_profile,
 )
 
-
-# Fujitsu AOU24RLXFWH single-zone outdoor + ASU24RLF wall-mount head.
-# Source: Fujitsu 24RLXFW1 Design & Technical Manual (pdf-extracted 2026-05-17,
-# Heating Capacity section, ASU24RLF table at 70°F indoor):
-#   Outdoor °C   TC kBtu/h   factor (vs +8.3°C/47°F rated = 36.17)
-#     +15.0 / 59°F   35.11      0.97
-#     +10.0 / 50°F   36.85      1.02
-#     +8.3  / 47°F   36.17      1.00   ← AHRI rated
-#     +5.0  / 41°F   35.14      0.97
-#     +0.0  / 32°F   32.21      0.89
-#     -5.0  / 23°F   29.31      0.81
-#     -10.0 / 14°F   26.87      0.74
-#     -15.0 /  5°F   25.21      0.70
-#     -20.6 / -5°F   22.54      0.62
-# Operation cutoff: -15°F (-26°C) per spec sheet.
-# Linear fit (rated_t=+8.3, design_t=cutoff_t=-26, design_factor=0.54)
-# matches all measured points within ~1%; design_factor=0.54 is the
-# implied capacity at cutoff (extrapolation of the linear segment).
-# Below cutoff: 0 (HP off per spec).
-# Earlier values (0.5/-32°C) were a Mitsubishi H2i curve mislabeled.
-# Per user_profile.md this is the LR outdoor; DR/BR/NU run off an
-# AOU36RLXFZH multi-split (separate curve, FUJITSU_AOU36RLXFZH_CAPACITY).
-FUJITSU_HYPERHEAT_CAPACITY = HPCapacityCurve(
-    heating_design_t=-26.0,
-    heating_design_factor=0.54,
-    heating_cutoff_t=-26.0,
-    heating_rated_t=8.3,
-    heating_mild_t=20.0,
-    heating_mild_factor=0.95,
-)
-
-
-# Fujitsu AOU36RLXFZH 4-zone-capable multi-split outdoor.
-# Source: AOU36RLXFZH Design & Technical Manual (pdf-extracted 2026-05-17,
-# Heating Capacity section, 36 kBtu connecting-capacity row, 70°F indoor;
-# user's connected heads ASU18+ASU9+ASU9 = 36 kBtu so this row applies):
-#   Outdoor °C   TC kBtu/h   factor (vs +8.3°C/47°F rated = 42.0)
-#     +15.0 / 59°F   42.0       1.00   (flat top)
-#     +10.0 / 50°F   42.0       1.00
-#     +8.3  / 47°F   42.0       1.00   ← AHRI rated
-#     +5.0  / 41°F   42.0       1.00   (flat to here)
-#     +0.0  / 32°F   42.0       1.00
-#     -5.0  / 23°F   40.8       0.97
-#     -10.0 / 14°F   38.6       0.92
-#     -15.0 /  5°F   36.4       0.87
-#     -20.6 / -5°F   25.1       0.60   (cliff drop here)
-#     -26.0 /-15°F   22.1       0.53
-# Operation cutoff: -15°F (-26°C).  Curve has a wide flat top + cliff drop
-# below ~-5°F that single-linear can't capture cleanly.  Fit prioritizes
-# cold-end accuracy (design_t=-26, design_factor=0.53) which approximates
-# the moderate-temp behavior as well (matches within ~10pts above -15°C).
-FUJITSU_AOU36RLXFZH_CAPACITY = HPCapacityCurve(
-    heating_design_t=-26.0,
-    heating_design_factor=0.53,
-    heating_cutoff_t=-26.0,
-    heating_rated_t=8.3,
-    heating_mild_t=20.0,
-    heating_mild_factor=0.95,
-)
+# Convenience references to production's registry entries. These replace the
+# bench-local curve constants while preserving the names that scenario tests
+# already import.
+STANDARD_HP_CAPACITY: CapacityProfile = _get_capacity_profile("standard_inverter")
+COLD_CLIMATE_HP_CAPACITY: CapacityProfile = _get_capacity_profile("cold_climate_inverter")
+FUJITSU_HYPERHEAT_CAPACITY: CapacityProfile = _get_capacity_profile("fujitsu_aou24rlxfwh")
+FUJITSU_AOU36RLXFZH_CAPACITY: CapacityProfile = _get_capacity_profile("fujitsu_aou36rlxfzh")
 
 
 @dataclass(frozen=True)
@@ -182,7 +53,7 @@ class HouseProfile:
     tau_minutes: float
     hp_gain: float
     description: str = ""
-    hp_capacity: HPCapacityCurve | None = None
+    hp_capacity: CapacityProfile | None = None
 
 
 @dataclass(frozen=True)
@@ -235,7 +106,7 @@ class HouseProfile2R2C:
     mass_ratio: float
     hp_gain: float
     description: str = ""
-    hp_capacity: HPCapacityCurve | None = None
+    hp_capacity: CapacityProfile | None = None
     solar_wall_fraction: float = 0.7
 
     @property
@@ -576,4 +447,30 @@ PROFILES_2R2C["bunkroom_fujitsu"] = HouseProfile2R2C(
                 "user's 36 kBtu head load, the AOU36 is at full nameplate "
                 "in mild weather but derates faster than a single-zone unit.",
     hp_capacity=FUJITSU_AOU36RLXFZH_CAPACITY,
+)
+
+# Lit-grounded reference Fujitsu profile — use this when the deployed-zone
+# Fujitsu profiles (living_room_fujitsu / bunkroom_fujitsu) aren't suitable
+# as ground truth. The living_room envelope params are calibrated on 48h of
+# bad data per feedback_living_room_calibration_suspect; the bunkroom
+# envelope is also uncertain. This profile combines the lit-grounded
+# standard_residential_2r2c envelope (Bacher-Madsen 2011 §5 centre values)
+# with the AOU24RLXFWH manufacturer capacity curve — both ends of the
+# combination are independently defensible.
+PROFILES_2R2C["standard_residential_fujitsu"] = HouseProfile2R2C(
+    name="Standard Residential (lit-archetype) with AOU24RLXFWH capacity",
+    tau_env=50,
+    tau_couple=60,
+    mass_ratio=7,
+    hp_gain=0.06,
+    description="Reference Fujitsu mini-split profile for greybox τ_hp and "
+                "capacity-profile validation. Envelope (τ_env=50/τ_couple=60/"
+                "mr=7/g=0.06) inherits standard_residential_2r2c's lit-grounded "
+                "Bacher-Madsen 2011 §5 centre values. Capacity curve is the "
+                "AOU24RLXFWH cold-climate hyper-heat data (D&T-manual extraction "
+                "2026-05-17). Prefer this over living_room_fujitsu / "
+                "bunkroom_fujitsu when the test needs ground-truth envelope "
+                "(per feedback_living_room_calibration_suspect, the deployed-"
+                "zone envelope params were calibrated on 48h of bad data).",
+    hp_capacity=FUJITSU_HYPERHEAT_CAPACITY,
 )

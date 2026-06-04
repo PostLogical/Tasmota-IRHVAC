@@ -17,18 +17,45 @@ identified from data (interpreted as the AHRI 47°F-equivalent heating gain or
 95°F-equivalent cooling gain) and ``profile.factor`` is loaded from the HP's
 manufacturer engineering data.
 
-## Boundary behavior (IMPORTANT — see [[project-greybox-stage1-validation-probes]])
+## Boundary behavior (Stage 1e redesign 2026-06-03)
 
 Profiles use piecewise-linear interpolation between anchor points sourced from
-manufacturer engineering data sheets. **Outside the anchor range we clamp to
-the boundary value rather than extrapolating.** This is the conservative choice:
-- Below the lowest documented temperature (typically the manufacturer's stated
-  cutoff): real HPs behave non-linearly here — some shut off entirely, some
-  continue at sharply reduced capacity, defrost cycles dominate. Linear
-  extrapolation from a few points would invent fantasy behavior.
-- Above the highest documented temperature (typically the rating point or
-  slightly above): similar issue at the upper end (some HPs cap capacity
-  above rated outdoor temps; some have a "boost" zone).
+manufacturer engineering data sheets.
+
+**Above the highest anchor**: clamp to the boundary value. Manufacturers don't
+characterize the boost regime consistently, and inverters cap their output
+rather than continuing to extrapolate.
+
+**Below the lowest anchor**: linear extrapolation to zero at an explicit
+``extrapolation_cutoff_c`` set per curve. This replaces the earlier "boundary
+clamp" policy, which was equally made-up but in the opposite direction (54%
+at -26°C → 54% at -100°C is no more honest than → 0% at -27°C).
+
+The cutoff is derived per-curve from a **convex-acceleration rule** applied
+to the lowest-segment slope. Physical motivation: at extreme cold, capacity
+degrades faster than the documented data suggests — refrigerant viscosity
+rises, compressor mass-flow drops, defrost frequency increases, eventually
+the unit shuts off for self-protection. We model this as continued linear
+degradation with the lowest-segment slope multiplied by ~3× to capture
+the convex acceleration. Specifically:
+
+    slope_extrap = 3 × (r[1] − r[0]) / (t[1] − t[0])
+    extrapolation_cutoff_c = t[0] − r[0] / slope_extrap
+
+Below this temperature, capacity = 0.
+
+The 3× factor is approximate. Per-class cutoffs end up roughly:
+- ``fixed_speed`` (legacy on/off):           -17°C
+- ``standard_inverter`` (generic):           -28°C
+- ``fujitsu_aou24rlxfwh`` (hyperheat):       -38°C
+- ``fujitsu_aou36rlxfzh`` (hyperheat):       -40°C
+- ``cold_climate_inverter`` (NEEP CC v4.0):  -42°C
+
+These respect the physical class ordering (fixed-speed dies first; cold-
+climate certified outlasts everything) and are consistent with the user-
+domain knowledge that NEEP CC v4.0 requires operation at -26°C with the
+real cutoff a reasonable extrapolation beyond. Fujitsu hyperheat is
+slightly worse than generic NEEP CC per real-world ranking.
 
 **Improvement path when needed**: if a user reports operation below the
 documented anchor range and we have evidence the real HP has measurable
@@ -86,14 +113,24 @@ class CapacityCurve:
     """Piecewise-linear capacity ratio curve.
 
     ``anchor_temps_c`` and ``anchor_ratios`` are paired arrays; the ratio at
-    ``temp_c`` is the linear interpolation between bracketing anchors. **Outside
-    the anchor range we hold the boundary value — see module docstring for
-    rationale.**
+    ``temp_c`` is the linear interpolation between bracketing anchors.
+
+    **Above the highest anchor**: clamp to the boundary ratio (conservative
+    — manufacturers typically don't characterize the boost regime
+    consistently and inverters cap their output rather than continue
+    extrapolating).
+
+    **Below the lowest anchor**: linear extrapolation to zero at
+    ``extrapolation_cutoff_c``. ``None`` falls back to boundary-clamp
+    (legacy). Set per-curve to reflect realistic class-specific behavior
+    — see module docstring (Stage 1e 2026-06-03 redesign) for the rule
+    we use to derive cutoffs from each curve's lowest-segment slope.
 
     Convention: ratio == 1.0 at the rating point (AHRI 47°F heating, 95°F cooling).
     """
     anchor_temps_c: tuple[float, ...]
     anchor_ratios: tuple[float, ...]
+    extrapolation_cutoff_c: float | None = None
 
     def __post_init__(self) -> None:
         if len(self.anchor_temps_c) != len(self.anchor_ratios):
@@ -105,14 +142,29 @@ class CapacityCurve:
                 raise ValueError("anchor_temps_c must be strictly ascending")
         if any(r < 0 for r in self.anchor_ratios):
             raise ValueError("anchor_ratios must be >= 0")
+        if self.extrapolation_cutoff_c is not None:
+            if self.extrapolation_cutoff_c >= self.anchor_temps_c[0]:
+                raise ValueError(
+                    "extrapolation_cutoff_c must be below the lowest anchor temp"
+                )
 
     def ratio(self, temp_c: float) -> float:
-        """Capacity ratio at ``temp_c``. Clamps to boundary values outside the
-        anchor range — see module docstring."""
+        """Capacity ratio at ``temp_c``.
+
+        Above the highest anchor: clamps to boundary. Below the lowest
+        anchor: linear drop to zero at ``extrapolation_cutoff_c`` (or
+        boundary-clamp if cutoff is None).
+        """
         t = self.anchor_temps_c
         r = self.anchor_ratios
         if temp_c <= t[0]:
-            return r[0]
+            cutoff = self.extrapolation_cutoff_c
+            if cutoff is None:
+                return r[0]
+            if temp_c <= cutoff:
+                return 0.0
+            # Linear drop from boundary ratio at t[0] to 0 at cutoff.
+            return r[0] * (temp_c - cutoff) / (t[0] - cutoff)
         if temp_c >= t[-1]:
             return r[-1]
         for i in range(1, len(t)):
@@ -130,6 +182,9 @@ class CapacityCurve:
 _HEAT_STANDARD = CapacityCurve(
     anchor_temps_c=(-23.0, -15.0, -8.0,  0.0,  8.33, 17.0),
     anchor_ratios=(  0.30,  0.45, 0.60, 0.78, 1.00, 1.10),
+    # 3× slope rule: lowest segment slope 0.01875/°C; 3× = 0.0563/°C;
+    # 0.30 / 0.0563 ≈ 5.3°C below the lowest anchor.
+    extrapolation_cutoff_c=-28.0,
 )
 _COOL_STANDARD = CapacityCurve(
     anchor_temps_c=(15.0,  25.0,  35.0,  43.0,  50.0),
@@ -143,12 +198,20 @@ _COOL_STANDARD = CapacityCurve(
 _HEAT_COLD_CLIMATE_GENERIC = CapacityCurve(
     anchor_temps_c=(-30.0, -23.0, -15.0, -8.0,  0.0,  8.33, 17.0),
     anchor_ratios=(  0.50,  0.60,  0.75, 0.85, 0.92, 1.00, 1.05),
+    # 3× slope rule: lowest segment slope 0.01429/°C; 3× = 0.0429/°C;
+    # 0.50 / 0.0429 ≈ 11.7°C below the lowest anchor.
+    extrapolation_cutoff_c=-42.0,
 )
 
 # Legacy fixed-speed (on/off compressor) — no variable-speed boost mode.
 _HEAT_FIXED_SPEED = CapacityCurve(
     anchor_temps_c=(-15.0, -8.0,  0.0,  8.33, 17.0),
     anchor_ratios=(  0.20, 0.40, 0.65, 1.00, 1.05),
+    # 3× slope rule: lowest segment slope 0.0286/°C; 3× = 0.0857/°C;
+    # 0.20 / 0.0857 ≈ 2.3°C below the lowest anchor. Legacy fixed-speed
+    # units typically rated to -15°C minimum operating temp; cutoff just
+    # below matches real-world early shutdown.
+    extrapolation_cutoff_c=-17.0,
 )
 _COOL_FIXED_SPEED = CapacityCurve(
     anchor_temps_c=(15.0,  25.0,  35.0,  43.0,  50.0),
@@ -167,6 +230,11 @@ _COOL_FIXED_SPEED = CapacityCurve(
 _HEAT_FUJITSU_AOU24 = CapacityCurve(
     anchor_temps_c=(-26.0,  -20.6, -15.0, -10.0,  -5.0,   0.0,   5.0,  8.33,  10.0,  15.0),
     anchor_ratios=( 0.54,   0.62,  0.70,  0.74,   0.81,  0.89,  0.97, 1.00,  1.02,  0.97),
+    # 3× slope rule: lowest segment slope 0.0148/°C; 3× = 0.0444/°C;
+    # 0.54 / 0.0444 ≈ 12.2°C below the lowest anchor. Fujitsu hyperheat
+    # is approximately equivalent to NEEP CC v4.0 spec (slightly worse
+    # per real-world ranking — see [[reference-hp-class-knowledge]]).
+    extrapolation_cutoff_c=-38.0,
 )
 # Cooling curve for AOU24 series — not in current spec extraction; using
 # the generic _COOL_STANDARD as fallback until we extract cooling data from
@@ -181,6 +249,9 @@ _COOL_FUJITSU_AOU24 = _COOL_STANDARD
 _HEAT_FUJITSU_AOU36 = CapacityCurve(
     anchor_temps_c=(-26.0,  -20.6, -15.0, -10.0,  -5.0,   0.0,   5.0,  8.33,  10.0,  15.0),
     anchor_ratios=( 0.53,   0.60,  0.87,  0.92,   0.97,  1.00,  1.00, 1.00,  1.00,  1.00),
+    # 3× slope rule: lowest segment slope 0.0130/°C; 3× = 0.0389/°C;
+    # 0.53 / 0.0389 ≈ 13.6°C below the lowest anchor.
+    extrapolation_cutoff_c=-40.0,
 )
 _COOL_FUJITSU_AOU36 = _COOL_STANDARD  # TODO: extract cooling table
 

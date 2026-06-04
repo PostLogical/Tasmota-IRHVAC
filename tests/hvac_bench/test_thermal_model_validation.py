@@ -14,7 +14,6 @@ from dataclasses import replace
 
 from tests.hvac_bench.house_profiles import (
     COLD_CLIMATE_HP_CAPACITY,
-    HPCapacityCurve,
     HouseProfile2R2C,
     PROFILES_2R2C,
     STANDARD_HP_CAPACITY,
@@ -427,123 +426,51 @@ class TestHPCapacityCurve:
 
     Real ASHPs lose capacity in cold and gain in mild conditions; the
     capacity curve adds that envelope to the bench thermal model.
+
+    2026-06-03 Stage 1e refactor: the factor() machinery unit tests that
+    used to live here have moved to tests/test_capacity_profiles.py
+    (production-side coverage of CapacityCurve / CapacityProfile). The
+    remaining tests here exercise downstream ThermalModel integration —
+    that the bench correctly applies the capacity multiplier to HP heat
+    delivery — using whatever curve shape production ships.
     """
 
-    # ── factor() unit tests ──────────────────────────────────────────
-
-    def test_heating_anchor_points(self, bench_metrics, num_regression):
-        """Curve passes through the three named anchors."""
-        c = HPCapacityCurve()
-        bench_metrics["design_factor"] = c.factor(c.heating_design_t, "heat")
-        bench_metrics["rated_factor"] = c.factor(c.heating_rated_t, "heat")
-        bench_metrics["mild_factor"] = c.factor(c.heating_mild_t, "heat")
-        check_bench_metrics(num_regression, bench_metrics)
-        assert c.factor(c.heating_design_t, "heat") == 0.0
-        assert c.factor(c.heating_rated_t, "heat") == pytest.approx(1.0)
-        assert c.factor(c.heating_mild_t, "heat") == pytest.approx(c.heating_mild_factor)
-
-    def test_heating_clamps_below_design(self, bench_metrics, num_regression):
-        """Below design temp, capacity stays at zero (HP can't run)."""
-        c = HPCapacityCurve()
-        bench_metrics["factor_minus30"] = c.factor(-30.0, "heat")
-        bench_metrics["factor_minus100"] = c.factor(-100.0, "heat")
-        check_bench_metrics(num_regression, bench_metrics)
-        assert c.factor(-30.0, "heat") == 0.0
-        assert c.factor(-100.0, "heat") == 0.0
-
-    def test_heating_clamps_above_mild(self, bench_metrics, num_regression):
-        """Above the mild knee, factor saturates at mild_factor."""
-        c = HPCapacityCurve()
-        bench_metrics["factor_40c"] = c.factor(40.0, "heat")
-        check_bench_metrics(num_regression, bench_metrics)
-        assert c.factor(40.0, "heat") == pytest.approx(c.heating_mild_factor)
-
-    def test_heating_linear_below_rated(self, bench_metrics, num_regression):
-        """Halfway between design and rated → 50% capacity."""
-        c = HPCapacityCurve(heating_design_t=-15.0, heating_rated_t=7.0)
-        midpoint = (-15.0 + 7.0) / 2  # -4°C
-        bench_metrics["midpoint_factor"] = c.factor(midpoint, "heat")
-        check_bench_metrics(num_regression, bench_metrics)
-        assert c.factor(midpoint, "heat") == pytest.approx(0.5)
-
-    def test_heating_linear_above_rated(self, bench_metrics, num_regression):
-        """Halfway between rated and mild → halfway from 1.0 to mild_factor."""
-        c = HPCapacityCurve(heating_rated_t=7.0, heating_mild_t=20.0,
-                             heating_mild_factor=1.15)
-        midpoint = (7.0 + 20.0) / 2  # 13.5°C
-        expected = 1.0 + 0.5 * (1.15 - 1.0)
-        bench_metrics["midpoint_factor"] = c.factor(midpoint, "heat")
-        check_bench_metrics(num_regression, bench_metrics)
-        assert c.factor(midpoint, "heat") == pytest.approx(expected)
-
-    def test_cooling_anchor_points(self, bench_metrics, num_regression):
-        """Cooling mirrors heating with reversed slope."""
-        c = HPCapacityCurve()
-        bench_metrics["design_factor"] = c.factor(c.cooling_design_t, "cool")
-        bench_metrics["rated_factor"] = c.factor(c.cooling_rated_t, "cool")
-        bench_metrics["mild_factor"] = c.factor(c.cooling_mild_t, "cool")
-        check_bench_metrics(num_regression, bench_metrics)
-        assert c.factor(c.cooling_design_t, "cool") == 0.0
-        assert c.factor(c.cooling_rated_t, "cool") == pytest.approx(1.0)
-        assert c.factor(c.cooling_mild_t, "cool") == pytest.approx(c.cooling_mild_factor)
-
-    def test_cooling_clamps_above_design(self, bench_metrics, num_regression):
-        """Above cooling design temp (extreme heat), factor is zero."""
-        c = HPCapacityCurve()
-        bench_metrics["factor_60c"] = c.factor(60.0, "cool")
-        check_bench_metrics(num_regression, bench_metrics)
-        assert c.factor(60.0, "cool") == 0.0
-
-    def test_cooling_clamps_below_mild(self, bench_metrics, num_regression):
-        """Below cooling mild knee, factor saturates at mild_factor."""
-        c = HPCapacityCurve()
-        bench_metrics["factor_0c"] = c.factor(0.0, "cool")
-        check_bench_metrics(num_regression, bench_metrics)
-        assert c.factor(0.0, "cool") == pytest.approx(c.cooling_mild_factor)
-
-    def test_cooling_linear_above_rated(self, bench_metrics, num_regression):
-        """Halfway between cooling rated and design → 50% capacity."""
-        c = HPCapacityCurve(cooling_rated_t=35.0, cooling_design_t=46.0)
-        midpoint = (35.0 + 46.0) / 2  # 40.5°C
-        bench_metrics["midpoint_factor"] = c.factor(midpoint, "cool")
-        check_bench_metrics(num_regression, bench_metrics)
-        assert c.factor(midpoint, "cool") == pytest.approx(0.5)
-
-    def test_cooling_linear_below_rated(self, bench_metrics, num_regression):
-        """Halfway between mild and rated → halfway from mild_factor to 1.0."""
-        c = HPCapacityCurve(cooling_mild_t=18.0, cooling_rated_t=35.0,
-                             cooling_mild_factor=1.15)
-        midpoint = (18.0 + 35.0) / 2  # 26.5°C
-        expected = 1.15 + 0.5 * (1.0 - 1.15)
-        bench_metrics["midpoint_factor"] = c.factor(midpoint, "cool")
-        check_bench_metrics(num_regression, bench_metrics)
-        assert c.factor(midpoint, "cool") == pytest.approx(expected)
-
-    def test_cold_climate_curve_holds_capacity_below_minus_15(self, bench_metrics, num_regression):
-        """CCASHP curve still delivers >0 capacity at -15°C unlike standard."""
+    def test_cold_climate_holds_more_capacity_than_standard_at_minus_15(
+        self, bench_metrics, num_regression,
+    ):
+        """At a cold operating temp, the cold-climate curve delivers more
+        than the standard curve. This is the discriminator between the
+        two profiles regardless of their exact anchor structure."""
         cc = COLD_CLIMATE_HP_CAPACITY.factor(-15.0, "heat")
-        bench_metrics["standard_factor"] = STANDARD_HP_CAPACITY.factor(-15.0, "heat")
+        std = STANDARD_HP_CAPACITY.factor(-15.0, "heat")
+        bench_metrics["standard_factor"] = std
         bench_metrics["cold_climate_factor"] = cc
         check_bench_metrics(num_regression, bench_metrics)
-        assert STANDARD_HP_CAPACITY.factor(-15.0, "heat") == 0.0
-        assert 0.25 < cc < 0.50, (
-            f"CCASHP at -15°C should retain ~30% capacity, got {cc:.3f}"
+        assert cc > std, (
+            f"Cold-climate should outperform standard at -15°C, got "
+            f"cc={cc:.3f} vs std={std:.3f}"
         )
 
     # ── ThermalModel integration ─────────────────────────────────────
 
     def test_capacity_at_rated_matches_no_capacity(self, bench_metrics, num_regression):
-        """At outdoor=rated_t, capacity=1.0 — model behaves identically."""
+        """At outdoor=AHRI rating point, capacity=1.0 — model behaves identically.
+
+        Stage 1e (2026-06-03) refactor: outdoor=8.33°C is the AHRI rating
+        point (47°F heating) where production's CapacityProfile gives
+        ratio=1.0 by construction. The pre-refactor test used 7°C, which
+        was the old bench HPCapacityCurve's rated_t (slightly off-rating).
+        """
         base = PROFILES_2R2C["living_room"]
         assert base.hp_capacity is None
         with_cap = replace(base, hp_capacity=STANDARD_HP_CAPACITY)
-        # rated_t default is 7°C
+        rating_point_c = 8.33  # AHRI_HEAT_RATING_C
         m_no_cap = ThermalModel2R2C(
-            profile=base, initial_temp=20.0, outdoor_temp=7.0,
+            profile=base, initial_temp=20.0, outdoor_temp=rating_point_c,
             sensor_noise_sigma=0.0,
         )
         m_cap = ThermalModel2R2C(
-            profile=with_cap, initial_temp=20.0, outdoor_temp=7.0,
+            profile=with_cap, initial_temp=20.0, outdoor_temp=rating_point_c,
             sensor_noise_sigma=0.0,
         )
         for tick in range(2000):
@@ -581,23 +508,39 @@ class TestHPCapacityCurve:
             f"no_cap={m_no_cap.room_temp:.3f} cap={m_cap.room_temp:.3f}"
         )
 
-    def test_2r2c_capacity_zero_below_design_temp(self, bench_metrics, num_regression):
-        """At outdoor ≤ heating_design_t, HP delivers no heat (room → outdoor)."""
+    def test_2r2c_capacity_strongly_reduces_below_anchor_range(self, bench_metrics, num_regression):
+        """At outdoor below the lowest anchor temp, capacity clamps to the
+        boundary value (sharply reduced but not zero). Room equilibrium
+        falls well below setpoint because most HP capacity is lost — but
+        not all the way to outdoor (the documented choice is boundary
+        clamp, not cliff-to-zero, since manufacturers' published data
+        ends but the HP itself keeps running at reduced capacity).
+        See capacity_profiles.py module docstring for the rationale.
+        """
         base = PROFILES_2R2C["living_room"]
         with_cap = replace(base, hp_capacity=STANDARD_HP_CAPACITY)
-        # design_t default is -15°C; well below it = -20°C.
+        # Lowest anchor in standard_inverter is -23°C; go below to -30°C.
         m_cap = ThermalModel2R2C(
-            profile=with_cap, initial_temp=20.0, outdoor_temp=-20.0,
+            profile=with_cap, initial_temp=20.0, outdoor_temp=-30.0,
             sensor_noise_sigma=0.0,
         )
-        # Run until decayed; HP commanded ON but capacity=0 → no heat input.
+        m_no_cap = ThermalModel2R2C(
+            profile=base, initial_temp=20.0, outdoor_temp=-30.0,
+            sensor_noise_sigma=0.0,
+        )
         for tick in range(500):
             m_cap.step(hp_setpoint=23.0, dt_minutes=15.0, mode="heat", tick=tick)
-        bench_metrics["final_room_temp"] = m_cap.room_temp
+            m_no_cap.step(hp_setpoint=23.0, dt_minutes=15.0, mode="heat", tick=tick)
+        bench_metrics["cap_final_temp"] = m_cap.room_temp
+        bench_metrics["no_cap_final_temp"] = m_no_cap.room_temp
         check_bench_metrics(num_regression, bench_metrics)
-        assert abs(m_cap.room_temp - (-20.0)) < 0.5, (
-            f"Below design temp, room should decay to outdoor: "
-            f"got {m_cap.room_temp:.3f}, expected ~-20.0"
+        # Capacity curve must drag equilibrium well below the no-capacity
+        # baseline (at -30°C, all curves are degraded to their lowest
+        # anchor's value — well under 50% of rated).
+        assert m_cap.room_temp < m_no_cap.room_temp - 2.0, (
+            f"Below the lowest anchor temp, capacity-clamped HP should fall "
+            f"well behind the fixed-gain baseline: "
+            f"cap={m_cap.room_temp:.3f} no_cap={m_no_cap.room_temp:.3f}"
         )
 
     def test_1r1c_capacity_reduces_heating_in_cold(self, bench_metrics, num_regression):
@@ -646,11 +589,21 @@ class TestHPCapacityCurve:
         )
 
     def test_cooling_capacity_reduces_in_extreme_heat(self, bench_metrics, num_regression):
-        """In cool mode, very hot outdoor reduces HP cooling capacity."""
+        """In cool mode, very hot outdoor reduces HP cooling capacity.
+
+        Stage 1e (2026-06-03) refactor: production's _COOL_STANDARD cooling
+        curve is gentler than the bench's old cool curve was (e.g. at 42°C
+        production gives ~7% derating vs old ~36%). Threshold tightened to
+        match the new curve's behavior — the test still demonstrates the
+        principle (cool-mode HP derates at high outdoor → slightly warmer
+        room) but the absolute effect is smaller because production's
+        residential-typical curve is less aggressive.
+        """
         # Build a profile with cooling capacity curve (reuse standard).
         base = PROFILES_2R2C["living_room"]
         with_cap = replace(base, hp_capacity=STANDARD_HP_CAPACITY)
-        # outdoor=42°C is between rated (35) and design (46); cap ~36%.
+        # outdoor=42°C is between rated (35°C, 1.00) and 43°C (0.92) on
+        # the production cool curve — ~7% derating.
         m_no_cap = ThermalModel2R2C(
             profile=base, initial_temp=24.0, outdoor_temp=42.0,
             sensor_noise_sigma=0.0,
@@ -667,7 +620,9 @@ class TestHPCapacityCurve:
         bench_metrics["cap_temp"] = m_cap.room_temp
         check_bench_metrics(num_regression, bench_metrics)
         # With reduced capacity, room stays warmer (less effective cooling).
-        assert m_cap.room_temp > m_no_cap.room_temp + 0.3, (
+        # ~7% derating produces ~0.25°C temperature gap — verify it's positive
+        # and meaningful (>0.1°C).
+        assert m_cap.room_temp > m_no_cap.room_temp + 0.1, (
             f"Hot outdoor should reduce cooling: "
             f"no_cap={m_no_cap.room_temp:.3f} cap={m_cap.room_temp:.3f}"
         )

@@ -69,12 +69,52 @@ class TestCapacityCurve:
         )
         assert c.ratio(5.0) == pytest.approx(1.0)
 
-    def test_ratio_clamps_below_first_anchor(self):
+    def test_ratio_clamps_below_first_anchor_when_no_cutoff_set(self):
+        """When extrapolation_cutoff_c is None (legacy default), the ratio
+        below the lowest anchor clamps to the boundary value. This preserves
+        backward-compatible behavior for curves that don't specify a cutoff."""
         c = CapacityCurve(
             anchor_temps_c=(0.0, 10.0),
             anchor_ratios=(0.5, 1.0),
         )
         assert c.ratio(-50.0) == 0.5  # held at boundary, no extrapolation
+
+    def test_ratio_linearly_extrapolates_below_first_anchor_when_cutoff_set(self):
+        """With extrapolation_cutoff_c set, capacity drops linearly from the
+        boundary ratio at the lowest anchor to 0 at the cutoff, and stays at
+        0 below the cutoff. See module docstring for the 3× slope derivation
+        rule used to pick cutoffs for the built-in profiles."""
+        c = CapacityCurve(
+            anchor_temps_c=(0.0, 10.0),
+            anchor_ratios=(0.5, 1.0),
+            extrapolation_cutoff_c=-20.0,
+        )
+        # At cutoff: 0
+        assert c.ratio(-20.0) == 0.0
+        # Below cutoff: still 0
+        assert c.ratio(-50.0) == 0.0
+        # Midway between cutoff and lowest anchor: half the boundary ratio.
+        assert c.ratio(-10.0) == pytest.approx(0.25)
+        # Just above cutoff: small positive value.
+        assert c.ratio(-19.0) == pytest.approx(0.025, abs=0.005)
+        # Just below the lowest anchor: close to boundary ratio.
+        assert c.ratio(-1.0) == pytest.approx(0.475, abs=0.005)
+
+    def test_extrapolation_cutoff_must_be_below_lowest_anchor(self):
+        """Cutoff at or above the lowest anchor is rejected — extrapolation
+        below the anchor range needs a lower bound to drop to zero at."""
+        with pytest.raises(ValueError, match="below the lowest anchor"):
+            CapacityCurve(
+                anchor_temps_c=(-10.0, 0.0),
+                anchor_ratios=(0.5, 1.0),
+                extrapolation_cutoff_c=-10.0,  # equal to lowest anchor
+            )
+        with pytest.raises(ValueError, match="below the lowest anchor"):
+            CapacityCurve(
+                anchor_temps_c=(-10.0, 0.0),
+                anchor_ratios=(0.5, 1.0),
+                extrapolation_cutoff_c=-5.0,  # above the lowest anchor
+            )
 
     def test_ratio_clamps_above_last_anchor(self):
         c = CapacityCurve(
@@ -153,6 +193,42 @@ class TestBuiltinProfileContracts:
         assert ratio_fixed < ratio_std, (
             f"fixed_speed {ratio_fixed:.2f} ≥ standard {ratio_std:.2f}"
         )
+
+    def test_class_ordering_at_extreme_cold(self):
+        """HP classes must follow a consistent physical ordering of cold-
+        weather capability. Fixed-speed fails first, then standard inverter,
+        then Fujitsu hyperheat (≈ NEEP CC v4.0), then generic cold-climate
+        last. Prevents future drift in the per-class extrapolation cutoffs.
+
+        Stage 1e (2026-06-03) — derived from the 3× lowest-segment-slope
+        rule on each curve's published anchors. See module docstring."""
+        # Spot-check at -28°C (where fixed_speed and standard_inverter have
+        # already cut off, but Fujitsu/CC are still delivering).
+        fixed = get_profile("fixed_speed").heat_curve
+        std = get_profile("standard_inverter").heat_curve
+        fuj24 = get_profile("fujitsu_aou24rlxfwh").heat_curve
+        cc = get_profile("cold_climate_inverter").heat_curve
+        # At -28°C: standard's cutoff (≈ -28°C), so it should be near 0;
+        # fixed-speed cut off long ago at -17°C; Fujitsu and CC still active.
+        assert fixed.ratio(-28.0) == 0.0
+        assert std.ratio(-28.0) == pytest.approx(0.0, abs=0.05)
+        assert fuj24.ratio(-28.0) > 0.30  # well above any cutoff
+        assert cc.ratio(-28.0) > 0.35
+        # At -38°C: only generic cold-climate still delivering meaningful
+        # capacity; Fujitsu (cutoff -38°C) at 0, others long gone.
+        assert std.ratio(-38.0) == 0.0
+        assert fuj24.ratio(-38.0) == 0.0
+        assert cc.ratio(-38.0) > 0.10
+        # Verify monotonic class ordering at a mid-cold temp (-15°C).
+        # Each class should be no worse than the next-fragile class.
+        r_fixed = fixed.ratio(-15.0)
+        r_std = std.ratio(-15.0)
+        r_fuj24 = fuj24.ratio(-15.0)
+        r_cc = cc.ratio(-15.0)
+        assert r_fixed <= r_std, f"fixed {r_fixed} > std {r_std}"
+        assert r_std <= r_fuj24, f"std {r_std} > fuj24 {r_fuj24}"
+        # Fujitsu and generic CC should be similar (Fujitsu slightly worse).
+        assert r_fuj24 <= r_cc + 0.05, f"fuj24 {r_fuj24} > cc {r_cc} + 0.05"
 
     @pytest.mark.parametrize("profile_name", [
         "standard_inverter", "cold_climate_inverter", "fixed_speed",
@@ -261,15 +337,29 @@ class TestFujitsuSpecData:
                 f"AOU36 at {t}°C should be ≈1.0; got {p.heat_curve.ratio(t):.3f}"
             )
 
-    def test_boundary_clamping_below_cutoff(self):
-        """Below the lowest anchor (AOU24 cutoff -26°C), we clamp at the
-        boundary value rather than extrapolating to fantasy. Documented
-        behavior — see module docstring for rationale and improvement path."""
+    def test_sub_anchor_linear_extrapolation_to_zero(self):
+        """Below the lowest documented anchor (AOU24 at -26°C, 54%), capacity
+        drops LINEARLY to 0 at the configured extrapolation_cutoff_c (-38°C
+        for AOU24 per the 3× slope rule).
+
+        Stage 1e (2026-06-03) replaced the older "boundary clamp" policy with
+        a defensible linear extrapolation: the boundary clamp at 54% was no
+        more honest than a cliff to 0%; both were made-up extrapolations.
+        Linear-to-zero at a physically-grounded cutoff is more consistent
+        with actual HP class capability (cold-climate models keep running
+        further than standard inverters, but eventually all degrade to 0)."""
         aou24 = get_profile("fujitsu_aou24rlxfwh")
-        # At -40°C (well below cutoff), we hold at the cutoff value (0.54)
-        # NOT extrapolate to a negative number.
-        assert aou24.heat_curve.ratio(-40.0) == aou24.heat_curve.ratio(-26.0)
-        assert aou24.heat_curve.ratio(-40.0) > 0  # not extrapolated to garbage
+        # Cutoff is at -38°C; capacity is 0 at and below.
+        assert aou24.heat_curve.ratio(-38.0) == 0.0
+        assert aou24.heat_curve.ratio(-50.0) == 0.0
+        # Midway between cutoff (-38°C, 0%) and the lowest anchor
+        # (-26°C, 54%): should be 27% — half of boundary ratio.
+        midpoint = (-38.0 + -26.0) / 2  # -32°C
+        assert aou24.heat_curve.ratio(midpoint) == pytest.approx(0.27, abs=0.005)
+        # Just above cutoff: still positive, dropping toward 0.
+        assert 0.0 < aou24.heat_curve.ratio(-37.0) < 0.10
+        # Just below lowest anchor: close to boundary ratio.
+        assert aou24.heat_curve.ratio(-27.0) == pytest.approx(0.495, abs=0.01)
 
     def test_factor_dispatches_by_mode(self):
         p = get_profile("fujitsu_aou24rlxfwh")
