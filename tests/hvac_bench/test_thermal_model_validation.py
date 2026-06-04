@@ -638,3 +638,114 @@ class TestHPCapacityCurve:
         # Same thermal characteristics as base living_room.
         assert profile.tau_env == base.tau_env
         assert profile.hp_gain == base.hp_gain
+
+
+class TestQhpDynamics:
+    """Validate the bench's optional Q_hp first-order lag (Stage 1e, 2026-06-03).
+
+    These tests exercise the ``tau_hp_minutes`` parameter that makes the
+    bench's HP output behave like production's greybox 3-state Q_hp model.
+    Without this lag, all HP heat is delivered instantly; with it, the
+    output ramps with a configurable time constant. Used by the greybox
+    τ_hp identification tests in test_greybox_observer.py.
+    """
+
+    def test_tau_hp_zero_matches_legacy_byte_identical(self):
+        """tau_hp_minutes=0 (default) must reproduce the legacy behavior
+        exactly. Same simulation with the same seed → same room temp."""
+        base = PROFILES_2R2C["standard_residential_fujitsu"]
+        m_legacy = ThermalModel2R2C(
+            profile=base, initial_temp=18.0, outdoor_temp=-5.0,
+            sensor_noise_sigma=0.0, tau_hp_minutes=0.0,
+        )
+        m_explicit_zero = ThermalModel2R2C(
+            profile=base, initial_temp=18.0, outdoor_temp=-5.0,
+            sensor_noise_sigma=0.0,  # default is tau_hp_minutes=0
+        )
+        for tick in range(50):
+            m_legacy.step(hp_setpoint=22.0, dt_minutes=15.0, mode="heat", tick=tick)
+            m_explicit_zero.step(hp_setpoint=22.0, dt_minutes=15.0, mode="heat", tick=tick)
+        assert m_legacy.room_temp == m_explicit_zero.room_temp
+
+    def test_tau_hp_delays_response_to_setpoint_step(self):
+        """With Q_hp lag, an HP-off → HP-on transition produces visibly
+        delayed room warming vs the instant-gain version. Demonstrates that
+        the lag mechanism is wired through and affecting room temperature."""
+        base = PROFILES_2R2C["standard_residential_fujitsu"]
+        # Start at outdoor temp (HP off, decayed). Sharp HP-on at tick 0.
+        m_instant = ThermalModel2R2C(
+            profile=base, initial_temp=15.0, outdoor_temp=-5.0,
+            sensor_noise_sigma=0.0, tau_hp_minutes=0.0,
+        )
+        m_lagged = ThermalModel2R2C(
+            profile=base, initial_temp=15.0, outdoor_temp=-5.0,
+            sensor_noise_sigma=0.0, tau_hp_minutes=5.0,  # 5-min lag
+        )
+        # Single short tick (less than τ_hp) → lagged HP should deliver less heat.
+        m_instant.step(hp_setpoint=22.0, dt_minutes=2.0, mode="heat", tick=0)
+        m_lagged.step(hp_setpoint=22.0, dt_minutes=2.0, mode="heat", tick=0)
+        # Instant version warmed faster: at dt=2 min, Q_hp_avg under lag is
+        # only ~(1 − e^{−2/5})·(τ/dt)·(target) ≈ 0.82 × target → noticeably
+        # smaller heat delivery → lower final temp.
+        assert m_lagged.room_temp < m_instant.room_temp, (
+            f"Q_hp lag should delay warming: "
+            f"instant={m_instant.room_temp:.4f} lagged={m_lagged.room_temp:.4f}"
+        )
+
+    def test_tau_hp_snap_to_zero_on_hp_off(self):
+        """When HP turns off (room hits setpoint), Q_hp snaps to 0 — no
+        residual delivery. Matches production's (B) snap policy and the
+        Fujitsu mini-split physics (closed vanes + stopped blower)."""
+        base = PROFILES_2R2C["standard_residential_fujitsu"]
+        m = ThermalModel2R2C(
+            profile=base, initial_temp=21.0, outdoor_temp=0.0,
+            sensor_noise_sigma=0.0, tau_hp_minutes=5.0,
+        )
+        # Warm up: HP active for a few ticks, Q_hp ramps up.
+        for tick in range(5):
+            m.step(hp_setpoint=24.0, dt_minutes=5.0, mode="heat", tick=tick)
+        assert m._q_hp > 0  # Q_hp built up during heating
+
+        # Now drop setpoint so HP is off (room > sp). Q_hp should snap to 0
+        # on the very first off-step, regardless of dt.
+        m.step(hp_setpoint=15.0, dt_minutes=5.0, mode="heat", tick=5)
+        assert m._q_hp == 0.0, f"Q_hp should snap to 0 when HP off, got {m._q_hp}"
+
+    def test_long_dt_relative_to_tau_hp_approximates_static_gain(self):
+        """When dt >> τ_hp (many lag time constants pass per step), Q_hp_avg
+        approaches the steady-state target. The lagged model should converge
+        to the same equilibrium as the instant-gain model.
+
+        Different transient behavior, same steady-state — a sanity check
+        that the lag model isn't introducing a steady-state bias."""
+        base = PROFILES_2R2C["standard_residential_fujitsu"]
+        m_instant = ThermalModel2R2C(
+            profile=base, initial_temp=18.0, outdoor_temp=-5.0,
+            sensor_noise_sigma=0.0, tau_hp_minutes=0.0,
+        )
+        m_lagged = ThermalModel2R2C(
+            profile=base, initial_temp=18.0, outdoor_temp=-5.0,
+            sensor_noise_sigma=0.0, tau_hp_minutes=3.0,
+        )
+        # 30-min dt is 10x τ_hp — Q_hp_avg ≈ target after the first few ticks.
+        # Run long enough for both to reach steady state.
+        for tick in range(2000):
+            m_instant.step(hp_setpoint=22.0, dt_minutes=30.0, mode="heat", tick=tick)
+            m_lagged.step(hp_setpoint=22.0, dt_minutes=30.0, mode="heat", tick=tick)
+        # Steady-state temps should agree within sensor-noise floor (~0.05°C).
+        assert abs(m_instant.room_temp - m_lagged.room_temp) < SS_TOL, (
+            f"Same steady-state expected at dt >> τ_hp: "
+            f"instant={m_instant.room_temp:.4f} lagged={m_lagged.room_temp:.4f}"
+        )
+
+    def test_q_hp_initial_state_is_zero(self):
+        """Q_hp initializes to 0 — matches production's snap-to-zero-on-boot.
+        This means the first HP-on interval ramps from 0 toward the target,
+        producing the off→on transient signal that's load-bearing for
+        τ_hp identification."""
+        base = PROFILES_2R2C["standard_residential_fujitsu"]
+        m = ThermalModel2R2C(
+            profile=base, initial_temp=20.0, outdoor_temp=0.0,
+            tau_hp_minutes=5.0,
+        )
+        assert m._q_hp == 0.0

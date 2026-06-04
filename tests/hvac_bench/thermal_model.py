@@ -60,6 +60,7 @@ class ThermalModel:
                  sensor_noise_sigma: float = 0.0, sensor_quantization: float = 0.0,
                  noise_seed: int | None = None,
                  hp_lag_minutes: float = 0.0,
+                 tau_hp_minutes: float = 0.0,
                  solar_gain: float = 0.0, stove_gain: float = 0.0):
         """Initialize thermal model.
 
@@ -71,8 +72,20 @@ class ThermalModel:
             sensor_noise_sigma: Gaussian noise std dev on sensor readings (°C).
             sensor_quantization: Sensor resolution (e.g., 0.1°C). 0 = continuous.
             noise_seed: Random seed for reproducible noise. None = random.
-            hp_lag_minutes: First-order lag on HP response (minutes). 0 = instant.
-                Models the delay from setpoint change to room temperature effect.
+            hp_lag_minutes: First-order lag on the **commanded setpoint**
+                (minutes). 0 = instant. Models the delay between the user-
+                requested setpoint and the HP's internal effective target
+                (compressor warmup, controller hesitation). Distinct from
+                ``tau_hp_minutes`` which lags the heat *output*.
+            tau_hp_minutes: First-order lag on **delivered heat output Q_hp**
+                (minutes). 0 (default) = instantaneous proportional gain
+                (legacy behavior, byte-identical baselines). When >0, the
+                model carries a Q_hp state that ramps toward steady-state
+                k_c·(sp − T_a) with this time constant, then injects Q_hp
+                into the room as additive heat. Matches production's
+                greybox 3-state model (production has the same param at
+                ``custom_components/.../pi/greybox_observer.py``). Use to
+                validate τ_hp identification in greybox unit tests.
             solar_gain: Solar sensitivity (°C/min per unit solar proxy). Zone config.
             stove_gain: Supplemental heat gain (°C/min when active). Zone config.
         """
@@ -86,7 +99,11 @@ class ThermalModel:
         self.sensor_quantization = sensor_quantization
         self._rng = random.Random(noise_seed)
         self.hp_lag_minutes = hp_lag_minutes
+        self.tau_hp_minutes = tau_hp_minutes
         self._effective_setpoint: float = initial_temp
+        # Q_hp state — only used when tau_hp_minutes > 0. Starts at 0,
+        # matching production's snap-to-zero-on-boot initial condition.
+        self._q_hp: float = 0.0
 
         # Energy tracking
         self.cumulative_kwh = 0.0
@@ -154,27 +171,76 @@ class ThermalModel:
         solar_heat = self.solar_gain * solar_proxy * dt_minutes
         stove_heat = self.stove_gain * stove_active * dt_minutes
 
-        # Equilibrium temperature (where room would settle with constant inputs).
-        # With proportional HP: dT/dt = (T_out - T)/τ + g*(sp - T) + solar + ...
-        # Rearranged: dT/dt = -(1/τ + g)*T + (T_out/τ + g*sp + solar + ...)
-        # Equilibrium: T_eq = (T_out/τ + g*sp + solar) / (1/τ + g)
-        total_gain = 1.0 / tau_eff + hp_gain_eff
-        if total_gain == 0:
-            return
-        t_eq = (
-            self.outdoor_temp / tau_eff
-            + hp_gain_eff * self._effective_setpoint
-            + solar_heat / dt_minutes  # Convert back to rate
-            + stove_heat / dt_minutes
-            + extra_heat / dt_minutes
-        ) / total_gain
+        if self.tau_hp_minutes > 0:
+            # ── Q_hp dynamic-state path (matches production greybox 3-state) ──
+            #
+            # Q_hp lags the steady-state target k_c·(sp − T_a) with time
+            # constant tau_hp_minutes. Snap-to-zero on HP-off matches
+            # production (Fujitsu wall-mount closes vanes + stops blower
+            # on idle → no residual delivery).
+            #
+            # ZOH on T_a inside Q_hp's equation: hold T_a at start-of-
+            # interval value when computing the target. Same approximation
+            # production uses.
+            if not hp_active:
+                self._q_hp = 0.0
+                q_hp_avg = 0.0
+            else:
+                q_hp_target = hp_gain * (self._effective_setpoint - self.room_temp)
+                if dt_minutes > 0:
+                    decay_hp = math.exp(-dt_minutes / self.tau_hp_minutes)
+                    # Average Q_hp over [0, dt] under first-order lag:
+                    #   avg = target + (start − target) · (τ/dt)·(1 − e^{−dt/τ})
+                    q_hp_avg = q_hp_target + (
+                        (self._q_hp - q_hp_target)
+                        * (self.tau_hp_minutes / dt_minutes)
+                        * (1.0 - decay_hp)
+                    )
+                    self._q_hp = q_hp_target + (self._q_hp - q_hp_target) * decay_hp
+                else:
+                    q_hp_avg = self._q_hp
+            # Room ODE with Q_hp as a constant additive input (no HP
+            # feedback in A): dT/dt = (T_out − T)/τ + Q_hp_avg + sources
+            total_gain = 1.0 / tau_eff
+            if total_gain == 0:
+                return  # pragma: no cover — defensive on tau_eff = ∞
+            t_eq = (
+                self.outdoor_temp / tau_eff
+                + q_hp_avg
+                + solar_heat / dt_minutes
+                + stove_heat / dt_minutes
+                + extra_heat / dt_minutes
+            ) / total_gain
+            decay = math.exp(-total_gain * dt_minutes)
+            self.room_temp = t_eq + (self.room_temp - t_eq) * decay
+            # Energy tracking uses the actual Q_hp delivered (not the
+            # commanded setpoint × g formula, which would overcount during
+            # the ramp).
+            thermal_output = q_hp_avg * dt_minutes
+        else:
+            # ── Legacy instantaneous-gain path (tau_hp_minutes == 0) ──
+            #
+            # Equilibrium temperature (where room would settle with constant inputs).
+            # With proportional HP: dT/dt = (T_out - T)/τ + g*(sp - T) + solar + ...
+            # Rearranged: dT/dt = -(1/τ + g)*T + (T_out/τ + g*sp + solar + ...)
+            # Equilibrium: T_eq = (T_out/τ + g*sp + solar) / (1/τ + g)
+            total_gain = 1.0 / tau_eff + hp_gain_eff
+            if total_gain == 0:
+                return
+            t_eq = (
+                self.outdoor_temp / tau_eff
+                + hp_gain_eff * self._effective_setpoint
+                + solar_heat / dt_minutes  # Convert back to rate
+                + stove_heat / dt_minutes
+                + extra_heat / dt_minutes
+            ) / total_gain
 
-        # Exact exponential decay toward equilibrium
-        decay = math.exp(-total_gain * dt_minutes)
-        self.room_temp = t_eq + (self.room_temp - t_eq) * decay
+            # Exact exponential decay toward equilibrium
+            decay = math.exp(-total_gain * dt_minutes)
+            self.room_temp = t_eq + (self.room_temp - t_eq) * decay
+            # Energy tracking — legacy "(sp − T) × g" approximation.
+            thermal_output = abs(self._effective_setpoint - self.room_temp) * hp_gain_eff * dt_minutes
 
-        # Energy tracking
-        thermal_output = abs(self._effective_setpoint - self.room_temp) * hp_gain_eff * dt_minutes
         cop = self.cop_model.cop(self.outdoor_temp, hp_setpoint, mode)
         if cop > 0:
             electrical_input = thermal_output / cop
@@ -227,9 +293,17 @@ class ThermalModel2R2C:
                  sensor_noise_sigma: float = 0.0, sensor_quantization: float = 0.0,
                  noise_seed: int | None = None,
                  hp_lag_minutes: float = 0.0,
+                 tau_hp_minutes: float = 0.0,
                  initial_wall_temp: float | None = None,
                  solar_gain: float = 0.0, stove_gain: float = 0.0,
                  head_sensor_offset: float = 0.0):
+        """Initialize 2R2C thermal model.
+
+        See :class:`ThermalModel` for the meaning of ``hp_lag_minutes``
+        (setpoint lag) vs ``tau_hp_minutes`` (heat-output lag, matches
+        production's greybox Q_hp state — default 0 preserves byte-
+        identical legacy behavior).
+        """
         self.profile = profile
         self.solar_gain = solar_gain
         self.stove_gain = stove_gain
@@ -241,7 +315,9 @@ class ThermalModel2R2C:
         self.sensor_quantization = sensor_quantization
         self._rng = random.Random(noise_seed)
         self.hp_lag_minutes = hp_lag_minutes
+        self.tau_hp_minutes = tau_hp_minutes
         self._effective_setpoint: float = initial_temp
+        self._q_hp: float = 0.0  # Q_hp state — only used when tau_hp_minutes > 0
         self.head_sensor_offset = head_sensor_offset
 
         # Energy tracking
@@ -325,23 +401,52 @@ class ThermalModel2R2C:
             hp_active = hp_sensed_temp > self._effective_setpoint
         g_eff = g if hp_active else 0.0
 
-        # System matrix A and forcing vector b:
-        #   d/dt [T_a, T_w]^T = A * [T_a, T_w]^T + b
-        #
-        # A = [[-1/τ_env - g_eff - 1/τ_c,   1/τ_c ],
-        #      [ 1/τ_m,                    -1/τ_m  ]]
-        #
-        # b = [T_out/τ_env + g_eff*sp + q_solar_air + q_stove + q_extra,
-        #      q_solar_wall / mass_ratio]
+        # Q_hp state path (tau_hp_minutes > 0): HP heat enters as a constant
+        # additive input (no -g_eff feedback in A's a11). Matches production
+        # greybox's 3-state model with ZOH on T_a inside Q_hp's equation.
+        # See ThermalModel.step for the lag-formula derivation.
+        if self.tau_hp_minutes > 0:
+            if not hp_active:
+                self._q_hp = 0.0
+                q_hp_avg = 0.0
+            else:
+                # ZOH on T_a: hold room_temp at start-of-interval value.
+                q_hp_target = g * (self._effective_setpoint - self.room_temp)
+                if dt_minutes > 0:
+                    decay_hp = math.exp(-dt_minutes / self.tau_hp_minutes)
+                    q_hp_avg = q_hp_target + (
+                        (self._q_hp - q_hp_target)
+                        * (self.tau_hp_minutes / dt_minutes)
+                        * (1.0 - decay_hp)
+                    )
+                    self._q_hp = q_hp_target + (self._q_hp - q_hp_target) * decay_hp
+                else:
+                    q_hp_avg = self._q_hp
+            # A matrix without g_eff in a11: HP no longer in the feedback path.
+            a11 = -(1.0 / tau_env_eff + 1.0 / tau_c)
+            b1 = (self.outdoor_temp / tau_env_eff
+                  + q_hp_avg
+                  + q_solar_air + q_stove + q_extra + q_air_extra)
+        else:
+            # Legacy instantaneous-gain path (byte-identical baselines).
+            #
+            # System matrix A and forcing vector b:
+            #   d/dt [T_a, T_w]^T = A * [T_a, T_w]^T + b
+            #
+            # A = [[-1/τ_env - g_eff - 1/τ_c,   1/τ_c ],
+            #      [ 1/τ_m,                    -1/τ_m  ]]
+            #
+            # b = [T_out/τ_env + g_eff*sp + q_solar_air + q_stove + q_extra,
+            #      q_solar_wall / mass_ratio]
+            a11 = -(1.0 / tau_env_eff + g_eff + 1.0 / tau_c)
+            b1 = (self.outdoor_temp / tau_env_eff
+                  + g_eff * self._effective_setpoint
+                  + q_solar_air + q_stove + q_extra + q_air_extra)
 
-        a11 = -(1.0 / tau_env_eff + g_eff + 1.0 / tau_c)
         a12 = 1.0 / tau_c
         a21 = 1.0 / tau_m
         a22 = -1.0 / tau_m
 
-        b1 = (self.outdoor_temp / tau_env_eff
-              + g_eff * self._effective_setpoint
-              + q_solar_air + q_stove + q_extra + q_air_extra)
         # Wall-node forcing normalized by wall capacitance ratio.
         b2 = (q_solar_wall + q_wall_extra) / p.mass_ratio
 
@@ -399,8 +504,13 @@ class ThermalModel2R2C:
         self.room_temp = t_eq_a + new_da
         self.wall_temp = t_eq_w + new_dw
 
-        # Energy tracking (same approach as 1R1C)
-        thermal_output = abs(self._effective_setpoint - self.room_temp) * g_eff * dt_minutes
+        # Energy tracking: when Q_hp state is active, use the actual delivered
+        # Q_hp_avg (which captures the lag-attenuated output during the ramp).
+        # Otherwise fall back to the legacy (sp − T) × g approximation.
+        if self.tau_hp_minutes > 0:
+            thermal_output = q_hp_avg * dt_minutes
+        else:
+            thermal_output = abs(self._effective_setpoint - self.room_temp) * g_eff * dt_minutes
         cop = self.cop_model.cop(self.outdoor_temp, hp_setpoint, mode)
         if cop > 0:
             electrical_input = thermal_output / cop

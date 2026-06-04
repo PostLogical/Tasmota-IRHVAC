@@ -1934,3 +1934,248 @@ class TestFitGreyboxWithPriorState:
         assert r_anchored is not None and r_lit is not None
         # The heat-mode-anchored fit should land closer to its prior.
         assert abs(r_anchored.k_c - 0.02) < abs(r_lit.k_c - 0.02)
+
+
+class TestTauHpIdentification:
+    """Validate that the greybox 3-state fit identifies τ_hp when the data
+    has informative HP transient signal (Stage 1e, 2026-06-03).
+
+    Uses the bench's ThermalModel2R2C with ``tau_hp_minutes`` set to a
+    known value to generate observations, then fits and checks recovery.
+    Companion negative-control test verifies that without Q_hp transient
+    signal (tau_hp_minutes=0 in the bench), the fit pulls τ_hp toward the
+    prior with high std_err — confirming the pre-registered Wang/Lin
+    expectation that passive ID can't pin HP-side time constants.
+    """
+
+    @staticmethod
+    def _generate_from_bench(
+        n_days: float,
+        tick_minutes: float,
+        bench_tau_hp_minutes: float,
+        capacity_profile_name: str = "fujitsu_aou24rlxfwh",
+        bench_profile_name: str = "standard_residential_fujitsu",
+        mean_outdoor_c: float = -3.0,
+        sp_swing_amplitude_c: float = 1.5,
+        sp_swing_period_minutes: float = 360.0,
+        sensor_noise_sigma: float = 0.0,
+        rng_seed: int = 42,
+    ) -> list[Observation]:
+        """Generate observations from a bench ThermalModel2R2C run with a
+        known ``tau_hp_minutes``. Setpoint swings sinusoidally (period 6 hr,
+        amplitude 1.5°C by default) to create the off→on transient signal
+        needed for τ_hp identification — without active excitation the
+        bench dwells at steady-state and τ_hp is unidentifiable from
+        operational data (the lit-expected behavior we're modeling)."""
+        import random as _random
+        from tests.hvac_bench.house_profiles import PROFILES_2R2C
+        from tests.hvac_bench.thermal_model import ThermalModel2R2C
+
+        profile = PROFILES_2R2C[bench_profile_name]
+        m_total = int(n_days * 24 * 60 / tick_minutes)
+        model = ThermalModel2R2C(
+            profile=profile,
+            initial_temp=20.0,
+            outdoor_temp=mean_outdoor_c,
+            sensor_noise_sigma=sensor_noise_sigma,
+            tau_hp_minutes=bench_tau_hp_minutes,
+            noise_seed=rng_seed,
+        )
+
+        rng_rate = _random.Random(rng_seed + 1)
+        obs: list[Observation] = []
+        # SP center chosen so HP has headroom most of the time even with
+        # capacity derating: sp ≈ 23°C at -3°C outdoor for a 50-min τ_env
+        # building gives steady-state ≈ sp.
+        sp_center = 23.0
+        for i in range(m_total):
+            minute = i * tick_minutes
+            # Diurnal outdoor wobble + slow drift to span the capacity curve.
+            hour_of_day = (minute / 60.0) % 24.0
+            t_out = mean_outdoor_c + 4.0 * math.sin(2 * math.pi * (hour_of_day - 6) / 24.0)
+            # Solar peak at midday; zero at night.
+            solar = max(0.0, 0.5 * math.sin(2 * math.pi * (hour_of_day - 6) / 24.0))
+            # Sinusoidal setpoint swing — creates off↔on transitions that
+            # carry τ_hp signal.
+            sp = sp_center + sp_swing_amplitude_c * math.sin(
+                2 * math.pi * minute / sp_swing_period_minutes
+            )
+            t_air_before = model.room_temp
+            model.outdoor_temp = t_out
+            model.step(hp_setpoint=sp, dt_minutes=tick_minutes, mode="heat",
+                       tick=i, solar_proxy=solar)
+            t_air_after = model.room_temp
+            # Room rate from observed before/after (one-step finite diff).
+            room_rate = (t_air_after - t_air_before) / tick_minutes
+            # Add small noise to room rate (production sees noisy first-difference).
+            room_rate += rng_rate.gauss(0, 0.001)
+            # bench_form HP-active criterion for clamped_reason:
+            hp_active = t_air_before < sp
+            clamped_reason = "" if hp_active else "no_output"
+            obs.append(Observation(
+                timestamp=float(i * tick_minutes * 60),
+                wall_time=1713650000.0 + i * tick_minutes * 60,
+                hp_setpoint=sp,
+                current_c=t_air_after,
+                desired_c=sp_center,
+                outdoor_temp_c=t_out,
+                room_rate=room_rate,
+                raw_readings={"sensor.solar_proxy": solar},
+                clamped=clamped_reason != "",
+                clamped_reason=clamped_reason,
+            ))
+        return obs
+
+    def test_tau_hp_passive_sinusoidal_excitation_does_not_recover(self):
+        """Confirms the lit-pre-registered failure mode: even with the bench
+        generating data with a known τ_hp = 5 min AND sinusoidal setpoint
+        swings (±1.5°C every 6 hr → 84 transitions over 21 days), the
+        3-state fit FAILS to recover τ_hp — posterior rails to the lower
+        bound (~1 min, the bottom of TAU_HP_BOUNDS).
+
+        Why: passive operational data — even with the kind of setpoint
+        variation a real PI controller would produce — cannot pin HP-side
+        time constants per Wang NSF (par/10304050) and Lin arXiv:1512.08169.
+        The off↔on transients are too short and the room dynamics too slow
+        to resolve τ_hp against the building's τ_env / τ_couple / τ_wall.
+
+        This test exists as **load-bearing documentation** that the
+        validation gap is real, not theoretical. When #138 active probe
+        lands and we have engineered step excitation, the companion test
+        ``test_tau_hp_recovered_with_active_excitation`` (currently xfail)
+        should start passing."""
+        obs = self._generate_from_bench(
+            n_days=21.0,
+            tick_minutes=10.0,
+            bench_tau_hp_minutes=5.0,
+        )
+        model_inputs = [
+            {"name": "Solar Proxy", "entity_id": "sensor.solar_proxy", "input_role": "solar"},
+        ]
+        result = fit_greybox(
+            obs, model_inputs,
+            capacity_profile_name="fujitsu_aou24rlxfwh",
+            mode="heat",
+        )
+        assert result is not None and result.is_2r2c
+        assert result.tau_hp is not None
+        # τ_hp should rail at or near the lower bound — this is the
+        # passive-ID-failure signature. If this assertion ever STARTS
+        # failing because τ_hp recovers further from the rail, the model
+        # has become more identifiable — either an algorithm improvement
+        # or active probe data finally arriving. Investigate then.
+        assert result.tau_hp < 2.5, (
+            f"Expected τ_hp to rail near lower bound under passive ID; got "
+            f"{result.tau_hp:.2f}. If this is from improved identifiability, "
+            f"update the recovery test below to match the new bracket."
+        )
+
+    @pytest.mark.xfail(reason=(
+        "Forward-looking xfail per feedback_xfail_for_future_fix: when "
+        "#138 active probe lands and provides engineered step excitation "
+        "for HP-side dynamics, the 3-state fit should recover τ_hp tightly. "
+        "Today, passive data fails per Wang NSF + Lin arXiv. Sized for the "
+        "eventual fix: tight bracket [3, 8] around true τ_hp = 5."
+    ))
+    def test_tau_hp_recovered_with_active_excitation(self):
+        """Forward-looking: when active probe data is available, the fit
+        should recover τ_hp tightly. Currently xfails because we have no
+        active-probe data path; the bench's sinusoidal setpoint swings
+        don't carry enough HP-transient information."""
+        obs = self._generate_from_bench(
+            n_days=21.0,
+            tick_minutes=10.0,
+            bench_tau_hp_minutes=5.0,
+        )
+        model_inputs = [
+            {"name": "Solar Proxy", "entity_id": "sensor.solar_proxy", "input_role": "solar"},
+        ]
+        result = fit_greybox(
+            obs, model_inputs,
+            capacity_profile_name="fujitsu_aou24rlxfwh",
+            mode="heat",
+        )
+        assert result is not None and result.is_2r2c
+        assert result.tau_hp is not None
+        # Tight bracket around true 5 min — sized for the eventual fix.
+        assert 3.0 <= result.tau_hp <= 8.0, (
+            f"τ_hp should recover near true 5 min with active excitation, "
+            f"got {result.tau_hp:.2f}"
+        )
+
+    def test_tau_hp_pulls_to_prior_when_no_transient_signal(self):
+        """Pre-registered behavior (Wang NSF + Lin arXiv:1512.08169):
+        passive operational data cannot identify HP-side time constants.
+        When the bench has tau_hp_minutes=0 (no actual lag in the data),
+        the fit should pull τ_hp toward the prior (3 min)."""
+        obs = self._generate_from_bench(
+            n_days=21.0,
+            tick_minutes=10.0,
+            bench_tau_hp_minutes=0.0,  # NO Q_hp lag in the data
+            sp_swing_amplitude_c=0.1,  # Very mild excitation
+        )
+        model_inputs = [
+            {"name": "Solar Proxy", "entity_id": "sensor.solar_proxy", "input_role": "solar"},
+        ]
+        result = fit_greybox(
+            obs, model_inputs,
+            capacity_profile_name="fujitsu_aou24rlxfwh",
+            mode="heat",
+        )
+        assert result is not None and result.is_2r2c
+        assert result.tau_hp is not None
+        # The prior mean is 3 min. Without informative data, posterior should
+        # stay within ~1 prior-σ (4 min) of the prior — i.e. roughly [1, 7].
+        # This is the "tau_hp gets dominated by the prior" outcome.
+        assert 1.0 <= result.tau_hp <= 7.0, (
+            f"τ_hp without transient signal should pull to prior 3 min, "
+            f"got {result.tau_hp:.2f}"
+        )
+
+    def test_k_c_rated_stable_across_outdoor_temps_with_capacity_profile(self):
+        """With a capacity profile applied, k_c_rated should be the AHRI-
+        rating-point gain regardless of which outdoor-temperature regime
+        the data is in. Cold-snap data and mild-weather data should both
+        recover similar k_c_rated values — this is the operational win of
+        the Stage 1c capacity-profile redesign over the old constant-k_c
+        formulation, which would have shown systematic bias across regimes.
+        """
+        # Generate two batches at different outdoor temperatures.
+        obs_cold = self._generate_from_bench(
+            n_days=21.0,
+            tick_minutes=10.0,
+            bench_tau_hp_minutes=0.0,
+            mean_outdoor_c=-12.0,  # cold weather
+        )
+        obs_mild = self._generate_from_bench(
+            n_days=21.0,
+            tick_minutes=10.0,
+            bench_tau_hp_minutes=0.0,
+            mean_outdoor_c=2.0,  # mild winter
+            rng_seed=43,
+        )
+        model_inputs = [
+            {"name": "Solar Proxy", "entity_id": "sensor.solar_proxy", "input_role": "solar"},
+        ]
+        r_cold = fit_greybox(
+            obs_cold, model_inputs,
+            capacity_profile_name="fujitsu_aou24rlxfwh",
+            mode="heat",
+        )
+        r_mild = fit_greybox(
+            obs_mild, model_inputs,
+            capacity_profile_name="fujitsu_aou24rlxfwh",
+            mode="heat",
+        )
+        assert r_cold is not None and r_cold.is_2r2c
+        assert r_mild is not None and r_mild.is_2r2c
+        # k_c_rated should agree between the two batches within 50% relative
+        # — they're identifying the SAME underlying rating-point gain even
+        # though the operating temperatures differ substantially. (Not asking
+        # for tight numerical convergence — passive data has lots of variance
+        # in identified k_c — just no SYSTEMATIC bias from outdoor temp.)
+        ratio = r_cold.k_c / r_mild.k_c if r_mild.k_c > 0 else float("inf")
+        assert 0.5 <= ratio <= 2.0, (
+            f"k_c_rated should be regime-invariant: cold={r_cold.k_c:.4f} "
+            f"mild={r_mild.k_c:.4f} ratio={ratio:.2f}"
+        )
