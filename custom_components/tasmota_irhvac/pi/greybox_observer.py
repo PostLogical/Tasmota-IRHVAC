@@ -167,8 +167,20 @@ MIN_OBSERVATIONS = 30
 
 # 2R2C dispatch thresholds: need both enough data and enough time span
 # to identify the wall mode + solar split. Below either, fall back to 1R1C.
+#
+# 2026-06-04 architecture: ``MIN_TIMESPAN_DAYS_2R2C`` reduced from 14d to
+# 6.0d to fit the weekly fill-and-wipe cadence (greybox_buffer.py + the
+# weekly gate in pi_controller). 7d × multiple diurnal cycles + natural
+# HP on/off variability is sufficient for 2R2C identification per lit
+# (Bacher-Madsen 2011, CTSM-R, Sodja 2018, Yi 2019 all use daily-to-
+# weekly windows). The 5-time-constants-of-τ_slow reasoning behind the
+# prior 14d minimum was inappropriately importing a step-response
+# settling rule onto a passive batch-fitting setup. 6.0d gives the
+# first weekly batch a chance to dispatch even with ~0.5d of clock
+# drift from the 6.5d cadence gate; subsequent batches will see the
+# full 7d.
 MIN_OBSERVATIONS_2R2C = 1500
-MIN_TIMESPAN_DAYS_2R2C = 14.0
+MIN_TIMESPAN_DAYS_2R2C = 6.0
 
 # Minimum variance in hp_offset column to identify k_c.
 MIN_HP_VARIANCE = 0.01
@@ -1378,7 +1390,7 @@ def _fit_greybox_2r2c(
             # residuals are 0.1–1.0°C; f_scale=0.1 puts them in the
             # Huber linear regime. Was 0.005 (rate-residual scale).
             f_scale=0.1,
-            max_nfev=400,  # cap; 6-param fit usually converges in <100
+            max_nfev=400,  # cap; 7-param fit usually converges in <100
         )
     except Exception:
         _LOGGER.exception("Grey-box 2R2C: least_squares failed")
