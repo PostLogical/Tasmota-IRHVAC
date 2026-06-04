@@ -91,6 +91,32 @@ def _solar_schedule(minute: float) -> float:
 # ── Scenario 1: Wrong Seeds → Convergence ────────────────────────────────
 
 
+@pytest.fixture(scope="module")
+def _wrong_seeds_2day_synth_result():
+    """2-day synth run for early-integral compensation check."""
+    return run_full_stack(TestWrongSeedsConvergence._make_config(n_days=2, weather="synth"))
+
+
+@pytest.fixture(scope="module")
+def _wrong_seeds_7day_result():
+    """7-day run for batch-WLS cycle-count check."""
+    return run_full_stack(TestWrongSeedsConvergence._make_config(n_days=7))
+
+
+@pytest.fixture(scope="module")
+def _wrong_seeds_30day_result():
+    """30-day run for stabilization / RMS / comfort / FF checks. Replaces
+    4 identical run_full_stack(_make_config(n_days=30)) calls (~4×190s)."""
+    return run_full_stack(TestWrongSeedsConvergence._make_config(n_days=30))
+
+
+@pytest.fixture(scope="module")
+def _wrong_seeds_30day_synth_result():
+    """30-day synth run for violation-streak check (synth weather avoids
+    cold-front saturation per feedback_synthetic_vs_real_bench.md)."""
+    return run_full_stack(TestWrongSeedsConvergence._make_config(n_days=30, weather="synth"))
+
+
 class TestWrongSeedsConvergence:
     """Living room with intentionally wrong FF seeds.
 
@@ -153,16 +179,18 @@ class TestWrongSeedsConvergence:
             relax_kappa_gate=True,
         )
 
-    def test_integral_compensates_early(self, bench_metrics, num_regression):
+    def test_integral_compensates_early(self, bench_metrics, num_regression,
+                                          _wrong_seeds_2day_synth_result):
         """Day 1: integral must be working to compensate wrong FF."""
-        config = self._make_config(n_days=2, weather="synth")
-        result = run_full_stack(config)
-
+        result = _wrong_seeds_2day_synth_result
+        # tick_minutes from the fixture's config — recompute for slice math
+        config_tick_minutes = TestWrongSeedsConvergence._make_config(
+            n_days=2, weather="synth").tick_minutes
         # Average over the last 5 wall-clock hours (was last 20 ticks =
         # 5h at 15-min cadence, but only 1h at 3-min — cadence-coupled).
         # Compute slice count from wall-clock window for byte-identity at
         # 15-min cadence (same 20 ticks) and scaling to 100 ticks at 3-min.
-        n_last = int(300 / config.tick_minutes)
+        n_last = int(300 / config_tick_minutes)
         late_integrals = [abs(h["integral"]) for h in result.history[-n_last:]]
         avg_integral = sum(late_integrals) / len(late_integrals)
         bench_metrics["avg_integral"] = avg_integral
@@ -172,21 +200,20 @@ class TestWrongSeedsConvergence:
             f"got avg |integral|={avg_integral:.2f}"
         )
 
-    def test_batch_wls_runs(self, bench_metrics, num_regression):
+    def test_batch_wls_runs(self, bench_metrics, num_regression,
+                             _wrong_seeds_7day_result):
         """Week 1: batch WLS should have run multiple cycles."""
-        config = self._make_config(n_days=7)
-        result = run_full_stack(config)
+        result = _wrong_seeds_7day_result
         bench_metrics["n_batches"] = result.n_batches
         check_bench_metrics(num_regression, bench_metrics)
         assert result.n_batches >= 10, (
             f"Expected ≥10 batch cycles in 7 days, got {result.n_batches}"
         )
 
-    def test_outdoor_delta_stabilizes(self, bench_metrics, num_regression):
+    def test_outdoor_delta_stabilizes(self, bench_metrics, num_regression,
+                                       _wrong_seeds_30day_result):
         """Month 1: outdoor_delta should stabilize (low batch-to-batch change)."""
-        config = self._make_config(n_days=30)
-        result = run_full_stack(config)
-
+        result = _wrong_seeds_30day_result
         if len(result.coef_trajectory) >= 10:
             late_ods = [snap.get("outdoor_delta", 0)
                         for snap in result.coef_trajectory[-5:]]
@@ -199,11 +226,10 @@ class TestWrongSeedsConvergence:
                 f"in last 5 batches (values: {[f'{v:.4f}' for v in late_ods]})"
             )
 
-    def test_integral_rms_decreases(self, bench_metrics, num_regression):
+    def test_integral_rms_decreases(self, bench_metrics, num_regression,
+                                     _wrong_seeds_30day_result):
         """Month 1: integral RMS in last week should be < first week."""
-        config = self._make_config(n_days=30)
-        result = run_full_stack(config)
-
+        result = _wrong_seeds_30day_result
         if len(result.daily_integral_rms) >= 14:
             first_week = sum(result.daily_integral_rms[:7]) / 7
             last_week = sum(result.daily_integral_rms[-7:]) / 7
@@ -215,11 +241,10 @@ class TestWrongSeedsConvergence:
                 f"last week={last_week:.3f}"
             )
 
-    def test_comfort_does_not_degrade(self, bench_metrics, num_regression):
+    def test_comfort_does_not_degrade(self, bench_metrics, num_regression,
+                                       _wrong_seeds_30day_result):
         """Learning should not make comfort worse over time."""
-        config = self._make_config(n_days=30)
-        result = run_full_stack(config)
-
+        result = _wrong_seeds_30day_result
         if len(result.daily_mae) >= 14:
             first_week_mae = sum(result.daily_mae[:7]) / 7
             last_week_mae = sum(result.daily_mae[-7:]) / 7
@@ -231,11 +256,10 @@ class TestWrongSeedsConvergence:
                 f"last week={last_week_mae:.3f}"
             )
 
-    def test_ff_fraction_increases(self, bench_metrics, num_regression):
+    def test_ff_fraction_increases(self, bench_metrics, num_regression,
+                                    _wrong_seeds_30day_result):
         """FF should carry more of the load as learning progresses."""
-        config = self._make_config(n_days=30)
-        result = run_full_stack(config)
-
+        result = _wrong_seeds_30day_result
         if len(result.daily_ff_fraction) >= 14:
             first_week_ff = sum(result.daily_ff_fraction[:7]) / 7
             last_week_ff = sum(result.daily_ff_fraction[-7:]) / 7
@@ -247,7 +271,8 @@ class TestWrongSeedsConvergence:
                 f"last week={last_week_ff:.2%}"
             )
 
-    def test_no_long_violation_streaks(self, bench_metrics, num_regression):
+    def test_no_long_violation_streaks(self, bench_metrics, num_regression,
+                                        _wrong_seeds_30day_synth_result):
         """No more than 5 hours of consecutive violations.
 
         With intentionally wrong seeds, the cold start produces a long
@@ -261,8 +286,7 @@ class TestWrongSeedsConvergence:
         envelope and turn this into a saturation test, not a controller
         test. See ``feedback_synthetic_vs_real_bench.md``.
         """
-        config = self._make_config(n_days=30, weather="synth")
-        result = run_full_stack(config)
+        result = _wrong_seeds_30day_synth_result
         bench_metrics["longest_violation_streak"] = result.longest_violation_streak
         check_bench_metrics(num_regression, bench_metrics)
         # Bound is wall-clock (10 hours, generous for wrong-seed cold start
@@ -285,6 +309,14 @@ class TestWrongSeedsConvergence:
 
 
 # ── Scenario 2: Bunkroom Slow Learner ────────────────────────────────────
+
+
+@pytest.fixture(scope="module")
+def _bunkroom_slow_learner_result():
+    """Run TestBunkroomSlowLearner's 30-day scenario ONCE; assertions
+    consume the cached result. Replaces 5 identical run_full_stack calls
+    (≈5×118s)."""
+    return run_full_stack(TestBunkroomSlowLearner._make_config(n_days=30))
 
 
 class TestBunkroomSlowLearner:
@@ -324,11 +356,10 @@ class TestBunkroomSlowLearner:
             relax_kappa_gate=True,
         )
 
-    def test_no_integral_runaway(self, bench_metrics, num_regression):
+    def test_no_integral_runaway(self, bench_metrics, num_regression,
+                                  _bunkroom_slow_learner_result):
         """Integral must stay bounded over 30 days."""
-        config = self._make_config(n_days=30)
-        result = run_full_stack(config)
-
+        result = _bunkroom_slow_learner_result
         max_integral = max(abs(h["integral"]) for h in result.history)
         bench_metrics["max_integral"] = max_integral
         check_bench_metrics(num_regression, bench_metrics)
@@ -336,20 +367,20 @@ class TestBunkroomSlowLearner:
             f"Integral runaway: max |integral|={max_integral:.1f}"
         )
 
-    def test_convergence_slower_than_living_room(self, bench_metrics, num_regression):
+    def test_convergence_slower_than_living_room(self, bench_metrics, num_regression,
+                                                  _bunkroom_slow_learner_result):
         """Bunkroom should converge but potentially slower."""
-        config = self._make_config(n_days=30)
-        result = run_full_stack(config)
+        result = _bunkroom_slow_learner_result
         bench_metrics["n_batches"] = result.n_batches
         check_bench_metrics(num_regression, bench_metrics)
         assert result.n_batches >= 50, (
             f"Expected ≥50 batch cycles in 30 days, got {result.n_batches}"
         )
 
-    def test_outdoor_delta_bounded(self, bench_metrics, num_regression):
+    def test_outdoor_delta_bounded(self, bench_metrics, num_regression,
+                                    _bunkroom_slow_learner_result):
         """outdoor_delta should not diverge."""
-        config = self._make_config(n_days=30)
-        result = run_full_stack(config)
+        result = _bunkroom_slow_learner_result
         od = result.final_coefs.get("outdoor_delta", 0)
         bench_metrics["outdoor_delta"] = od
         check_bench_metrics(num_regression, bench_metrics)
@@ -357,10 +388,10 @@ class TestBunkroomSlowLearner:
             f"outdoor_delta diverged: {od:.3f}"
         )
 
-    def test_comfort_above_80_pct(self, bench_metrics, num_regression):
+    def test_comfort_above_80_pct(self, bench_metrics, num_regression,
+                                   _bunkroom_slow_learner_result):
         """Room should be within deadband ≥80% of the time."""
-        config = self._make_config(n_days=30)
-        result = run_full_stack(config)
+        result = _bunkroom_slow_learner_result
         bench_metrics["ctrl_comfort_pct"] = result.ctrl_comfort_pct
         bench_metrics["ctrl_violations"] = result.ctrl_violations
         bench_metrics["unctrl_violations"] = result.unctrl_violations
@@ -370,10 +401,10 @@ class TestBunkroomSlowLearner:
             f"(ctrl={result.ctrl_violations}, unctrl={result.unctrl_violations})"
         )
 
-    def test_no_runaway_overshoot(self, bench_metrics, num_regression):
+    def test_no_runaway_overshoot(self, bench_metrics, num_regression,
+                                   _bunkroom_slow_learner_result):
         """Controllable warm violations should be minority — no FF sign errors."""
-        config = self._make_config(n_days=30)
-        result = run_full_stack(config)
+        result = _bunkroom_slow_learner_result
         bench_metrics["ctrl_violations"] = result.ctrl_violations
         bench_metrics["warm_violations"] = result.warm_violations
         bench_metrics["unctrl_violations"] = result.unctrl_violations
