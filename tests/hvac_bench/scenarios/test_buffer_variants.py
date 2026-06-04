@@ -457,9 +457,15 @@ _VARIANT_RESULTS_DIR = _pathlib.Path(
 @pytest.mark.parametrize("season", list(_SEASON_WINDOWS.keys()))
 def test_variant_cell(
     variant: tuple[str, int, str], season: str,
-    bench_metrics, num_regression,
+    bench_metrics, num_regression, variant_results,
 ) -> None:
     """One (variant × season) cell. xdist runs cells across workers.
+
+    Consumes ``variant_results`` (module-scoped fixture) rather than
+    running its own scenario: ``TestBufferVariants.test_no_variant_diverges``
+    already evaluates the same (variant × season) grid via the fixture, so
+    re-running per cell duplicated 32+ scenario runs. The fixture computes
+    once; per-cell tests now just look up their slice.
 
     Writes per-cell results to ``BUFFER_VARIANT_RESULTS_DIR/{variant}__{season}.json``
     so a post-run aggregation step can read them. Set the env var to redirect.
@@ -477,7 +483,7 @@ def test_variant_cell(
     from tests.hvac_bench.full_stack_runner import summarize_post_fill
 
     vname, size, policy = variant
-    r = _run_with_variant(season, max_size=size, policy=policy, n_days=90)
+    r = variant_results[vname][season]
     bs = r.final_coefs.get("Solar Proxy", float("nan"))
     od = r.final_coefs.get("outdoor_delta", float("nan"))
     # Trajectory at canonical days for drift inspection
