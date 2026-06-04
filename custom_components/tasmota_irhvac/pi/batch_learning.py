@@ -2706,20 +2706,47 @@ def _compute_vif_from_features(
         return [1.0] * n
 
     m = n - 1  # exclude intercept at index 0
-    xtx = [[0.0] * m for _ in range(m)]
-    for k in range(n_obs):
-        row = X[k]
-        for i in range(m):
-            ri = i + 1  # skip intercept
-            if ri >= len(row):
-                continue
-            vi = row[ri]
-            xrow = xtx[i]
-            for j in range(m):
-                rj = j + 1
-                if rj >= len(row):
+    if _NUMPY_AVAILABLE:
+        # Vectorized X^T X for the non-intercept columns. The original
+        # pure-Python path skips out-of-bounds row accesses (`if rj >=
+        # len(row): continue`), which is mathematically equivalent to
+        # padding short rows with zeros (zero contributes zero to the
+        # accumulator). We pad explicitly here to support ragged input
+        # while keeping the numpy fastpath.
+        try:
+            X_arr = np.asarray(X[:n_obs], dtype=float)
+            row_n = X_arr.shape[1] if X_arr.ndim == 2 else 0
+        except (ValueError, TypeError):
+            # Ragged rows — pad to max length with zeros.
+            max_len = max((len(r) for r in X[:n_obs]), default=0)
+            X_arr = np.zeros((n_obs, max_len), dtype=float)
+            for k in range(n_obs):
+                row = X[k]
+                if row:
+                    X_arr[k, :len(row)] = row
+            row_n = max_len
+        avail = max(0, min(m, row_n - 1))
+        xtx_arr = np.zeros((m, m), dtype=float)
+        if avail > 0:
+            Xt = X_arr[:, 1:1 + avail]
+            xtx_arr[:avail, :avail] = Xt.T @ Xt
+        xtx = xtx_arr.tolist()
+    else:
+        # Pure-Python fallback (manual triple loop).
+        xtx = [[0.0] * m for _ in range(m)]
+        for k in range(n_obs):
+            row = X[k]
+            for i in range(m):
+                ri = i + 1  # skip intercept
+                if ri >= len(row):
                     continue
-                xrow[j] += vi * row[rj]
+                vi = row[ri]
+                xrow = xtx[i]
+                for j in range(m):
+                    rj = j + 1
+                    if rj >= len(row):
+                        continue
+                    xrow[j] += vi * row[rj]
 
     # Exclude constant columns (zero diagonal) — they singularize the matrix
     # and would inflate every feature's VIF to inf.  Threshold matches the
