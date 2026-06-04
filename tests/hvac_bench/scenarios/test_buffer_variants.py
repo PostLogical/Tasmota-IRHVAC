@@ -1,4 +1,11 @@
-"""Buffer variant sweep — canonical real-weather scenarios (#45).
+"""WLS buffer variant sweep — canonical real-weather scenarios (#45).
+
+Scope (post-fill-and-wipe, 2026-06-04): now exercises the WLS
+``DiversityAwareBuffer`` only.  The grey-box observer moved to a
+standalone fill-and-wipe buffer in commit 4770943, so buffer-size and
+eviction-policy variants no longer affect grey-box fits — only WLS.
+Solar Proxy / outdoor_delta convergence as measured here is therefore a
+WLS-pipeline verdict, not a joint WLS+greybox one.
 
 Default weather source is real Open-Meteo CSV per ``_make_config`` in
 ``test_seasonal_convergence`` (#45, 2026-04-29). Compares Solar Proxy and

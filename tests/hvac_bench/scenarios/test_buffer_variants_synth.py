@@ -1,6 +1,11 @@
-"""Buffer variant sweep — synth-only path for parameter sweeps (#45).
+"""WLS buffer variant sweep — synth-only path for parameter sweeps (#45).
 
-For verdict-producing buffer comparisons see ``test_buffer_variants.py``
+Scope (post-fill-and-wipe, 2026-06-04): now exercises the WLS
+``DiversityAwareBuffer`` only.  The grey-box observer moved to a
+standalone fill-and-wipe buffer in commit 4770943, so buffer-size and
+eviction-policy variants no longer affect grey-box fits — only WLS.
+
+For verdict-producing WLS buffer comparisons see ``test_buffer_variants.py``
 (canonical, real-weather). This file is reserved for sweeps where
 *reproducible synth knobs* matter more than weather realism — varying
 ``weather_amp_c``, sweeping seeds, swapping cloud-coupling, etc.

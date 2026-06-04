@@ -126,7 +126,7 @@ def _combined_bound(report: RichardsonReport) -> float:
 _QREF_DEADBAND_EDGE_XFAILS: set[tuple[str, str]] = set()
 
 
-@pytest.mark.study
+@pytest.mark.design
 @pytest.mark.parametrize("scenario_name", sorted(RICHARDSON_SCORES.keys()))
 @pytest.mark.parametrize("controller_name", sorted({
     c for s in RICHARDSON_SCORES.values() for c in s
@@ -198,7 +198,7 @@ def test_solution_verification_within_tolerance(request, bench_metrics, num_regr
 # ── Shape invariants ──────────────────────────────────────────────────────
 
 
-@pytest.mark.study
+@pytest.mark.design
 @pytest.mark.parametrize("invariant_name", sorted(CONVERGENCE_INVARIANTS.keys()))
 def test_convergence_shape_invariants(bench_metrics, num_regression, invariant_name):
     """Per-rule asymptotic-regime invariants on specific (scenario × controller × KPI).
@@ -233,7 +233,7 @@ def test_convergence_shape_invariants(bench_metrics, num_regression, invariant_n
 # ── Sanity check: error bands are non-negative ────────────────────────────
 
 
-@pytest.mark.study
+@pytest.mark.design
 def test_richardson_reports_have_finite_bands(bench_metrics, num_regression):
     """All RichardsonReport bands are finite and non-negative.
 

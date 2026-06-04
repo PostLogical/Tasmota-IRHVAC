@@ -1,20 +1,27 @@
-"""Eviction-seed sensitivity — does buffer-eviction RNG move the learned coefs?
+"""WLS eviction-seed sensitivity — does buffer-eviction RNG move WLS coefs?
 
-Production uses ``SlevPolicy(alpha=0.0, seed=0)`` (uniform-random eviction).
-Each production run is deterministic, but ``seed=0`` is an arbitrary choice.
-In low-SNR seasons the data under-determines the solar coefficient, so *which*
-observations the random eviction keeps shifts the final estimate — e.g. fall
-final Solar Proxy is −1.10 at seed 0 but −1.59 at seed 42 (same code, same
-data).  That hidden degree of freedom plausibly explains why earlier sessions
-saw inconsistent "final" solar numbers.
+Scope (post-fill-and-wipe, 2026-06-04): this test now studies WLS only.
+The grey-box observer moved to a standalone fill-and-wipe buffer in
+commit 4770943, so eviction RNG no longer affects greybox fits. WLS's
+DiversityAwareBuffer still uses ``SlevPolicy(alpha=0.0, seed=0)``
+(uniform-random eviction), and the seed-luck concern continues to apply
+to WLS-fitted Solar Proxy / outdoor_delta in low-SNR seasons.
 
-This test runs the same scenario across N eviction seeds and pins the spread
-of the learned coefficients.  A coefficient whose seed-induced spread is large
-relative to its own value is being driven by RNG luck, not data.  The pinned
-spread lets a future code change (deterministic eviction, seed-ensembling,
-added excitation, …) be measured: did it make the learner more seed-robust?
+The original observation that motivated this test: fall final Solar
+Proxy was −1.10 at seed 0 but −1.59 at seed 42 (same code, same data) —
+the data under-determines the solar coefficient and *which* observations
+random eviction keeps shifts the final estimate.
+
+The test runs the same scenario across N eviction seeds and pins the
+spread of the WLS-learned coefficients.  A coefficient whose seed-induced
+spread is large relative to its own value is being driven by RNG luck,
+not data.  The pinned spread lets a future code change (deterministic
+eviction, seed-ensembling, added excitation, …) be measured: did it make
+the WLS learner more seed-robust?
 
 Marked @study (N× the cost of a single run); opt in with --run-studies.
+Greybox is no longer affected — its fill-and-wipe buffer is RNG-free
+and the same fits would occur regardless of WLS eviction seed.
 """
 from __future__ import annotations
 

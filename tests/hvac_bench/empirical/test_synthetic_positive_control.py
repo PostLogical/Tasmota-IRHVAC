@@ -249,7 +249,6 @@ class TestSyntheticExcitationPOC:
 
 
 @pytest.mark.design
-@pytest.mark.study
 @pytest.mark.skipif(not BUNDLE_AVAILABLE, reason="Condenser A bundle not present")
 class TestBundleExcitationRealism:
     """Same literature truth, but bundle's recorded outdoor/setpoint/solar
