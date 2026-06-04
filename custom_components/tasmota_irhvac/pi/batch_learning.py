@@ -2069,11 +2069,19 @@ def _solve_joint(
     cov_diag = _diagonal_of_inverse(XtWX, n_joint)
     if cov_diag is not None:  # pragma: no branch — XtWX is well-conditioned when _solve_symmetric succeeded
         all_beta_norm = [beta_norm[jj] / col_scales[jj] for jj in range(n_joint)]
-        resid = [
-            y[idx] - sum(joint_cols[jj][idx] * all_beta_norm[jj] for jj in range(n_joint))
-            for idx in range(m_complete)
-        ]
-        rms_sq = sum(r * r for r in resid) / max(1, m_complete - n_joint)
+        if _NUMPY_AVAILABLE:
+            J_arr = np.asarray(joint_cols, dtype=float).T   # (m_complete, n_joint)
+            y_arr = np.asarray(y, dtype=float)
+            beta_arr = np.asarray(all_beta_norm, dtype=float)
+            resid_arr = y_arr - J_arr @ beta_arr
+            resid = resid_arr.tolist()
+            rms_sq = float((resid_arr @ resid_arr) / max(1, m_complete - n_joint))
+        else:
+            resid = [
+                y[idx] - sum(joint_cols[jj][idx] * all_beta_norm[jj] for jj in range(n_joint))
+                for idx in range(m_complete)
+            ]
+            rms_sq = sum(r * r for r in resid) / max(1, m_complete - n_joint)
 
         # Classical per-coefficient std_err keyed back to ctx.n positions.
         classical_norm = [0.0] * n_joint
@@ -2633,11 +2641,35 @@ def weighted_least_squares(
         full_y = y_base
         m_full = m_base
 
-    residuals = [
-        full_y[k] - sum(beta[i] * (full_X[k][i] if i < len(full_X[k]) else 0.0) for i in range(n))
-        for k in range(m_full)
-    ]
-    rms = math.sqrt(sum(r * r for r in residuals) / m_full) if m_full > 0 else 0.0
+    if _NUMPY_AVAILABLE and m_full > 0:
+        y_arr = np.asarray(full_y, dtype=float)
+        # Pad ragged / over-long rows to exactly n columns. Missing
+        # entries become zero (mirrors `if i < len(row) else 0.0`).
+        try:
+            X_arr = np.asarray(full_X, dtype=float)
+        except (ValueError, TypeError):
+            X_arr = np.zeros((m_full, n), dtype=float)
+            for k in range(m_full):
+                row = full_X[k]
+                rl = min(len(row), n)
+                if rl > 0:
+                    X_arr[k, :rl] = row[:rl]
+        if X_arr.ndim != 2 or X_arr.shape[1] != n:
+            padded = np.zeros((m_full, n), dtype=float)
+            if X_arr.ndim == 2:
+                take = min(X_arr.shape[1], n)
+                padded[:, :take] = X_arr[:, :take]
+            X_arr = padded
+        beta_arr = np.asarray(beta, dtype=float)
+        resid_arr = y_arr - X_arr @ beta_arr
+        residuals = resid_arr.tolist()
+        rms = float(math.sqrt((resid_arr @ resid_arr) / m_full))
+    else:
+        residuals = [
+            full_y[k] - sum(beta[i] * (full_X[k][i] if i < len(full_X[k]) else 0.0) for i in range(n))
+            for k in range(m_full)
+        ]
+        rms = math.sqrt(sum(r * r for r in residuals) / m_full) if m_full > 0 else 0.0
 
     # Outlier exclusion with rare-feature protection
     n_excluded = 0
