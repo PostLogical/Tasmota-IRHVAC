@@ -157,6 +157,13 @@ def make_passive_zone_schedule():
 # ── Scenario 1: Direct active source (pellet stove) ─────────────────────
 
 
+@pytest.fixture(scope="module")
+def _direct_active_source_result():
+    """Run TestDirectActiveSource scenario ONCE; assertions consume the
+    cached result. Replaces 4 independent run_full_stack calls (≈4×1040s)."""
+    return run_full_stack(TestDirectActiveSource._make_config())
+
+
 class TestDirectActiveSource:
     """Single pellet-stove-style discrete heat source.
 
@@ -188,9 +195,10 @@ class TestDirectActiveSource:
             relax_kappa_gate=True,
         )
 
-    def test_stove_unlocks_within_30d(self, bench_metrics, num_regression):
+    def test_stove_unlocks_within_30d(self, bench_metrics, num_regression,
+                                       _direct_active_source_result):
         """Stove model input should unlock by day 30."""
-        result = run_full_stack(self._make_config())
+        result = _direct_active_source_result
         bench_metrics["final_stove_beta"] = result.final_coefs.get("Pellet Stove", 0.0)
         bench_metrics["n_batches"] = result.n_batches
         check_bench_metrics(num_regression, bench_metrics)
@@ -200,9 +208,10 @@ class TestDirectActiveSource:
                 "Stove never unlocked over 30 days"
             )
 
-    def test_stove_beta_recovers_meaningful_magnitude(self, bench_metrics, num_regression):
+    def test_stove_beta_recovers_meaningful_magnitude(self, bench_metrics, num_regression,
+                                                      _direct_active_source_result):
         """Stove β should reach at least 50% of true magnitude."""
-        result = run_full_stack(self._make_config())
+        result = _direct_active_source_result
         beta = result.final_coefs.get("Pellet Stove", 0.0)
         bench_metrics["stove_beta"] = beta
         check_bench_metrics(num_regression, bench_metrics)
@@ -211,9 +220,10 @@ class TestDirectActiveSource:
             f"Stove β only {beta:.3f}, expected ≤ -1.5 (true -3.0)"
         )
 
-    def test_stove_does_not_destabilize_outdoor(self, bench_metrics, num_regression):
+    def test_stove_does_not_destabilize_outdoor(self, bench_metrics, num_regression,
+                                                 _direct_active_source_result):
         """outdoor_delta should converge near the regression-sign truth."""
-        result = run_full_stack(self._make_config())
+        result = _direct_active_source_result
         od = result.final_coefs.get("outdoor_delta", 0.0)
         expected = -PROFILES_2R2C["living_room"].true_seed
         bench_metrics["outdoor_delta"] = od
@@ -223,9 +233,10 @@ class TestDirectActiveSource:
             f"outdoor_delta diverged: {od:.3f} vs expected {expected:.3f}"
         )
 
-    def test_comfort_above_85_pct(self, bench_metrics, num_regression):
+    def test_comfort_above_85_pct(self, bench_metrics, num_regression,
+                                   _direct_active_source_result):
         """Comfort should exceed 85% with active-source FF."""
-        result = run_full_stack(self._make_config())
+        result = _direct_active_source_result
         bench_metrics["ctrl_comfort_pct"] = result.ctrl_comfort_pct
         check_bench_metrics(num_regression, bench_metrics)
         assert result.ctrl_comfort_pct >= 85.0, (
@@ -234,6 +245,13 @@ class TestDirectActiveSource:
 
 
 # ── Scenario 2: Adjacent zone proxy (DR_temp aggregate) ─────────────────
+
+
+@pytest.fixture(scope="module")
+def _adjacent_zone_proxy_result():
+    """Run TestAdjacentZoneProxy scenario ONCE; assertions consume the
+    cached result. Replaces 4 independent run_full_stack calls (≈4×1065s)."""
+    return run_full_stack(TestAdjacentZoneProxy._make_config())
 
 
 class TestAdjacentZoneProxy:
@@ -269,9 +287,10 @@ class TestAdjacentZoneProxy:
             relax_kappa_gate=True,
         )
 
-    def test_dr_temp_unlocks_within_30d(self, bench_metrics, num_regression):
+    def test_dr_temp_unlocks_within_30d(self, bench_metrics, num_regression,
+                                         _adjacent_zone_proxy_result):
         """DR_temp should unlock once oil/cooking events accumulate."""
-        result = run_full_stack(self._make_config())
+        result = _adjacent_zone_proxy_result
         bench_metrics["dr_temp_beta"] = result.final_coefs.get("DR Temp", 0.0)
         bench_metrics["n_batches"] = result.n_batches
         check_bench_metrics(num_regression, bench_metrics)
@@ -281,9 +300,10 @@ class TestAdjacentZoneProxy:
                 "DR_temp never unlocked despite mixed-source variance"
             )
 
-    def test_dr_temp_beta_correct_sign(self, bench_metrics, num_regression):
+    def test_dr_temp_beta_correct_sign(self, bench_metrics, num_regression,
+                                        _adjacent_zone_proxy_result):
         """β should be negative (warmer DR → less HP needed in LR)."""
-        result = run_full_stack(self._make_config())
+        result = _adjacent_zone_proxy_result
         beta = result.final_coefs.get("DR Temp", 0.0)
         bench_metrics["dr_temp_beta"] = beta
         check_bench_metrics(num_regression, bench_metrics)
@@ -291,18 +311,20 @@ class TestAdjacentZoneProxy:
             f"DR_temp β has wrong sign: {beta:.3f}"
         )
 
-    def test_outdoor_remains_correctly_signed(self, bench_metrics, num_regression):
+    def test_outdoor_remains_correctly_signed(self, bench_metrics, num_regression,
+                                               _adjacent_zone_proxy_result):
         """outdoor_delta should not flip sign or wildly diverge."""
-        result = run_full_stack(self._make_config())
+        result = _adjacent_zone_proxy_result
         od = result.final_coefs.get("outdoor_delta", 0.0)
         bench_metrics["outdoor_delta"] = od
         check_bench_metrics(num_regression, bench_metrics)
         assert od < 0, f"outdoor_delta wrong sign: {od:.3f}"
         assert abs(od) < 1.0, f"outdoor_delta diverged: {od:.3f}"
 
-    def test_comfort_above_80_pct(self, bench_metrics, num_regression):
+    def test_comfort_above_80_pct(self, bench_metrics, num_regression,
+                                   _adjacent_zone_proxy_result):
         """Comfort holds even with messy aggregate proxy."""
-        result = run_full_stack(self._make_config())
+        result = _adjacent_zone_proxy_result
         bench_metrics["ctrl_comfort_pct"] = result.ctrl_comfort_pct
         check_bench_metrics(num_regression, bench_metrics)
         assert result.ctrl_comfort_pct >= 80.0, (
@@ -311,6 +333,13 @@ class TestAdjacentZoneProxy:
 
 
 # ── Scenario 3: Pure passive adjacent zone ──────────────────────────────
+
+
+@pytest.fixture(scope="module")
+def _pure_passive_adjacent_result():
+    """Run TestPurePassiveAdjacent scenario ONCE; assertions consume the
+    cached result. Replaces 3 independent run_full_stack calls (≈3×1030s)."""
+    return run_full_stack(TestPurePassiveAdjacent._make_config())
 
 
 class TestPurePassiveAdjacent:
@@ -348,9 +377,10 @@ class TestPurePassiveAdjacent:
             relax_kappa_gate=False,
         )
 
-    def test_passive_zone_stays_frozen(self, bench_metrics, num_regression):
+    def test_passive_zone_stays_frozen(self, bench_metrics, num_regression,
+                                        _pure_passive_adjacent_result):
         """Pure-passive zone should remain frozen all 30 days."""
-        result = run_full_stack(self._make_config())
+        result = _pure_passive_adjacent_result
         bench_metrics["n_snapshots"] = len(result.coef_trajectory)
         check_bench_metrics(num_regression, bench_metrics)
         # Check every snapshot — never unlocks
@@ -360,18 +390,20 @@ class TestPurePassiveAdjacent:
                 f"to detect redundancy"
             )
 
-    def test_outdoor_absorbs_passive_coupling(self, bench_metrics, num_regression):
+    def test_outdoor_absorbs_passive_coupling(self, bench_metrics, num_regression,
+                                               _pure_passive_adjacent_result):
         """outdoor_delta β may shift to absorb passive contribution."""
-        result = run_full_stack(self._make_config())
+        result = _pure_passive_adjacent_result
         od = result.final_coefs.get("outdoor_delta", 0.0)
         bench_metrics["outdoor_delta"] = od
         check_bench_metrics(num_regression, bench_metrics)
         assert od < 0, f"outdoor_delta wrong sign: {od:.3f}"
         assert abs(od) < 1.0, f"outdoor_delta diverged: {od:.3f}"
 
-    def test_comfort_holds_with_frozen_passive(self, bench_metrics, num_regression):
+    def test_comfort_holds_with_frozen_passive(self, bench_metrics, num_regression,
+                                                _pure_passive_adjacent_result):
         """Comfort should not collapse despite frozen passive feature."""
-        result = run_full_stack(self._make_config())
+        result = _pure_passive_adjacent_result
         bench_metrics["ctrl_comfort_pct"] = result.ctrl_comfort_pct
         check_bench_metrics(num_regression, bench_metrics)
         assert result.ctrl_comfort_pct >= 80.0, (
@@ -380,6 +412,24 @@ class TestPurePassiveAdjacent:
 
 
 # ── Scenario 4: Anomaly robustness (windows + oven) ─────────────────────
+
+
+@pytest.fixture(scope="module")
+def _anomaly_with_events_result():
+    """Run TestAnomalyRobustness with anomalies enabled ONCE; consumed by
+    multiple test methods. Replaces 3 independent run_full_stack calls."""
+    return run_full_stack(TestAnomalyRobustness._make_config(
+        with_window_events=True, with_oven_events=True,
+    ))
+
+
+@pytest.fixture(scope="module")
+def _anomaly_without_events_result():
+    """Run TestAnomalyRobustness with anomalies disabled ONCE; consumed by
+    multiple test methods as the no-anomaly baseline. Replaces 2 calls."""
+    return run_full_stack(TestAnomalyRobustness._make_config(
+        with_window_events=False, with_oven_events=False,
+    ))
 
 
 def _make_window_disturbances(n_days: int, tick_minutes: float = 15.0):
@@ -477,12 +527,12 @@ class TestAnomalyRobustness:
             relax_kappa_gate=True,
         )
 
-    def test_outdoor_survives_baseline_anomalies(self, bench_metrics, num_regression):
+    def test_outdoor_survives_baseline_anomalies(self, bench_metrics, num_regression,
+                                                  _anomaly_with_events_result,
+                                                  _anomaly_without_events_result):
         """outdoor_delta β should not shift dramatically due to anomalies."""
-        result_with = run_full_stack(self._make_config(with_window_events=True,
-                                                       with_oven_events=True))
-        result_without = run_full_stack(self._make_config(with_window_events=False,
-                                                          with_oven_events=False))
+        result_with = _anomaly_with_events_result
+        result_without = _anomaly_without_events_result
         od_with = result_with.final_coefs.get("outdoor_delta", 0.0)
         od_without = result_without.final_coefs.get("outdoor_delta", 0.0)
         bench_metrics["od_with"] = od_with
@@ -494,7 +544,9 @@ class TestAnomalyRobustness:
             f"due to anomalies (with={od_with:.3f}, without={od_without:.3f})"
         )
 
-    def test_solar_survives_baseline_anomalies(self, bench_metrics, num_regression):
+    def test_solar_survives_baseline_anomalies(self, bench_metrics, num_regression,
+                                                _anomaly_with_events_result,
+                                                _anomaly_without_events_result):
         """solar β should not collapse or sign-flip due to anomalies.
 
         Window-open events at 10 AM coincide with rising solar, creating
@@ -507,10 +559,8 @@ class TestAnomalyRobustness:
         If this assertion fails persistently, that's signal worth chasing
         (CUSUM tuning, exclusion logic, or per-window suppression).
         """
-        result_with = run_full_stack(self._make_config(with_window_events=True,
-                                                       with_oven_events=True))
-        result_without = run_full_stack(self._make_config(with_window_events=False,
-                                                          with_oven_events=False))
+        result_with = _anomaly_with_events_result
+        result_without = _anomaly_without_events_result
         s_with = result_with.final_coefs.get("Solar Proxy", 0.0)
         s_without = result_without.final_coefs.get("Solar Proxy", 0.0)
         bench_metrics["s_with"] = s_with
@@ -522,9 +572,15 @@ class TestAnomalyRobustness:
             f"baseline |{s_without:.3f}|"
         )
 
-    def test_comfort_holds_through_anomalies(self, bench_metrics, num_regression):
-        """Comfort should remain reasonable despite periodic disturbances."""
-        result = run_full_stack(self._make_config())
+    def test_comfort_holds_through_anomalies(self, bench_metrics, num_regression,
+                                              _anomaly_with_events_result):
+        """Comfort should remain reasonable despite periodic disturbances.
+
+        Uses the with-events fixture — _make_config() defaults to both
+        window and oven events on, which is what this test's
+        "comfort despite anomalies" semantics need.
+        """
+        result = _anomaly_with_events_result
         bench_metrics["ctrl_comfort_pct"] = result.ctrl_comfort_pct
         check_bench_metrics(num_regression, bench_metrics)
         # Anomalies cause uncontrollable violations during events;
