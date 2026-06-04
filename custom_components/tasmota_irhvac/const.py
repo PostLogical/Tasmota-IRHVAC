@@ -209,6 +209,12 @@ CONF_PI_FF_ENABLED = "pi_ff_enabled"
 CONF_PI_BATCH_WLS_ENABLED = "pi_batch_wls_enabled"
 CONF_PI_PLANT_ID_ENABLED = "pi_plant_id_enabled"
 CONF_PI_MODEL_INPUTS = "pi_model_inputs"
+# HP capacity profile selector — feeds the greybox 3-state fit's outdoor-temp-
+# dependent k_c modulation. See custom_components/tasmota_irhvac/pi/capacity_profiles.py
+# for the registry (Fujitsu AOU24/AOU36 spec + generic profiles).
+# Stage 1 (2026-06-03) is integration-wide; per-zone is a future improvement
+# per [[project-greybox-stage1-validation-probes]].
+CONF_PI_HP_CAPACITY_PROFILE = "pi_hp_capacity_profile"
 CONF_CUSUM_OVERTEMP_ARMING_ENABLED = "pi_cusum_overtemp_arming_enabled"
 
 # Subentry types
@@ -349,6 +355,10 @@ DEFAULT_PI_INTERCEPT_SEED_COOL = 0.0
 DEFAULT_PI_FF_ENABLED = True
 DEFAULT_PI_BATCH_WLS_ENABLED = True
 DEFAULT_PI_PLANT_ID_ENABLED = True
+# "unknown" = flat capacity curve (legacy constant-k_c behavior). Cold-start
+# default; users with cold-climate / spec-known HPs should set this in options
+# to get the outdoor-temp-dependent k_c modulation that Stage 1 adds.
+DEFAULT_PI_HP_CAPACITY_PROFILE = "unknown"
 DEFAULT_CUSUM_OVERTEMP_ARMING_ENABLED = False  # #135: passive arming has three failure modes (chatter, σ̂-collapse, observation starvation). Off until active-probe redesign per future_work #138.
 
 # PI controller extra state attributes

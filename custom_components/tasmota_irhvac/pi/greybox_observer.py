@@ -49,6 +49,9 @@ from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .batch_learning import Observation
+    from .capacity_profiles import CapacityProfile
+
+from .capacity_profiles import get_profile as _get_capacity_profile
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -171,9 +174,55 @@ MIN_TIMESPAN_DAYS_2R2C = 14.0
 MIN_HP_VARIANCE = 0.01
 
 
+# ── HP dynamic state (Stage 1, 2026-06-03) ──────────────────────────────────
+#
+# τ_hp models the first-order lag of HP thermal output Q_hp toward its
+# steady-state target k_c_eff·(sp−T_a), where k_c_eff is the capacity-
+# profile-modulated gain at the current outdoor temperature.
+#
+# Lit support for the dynamic-HP construction (verified citations, see
+# [[reference-hp-grey-box-lit]]):
+#   * Tang et al. 2025 (Energy & Buildings, S0378778825008618): neglecting
+#     HP cold-start/hot-start transients produces up to 4.9% seasonal-
+#     performance bias — quantitative motivation for the third state.
+#   * NIST Kim/Payne et al. 2023 ("Gray-Box Model of a Two-Stage Heat Pump
+#     for Electrical Load Forecasting"): closest published analog, first-
+#     order lag on residential HP (ducted, lag on electrical current).
+#
+# The mini-split ductless regime specifically is lit-thin — Tang & NIST are
+# ducted. Mini-split has shorter τ_hp than ducted (no duct mass, no plenum),
+# so the prior is biased low + wide:
+#   μ = 3 min — typical inverter mini-split ramp; manufacturer engineering
+#                data shows compressor 10→90% in 60–180s + ~1 min of
+#                coil-air mixing to room.
+#   σ = 4 min — wide because mini-split-specific lit is sparse; lets data
+#                update vigorously when transients are present.
+#
+# Bounds (1, 30) min — below 1 min the static-gain model is fine; above
+# 30 min would imply a hydronic-like emission system not present here.
+#
+# IDENTIFIABILITY WARNING (pre-registered, lit-consensus): Wang et al. NSF
+# par/10304050 + Lin et al. arXiv:1512.08169 both argue passive thermostat
+# operation gives insufficient excitation for HP-side time constants.
+# **Expect τ_hp to rail under passive ID** — that is the lit-expected
+# outcome and load-bearing evidence for the #138 active probe being
+# necessary, NOT a Stage 1 failure. The mode-aware prior anchors τ_hp at
+# the mini-split-typical value until #138 lands.
+# See [[project-greybox-stage1-validation-probes]] for what tells us this
+# is working vs failing.
+TAU_HP_BOUNDS: tuple[float, float] = (1.0, 30.0)  # min
+TAU_HP_PRIOR_MEAN: float = 3.0
+TAU_HP_PRIOR_SIGMA: float = 4.0
+
+
 # Lit-typical prior lookup. Used when ``PriorState`` has no promoted
 # value for a given parameter (cold start, or that param was railed and
 # never qualified for promotion).
+#
+# Names here are PARAMETER NAMES (mode-invariant for envelope params,
+# base name for HP params). Mode-specific HP params (k_c_heat, k_c_cool,
+# etc.) share the same lit defaults — the heat-mode k_c and cool-mode
+# k_c have the same prior at cold start, then diverge as data arrives.
 _LIT_PRIOR_MEAN: dict[str, float] = {
     "c0":         C0_PRIOR_MEAN,
     "ua_c":       UA_C_PRIOR_MEAN,
@@ -181,6 +230,7 @@ _LIT_PRIOR_MEAN: dict[str, float] = {
     "alpha_c":    ALPHA_C_PRIOR_MEAN,
     "k_w":        K_W_PRIOR_MEAN,
     "mass_ratio": MASS_RATIO_PRIOR_MEAN,
+    "tau_hp":     TAU_HP_PRIOR_MEAN,
 }
 _LIT_PRIOR_SIGMA: dict[str, float] = {
     "c0":         C0_PRIOR_SIGMA,
@@ -189,6 +239,7 @@ _LIT_PRIOR_SIGMA: dict[str, float] = {
     "alpha_c":    ALPHA_C_PRIOR_SIGMA,
     "k_w":        K_W_PRIOR_SIGMA,
     "mass_ratio": MASS_RATIO_PRIOR_SIGMA,
+    "tau_hp":     TAU_HP_PRIOR_SIGMA,
 }
 _BOUNDS_BY_NAME: dict[str, tuple[float, float]] = {
     "c0":         C0_BOUNDS,
@@ -197,6 +248,7 @@ _BOUNDS_BY_NAME: dict[str, tuple[float, float]] = {
     "alpha_c":    ALPHA_C_BOUNDS,
     "k_w":        K_W_BOUNDS,
     "mass_ratio": MASS_RATIO_BOUNDS,
+    "tau_hp":     TAU_HP_BOUNDS,
 }
 
 
@@ -209,65 +261,151 @@ class PriorState:
     never promoted). ``None`` entries fall back to lit-typical defaults
     via :meth:`mu_for` and :meth:`sigma_for`.
 
-    Promotion is governed by :func:`promote_posterior` with lit-grounded
-    gates (no railed params per Reynders 2014; bridge gates pass;
-    least_squares converged). The dataclass itself is immutable —
-    promotion returns a new instance.
+    ## Mode-invariant vs mode-specific parameters
 
-    Serialization is via :meth:`to_dict` / :meth:`from_dict`; unknown
-    keys are ignored on restore so the schema can grow forward-compatibly.
+    **Envelope params (mode-invariant)**: ``c0``, ``ua_c``, ``alpha_c``,
+    ``k_w``, ``mass_ratio``. These describe building physics independent
+    of whether the HP is heating or cooling — the same wall, the same
+    insulation, the same thermal mass. Heat-mode fits update the same
+    slots as cool-mode fits.
+
+    **HP params (mode-specific)**: ``k_c`` and ``tau_hp`` are stored
+    separately for heat and cool because the HP behaves differently
+    by mode (different rated capacity, different ramp dynamics, defrost
+    cycles in heating, etc.). Heat-mode fits update ``k_c_heat`` and
+    ``tau_hp_heat``; cool-mode fits update ``k_c_cool`` and ``tau_hp_cool``.
+    The two modes share envelope priors via the chain — what's learned
+    about the wall in summer-cool informs winter-heat fits and vice versa.
+
+    Lookup convention: :meth:`mu_for("ua_c")` (mode-invariant param —
+    no mode arg) vs :meth:`mu_for("k_c", mode="heat")` (HP param —
+    mode required).
+
+    Promotion is governed by :func:`promote_posterior` with lit-grounded
+    gates (no railed params per Reynders 2014; least_squares converged).
+    Bridge gates are explicitly NOT a promotion criterion — they protect
+    the FF coefficient path, which is a separate downstream consumer.
+    The dataclass itself is immutable — promotion returns a new instance.
+
+    Serialization is via :meth:`to_dict` / :meth:`from_dict`. Schema
+    handles backwards-compatible migration from the pre-2026-06-03
+    single-mode format (legacy ``k_c`` field migrates into ``k_c_heat``,
+    consistent with the heating-dominant bench corpus).
     """
 
+    # Envelope (mode-invariant)
     c0:         tuple[float, float] | None = None
     ua_c:       tuple[float, float] | None = None
-    k_c:        tuple[float, float] | None = None
     alpha_c:    tuple[float, float] | None = None
     k_w:        tuple[float, float] | None = None
     mass_ratio: tuple[float, float] | None = None
+    # HP — heating mode
+    k_c_heat:    tuple[float, float] | None = None
+    tau_hp_heat: tuple[float, float] | None = None
+    # HP — cooling mode
+    k_c_cool:    tuple[float, float] | None = None
+    tau_hp_cool: tuple[float, float] | None = None
     n_promotions: int = 0
 
-    _PARAM_NAMES = ("c0", "ua_c", "k_c", "alpha_c", "k_w", "mass_ratio")
+    # Param name conventions:
+    #   _ENVELOPE_PARAMS: mode-invariant; slot name == param name
+    #   _HP_PARAMS: mode-specific; slot name == f"{param}_{mode}"
+    _ENVELOPE_PARAMS = ("c0", "ua_c", "alpha_c", "k_w", "mass_ratio")
+    _HP_PARAMS = ("k_c", "tau_hp")
 
-    def mu_for(self, name: str) -> float:
+    @classmethod
+    def _resolve_slot(cls, name: str, mode: str | None) -> str:
+        """Map a parameter name + optional mode to the dataclass slot name.
+
+        Envelope params don't take a mode (raises if one is passed for an
+        envelope param — caller bug). HP params require a mode."""
+        if name in cls._ENVELOPE_PARAMS:
+            return name
+        if name in cls._HP_PARAMS:
+            if mode not in ("heat", "cool"):
+                raise ValueError(
+                    f"mode 'heat' or 'cool' required for HP param {name!r}; got {mode!r}"
+                )
+            return f"{name}_{mode}"
+        raise ValueError(f"unknown PriorState parameter: {name!r}")
+
+    def mu_for(self, name: str, mode: str | None = None) -> float:
         """Return persisted μ for ``name``, or the lit-typical default if
-        this parameter has never been promoted."""
-        val = getattr(self, name, None)
+        this parameter has never been promoted. ``mode`` required for HP
+        params; ignored for envelope params."""
+        slot = self._resolve_slot(name, mode)
+        val = getattr(self, slot)
         return val[0] if val is not None else _LIT_PRIOR_MEAN[name]
 
-    def sigma_for(self, name: str) -> float:
-        """Return persisted σ for ``name``, or the lit-typical default if
-        this parameter has never been promoted."""
-        val = getattr(self, name, None)
+    def sigma_for(self, name: str, mode: str | None = None) -> float:
+        """Return persisted σ for ``name``, or the lit-typical default."""
+        slot = self._resolve_slot(name, mode)
+        val = getattr(self, slot)
         return val[1] if val is not None else _LIT_PRIOR_SIGMA[name]
 
-    def is_promoted(self, name: str) -> bool:
-        """True iff this parameter has a persisted posterior (not lit default)."""
-        return getattr(self, name, None) is not None
+    def is_promoted(self, name: str, mode: str | None = None) -> bool:
+        """True iff this parameter has a persisted posterior."""
+        slot = self._resolve_slot(name, mode)
+        return getattr(self, slot) is not None
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize to a dict. Schema includes both envelope and mode-specific
+        slots; ``None`` entries are omitted."""
         out: dict[str, Any] = {"n_promotions": self.n_promotions}
-        for name in self._PARAM_NAMES:
-            val = getattr(self, name)
+        all_slots = (
+            *self._ENVELOPE_PARAMS,
+            "k_c_heat", "tau_hp_heat",
+            "k_c_cool", "tau_hp_cool",
+        )
+        for slot in all_slots:
+            val = getattr(self, slot)
             if val is not None:
-                out[name] = [float(val[0]), float(val[1])]
+                out[slot] = [float(val[0]), float(val[1])]
         return out
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "PriorState":
-        """Restore from serialized form. ``None`` or empty input → cold-start
-        defaults. Malformed entries for a single parameter are silently
-        dropped (that param falls back to lit default)."""
+        """Restore from serialized form. ``None`` or empty → cold-start defaults.
+
+        Backwards-compatible migration from pre-2026-06-03 format:
+        - Legacy ``k_c`` field → migrates into ``k_c_heat`` (bench was
+          heating-only; production users are heating-dominant in winter
+          installations and the chain re-converges on cool when cool batches arrive).
+        - Legacy persistence had no ``tau_hp`` (HP dynamics not modeled);
+          ``tau_hp_heat`` and ``tau_hp_cool`` start fresh (cold-start).
+
+        Malformed entries for a single parameter are silently dropped (that
+        param falls back to lit default)."""
         if not data:
             return cls()
         kwargs: dict[str, Any] = {}
-        for name in cls._PARAM_NAMES:
-            entry = data.get(name)
+
+        # Legacy migration: old ``k_c`` → ``k_c_heat``.  Only applied if the
+        # new field isn't already present (avoid clobbering a properly-saved
+        # heat-mode value).
+        if "k_c" in data and "k_c_heat" not in data:
+            try:
+                mu, sigma = float(data["k_c"][0]), float(data["k_c"][1])
+                if math.isfinite(mu) and math.isfinite(sigma) and sigma > 0:
+                    kwargs["k_c_heat"] = (mu, sigma)
+            except (TypeError, ValueError, IndexError):
+                pass
+
+        all_slots = (
+            *cls._ENVELOPE_PARAMS,
+            "k_c_heat", "tau_hp_heat",
+            "k_c_cool", "tau_hp_cool",
+        )
+        for slot in all_slots:
+            if slot in kwargs:  # already set by legacy migration
+                continue
+            entry = data.get(slot)
             if entry is None:
                 continue
             try:
                 mu, sigma = float(entry[0]), float(entry[1])
                 if math.isfinite(mu) and math.isfinite(sigma) and sigma > 0:
-                    kwargs[name] = (mu, sigma)
+                    kwargs[slot] = (mu, sigma)
             except (TypeError, ValueError, IndexError):
                 continue
         n = data.get("n_promotions", 0)
@@ -282,15 +420,21 @@ def promote_posterior(
     result: "GreyboxResult",
     current_state: PriorState,
     *,
+    mode: str,
     least_squares_converged: bool = True,
 ) -> PriorState:
     """Pathak (2019) §4.2 transfer learning: promote a passing batch's
     posterior to next batch's prior.
 
+    ``mode`` ("heat" or "cool") routes HP-related parameters (``k_c``,
+    ``tau_hp``) to the mode-specific slot. Envelope params (``c0``,
+    ``ua_c``, ``alpha_c``, ``k_w``, ``mass_ratio``) update the shared
+    mode-invariant slots regardless of which mode produced this batch.
+
     Lit-grounded promotion criteria (all must hold for the batch as a
     whole; per-parameter gates apply below):
 
-      1. ``result.is_2r2c`` — only 2R2C fits expose all 6 envelope params
+      1. ``result.is_2r2c`` — only 2R2C fits expose all envelope params
       2. ``least_squares_converged`` — standard PEM gate (Ljung 1999)
       3. ``param_std_err`` populated — Jacobian-derived posterior σ
          must exist for the parameters we want to promote
@@ -308,14 +452,16 @@ def promote_posterior(
     going into the WLS regression); they're tight by design for that
     consumer. The prior chain consumes the raw envelope parameters
     directly, where Reynders rail detection + wide-σ-on-disagreement
-    are the correct safeguards. Smoke-test evidence: lit-grounded
-    parameter recovery within 7-14% of truth produced 0/120 bridge
-    gates passed — gating promotion on that would have blocked the
-    chain entirely despite excellent envelope identification.
+    are the correct safeguards. Smoke-test evidence (2026-06-03):
+    lit-grounded parameter recovery within 7-14% of truth produced
+    0/120 bridge gates passed — gating promotion on that would have
+    blocked the chain entirely despite excellent envelope identification.
 
     Returns a new :class:`PriorState` (the input is not mutated). If no
     parameter qualifies, returns ``current_state`` unchanged.
     """
+    if mode not in ("heat", "cool"):
+        raise ValueError(f"mode must be 'heat' or 'cool'; got {mode!r}")
     if not least_squares_converged:
         return current_state
     if not result.is_2r2c:
@@ -331,8 +477,11 @@ def promote_posterior(
         "alpha_c":    result.alpha_c,
         "k_w":        result.k_w,
         "mass_ratio": result.mass_ratio,
+        "tau_hp":     result.tau_hp,
     }
 
+    # Updates keyed by SLOT NAME (not param name) so envelope and mode-
+    # specific routing is resolved here, not when reconstructing PriorState.
     updates: dict[str, tuple[float, float]] = {}
     for name, value in values.items():
         if value is None:
@@ -347,22 +496,29 @@ def promote_posterior(
         rail_tol = max((hi - lo) * 0.01, 1e-9)
         if value <= lo + rail_tol or value >= hi - rail_tol:
             continue
-        updates[name] = (float(value), float(sigma))
+        # HP params route to the mode-specific slot; envelope params keep
+        # their slot name (which equals their param name).
+        slot = (
+            f"{name}_{mode}" if name in PriorState._HP_PARAMS else name
+        )
+        updates[slot] = (float(value), float(sigma))
 
     if not updates:
         return current_state
 
-    # Build new immutable state with the updated fields; non-updated params
-    # carry over from current_state (either persisted posterior or None).
-    return PriorState(
-        c0=updates.get("c0", current_state.c0),
-        ua_c=updates.get("ua_c", current_state.ua_c),
-        k_c=updates.get("k_c", current_state.k_c),
-        alpha_c=updates.get("alpha_c", current_state.alpha_c),
-        k_w=updates.get("k_w", current_state.k_w),
-        mass_ratio=updates.get("mass_ratio", current_state.mass_ratio),
-        n_promotions=current_state.n_promotions + 1,
+    # Build new immutable state. Updated slots take new values; non-updated
+    # slots carry over from current_state.
+    all_slots = (
+        *PriorState._ENVELOPE_PARAMS,
+        "k_c_heat", "tau_hp_heat",
+        "k_c_cool", "tau_hp_cool",
     )
+    kwargs = {
+        slot: updates.get(slot, getattr(current_state, slot))
+        for slot in all_slots
+    }
+    kwargs["n_promotions"] = current_state.n_promotions + 1
+    return PriorState(**kwargs)
 
 
 @dataclass
@@ -408,6 +564,13 @@ class GreyboxResult:
     tau_fast: float | None = None    # natural fast eigenvalue (min)
     tau_slow: float | None = None    # natural slow eigenvalue (min)
 
+    # HP dynamic state (Stage 1, 2026-06-03): first-order lag time constant
+    # for the modeled inverter-HP ramp. ``None`` until the 3-state fit lands;
+    # at that point this carries the fitted τ_hp (minutes). Required by
+    # :func:`promote_posterior` so the mode-specific ``tau_hp_heat`` /
+    # ``tau_hp_cool`` slots in :class:`PriorState` can be updated.
+    tau_hp: float | None = None
+
     # Median observation interval — used by cadence-adaptive gates so the
     # residual_rms threshold scales with the data's actual sample rate.
     # None means "unknown / fallback to legacy threshold."
@@ -434,6 +597,7 @@ class GreyboxResult:
             "mass_ratio": self.mass_ratio,
             "tau_fast": self.tau_fast,
             "tau_slow": self.tau_slow,
+            "tau_hp": self.tau_hp,
             "dt_median_min": self.dt_median_min,
         }
 
@@ -452,6 +616,9 @@ def fit_greybox(
     plant_tau_slow: float | None = None,
     plant_tau_slow_confidence: float = 0.0,
     prior_state: PriorState | None = None,
+    *,
+    capacity_profile_name: str = "unknown",
+    mode: str = "heat",
 ) -> GreyboxResult | None:
     """Fit a grey-box energy balance to observation buffer data.
 
@@ -471,6 +638,18 @@ def fit_greybox(
         model_inputs: model input config dicts (to identify solar proxy).
         plant_tau_slow: τ_slow from plant ID (minutes), if available.
         plant_tau_slow_confidence: confidence in τ_slow (0-1).
+        prior_state: Pathak §4.2 transfer-learning prior state (mode-aware,
+            envelope shared across heat/cool, k_c/τ_hp per-mode).
+        capacity_profile_name: HP capacity-profile config name. The 2R2C
+            fit applies the profile to modulate ``k_c`` by outdoor
+            temperature (k_c_eff = k_c_rated · profile.factor(T_out, mode)).
+            ``"unknown"`` (default) is a flat profile → legacy constant-k_c.
+            See ``capacity_profiles.py`` for the registry.
+        mode: HVAC mode ("heat" or "cool") for the buffer being fit.
+            Determines which capacity curve applies and which PriorState
+            HP slot (k_c_heat vs k_c_cool, tau_hp_heat vs tau_hp_cool)
+            is used as prior + promoted on success. Envelope params are
+            shared across modes.
 
     Returns:
         GreyboxResult (1R1C or 2R2C) or None if insufficient data or
@@ -516,10 +695,15 @@ def fit_greybox(
         )
         return r_1r1c
 
-    # Attempt 2R2C with 1R1C warm start.
+    # Attempt 2R2C with 1R1C warm start. Capacity profile + mode are
+    # threaded through to the 3-state fit so k_c is modulated by outdoor
+    # temperature and the mode-specific prior slots are used.
+    capacity_profile = _get_capacity_profile(capacity_profile_name)
     r_2r2c = _fit_greybox_2r2c(
         eligible, model_inputs, r_1r1c, plant_tau_slow,
         prior_state=prior_state,
+        capacity_profile=capacity_profile,
+        mode=mode,
     )
     if r_2r2c is None:
         _LOGGER.info("Grey-box: 2R2C fit failed — falling back to 1R1C")
@@ -775,22 +959,69 @@ def _fit_greybox_2r2c(
     plant_tau_slow: float | None = None,
     *,
     prior_state: PriorState | None = None,
+    capacity_profile: "CapacityProfile | None" = None,
+    mode: str = "heat",
 ) -> GreyboxResult | None:
-    """Fit a 2R2C grey-box energy balance with forward-simulated wall state.
+    """Fit a 2R2C+HP grey-box energy balance with dynamic HP state.
 
-    Air ODE:  dT_a/dt = c₀ + ua_c·(T_out - T_a) + k_c·hp_offset
-                       + α_air·solar + k_w·(T_w - T_a)
-    Wall ODE: dT_w/dt = (k_w/mass_ratio)·(T_a - T_w) + (α_wall/mass_ratio)·solar
+    State: ``x = [T_a, T_w, Q_hp]`` (3-state).
+
+    Continuous dynamics (Stage 1, 2026-06-03; see ``project-greybox-hp-dynamic-state``):
+
+        dT_a/dt  = c₀ + ua_c·(T_out − T_a) + Q_hp + α_air·solar
+                   + k_w·(T_w − T_a)
+        dT_w/dt  = (k_w/mass_ratio)·(T_a − T_w) + (α_wall/mass_ratio)·solar
+        dQ_hp/dt = (k_c_eff·(sp − T_a) − Q_hp) / τ_hp     [HP active]
+                 = -Q_hp / τ_hp                            [HP inactive, snap to 0]
+
+    where ``k_c_eff(T_out, mode) = k_c_rated · capacity_profile.factor(T_out, mode)``.
+    ``k_c_rated`` is the fitted parameter — interpreted as the AHRI rating-point
+    capacity (47°F heating / 95°F cooling). Below/above rating, the profile
+    modulates delivery to match manufacturer engineering data.
+
+    HP-off behavior (option B, locked 2026-06-03 conversation): Q_hp snaps to
+    0 at the end of each tick where HP is off. Reason: Fujitsu wall-mount
+    mini-splits close vanes + stop blower on idle, so residual coil delivery
+    is ~0.1% of active — modeling decay would CLAIM heat delivery that
+    doesn't happen and bias ua_c/c0. **This is a modeling choice for the
+    ductless-mini-split regime, not a cited construction** — see
+    [[reference-hp-grey-box-lit]] for why lit papers using decay (Tang,
+    NIST, Sourbron) are inapplicable (ducted/hydronic).
+
+    The 3×3 A matrix is upper block-triangular (Q_hp's row couples only to
+    itself in A; the (sp − T_a) term enters via ZOH input b, so T_a → Q_hp
+    feedback is held constant over each ZOH interval). This makes a closed-
+    form 3×3 expm achievable cheaply by composing the 2×2 envelope expm
+    with scalar exp(−dt/τ_hp), but we use scipy.linalg.expm for now per
+    design Decision 4 (~6 μs vs ~1 μs closed-form). Optimize later if bench
+    shows it matters.
+
+    Per-mode parameters (locked Decision 3): the fit uses mode-specific
+    priors for k_c and τ_hp (heat vs cool — different 4-way valve / defrost
+    dynamics) and shared envelope priors (ua_c, k_w, mass_ratio, c0,
+    alpha_c — the building is the same regardless of HP mode). Promotion
+    routes k_c/τ_hp to the mode-specific PriorState slot.
 
     Solar split fixed at SOLAR_AIR_FRACTION / SOLAR_WALL_FRACTION (ASHRAE).
     α_total is the fitted parameter; α_air = 0.3·α_total, α_wall = 0.7·α_total.
 
-    Residual: predicted - observed room_rate at each tick, with t_wall
-    propagated forward via exact piecewise-exponential integration.
-
     Bridge formulas at steady state are unchanged from 1R1C:
-      β_outdoor = -ua_c / k_c
-      β_solar   = -α_total / k_c   (the 30/70 split cancels at SS)
+      β_outdoor = -ua_c / k_c_eff
+      β_solar   = -α_total / k_c_eff   (the 30/70 split cancels at SS)
+    where k_c_eff is evaluated at the desired operating-point T_out.
+
+    Identifiability: τ_hp is expected to rail under passive operational
+    data (Wang NSF + Lin arXiv pre-registration). The mode-aware prior
+    anchors it at the mini-split-typical 3 min until #138 active probe
+    lands; railing is evidence for the probe, not a Stage 1 failure.
+
+    Args:
+        capacity_profile: HP capacity curve registry entry. ``None`` falls
+            back to the flat ``"unknown"`` profile (legacy constant-k_c
+            behavior with τ_hp dynamics still active).
+        mode: ``"heat"`` or ``"cool"``. Determines which capacity curve
+            applies and which mode-specific prior slots are used. Must
+            match a value the PriorState accepts.
     """
     solar_entity = find_solar_entity(model_inputs)
 
@@ -861,30 +1092,47 @@ def _fit_greybox_2r2c(
     # The Tikhonov penalty (θ-μ)/σ stays identical in form; only the
     # numbers change.
     ps = prior_state if prior_state is not None else PriorState()
+    # Mode-aware prior lookup: HP params (k_c, tau_hp) need the mode; envelope
+    # params don't. Caller passes mode via the fit_greybox dispatcher; PriorState
+    # validates mode in mu_for/sigma_for and raises ValueError on bad input.
+    fit_mode = mode
+
+    def _prior_mu(name: str) -> float:
+        return ps.mu_for(name, mode=fit_mode) if name in PriorState._HP_PARAMS else ps.mu_for(name)
+
+    def _prior_sigma(name: str) -> float:
+        return ps.sigma_for(name, mode=fit_mode) if name in PriorState._HP_PARAMS else ps.sigma_for(name)
+
+    # Capacity profile: flat "unknown" fallback preserves legacy constant-k_c
+    # behavior when caller doesn't specify a profile.
+    profile = capacity_profile if capacity_profile is not None else _get_capacity_profile("unknown")
+
+    # Parameter ordering: append tau_hp at the end (Decision 5 — diff
+    # minimization vs grouping with k_c; no readability difference).
     if has_solar:
-        param_names = ["c0", "ua_c", "k_c", "alpha_c", "k_w", "mass_ratio"]
+        param_names = ["c0", "ua_c", "k_c", "alpha_c", "k_w", "mass_ratio", "tau_hp"]
         lower = [
             C0_BOUNDS[0], UA_C_BOUNDS[0], K_C_BOUNDS[0], ALPHA_C_BOUNDS[0],
-            K_W_BOUNDS[0], MASS_RATIO_BOUNDS[0],
+            K_W_BOUNDS[0], MASS_RATIO_BOUNDS[0], TAU_HP_BOUNDS[0],
         ]
         upper = [
             C0_BOUNDS[1], UA_C_BOUNDS[1], K_C_BOUNDS[1], ALPHA_C_BOUNDS[1],
-            K_W_BOUNDS[1], MASS_RATIO_BOUNDS[1],
+            K_W_BOUNDS[1], MASS_RATIO_BOUNDS[1], TAU_HP_BOUNDS[1],
         ]
-        prior_mu = [ps.mu_for(n) for n in param_names]
-        prior_sigma = [ps.sigma_for(n) for n in param_names]
+        prior_mu = [_prior_mu(n) for n in param_names]
+        prior_sigma = [_prior_sigma(n) for n in param_names]
     else:
-        param_names = ["c0", "ua_c", "k_c", "k_w", "mass_ratio"]
+        param_names = ["c0", "ua_c", "k_c", "k_w", "mass_ratio", "tau_hp"]
         lower = [
             C0_BOUNDS[0], UA_C_BOUNDS[0], K_C_BOUNDS[0],
-            K_W_BOUNDS[0], MASS_RATIO_BOUNDS[0],
+            K_W_BOUNDS[0], MASS_RATIO_BOUNDS[0], TAU_HP_BOUNDS[0],
         ]
         upper = [
             C0_BOUNDS[1], UA_C_BOUNDS[1], K_C_BOUNDS[1],
-            K_W_BOUNDS[1], MASS_RATIO_BOUNDS[1],
+            K_W_BOUNDS[1], MASS_RATIO_BOUNDS[1], TAU_HP_BOUNDS[1],
         ]
-        prior_mu = [ps.mu_for(n) for n in param_names]
-        prior_sigma = [ps.sigma_for(n) for n in param_names]
+        prior_mu = [_prior_mu(n) for n in param_names]
+        prior_sigma = [_prior_sigma(n) for n in param_names]
 
     # Plant ID transfer-learning: if plant_tau_slow is confidently known,
     # replace the default ua_c prior with one centered at 1/tau_slow.
@@ -899,16 +1147,32 @@ def _fit_greybox_2r2c(
         # estimate; keep σ at default (data can still override).
         prior_mu[1] = ua_c_init
 
+    # k_c warm-start rescale: r_1r1c.k_c is identified at the data's mean
+    # outdoor temp, so it reflects the AVERAGE delivered capacity over the
+    # buffer. The 3-state model identifies k_c_RATED (the AHRI rating-point
+    # value); these differ by the inverse of the profile factor evaluated
+    # at the mean operating T_out. Without this rescale, the optimizer
+    # starts low and has to traverse a large parameter range — adding fit
+    # iterations and risking premature convergence to a local minimum.
+    mean_t_out = sum(t_out) / m if m > 0 else 0.0
+    profile_mean = profile.factor(mean_t_out, fit_mode)
+    if profile_mean > 1e-6:
+        k_c_rated_warm = r_1r1c.k_c / profile_mean
+    else:
+        k_c_rated_warm = r_1r1c.k_c
+
     if has_solar:
         x0 = [
-            r_1r1c.c0, ua_c_init, r_1r1c.k_c,
+            r_1r1c.c0, ua_c_init, k_c_rated_warm,
             max(ALPHA_C_BOUNDS[0], r_1r1c.alpha_c),
             K_W_PRIOR_MEAN, MASS_RATIO_PRIOR_MEAN,
+            TAU_HP_PRIOR_MEAN,
         ]
     else:
         x0 = [
-            r_1r1c.c0, ua_c_init, r_1r1c.k_c,
+            r_1r1c.c0, ua_c_init, k_c_rated_warm,
             K_W_PRIOR_MEAN, MASS_RATIO_PRIOR_MEAN,
+            TAU_HP_PRIOR_MEAN,
         ]
     # Clamp warm-start values into bounds.
     for i, (lo, hi) in enumerate(zip(lower, upper)):
@@ -917,162 +1181,118 @@ def _fit_greybox_2r2c(
     n_data = m
     n_priors = len(prior_mu)
 
-    # Sim-error PEM residual: forward-simulate state x = [T_a, T_w] via
-    # matrix-exponential with HP-as-feedback in A; data residual =
-    # predicted T_a − observed T_a (in °C). Replaces the prior rate-
-    # residual / HP-as-input formulation that produced biased β_outdoor
-    # and ~14× underestimate of raw RC params on real CSV (project_grey-
-    # box_2r2c_real_csv_finding.md, project_greybox_rate_convention_bug.md).
-    # Formulation matches Probe 8 of the multi-restart probe series:
+    # Sim-error PEM residual: forward-simulate state x = [T_a, T_w, Q_hp] via
+    # matrix-exponential; data residual = predicted T_a − observed T_a (in °C).
     #
-    #   Active:   dx/dt = A_active   · x + b_active
-    #             A_active   = [[-(ua_c + k_c + k_w),  k_w           ],
-    #                           [ k_w/mr,             -k_w/mr        ]]
-    #             b_active[0]   = c0 + ua_c·t_out + k_c·hp_setpoint
-    #                                 + α_air·solar
+    # 3-state continuous dynamics (Stage 1, 2026-06-03):
     #
-    #   Inactive: dx/dt = A_inactive · x + b_inactive
-    #             A_inactive = [[-(ua_c + k_w),         k_w           ],
-    #                           [ k_w/mr,              -k_w/mr        ]]
-    #             b_inactive[0] = c0 + ua_c·t_out + α_air·solar
+    #   dT_a/dt  = c₀ + ua_c·(T_out − T_a) + Q_hp + α_air·solar + k_w·(T_w − T_a)
+    #   dT_w/dt  = (k_w/mr)·(T_a − T_w) + (α_wall/mr)·solar
+    #   dQ_hp/dt = (k_c_eff·(sp − T_a) − Q_hp) / τ_hp   [HP active]
+    #            = -Q_hp / τ_hp                          [HP inactive]
     #
-    #   Always:   b[1] = α_wall·solar / mr
+    # ZOH formulation with constant A across ticks:
     #
-    # Zero-order hold inputs at start of interval:
-    #   x(i) = exp(A·dt)·x(i-1) + ψ(dt)·b(i-1)
-    #   ψ(dt) = A⁻¹·(exp(A·dt) − I)
+    #   A = | -(ua_c + k_w)   k_w         1           |
+    #       | k_w/mr         -k_w/mr      0           |
+    #       | 0               0          -1/τ_hp      |
     #
-    # Matrix exp + ψ are precomputed per (A_type, dt) pair via dt-memoization;
-    # the closed-form 2×2 expm below makes each entry ~1 μs to build.
-    # Lit-canonical output-error PEM (Ljung) — what Bacher-Madsen 2011 /
-    # Hollick 2020 / CTSM-R use, modulo the Kalman filter (which Probe 8
-    # didn't include and which we're testing whether priors substitute for).
+    #   b[0] = c₀ + ua_c·T_out_prev + α_air·solar_prev
+    #   b[1] = α_wall·solar_prev / mr
+    #   b[2] = k_c_eff(T_out_prev)·(sp_prev − T_a_prev) / τ_hp   [HP active]
+    #        = 0                                                  [HP inactive]
+    #
+    # The (sp − T_a) feedback in dQ_hp/dt is ZOH-held at t_{i-1} (using observed
+    # T_a, not predicted) — this keeps A constant across ticks (only τ_hp varies
+    # with params, not data) so dt-memoization works the same as the 2-state
+    # version. Error from ZOH on T_a inside Q_hp's equation is bounded by
+    # ΔT_a over τ_hp (a few tenths of a degree at most), small relative to
+    # other modeling error.
+    #
+    # The (B) HP-off snap-to-zero (Q_hp := 0 whenever HP is off at the
+    # current tick) is applied AFTER the residual is computed for the current
+    # tick, before propagating to the next. This avoids modeling residual
+    # delivery that doesn't happen (vanes closed + blower off on Fujitsu
+    # wall-mounts → ~0.1% of active delivery). See function docstring for
+    # why this differs from lit (ducted/hydronic systems where decay applies).
+    #
+    # k_c_eff = k_c_rated · capacity_profile.factor(T_out, mode) — the AHRI-
+    # rating-point capacity (the fitted scalar) is modulated by outdoor temp
+    # per the manufacturer engineering data in capacity_profiles.py.
+    #
+    # Lit-canonical output-error PEM (Ljung) extended with HP dynamic state;
+    # see [[reference-hp-grey-box-lit]] for Tang 2025 / NIST 2023 motivation.
     import numpy as np  # local-import to honour scipy-optional pattern
-
-    # Closed-form 2×2 matrix exp via Sylvester projectors. Valid because:
-    #   trace(A) = -(ua_c + k_w + k_w/mr)            < 0
-    #   det(A)   = ua_c · k_w / mr   (inactive)        > 0   (k_c shift same form)
-    #   discr    = trace² − 4·det     > 0  across full UA_C × K_C × K_W × MASS_RATIO box
-    #     (verified by sampling 200k random points; min 2.2e-6, rel eigenvalue
-    #      separation > 0.7)
-    # → distinct real eigenvalues, so:
-    #
-    #     expm(A·dt) = e^(λ₁·dt)·P₁ + e^(λ₂·dt)·P₂
-    #     ψ(dt) := A⁻¹·(expm(A·dt) − I)
-    #            = (expm1(λ₁·dt)/λ₁)·P₁ + (expm1(λ₂·dt)/λ₂)·P₂
-    #
-    # where P₁ = (A − λ₂·I)/(λ₁ − λ₂),  P₂ = I − P₁ (Sylvester).
-    # numpy.expm1 maintains precision for |λ·dt| → 0; (eˣ−1)/x naïve
-    # cancels catastrophically there.
-    #
-    # Replaces scipy.linalg.expm + numpy.linalg.solve (~150 μs general
-    # Padé+LU) with ~1 μs closed-form. The scipy path is kept as fallback
-    # if the discriminant ever falls below threshold (would only happen
-    # if bounds change to allow A to drift into a degenerate regime).
-    _expm_eye2 = np.eye(2)
-
-    def _expm_psi(A, dt):
-        a00, a01 = A[0, 0], A[0, 1]
-        a10, a11 = A[1, 0], A[1, 1]
-        trace = a00 + a11
-        det = a00 * a11 - a01 * a10
-        discr = trace * trace - 4.0 * det
-        if discr <= 1e-12:
-            # Defensive fallback — unreachable across current bounds.
-            eA_fb = _expm(A * dt)
-            try:
-                psi_fb = np.linalg.solve(A, eA_fb - _expm_eye2)
-            except np.linalg.LinAlgError:
-                psi_fb = np.zeros((2, 2))
-            return eA_fb, psi_fb
-        sqrt_d = math.sqrt(discr)
-        lam1 = (trace + sqrt_d) * 0.5
-        lam2 = (trace - sqrt_d) * 0.5
-        inv_dlam = 1.0 / (lam1 - lam2)
-        # P1 = (A − λ₂·I) · inv_dlam.  Only need P1: P2 = I − P1.
-        p1_00 = (a00 - lam2) * inv_dlam
-        p1_01 = a01 * inv_dlam
-        p1_10 = a10 * inv_dlam
-        p1_11 = (a11 - lam2) * inv_dlam
-        e1 = math.exp(lam1 * dt)
-        e2 = math.exp(lam2 * dt)
-        de = e1 - e2
-        eA = np.array([
-            [de * p1_00 + e2,  de * p1_01      ],
-            [de * p1_10,       de * p1_11 + e2 ],
-        ], dtype=float)
-        # ψ = (expm1(λ₁·dt)/λ₁)·P₁ + (expm1(λ₂·dt)/λ₂)·P₂
-        psi_1 = math.expm1(lam1 * dt) / lam1
-        psi_2 = math.expm1(lam2 * dt) / lam2
-        dp = psi_1 - psi_2
-        psi = np.array([
-            [dp * p1_00 + psi_2,  dp * p1_01         ],
-            [dp * p1_10,           dp * p1_11 + psi_2 ],
-        ], dtype=float)
-        return eA, psi
 
     # Per-fit dt-memoization. The set of distinct positive dt values is
     # data-only (depends on dt_min, not params), so compute it once outside
-    # residual_fn. Inside, build per-(A_type, dt) (eA, ψ) caches up front;
-    # the inner loop becomes a dict lookup. Reduces expm cost per
-    # residual_fn from O(m) to O(unique_dts) — typically 30–100 vs 10000
-    # for sorted-but-eviction-sparse buffers.
+    # residual_fn. Inside, build per-dt (eA, ψ) caches up front; the inner
+    # loop becomes a dict lookup. Reduces expm cost per residual_fn from
+    # O(m) to O(unique_dts) — typically 30–100 vs 10000 for sorted-but-
+    # eviction-sparse buffers.
     _unique_dts_pos = sorted({d for d in dt_min if d > 0})
 
-    # v2 Bayesian: k_w and mass_ratio are FREE parameters constrained
-    # by Tikhonov priors (appended to residuals below). A matrices must
-    # be rebuilt every iteration since wall structure varies with the
-    # fitted params now.
+    # Pre-compute capacity-profile factor at each tick's outdoor temp. Data-
+    # only (independent of fit params), so cache once.
+    k_c_profile_at = [profile.factor(t, fit_mode) for t in t_out]
+
+    # TODO(perf): closed-form 3×3 expm. A is lower block-triangular (envelope
+    # 2×2 block top-left, Q_hp scalar bottom-right, T_a←Q_hp coupling A[0,2]=1
+    # in top-right). Can compose: top-left = closed-form 2×2 (reuse old Sylvester
+    # projector formula), bottom-right = exp(-dt/τ_hp), off-diagonal block via
+    # Sylvester equation. Would recover the ~6× perf gap vs scipy.linalg.expm.
+    # Deferred per Stage 1c Decision 4 — optimize when bench shows it matters.
+    _eye3 = np.eye(3)
 
     def residual_fn(params: list[float]) -> list[float]:
         if has_solar:
-            c0, ua_c, k_c, alpha_total, k_w, mass_ratio = params
+            c0, ua_c, k_c_rated, alpha_total, k_w, mass_ratio, tau_hp = params
         else:
-            c0, ua_c, k_c, k_w, mass_ratio = params
+            c0, ua_c, k_c_rated, k_w, mass_ratio, tau_hp = params
             alpha_total = 0.0
         alpha_air = alpha_total * SOLAR_AIR_FRACTION
         alpha_wall = alpha_total * SOLAR_WALL_FRACTION
         a_wall_rate = k_w / mass_ratio
+        inv_tau_hp = 1.0 / tau_hp
 
-        A_active = np.array([
-            [-(ua_c + k_c + k_w),  k_w           ],
-            [ a_wall_rate,        -a_wall_rate   ],
-        ], dtype=float)
-        A_inactive = np.array([
-            [-(ua_c + k_w),         k_w           ],
-            [ a_wall_rate,         -a_wall_rate   ],
+        # Single 3×3 A (k_c does NOT enter A — it enters only Q_hp's b
+        # component, modulated by the capacity profile per-tick).
+        A = np.array([
+            [-(ua_c + k_w),  k_w,          1.0          ],
+            [ a_wall_rate,  -a_wall_rate,  0.0          ],
+            [ 0.0,           0.0,         -inv_tau_hp   ],
         ], dtype=float)
 
-        # Build flat-tuple (eA, ψ) caches for every distinct dt. Tuples of
-        # 8 scalars (eA_00, eA_01, eA_10, eA_11, ψ_00, ψ_01, ψ_10, ψ_11)
-        # let the inner loop do pure-scalar arithmetic — no per-tick
-        # numpy array allocations, no `@` matmul overhead. The inner loop
-        # runs O(m × scalar_ops) instead of O(m × numpy_op_overhead);
-        # 10× faster than the array-based form on a 10000-tick buffer.
-        cache_active: dict[float, tuple] = {}
-        cache_inactive: dict[float, tuple] = {}
+        # dt-memoized (eA, ψ) caches. scipy.linalg.expm + numpy.linalg.solve
+        # at 3×3 is ~6 μs/call; with ~50 unique dts in a typical batch, the
+        # cache build cost is ~300 μs per residual_fn call (negligible vs
+        # the ~10ms inner loop on 10k-tick buffers).
+        cache: dict[float, tuple] = {}
         try:
             for dt_u in _unique_dts_pos:
-                eA_a, psi_a = _expm_psi(A_active, dt_u)
-                eA_i, psi_i = _expm_psi(A_inactive, dt_u)
-                cache_active[dt_u] = (
-                    eA_a[0, 0], eA_a[0, 1], eA_a[1, 0], eA_a[1, 1],
-                    psi_a[0, 0], psi_a[0, 1], psi_a[1, 0], psi_a[1, 1],
-                )
-                cache_inactive[dt_u] = (
-                    eA_i[0, 0], eA_i[0, 1], eA_i[1, 0], eA_i[1, 1],
-                    psi_i[0, 0], psi_i[0, 1], psi_i[1, 0], psi_i[1, 1],
+                eA = _expm(A * dt_u)
+                psi = np.linalg.solve(A, eA - _eye3)
+                cache[dt_u] = (
+                    float(eA[0, 0]), float(eA[0, 1]), float(eA[0, 2]),
+                    float(eA[1, 0]), float(eA[1, 1]), float(eA[1, 2]),
+                    float(eA[2, 0]), float(eA[2, 1]), float(eA[2, 2]),
+                    float(psi[0, 0]), float(psi[0, 1]), float(psi[0, 2]),
+                    float(psi[1, 0]), float(psi[1, 1]), float(psi[1, 2]),
+                    float(psi[2, 0]), float(psi[2, 1]), float(psi[2, 2]),
                 )
         except Exception:
-            # Numerical failure (e.g. expm overflow at extreme params):
-            # return large residuals so optimizer steers away. Length
-            # must include prior terms so least_squares sees a
-            # consistent residual vector size across iterations.
+            # Numerical failure (e.g. expm overflow at extreme params, or
+            # A singular if a parameter rails to a degenerate point):
+            # return large residuals so optimizer steers away. Length must
+            # include prior terms so least_squares sees a consistent
+            # residual vector size across iterations.
             return [1e6] * (n_data + n_priors)
 
-        # Initial state: assume wall at air temperature at t=0 (equilibrium
-        # is the best we can do from a single observation).
+        # Initial state: T_a/T_w start at first observation (best estimate
+        # absent multi-sample warm-up), Q_hp = 0 (snap-to-zero on boot;
+        # first HP-on interval will ramp it via τ_hp dynamics).
         x0 = x1 = t_air[0]
+        x2 = 0.0
         residuals = [0.0] * n_data
         # First-tick residual identically zero — no inter-sample propagation
         # is possible. Optimizer learns from i=1 onward.
@@ -1084,36 +1304,63 @@ def _fit_greybox_2r2c(
                 continue
             sp_prev = hp_setpoint_arr[i - 1]
             t_a_prev = t_air[i - 1]
-            # bench_form active flag: HP delivers heating only when
-            # room_temp < setpoint (matches thermal_model.py:315 thermo-
-            # static cycling). Per probe truth-validation, this halves
-            # tracking RMS vs the simpler `sp is not None` proxy.
-            # Heating-mode assumption (bench is heating-only).
-            active_prev = (sp_prev is not None) and (t_a_prev < sp_prev)
+            # Mode-aware HP active check: heat mode delivers when room <
+            # setpoint; cool mode delivers when room > setpoint. Matches
+            # thermal_model.py's thermostatic cycling for the bench, and
+            # is the natural production semantics.
+            if fit_mode == "heat":
+                active_prev = (sp_prev is not None) and (t_a_prev < sp_prev)
+            else:  # cool
+                active_prev = (sp_prev is not None) and (t_a_prev > sp_prev)
+
+            (eA00, eA01, eA02, eA10, eA11, eA12, eA20, eA21, eA22,
+             ps00, ps01, ps02, ps10, ps11, ps12, ps20, ps21, ps22) = cache[dt]
+
+            b0 = c0 + ua_c * t_out[i - 1] + alpha_air * solar[i - 1]
+            b1 = alpha_wall * solar[i - 1] / mass_ratio
             if active_prev:
-                (eA00, eA01, eA10, eA11,
-                 ps00, ps01, ps10, ps11) = cache_active[dt]
-                b1 = (c0 + ua_c * t_out[i - 1] + k_c * sp_prev
-                      + alpha_air * solar[i - 1])
+                # k_c_eff = k_c_rated · profile(T_out_prev, mode); the
+                # profile factor was pre-computed outside residual_fn.
+                k_c_eff = k_c_rated * k_c_profile_at[i - 1]
+                # In heat mode (sp - T_a) > 0 → b2 > 0 (delivering heat).
+                # In cool mode (sp - T_a) < 0 → b2 < 0 (delivering cooling).
+                # The natural sign convention; cool-mode Q_hp will be negative.
+                b2 = k_c_eff * (sp_prev - t_a_prev) * inv_tau_hp
             else:
-                (eA00, eA01, eA10, eA11,
-                 ps00, ps01, ps10, ps11) = cache_inactive[dt]
-                b1 = (c0 + ua_c * t_out[i - 1] + alpha_air * solar[i - 1])
-            b2 = alpha_wall * solar[i - 1] / mass_ratio
-            # x_new = eA · x + ψ · b  expanded to scalars to skip numpy overhead.
-            x0_new = eA00 * x0 + eA01 * x1 + ps00 * b1 + ps01 * b2
-            x1_new = eA10 * x0 + eA11 * x1 + ps10 * b1 + ps11 * b2
-            x0, x1 = x0_new, x1_new
+                b2 = 0.0
+            # x_new = eA · x + ψ · b  — scalar expansion to skip numpy overhead.
+            x0_new = (eA00 * x0 + eA01 * x1 + eA02 * x2
+                      + ps00 * b0 + ps01 * b1 + ps02 * b2)
+            x1_new = (eA10 * x0 + eA11 * x1 + eA12 * x2
+                      + ps10 * b0 + ps11 * b1 + ps12 * b2)
+            x2_new = (eA20 * x0 + eA21 * x1 + eA22 * x2
+                      + ps20 * b0 + ps21 * b1 + ps22 * b2)
+            x0, x1, x2 = x0_new, x1_new, x2_new
             residuals[i] = x0 - t_air[i]
 
+            # Snap-to-zero on HP-off (Option B, see function docstring). Apply
+            # AFTER computing residual at i — the snap affects only the NEXT
+            # tick's starting state, not the current residual. On Fujitsu
+            # wall-mount mini-splits, vanes close + blower stops on idle →
+            # residual coil delivery is ~0.1% of active (negligible vs sensor
+            # noise + envelope dynamics); modeling decay would inject a false
+            # heat-delivery signal that biases ua_c / c0.
+            sp_curr = hp_setpoint_arr[i]
+            if fit_mode == "heat":
+                hp_off_at_i = (sp_curr is None) or not (t_air[i] < sp_curr)
+            else:
+                hp_off_at_i = (sp_curr is None) or not (t_air[i] > sp_curr)
+            if hp_off_at_i:
+                x2 = 0.0
+
         # Tikhonov prior penalty terms appended to the data residuals.
-        # Each term is (θ_i − μ_i) / σ_i; scipy's sum-of-squares loss
-        # makes the contribution to the objective equal to ½·(θ_i−μ_i)²/σ_i²,
-        # i.e. the negative log of an independent Gaussian prior up to
-        # a constant. The MAP optimum is the inverse-variance-weighted
-        # blend of likelihood (data residuals) and priors. CTSM-R MAP /
-        # Pathak 2019 §3.1 BSSM (with the simplification that scipy's
-        # huber loss is a robust likelihood, not an exact Gaussian).
+        # Each term is (θ_i − μ_i) / σ_i; scipy's sum-of-squares loss makes
+        # the contribution to the objective equal to ½·(θ_i−μ_i)²/σ_i², i.e.
+        # the negative log of an independent Gaussian prior up to a constant.
+        # The MAP optimum is the inverse-variance-weighted blend of likelihood
+        # (data residuals) and priors. CTSM-R MAP / Pathak 2019 §3.1 BSSM
+        # (with the simplification that scipy's huber loss is a robust
+        # likelihood, not an exact Gaussian).
         prior_residuals = [
             (params[i] - prior_mu[i]) / prior_sigma[i]
             for i in range(n_priors)
@@ -1140,12 +1387,20 @@ def _fit_greybox_2r2c(
     params_fit = dict(zip(param_names, result.x))
     c0 = float(params_fit["c0"])
     ua_c = float(params_fit["ua_c"])
+    # k_c here is k_c_RATED (AHRI rating-point value); downstream consumers
+    # interpret it as the gain at AHRI 47°F heating / 95°F cooling. To get
+    # k_c at a specific operating T_out, multiply by profile.factor(T_out).
+    # The GreyboxResult.k_c field semantics is the rated value going forward.
     k_c = float(params_fit["k_c"])
     alpha_total = float(params_fit.get("alpha_c", 0.0))
     # v2 Bayesian: k_w and mass_ratio are fitted (constrained by Tikhonov
     # priors, see comments at parameter packing above).
     k_w = float(params_fit["k_w"])
     mass_ratio = float(params_fit["mass_ratio"])
+    # Stage 1 (2026-06-03): tau_hp is the new 7th parameter — the HP first-
+    # order ramp time constant. See module-level TAU_HP_BOUNDS for bounds
+    # rationale and identifiability warning.
+    tau_hp = float(params_fit["tau_hp"])
 
     tau_fast, tau_slow = _natural_eigenvalues(ua_c, k_w, mass_ratio)
     tau_eff = tau_slow  # dominant for legacy consumers
@@ -1196,7 +1451,8 @@ def _fit_greybox_2r2c(
         n_hp_off=n_hp_off,
         c0=c0,
         ua_c=ua_c,
-        k_c=k_c,
+        k_c=k_c,  # k_c_RATED — AHRI rating-point value; multiply by
+                   # capacity_profile.factor(T_out, mode) for operating-point gain
         alpha_c=alpha_total,  # SS-effective total; bridge uses α_c/k_c
         tau_eff=tau_eff,
         residual_rms=residual_rms,
@@ -1210,6 +1466,7 @@ def _fit_greybox_2r2c(
         mass_ratio=mass_ratio,
         tau_fast=tau_fast,
         tau_slow=tau_slow,
+        tau_hp=tau_hp,
         dt_median_min=typical_dt if typical_dt > 0 else None,
     )
 

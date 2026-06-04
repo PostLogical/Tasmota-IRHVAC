@@ -88,6 +88,7 @@ from ..const import (
     CONF_CUSUM_OVERTEMP_ARMING_ENABLED,
     CONF_PI_BATCH_WLS_ENABLED,
     CONF_PI_FF_ENABLED,
+    CONF_PI_HP_CAPACITY_PROFILE,
     CONF_PI_PLANT_ID_ENABLED,
     CONF_PI_TAU_ESTIMATE,
     DEFAULT_CUSUM_OVERTEMP_ARMING_ENABLED,
@@ -115,6 +116,7 @@ from ..const import (
     DEFAULT_PI_KD_FILTER_N,
     DEFAULT_PI_KI,
     DEFAULT_PI_KP,
+    DEFAULT_PI_HP_CAPACITY_PROFILE,
     DEFAULT_PI_PLANT_ID_ENABLED,
     MIN_PI_KI,
     DEFAULT_PI_TICK_FALLBACK,
@@ -359,6 +361,12 @@ class PIController:
             CONF_PI_BATCH_WLS_ENABLED, DEFAULT_PI_BATCH_WLS_ENABLED)
         self._pi_plant_id_enabled: bool = config.get(
             CONF_PI_PLANT_ID_ENABLED, DEFAULT_PI_PLANT_ID_ENABLED)
+        # HP capacity profile name — feeds greybox 3-state fit. "unknown" = flat
+        # curve (legacy constant-k_c behavior). Validated against registry by
+        # config_flow's SelectSelector; an unrecognized name (e.g. from an
+        # older YAML import) falls back to "unknown" via capacity_profiles.get_profile.
+        self._pi_hp_capacity_profile: str = str(config.get(
+            CONF_PI_HP_CAPACITY_PROFILE, DEFAULT_PI_HP_CAPACITY_PROFILE))
         self._SETPOINT_HOLD_SECONDS: float = float(
             config.get(CONF_PI_SETPOINT_HOLD, DEFAULT_PI_SETPOINT_HOLD)
         )
@@ -1313,11 +1321,17 @@ class PIController:
         greybox_observations = self._greybox_buffer.get_all()
         gb_diag = self._greybox_buffer.get_diagnostics()
         # Log prior-chain state at fit start so the audit trail shows which
-        # params used persistent posteriors vs lit-typical defaults.
+        # params used persistent posteriors vs lit-typical defaults.  Iterates
+        # all PriorState slots (envelope + per-mode HP) so the log shows
+        # which slots are populated.
+        _PROMOTION_SLOTS = (
+            *PriorState._ENVELOPE_PARAMS,
+            "k_c_heat", "tau_hp_heat", "k_c_cool", "tau_hp_cool",
+        )
         if self._greybox_prior_chain_enabled and self._greybox_prior_state.n_promotions > 0:
             promoted = [
-                n for n in PriorState._PARAM_NAMES
-                if self._greybox_prior_state.is_promoted(n)
+                slot for slot in _PROMOTION_SLOTS
+                if getattr(self._greybox_prior_state, slot) is not None
             ]
             _LOGGER.info(
                 "%sGrey-box buffer: %d/%d obs, hp_off=%.1f%%, "
@@ -1341,12 +1355,25 @@ class PIController:
             if self._greybox_prior_chain_enabled
             else None
         )
+        # Stage 1c (2026-06-03): mode-aware capacity-profile application.
+        # The fit_mode is the entity's CURRENT HVAC mode at batch time —
+        # an assumption that the buffer is single-mode. Stage 1d will
+        # handle mixed-mode buffers by splitting per-mode subsets.
+        # Cooling modes: COOL, DRY (matches existing pattern around L1865);
+        # everything else (HEAT, AUTO, HEAT_COOL, None) defaults to heat.
+        fit_mode = (
+            "cool"
+            if self._entity._attr_hvac_mode in (HVACMode.COOL, HVACMode.DRY)
+            else "heat"
+        )
         greybox = fit_greybox(
             greybox_observations,
             model_inputs=self._model_inputs,
             plant_tau_slow=plant.tau_slow.value if plant.tau_slow.confidence > 0 else None,
             plant_tau_slow_confidence=plant.tau_slow.confidence,
             prior_state=fit_prior,
+            capacity_profile_name=self._pi_hp_capacity_profile,
+            mode=fit_mode,
         )
         if greybox is not None:
             log_greybox_result(greybox, log_prefix=self._log_prefix)
@@ -1365,23 +1392,24 @@ class PIController:
 
             # Pathak §4.2 transfer-learning chain: if this batch's posterior
             # qualifies for promotion, persist it as next batch's prior.
-            # promote_posterior gates on envelope-fit quality only (2R2C
-            # dispatched, optimizer converged, std_err populated, no
-            # Reynders rails) — NOT bridge.gates_passed, which calibrates
-            # the WLS β-flow downstream and is too tight for prior-chain
-            # use; see docstring.
+            # Mode argument routes HP params (k_c, tau_hp) to mode-specific
+            # slots; envelope params update the shared slots regardless.
+            # Stage 1c (2026-06-03): uses the same fit_mode as the fit itself
+            # — the current HVAC mode of the entity. Single-mode-buffer
+            # assumption; Stage 1d will handle mixed-mode buffers.
             if self._greybox_prior_chain_enabled:
                 new_prior = promote_posterior(
                     greybox,
                     self._greybox_prior_state,
+                    mode=fit_mode,
                 )
                 if new_prior is not self._greybox_prior_state:
                     delta = [
-                        n for n in PriorState._PARAM_NAMES
+                        slot for slot in _PROMOTION_SLOTS
                         if (
-                            getattr(new_prior, n) is not None
-                            and getattr(new_prior, n)
-                            != getattr(self._greybox_prior_state, n)
+                            getattr(new_prior, slot) is not None
+                            and getattr(new_prior, slot)
+                            != getattr(self._greybox_prior_state, slot)
                         )
                     ]
                     _LOGGER.info(

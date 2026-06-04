@@ -1596,34 +1596,59 @@ class TestFitGreybox2R2CDefensiveResidualPaths:
 
 
 class TestPriorState:
-    """PriorState: per-zone persisted greybox priors with lit-default fallback."""
+    """PriorState: per-zone persisted greybox priors with lit-default fallback.
+
+    Stage 1 (2026-06-03): env params (c0, ua_c, alpha_c, k_w, mass_ratio) are
+    mode-invariant; HP params (k_c, tau_hp) are stored per-mode."""
 
     def test_default_init_has_no_promotions(self):
         ps = PriorState()
         assert ps.n_promotions == 0
-        for name in PriorState._PARAM_NAMES:
+        # Envelope slots all None
+        for name in PriorState._ENVELOPE_PARAMS:
             assert getattr(ps, name) is None
             assert not ps.is_promoted(name)
+        # HP slots all None for both modes
+        for hp_name in PriorState._HP_PARAMS:
+            for mode in ("heat", "cool"):
+                assert getattr(ps, f"{hp_name}_{mode}") is None
+                assert not ps.is_promoted(hp_name, mode=mode)
 
-    def test_mu_for_falls_back_to_lit_default(self):
+    def test_mu_for_envelope_param_falls_back_to_lit_default(self):
         ps = PriorState()
-        # Cold start → lit defaults.
         assert ps.mu_for("ua_c") == UA_C_PRIOR_MEAN
         assert ps.sigma_for("ua_c") == UA_C_PRIOR_SIGMA
 
+    def test_mu_for_hp_param_requires_mode(self):
+        ps = PriorState()
+        with pytest.raises(ValueError, match="mode 'heat' or 'cool' required"):
+            ps.mu_for("k_c")
+        with pytest.raises(ValueError, match="mode 'heat' or 'cool' required"):
+            ps.is_promoted("tau_hp")
+
+    def test_mu_for_unknown_param_raises(self):
+        ps = PriorState()
+        with pytest.raises(ValueError, match="unknown PriorState parameter"):
+            ps.mu_for("not_a_param")
+
     def test_mu_for_returns_persisted_value_when_promoted(self):
-        ps = PriorState(ua_c=(0.008, 0.002), n_promotions=1)
+        ps = PriorState(ua_c=(0.008, 0.002), k_c_heat=(0.04, 0.005), n_promotions=1)
         assert ps.mu_for("ua_c") == 0.008
         assert ps.sigma_for("ua_c") == 0.002
         assert ps.is_promoted("ua_c")
-        # Non-promoted params still fall back to lit defaults.
-        assert ps.mu_for("k_c") != 0.008
-        assert not ps.is_promoted("k_c")
+        assert ps.mu_for("k_c", mode="heat") == 0.04
+        assert ps.is_promoted("k_c", mode="heat")
+        # k_c is mode-specific: heating value doesn't propagate to cooling.
+        assert ps.mu_for("k_c", mode="cool") != 0.04
+        assert not ps.is_promoted("k_c", mode="cool")
 
     def test_serialization_roundtrip(self):
+        """Round-trip with both envelope and per-mode HP slots populated."""
         ps = PriorState(
             ua_c=(0.008, 0.002),
-            k_c=(0.04, 0.01),
+            k_c_heat=(0.04, 0.01),
+            k_c_cool=(0.035, 0.012),  # different mode value
+            tau_hp_heat=(5.0, 2.0),
             k_w=(0.022, 0.003),
             n_promotions=5,
         )
@@ -1635,20 +1660,48 @@ class TestPriorState:
         assert PriorState.from_dict({}) == PriorState()
 
     def test_from_dict_drops_malformed_entries(self):
-        # Bogus values for one param shouldn't poison the others.
+        """Bogus values for one slot shouldn't poison the others."""
         data = {
-            "ua_c": [0.008, 0.002],     # ok
-            "k_c": ["not", "numeric"],   # malformed → dropped
-            "alpha_c": [float("nan"), 0.01],  # NaN → dropped
-            "k_w": [0.02, -1.0],         # negative σ → dropped
+            "ua_c": [0.008, 0.002],            # ok
+            "k_c_heat": ["not", "numeric"],     # malformed → dropped
+            "alpha_c": [float("nan"), 0.01],   # NaN → dropped
+            "k_w": [0.02, -1.0],                # negative σ → dropped
+            "tau_hp_heat": [5.0, 2.0],          # ok
             "n_promotions": 3,
         }
         ps = PriorState.from_dict(data)
         assert ps.ua_c == (0.008, 0.002)
-        assert ps.k_c is None
+        assert ps.k_c_heat is None
         assert ps.alpha_c is None
         assert ps.k_w is None
+        assert ps.tau_hp_heat == (5.0, 2.0)
         assert ps.n_promotions == 3
+
+    def test_from_dict_migrates_legacy_kc_to_heat_slot(self):
+        """Pre-Stage-1 persistence had a single ``k_c`` field (no mode split).
+        Restoring such a blob should populate ``k_c_heat`` (bench was
+        heating-only; production users were heating-dominant)."""
+        data = {
+            "ua_c": [0.008, 0.002],
+            "k_c": [0.04, 0.01],         # legacy single-mode field
+            "n_promotions": 2,
+        }
+        ps = PriorState.from_dict(data)
+        assert ps.k_c_heat == (0.04, 0.01)
+        assert ps.k_c_cool is None   # cool stays cold-start
+        assert ps.ua_c == (0.008, 0.002)
+        assert ps.n_promotions == 2
+
+    def test_from_dict_does_not_clobber_new_format_with_legacy(self):
+        """If both legacy ``k_c`` and new ``k_c_heat`` exist (transitional
+        blob), the new format wins to avoid overwriting a properly-saved
+        Stage 1 posterior."""
+        data = {
+            "k_c": [0.04, 0.01],          # legacy
+            "k_c_heat": [0.045, 0.008],   # Stage 1
+        }
+        ps = PriorState.from_dict(data)
+        assert ps.k_c_heat == (0.045, 0.008)  # new format won
 
     def test_immutable(self):
         ps = PriorState(ua_c=(0.008, 0.002))
@@ -1683,22 +1736,57 @@ class TestPromotePosterior:
         defaults.update(overrides)
         return GreyboxResult(**defaults)
 
-    def test_clean_fit_promotes_all_params(self):
+    def test_clean_fit_promotes_envelope_and_mode_specific_hp(self):
+        """A heat-mode fit promotes envelope params to shared slots and HP
+        params to heat-mode slots only. Cool-mode HP slots untouched."""
         result = self._result()
         before = PriorState()
-        after = promote_posterior(result, before)
+        after = promote_posterior(result, before, mode="heat")
         assert after.n_promotions == 1
+        # Envelope updates the shared slots
         assert after.ua_c == (0.008, 0.001)
-        assert after.k_c == (0.04, 0.002)
         assert after.k_w == (0.022, 0.002)
         assert after.mass_ratio == (8.0, 1.0)
+        # HP params route to heat-mode slots only
+        assert after.k_c_heat == (0.04, 0.002)
+        assert after.k_c_cool is None
+        # The default _result() has no tau_hp set yet (Stage 1c will populate it)
+        assert after.tau_hp_heat is None
+        assert after.tau_hp_cool is None
         assert after is not before  # immutable; new instance returned
+
+    def test_promote_routes_hp_to_correct_mode(self):
+        """A cool-mode fit updates k_c_cool, NOT k_c_heat."""
+        result = self._result(k_c=0.035)
+        before = PriorState()
+        after = promote_posterior(result, before, mode="cool")
+        assert after.k_c_cool == (0.035, 0.002)
+        assert after.k_c_heat is None  # heat-mode slot untouched
+
+    def test_promote_requires_valid_mode(self):
+        result = self._result()
+        before = PriorState()
+        with pytest.raises(ValueError, match="mode must be 'heat' or 'cool'"):
+            promote_posterior(result, before, mode="not_a_mode")
+
+    def test_envelope_priors_shared_across_modes(self):
+        """A heat fit, then a cool fit — envelope params from heat carry
+        forward as priors for cool. The two modes share building physics."""
+        result_heat = self._result(ua_c=0.008)
+        state = promote_posterior(result_heat, PriorState(), mode="heat")
+        assert state.ua_c == (0.008, 0.001)
+        # Cool fit with a different ua_c value updates the SHARED slot
+        result_cool = self._result(ua_c=0.0085)
+        state = promote_posterior(result_cool, state, mode="cool")
+        # ua_c carries the latest fit (envelope is shared)
+        assert state.ua_c == (0.0085, 0.001)
+        assert state.n_promotions == 2
 
     def test_optimizer_not_converged_blocks_promotion(self):
         result = self._result()
         before = PriorState()
         after = promote_posterior(
-            result, before,
+            result, before, mode="heat",
             least_squares_converged=False,
         )
         assert after is before
@@ -1709,13 +1797,13 @@ class TestPromotePosterior:
         result = self._result(is_2r2c=False, k_w=None, mass_ratio=None,
                               tau_fast=None, tau_slow=None)
         before = PriorState()
-        after = promote_posterior(result, before)
+        after = promote_posterior(result, before, mode="heat")
         assert after is before
 
     def test_missing_std_err_blocks_promotion(self):
         result = self._result(param_std_err={})
         before = PriorState()
-        after = promote_posterior(result, before)
+        after = promote_posterior(result, before, mode="heat")
         assert after is before
 
     def test_railed_param_not_promoted_others_still_promote(self):
@@ -1725,7 +1813,7 @@ class TestPromotePosterior:
         # Rail mass_ratio at upper bound; ua_c stays clean.
         result = self._result(mass_ratio=MASS_RATIO_BOUNDS[1])
         before = PriorState()
-        after = promote_posterior(result, before)
+        after = promote_posterior(result, before, mode="heat")
         assert after.n_promotions == 1
         assert after.ua_c is not None
         assert after.mass_ratio is None  # railed → not promoted
@@ -1734,9 +1822,9 @@ class TestPromotePosterior:
         """Same rule applies at the lower bound."""
         result = self._result(ua_c=UA_C_BOUNDS[0])
         before = PriorState()
-        after = promote_posterior(result, before)
+        after = promote_posterior(result, before, mode="heat")
         assert after.ua_c is None  # railed lower
-        assert after.k_c is not None  # k_c was clean → promoted
+        assert after.k_c_heat is not None  # k_c was clean → promoted to heat slot
 
     def test_param_with_nan_std_err_not_promoted(self):
         result = self._result(param_std_err={
@@ -1744,9 +1832,9 @@ class TestPromotePosterior:
             "k_w": 0.002, "mass_ratio": 1.0,
         })
         before = PriorState()
-        after = promote_posterior(result, before)
+        after = promote_posterior(result, before, mode="heat")
         assert after.ua_c is None
-        assert after.k_c is not None
+        assert after.k_c_heat is not None
 
     def test_all_params_railed_returns_unchanged(self):
         # All params at bounds → no updates → input returned unchanged.
@@ -1759,7 +1847,7 @@ class TestPromotePosterior:
             mass_ratio=MASS_RATIO_BOUNDS[1],
         )
         before = PriorState()
-        after = promote_posterior(result, before)
+        after = promote_posterior(result, before, mode="heat")
         assert after is before  # n_promotions NOT incremented
 
     def test_successive_promotions_accumulate(self):
@@ -1769,11 +1857,11 @@ class TestPromotePosterior:
         result2 = self._result(ua_c=0.010)
         result3 = self._result(ua_c=0.0095)
         state = PriorState()
-        state = promote_posterior(result1, state)
-        state = promote_posterior(result2, state)
-        state = promote_posterior(result3, state)
+        state = promote_posterior(result1, state, mode="heat")
+        state = promote_posterior(result2, state, mode="heat")
+        state = promote_posterior(result3, state, mode="heat")
         assert state.n_promotions == 3
-        # ua_c reflects the latest posterior, not an average.
+        # Envelope (ua_c) carries the latest posterior, not an average.
         assert state.ua_c[0] == 0.0095
 
     def test_partial_promotion_preserves_prior_promotions(self):
@@ -1782,13 +1870,13 @@ class TestPromotePosterior:
         state = PriorState()
         # Batch 1: mass_ratio railed → only other params promoted.
         r1 = self._result(mass_ratio=MASS_RATIO_BOUNDS[1])
-        state = promote_posterior(r1, state)
+        state = promote_posterior(r1, state, mode="heat")
         assert state.mass_ratio is None
         assert state.ua_c is not None
         ua_c_after_b1 = state.ua_c
         # Batch 2: clean mass_ratio. ua_c also re-promoted.
         r2 = self._result(mass_ratio=7.5)
-        state = promote_posterior(r2, state)
+        state = promote_posterior(r2, state, mode="heat")
         assert state.n_promotions == 2
         assert state.mass_ratio == (7.5, 1.0)
         # ua_c should have been re-promoted from batch 2's posterior
@@ -1797,7 +1885,8 @@ class TestPromotePosterior:
 
 class TestFitGreyboxWithPriorState:
     """End-to-end: fit_greybox accepts prior_state and uses it for the
-    Tikhonov penalty."""
+    Tikhonov penalty. Stage 1 (2026-06-03): fit pipeline is heat-mode by
+    construction; HP params look up via the heat-mode slot."""
 
     def test_fit_with_default_prior_state_unchanged_behavior(self):
         """prior_state=None (or default PriorState) should give the
@@ -1813,21 +1902,35 @@ class TestFitGreyboxWithPriorState:
         # Same fit, same numerics (within optimizer tolerance).
         assert abs(r_no_arg.ua_c - r_with_default.ua_c) < 1e-6
 
-    def test_sharp_prior_anchors_param_near_persisted_value(self):
-        """A very tight prior should anchor the fit near the persisted μ
-        even when the data alone would suggest a different value."""
+    def test_sharp_envelope_prior_anchors_param_near_persisted_value(self):
+        """A very tight envelope prior anchors the fit near μ even when
+        the data alone would suggest a different value."""
         from tests.test_greybox_observer import TestFitGreybox2R2C
         gen = TestFitGreybox2R2C()
         obs = gen._generate_2r2c_observations(n_days=21.0, tick_minutes=10.0)
         mi = [{"name": "Solar Proxy", "entity_id": "sensor.solar_proxy",
                "input_role": "solar"}]
-        # Build a prior that lies AWAY from truth (truth ua_c=0.01)
-        # but with very tight σ — fit should land between truth and prior,
-        # biased toward prior.
-        sharp_prior = PriorState(ua_c=(0.005, 0.0001))  # μ=0.005, σ=0.0001
+        # Envelope param (ua_c) — mode-invariant slot.
+        sharp_prior = PriorState(ua_c=(0.005, 0.0001))
         r_anchored = fit_greybox(obs, mi, prior_state=sharp_prior)
         r_lit = fit_greybox(obs, mi)
         assert r_anchored is not None and r_lit is not None
         # The sharply-prior'd fit should land closer to its prior than
         # the lit-prior'd fit does.
         assert abs(r_anchored.ua_c - 0.005) < abs(r_lit.ua_c - 0.005)
+
+    def test_sharp_heat_mode_hp_prior_anchors_kc(self):
+        """A sharp heat-mode k_c prior should anchor the fit (since the
+        fit pipeline is heat-mode by construction in Stage 1)."""
+        from tests.test_greybox_observer import TestFitGreybox2R2C
+        gen = TestFitGreybox2R2C()
+        obs = gen._generate_2r2c_observations(n_days=21.0, tick_minutes=10.0)
+        mi = [{"name": "Solar Proxy", "entity_id": "sensor.solar_proxy",
+               "input_role": "solar"}]
+        # k_c is now mode-specific. Truth is 0.04; bias prior to 0.02 with tight σ.
+        sharp_prior = PriorState(k_c_heat=(0.02, 0.0005))
+        r_anchored = fit_greybox(obs, mi, prior_state=sharp_prior)
+        r_lit = fit_greybox(obs, mi)
+        assert r_anchored is not None and r_lit is not None
+        # The heat-mode-anchored fit should land closer to its prior.
+        assert abs(r_anchored.k_c - 0.02) < abs(r_lit.k_c - 0.02)

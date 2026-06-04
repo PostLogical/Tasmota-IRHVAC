@@ -119,6 +119,7 @@ from .const import (
     CONF_PI_INTERCEPT_SEED_COOL,
     CONF_PI_INTERCEPT_SEED_HEAT,
     CONF_PI_PLANT_ID_ENABLED,
+    CONF_PI_HP_CAPACITY_PROFILE,
     CONF_PI_MODEL_INPUTS,
     CONF_SUPPLEMENTAL_AUTO_MODEL_INPUT,
     CONF_SUPPLEMENTAL_ENTITY,
@@ -156,6 +157,7 @@ from .const import (
     DEFAULT_PI_OUTDOOR_SEED_COOL,
     DEFAULT_PI_OUTDOOR_SEED_HEAT,
     DEFAULT_PI_PLANT_ID_ENABLED,
+    DEFAULT_PI_HP_CAPACITY_PROFILE,
     DEFAULT_PI_OUTDOOR_SEED_CLAMP_MAX,
     DEFAULT_PI_OUTDOOR_SEED_CLAMP_MIN,
     DEFAULT_PI_KD,
@@ -226,6 +228,11 @@ DEFAULT_SWING_LIST = [SWING_OFF, SWING_VERTICAL]
 # Keys whose SelectSelector values need coercion from str to float
 _FLOAT_KEYS = (CONF_PRECISION, CONF_TEMP_STEP)
 
+
+# HP capacity profile dropdown options, sourced from the capacity_profiles
+# registry. Captured at module import time — the registry is immutable.
+from .pi.capacity_profiles import available_profile_names as _available_profile_names
+_AVAILABLE_HP_CAPACITY_PROFILES: tuple[str, ...] = _available_profile_names()
 
 
 # Reusable selector configs
@@ -493,6 +500,19 @@ OPTIONS_PI_ADVANCED_SCHEMA = vol.Schema(
             NumberSelectorConfig(min=0, max=23, step=1, mode=NumberSelectorMode.BOX)
         ),
         vol.Optional(CONF_PI_AUTO_PERTURB_RESEARCH_MODE, default=False): BooleanSelector(),
+        vol.Optional(
+            CONF_PI_HP_CAPACITY_PROFILE,
+            default=DEFAULT_PI_HP_CAPACITY_PROFILE,
+        ): SelectSelector(
+            SelectSelectorConfig(
+                # Profile names come from the capacity_profiles registry. If a
+                # user picks an unrecognized name (e.g. via YAML import from an
+                # older config), the greybox dispatcher silently falls back to
+                # "unknown" — see capacity_profiles.get_profile.
+                options=list(_AVAILABLE_HP_CAPACITY_PROFILES),
+                mode=SelectSelectorMode.DROPDOWN,
+            )
+        ),
     }
 )
 

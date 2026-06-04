@@ -266,7 +266,8 @@
           "pi_auto_perturb_enabled": "Auto-Perturbation",
           "pi_auto_perturb_window_start": "Perturbation Window Start (hour)",
           "pi_auto_perturb_window_end": "Perturbation Window End (hour)",
-          "pi_auto_perturb_research_mode": "Auto-Perturbation Research Mode"
+          "pi_auto_perturb_research_mode": "Auto-Perturbation Research Mode",
+          "pi_hp_capacity_profile": "HP Capacity Profile"
         },
         "data_description": {
           "pi_setpoint_weight": "2-DOF PI setpoint weighting. At 1.0 (default), P reacts fully to setpoint changes. At 0.0, P only reacts to disturbances. Try 0.5 for less overshoot on setpoint changes.",
@@ -274,7 +275,8 @@
           "pi_auto_perturb_enabled": "Automatically perturb the setpoint ±1°C when steady state is detected to accelerate plant identification. Temperature may vary ~1°C during learning cycles. Requires IMC (τ estimate > 0).",
           "pi_auto_perturb_window_start": "Optional: only start perturbation cycles during this time window (hour 0-23). Leave empty for anytime.",
           "pi_auto_perturb_window_end": "Optional: end hour of perturbation window (0-23). Leave empty for anytime.",
-          "pi_auto_perturb_research_mode": "Research mode: bypass the convergence gate (perturb whenever steady state is detected) and raise the stall cap from 5 to 30 cycles. Cycles where the room moved less than 0.4°C are flagged low-quality and don't count toward stalling. Use this to accumulate enough excitation cycles for offline plant identification (~10-30 cycles per 30-day window expected). Best on a single zone with flexible comfort (e.g., living room overnight via the window settings); avoid on bedrooms during sleep hours."
+          "pi_auto_perturb_research_mode": "Research mode: bypass the convergence gate (perturb whenever steady state is detected) and raise the stall cap from 5 to 30 cycles. Cycles where the room moved less than 0.4°C are flagged low-quality and don't count toward stalling. Use this to accumulate enough excitation cycles for offline plant identification (~10-30 cycles per 30-day window expected). Best on a single zone with flexible comfort (e.g., living room overnight via the window settings); avoid on bedrooms during sleep hours.",
+          "pi_hp_capacity_profile": "Outdoor-temperature-dependent capacity curve used by the greybox energy-balance fitter. Defaults to \"unknown\" (flat curve, legacy behavior). Select \"standard_inverter\" for typical residential inverter HPs, \"cold_climate_inverter\" for NEEP-certified cold-climate models, \"fixed_speed\" for legacy on/off compressors, or a Fujitsu model name (fujitsu_aou24rlxfwh single-zone or fujitsu_aou36rlxfzh multi-split) when you have one of those specific outdoor units. Selecting a matching profile corrects k_c bias from outdoor-temp capacity variation."
         }
       },
       "reconfigure": {
@@ -600,7 +602,8 @@
           "pi_auto_perturb_enabled": "Auto-Perturbation",
           "pi_auto_perturb_window_start": "Perturbation Window Start (hour)",
           "pi_auto_perturb_window_end": "Perturbation Window End (hour)",
-          "pi_auto_perturb_research_mode": "Auto-Perturbation Research Mode"
+          "pi_auto_perturb_research_mode": "Auto-Perturbation Research Mode",
+          "pi_hp_capacity_profile": "HP Capacity Profile"
         },
         "data_description": {
           "pi_setpoint_weight": "2-DOF PI setpoint weighting. At 1.0 (default), P reacts fully to setpoint changes. At 0.0, P only reacts to disturbances. Try 0.5 for less overshoot on setpoint changes.",
@@ -608,7 +611,8 @@
           "pi_auto_perturb_enabled": "Automatically perturb the setpoint ±1°C when steady state is detected to accelerate plant identification. Temperature may vary ~1°C during learning cycles. Requires IMC (τ estimate > 0).",
           "pi_auto_perturb_window_start": "Optional: only start perturbation cycles during this time window (hour 0-23). Leave empty for anytime.",
           "pi_auto_perturb_window_end": "Optional: end hour of perturbation window (0-23). Leave empty for anytime.",
-          "pi_auto_perturb_research_mode": "Research mode: bypass the convergence gate (perturb whenever steady state is detected) and raise the stall cap from 5 to 30 cycles. Cycles where the room moved less than 0.4°C are flagged low-quality and don't count toward stalling. Use this to accumulate enough excitation cycles for offline plant identification (~10-30 cycles per 30-day window expected). Best on a single zone with flexible comfort (e.g., living room overnight via the window settings); avoid on bedrooms during sleep hours."
+          "pi_auto_perturb_research_mode": "Research mode: bypass the convergence gate (perturb whenever steady state is detected) and raise the stall cap from 5 to 30 cycles. Cycles where the room moved less than 0.4°C are flagged low-quality and don't count toward stalling. Use this to accumulate enough excitation cycles for offline plant identification (~10-30 cycles per 30-day window expected). Best on a single zone with flexible comfort (e.g., living room overnight via the window settings); avoid on bedrooms during sleep hours.",
+          "pi_hp_capacity_profile": "Outdoor-temperature-dependent capacity curve used by the greybox energy-balance fitter. Defaults to \"unknown\" (flat curve, legacy behavior). Select \"standard_inverter\" for typical residential inverter HPs, \"cold_climate_inverter\" for NEEP-certified cold-climate models, \"fixed_speed\" for legacy on/off compressors, or a Fujitsu model name (fujitsu_aou24rlxfwh single-zone or fujitsu_aou36rlxfzh multi-split) when you have one of those specific outdoor units. Selecting a matching profile corrects k_c bias from outdoor-temp capacity variation."
         }
       }
     }
