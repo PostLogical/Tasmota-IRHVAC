@@ -6255,6 +6255,83 @@ class PIController:
             obs_clamped = False
             obs_clamped_reason = ""
 
+        # ── Setpoint decision (moved BEFORE Observation creation) ──
+        #
+        # Convention A (2026-06-04 fix): obs.hp_setpoint records the setpoint
+        # that is ACTIVE GOING FORWARD from observation time — i.e., the
+        # value AFTER this tick's PI decision. Previously the Observation
+        # was created BEFORE this block, so it captured the OLD setpoint
+        # (from the previous tick) — that mismatched what greybox's
+        # residual_fn expects (`hp_setpoint_arr[i-1]` as the ZOH input
+        # for propagation [t_{i-1}, t_i]), causing a 1-tick offset that
+        # silently broke τ_hp identification on setpoint transients. The
+        # bug was masked at steady state (where consecutive obs share the
+        # same sp) but bit hard on greybox 2R2C transient signal.
+        #
+        # All "from→to" arithmetic still needs the OLD value — captured
+        # in ``old_hp_setpoint`` and used everywhere ``self._hp_setpoint``
+        # appeared in the old structure.
+        old_hp_setpoint = self._hp_setpoint
+
+        # Midpoint-crossing hysteresis
+        new_setpoint = old_hp_setpoint
+        if probe_result.force_min_setpoint:
+            # Regime probe is actively forcing HP to min to observe room
+            # rate without HP contribution. Probe wins over PI math; the
+            # hysteresis below would otherwise re-round `clamped_setpoint`
+            # (PI's normal output) and undo the probe's force.
+            new_setpoint = int(self._min_temp_c)
+        elif self._overtemp_regime:
+            # Over-temp regime forces HP to the idle setpoint for the active
+            # mode (heat: min, cool: max).  Overrides hysteresis because the
+            # gate is acting on physical state, not the PI's commanded value.
+            new_setpoint = int(self._min_temp_c if is_heating else self._max_temp_c)
+        elif clamped_setpoint > old_hp_setpoint + 0.5:
+            new_setpoint = round(clamped_setpoint)
+        elif clamped_setpoint < old_hp_setpoint - 0.5:
+            new_setpoint = round(clamped_setpoint)
+        # TODO: int() assumes 1°C vendor resolution; use vendor setpoint_step
+        new_setpoint = int(max(self._min_temp_c, min(self._max_temp_c, new_setpoint)))
+
+        # Decide whether to commit the change.  Carries the IR-send /
+        # logging / boundary / plant-id updates that follow Observation
+        # creation below.
+        sp_change_committed = False
+        sp_change_held = False  # change wanted but blocked by hold
+        time_since_last = float("inf")  # default; populated if change wanted
+        change = 0
+        if new_setpoint != old_hp_setpoint:
+            # Minimum dwell time: wait after a setpoint change before allowing
+            # another.  A 1°C change takes ~15-25 min to propagate through the
+            # HP response chain (compressor → heat exchanger → room → sensor).
+            # Without a hold the PI reacts to incomplete information and
+            # oscillates in the 0.3-1.0°C error band.
+            #
+            # With Smith predictor active the pipeline effect is modelled
+            # explicitly, so the hold can be shorter (10 min safety net vs
+            # the original 30 min).  Without Smith the 10-min hold still
+            # works because the 1°C urgent bypass covers large errors and
+            # hysteresis prevents sub-step changes.
+            #
+            # Bypass: error >1°C skips the hold (urgent demand).
+            change = new_setpoint - old_hp_setpoint
+            if self._last_setpoint_change_time is None:
+                # No prior change has happened — hold doesn't apply.
+                # Without this, a fresh-boot first tick where `now_mono` is
+                # small (<1200) would incorrectly hold the initial setpoint
+                # for ~20 minutes before allowing any change.
+                can_change = True
+            else:
+                time_since_last = now_mono - self._last_setpoint_change_time
+                can_change = time_since_last >= self._SETPOINT_HOLD_SECONDS
+            if abs_error > 1.0:
+                can_change = True  # Large error = urgent demand, bypass hold
+            if can_change:
+                self._hp_setpoint = new_setpoint
+                sp_change_committed = True
+            else:
+                sp_change_held = True
+
         if data_complete:
             # Observation metadata for batch diagnostics.
             obs_integral_change = abs(self._pi_integral - self._prev_integral_for_obs)
@@ -6279,7 +6356,7 @@ class PIController:
             obs = Observation(
                 timestamp=now_mono,
                 wall_time=time.time(),
-                hp_setpoint=float(self._hp_setpoint),
+                hp_setpoint=float(self._hp_setpoint),  # Convention A: NEW value
                 current_c=current_c,
                 desired_c=self._desired_temp if self._desired_temp is not None else current_c,
                 effective_desired_c=desired_c,
@@ -6361,6 +6438,9 @@ class PIController:
             )
 
         # CUSUM anomaly detection — requires valid feature vector (x).
+        # Now reads ``self._hp_setpoint`` AFTER the tick's decision, so
+        # the residual is "current action minus current prediction"
+        # rather than the prior 1-tick-lagged version.
         if x is not None and not obs_clamped:
             cusum_residual = (float(self._hp_setpoint) - desired_c) - rls.predict(x)
             self._update_cusum(
@@ -6368,90 +6448,48 @@ class PIController:
                 current_c=current_c, desired_c=desired_c,
             )
 
-        # Midpoint-crossing hysteresis
-        new_setpoint = self._hp_setpoint
-        if probe_result.force_min_setpoint:
-            # Regime probe is actively forcing HP to min to observe room
-            # rate without HP contribution. Probe wins over PI math; the
-            # hysteresis below would otherwise re-round `clamped_setpoint`
-            # (PI's normal output) and undo the probe's force.
-            new_setpoint = int(self._min_temp_c)
-        elif self._overtemp_regime:
-            # Over-temp regime forces HP to the idle setpoint for the active
-            # mode (heat: min, cool: max).  Overrides hysteresis because the
-            # gate is acting on physical state, not the PI's commanded value.
-            new_setpoint = int(self._min_temp_c if is_heating else self._max_temp_c)
-        elif clamped_setpoint > self._hp_setpoint + 0.5:
-            new_setpoint = round(clamped_setpoint)
-        elif clamped_setpoint < self._hp_setpoint - 0.5:
-            new_setpoint = round(clamped_setpoint)
-        # TODO: int() assumes 1°C vendor resolution; use vendor setpoint_step
-        new_setpoint = int(max(self._min_temp_c, min(self._max_temp_c, new_setpoint)))
-
-        if new_setpoint != self._hp_setpoint:
-            # Minimum dwell time: wait after a setpoint change before allowing
-            # another.  A 1°C change takes ~15-25 min to propagate through the
-            # HP response chain (compressor → heat exchanger → room → sensor).
-            # Without a hold the PI reacts to incomplete information and
-            # oscillates in the 0.3-1.0°C error band.
-            #
-            # With Smith predictor active the pipeline effect is modelled
-            # explicitly, so the hold can be shorter (10 min safety net vs
-            # the original 30 min).  Without Smith the 10-min hold still
-            # works because the 1°C urgent bypass covers large errors and
-            # hysteresis prevents sub-step changes.
-            #
-            # Bypass: error >1°C skips the hold (urgent demand).
-            change = new_setpoint - self._hp_setpoint
-            if self._last_setpoint_change_time is None:
-                # No prior change has happened — hold doesn't apply.
-                # Without this, a fresh-boot first tick where `now_mono` is
-                # small (<1200) would incorrectly hold the initial setpoint
-                # for ~20 minutes before allowing any change.
-                time_since_last = float("inf")
-                can_change = True
-            else:
-                time_since_last = now_mono - self._last_setpoint_change_time
-                can_change = time_since_last >= self._SETPOINT_HOLD_SECONDS
-            if abs_error > 1.0:
-                can_change = True  # Large error = urgent demand, bypass hold
-            if not can_change:
+        # ── IR send + logging + downstream updates ──
+        #
+        # All path branches below MUST preserve the original return value
+        # semantics: True when an IR command needs to be sent (committed
+        # change + non-tracking mode), False otherwise.
+        if sp_change_committed:
+            if not hp_should_send_ir:
+                # Tracking mode: update internal setpoint but don't send IR.
                 _LOGGER.debug(
-                    "%sPI: setpoint %s -> %s held (%.0fs since last change, need %.0fs)",
-                    self._log_prefix, self._hp_setpoint, new_setpoint, time_since_last,
-                    self._SETPOINT_HOLD_SECONDS,
+                    "%sPI tracking: setpoint %s -> %s (IR suppressed, override by %s)",
+                    self._log_prefix, old_hp_setpoint, new_setpoint,
+                    ", ".join(self._supplemental.tracking_sources),
                 )
-            else:
-                old_setpoint = self._hp_setpoint
-                self._hp_setpoint = new_setpoint
-                if not hp_should_send_ir:
-                    # Tracking mode: update internal setpoint but don't send IR
-                    _LOGGER.debug(
-                        "%sPI tracking: setpoint %s -> %s (IR suppressed, override by %s)",
-                        self._log_prefix, old_setpoint, new_setpoint, ", ".join(self._supplemental.tracking_sources),
-                    )
-                else:
-                    _LOGGER.info(
-                        "%sPI: error=%.1f smith=%.2f P=%.1f I=%.1f D=%.1f FF=%.1f raw=%.1f setpoint %s -> %s",
-                        self._log_prefix, error, smith_correction, p_term, i_term, d_term, self._ff_offset,
-                        clamped_setpoint, old_setpoint, new_setpoint,
-                    )
-                    self._last_setpoint_change_time = now_mono
-                    self._metrics.record_setpoint_change()
-                    # Boundary estimator Layer 2: record setpoint change
-                    self._boundary_estimator.record_setpoint_change(
-                        mono_time=now_mono,
-                        old_setpoint=int(old_setpoint),
-                        new_setpoint=new_setpoint,
-                        current_c=current_c,
-                        room_rate=self._room_temp_rate,
-                    )
-                    # Start τ observation on significant setpoint changes
-                    if (self._pi_plant_id_enabled
-                            and self._inputs.outdoor_temp is not None
-                            and not self._any_model_input_unavailable()):
-                        self._plant_id.start_observation(now_mono, current_c, desired_c, float(change), self._ff_offset)
-                    return True
+                return False
+            _LOGGER.info(
+                "%sPI: error=%.1f smith=%.2f P=%.1f I=%.1f D=%.1f FF=%.1f raw=%.1f setpoint %s -> %s",
+                self._log_prefix, error, smith_correction, p_term, i_term, d_term, self._ff_offset,
+                clamped_setpoint, old_hp_setpoint, new_setpoint,
+            )
+            self._last_setpoint_change_time = now_mono
+            self._metrics.record_setpoint_change()
+            # Boundary estimator Layer 2: record setpoint change
+            self._boundary_estimator.record_setpoint_change(
+                mono_time=now_mono,
+                old_setpoint=int(old_hp_setpoint),
+                new_setpoint=new_setpoint,
+                current_c=current_c,
+                room_rate=self._room_temp_rate,
+            )
+            # Start τ observation on significant setpoint changes
+            if (self._pi_plant_id_enabled
+                    and self._inputs.outdoor_temp is not None
+                    and not self._any_model_input_unavailable()):
+                self._plant_id.start_observation(now_mono, current_c, desired_c, float(change), self._ff_offset)
+            return True
+
+        if sp_change_held:
+            _LOGGER.debug(
+                "%sPI: setpoint %s -> %s held (%.0fs since last change, need %.0fs)",
+                self._log_prefix, old_hp_setpoint, new_setpoint, time_since_last,
+                self._SETPOINT_HOLD_SECONDS,
+            )
         else:
             _LOGGER.debug(
                 "%sPI: error=%.1f raw=%.1f setpoint=%s (held)",

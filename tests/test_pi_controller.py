@@ -5361,6 +5361,78 @@ class TestRegimeProbeIntegration:
         assert pi._head_calibration_min_heat == -2.0  # unchanged
 
 
+class TestObservationConventionA:
+    """Codify Convention A (2026-06-04): obs.hp_setpoint records the
+    setpoint going forward from observation time = post-tick state.
+
+    Earlier the Observation was created BEFORE the PI's setpoint update,
+    so it captured the OLD pre-tick value (Convention C). That arrangement
+    was accidental (an artifact of where the Observation block was placed
+    in the FF-gating commit f233ba7) and caused a 1-tick offset against
+    greybox 2R2C residual_fn — silently breaking τ_hp identification on
+    setpoint transients. The refactor moves the setpoint update before
+    the Observation block so the recorded value reflects what's active
+    going forward.
+    """
+
+    @pytest.mark.asyncio
+    async def test_obs_hp_setpoint_matches_post_tick_value_on_change(self):
+        """When the PI changes the setpoint, obs.hp_setpoint records the
+        NEW (post-change) value, not the OLD (pre-change) value."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 18.0  # cold → PI will push sp up
+        pi._desired_temp = 24.0
+        pi._hp_setpoint = 22.0  # OLD value before tick
+        pi._inputs.outdoor_temp = 0.0
+        pi._pi_integral = 0.0
+        pi._sensor_filter_tau = 0
+
+        sp_before = pi._hp_setpoint
+        await pi._pi_tick()
+        sp_after = pi._hp_setpoint
+
+        # PI should have changed the setpoint (this scenario forces a change)
+        assert sp_after != sp_before, (
+            "Test setup is wrong — PI should have changed the setpoint "
+            "for this convention check to be meaningful"
+        )
+
+        obs_list = pi._greybox_buffer.get_all()
+        assert obs_list, "Observation should have been recorded"
+        last = obs_list[-1]
+        # Convention A: obs records POST-tick value, not pre-tick.
+        assert last.hp_setpoint == float(sp_after), (
+            f"Convention A violated: obs.hp_setpoint={last.hp_setpoint} but "
+            f"post-tick pi._hp_setpoint={sp_after} (pre-tick was {sp_before})"
+        )
+
+    @pytest.mark.asyncio
+    async def test_obs_hp_setpoint_matches_self_hp_setpoint_when_no_change(self):
+        """When no setpoint change happens (PI holds or sp already at target),
+        obs.hp_setpoint matches pi._hp_setpoint trivially. Sanity check that
+        the convention doesn't fall apart on the no-change path."""
+        config = make_pi_config()
+        entity = FakePIEntity(config)
+        pi = entity._pi
+        entity._attr_hvac_mode = HVACMode.HEAT
+        entity._attr_current_temperature = 22.0
+        pi._desired_temp = 22.0  # already at target, integral=0 → no change
+        pi._hp_setpoint = 22.0
+        pi._inputs.outdoor_temp = 5.0
+        pi._pi_integral = 0.0
+        pi._sensor_filter_tau = 0
+
+        await pi._pi_tick()
+
+        obs_list = pi._greybox_buffer.get_all()
+        assert obs_list, "Observation should have been recorded"
+        last = obs_list[-1]
+        assert last.hp_setpoint == float(pi._hp_setpoint)
+
+
 class TestObservationRecordingZoneModel:
     """Tests for observation recording with hp_definitely_off.
 
@@ -5428,7 +5500,14 @@ class TestObservationRecordingZoneModel:
 
     @pytest.mark.asyncio
     async def test_definitely_on_records_setpoint(self):
-        """HP definitely on (delta < cal_min) → normal observation."""
+        """HP definitely on (delta < cal_min) → normal observation.
+
+        Convention A (2026-06-04): obs.hp_setpoint records the setpoint
+        ACTIVE GOING FORWARD from observation time — i.e., the post-tick
+        ``pi._hp_setpoint`` value, not the OLD pre-tick value. The PI may
+        change the setpoint during the tick; obs.hp_setpoint matches the
+        post-decision state.
+        """
         config = make_pi_config()
         entity = FakePIEntity(config)
         pi = entity._pi
@@ -5445,7 +5524,13 @@ class TestObservationRecordingZoneModel:
         obs = pi._greybox_buffer.get_all()
         assert len(obs) >= 1
         last = obs[-1]
-        assert last.hp_setpoint == 25.0
+        # Convention A: obs.hp_setpoint == post-tick pi._hp_setpoint
+        # (the setpoint going forward from observation time).
+        assert last.hp_setpoint == float(pi._hp_setpoint), (
+            f"obs.hp_setpoint should match post-tick pi._hp_setpoint "
+            f"(Convention A); got obs={last.hp_setpoint}, "
+            f"pi._hp_setpoint={pi._hp_setpoint}"
+        )
         assert last.hp_contribution_uncertain is False
         assert last.clamped_reason != "no_output"
 
