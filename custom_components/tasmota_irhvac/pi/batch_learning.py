@@ -2370,17 +2370,31 @@ def weighted_least_squares(
     col_scales_base[1] = math.sqrt(var_od) if var_od > 1e-12 else 1.0
 
     ridge = 1e-6
-    XtWX_base = [[0.0] * n_base for _ in range(n_base)]
-    XtWy_base = [0.0] * n_base
-    for k in range(m_base):
+    if _NUMPY_AVAILABLE:
+        # Vectorized base X'WX + X'Wy (same pattern as _solve_joint, smaller).
+        Xb = np.asarray(X_base, dtype=float)
+        cs = np.asarray(col_scales_base, dtype=float)
+        wb = np.asarray(w_base, dtype=float)
+        yb = np.asarray(y_base, dtype=float)
+        Xb_norm = Xb / cs
+        Xbw = Xb_norm * wb[:, None]
+        XtWX_arr = Xb_norm.T @ Xbw
+        XtWy_arr = Xb_norm.T @ (wb * yb)
+        np.fill_diagonal(XtWX_arr, np.diag(XtWX_arr) + ridge)
+        XtWX_base = XtWX_arr.tolist()
+        XtWy_base = XtWy_arr.tolist()
+    else:
+        XtWX_base = [[0.0] * n_base for _ in range(n_base)]
+        XtWy_base = [0.0] * n_base
+        for k in range(m_base):
+            for i in range(n_base):
+                xi = X_base[k][i] / col_scales_base[i]
+                XtWy_base[i] += xi * w_base[k] * y_base[k]
+                for j in range(n_base):
+                    xj = X_base[k][j] / col_scales_base[j]
+                    XtWX_base[i][j] += xi * w_base[k] * xj
         for i in range(n_base):
-            xi = X_base[k][i] / col_scales_base[i]
-            XtWy_base[i] += xi * w_base[k] * y_base[k]
-            for j in range(n_base):
-                xj = X_base[k][j] / col_scales_base[j]
-                XtWX_base[i][j] += xi * w_base[k] * xj
-    for i in range(n_base):
-        XtWX_base[i][i] += ridge
+            XtWX_base[i][i] += ridge
 
     beta_base_norm = _solve_symmetric(XtWX_base, XtWy_base, n_base)
     if beta_base_norm is None:
