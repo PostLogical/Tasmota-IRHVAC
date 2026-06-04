@@ -168,6 +168,14 @@ class FullStackConfig:
     # sooner in heat mode).  0.0 = perfect sensor match (bench default).
     head_sensor_offset: float = 0.0
 
+    # Bench HP first-order output lag (minutes).  0 = instantaneous gain
+    # (legacy behavior, byte-identical baselines).  When > 0, bench's
+    # ThermalModel2R2C carries a Q_hp state that ramps toward target with
+    # this time constant — used to validate production greybox's 3-state
+    # model can identify τ_hp under closed-loop PI dynamics + active
+    # probes.  See thermal_model.py for the math.
+    tau_hp_minutes: float = 0.0
+
     # Head calibration bounds [min, max] for the uncertain zone.
     # None = production defaults (±2.0°C).  (0.0, 0.0) = no uncertain
     # zone (prior bench behavior).
@@ -571,6 +579,7 @@ def run_full_stack(
         solar_gain=solar_thermal_gain,
         stove_gain=0.0,
         head_sensor_offset=config.head_sensor_offset,
+        tau_hp_minutes=config.tau_hp_minutes,
     )
 
     # Wire any thermal-model disturbances (window-open, cooking, etc.)

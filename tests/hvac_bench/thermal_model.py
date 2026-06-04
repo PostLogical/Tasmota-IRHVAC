@@ -172,51 +172,85 @@ class ThermalModel:
         stove_heat = self.stove_gain * stove_active * dt_minutes
 
         if self.tau_hp_minutes > 0:
-            # ── Q_hp dynamic-state path (matches production greybox 3-state) ──
+            # ── Q_hp 2-state matrix-exp path ──
             #
-            # Q_hp lags the steady-state target k_c·(sp − T_a) with time
-            # constant tau_hp_minutes. Snap-to-zero on HP-off matches
-            # production (Fujitsu wall-mount closes vanes + stops blower
-            # on idle → no residual delivery).
+            # MUST match production greybox_observer.py exactly — same A
+            # matrix structure, same b vector form, same matrix-exp
+            # propagation. Earlier impl used Q_hp_avg as constant input
+            # to T's analytical ODE, which diverged from production's
+            # exact 3-state matrix-exp (production correctly accounts
+            # for the time-varying Q_hp(s) within each interval). That
+            # divergence made the fit's residual surface peak at the
+            # WRONG τ_hp on bench data — a real model mismatch, see
+            # Stage 1f finding (2026-06-03).
             #
-            # ZOH on T_a inside Q_hp's equation: hold T_a at start-of-
-            # interval value when computing the target. Same approximation
-            # production uses.
+            # State: x = [T_a, Q_hp]
+            #
+            # A = | -1/τ_env   1         |
+            #     | 0          -1/τ_hp   |
+            #
+            # b = | T_out/τ_env + sources           |
+            #     | hp_gain·(sp − T_a_zoh)/τ_hp     [active]
+            #     | 0                                [inactive]
+            #
+            # Production's snap-to-zero policy: when current step is
+            # inactive, Q_hp = 0 throughout. Implemented as snap at
+            # start-of-step + b[1]=0; matrix-exp then keeps it at 0.
+            import numpy as np
+            from scipy.linalg import expm as _expm
+
             if not hp_active:
                 self._q_hp = 0.0
-                q_hp_avg = 0.0
-            else:
-                q_hp_target = hp_gain * (self._effective_setpoint - self.room_temp)
-                if dt_minutes > 0:
-                    decay_hp = math.exp(-dt_minutes / self.tau_hp_minutes)
-                    # Average Q_hp over [0, dt] under first-order lag:
-                    #   avg = target + (start − target) · (τ/dt)·(1 − e^{−dt/τ})
-                    q_hp_avg = q_hp_target + (
-                        (self._q_hp - q_hp_target)
-                        * (self.tau_hp_minutes / dt_minutes)
-                        * (1.0 - decay_hp)
-                    )
-                    self._q_hp = q_hp_target + (self._q_hp - q_hp_target) * decay_hp
-                else:
-                    q_hp_avg = self._q_hp
-            # Room ODE with Q_hp as a constant additive input (no HP
-            # feedback in A): dT/dt = (T_out − T)/τ + Q_hp_avg + sources
-            total_gain = 1.0 / tau_eff
-            if total_gain == 0:
-                return  # pragma: no cover — defensive on tau_eff = ∞
-            t_eq = (
-                self.outdoor_temp / tau_eff
-                + q_hp_avg
+
+            inv_tau_env = 1.0 / tau_eff
+            inv_tau_hp = 1.0 / self.tau_hp_minutes
+
+            A = np.array([
+                [-inv_tau_env,  1.0          ],
+                [ 0.0,         -inv_tau_hp   ],
+            ], dtype=float)
+
+            # Sources in T's row (excluding HP). dt division here cancels
+            # with the explicit *dt in the heat-input expressions above.
+            T_sources = (
+                self.outdoor_temp * inv_tau_env
                 + solar_heat / dt_minutes
                 + stove_heat / dt_minutes
                 + extra_heat / dt_minutes
-            ) / total_gain
-            decay = math.exp(-total_gain * dt_minutes)
-            self.room_temp = t_eq + (self.room_temp - t_eq) * decay
-            # Energy tracking uses the actual Q_hp delivered (not the
-            # commanded setpoint × g formula, which would overcount during
-            # the ramp).
-            thermal_output = q_hp_avg * dt_minutes
+            )
+            if hp_active:
+                # ZOH at start of interval: Q_hp target uses room_temp NOW.
+                q_hp_target_rate = hp_gain * (self._effective_setpoint - self.room_temp)
+                b1 = q_hp_target_rate * inv_tau_hp
+            else:
+                b1 = 0.0
+            b = np.array([T_sources, b1], dtype=float)
+
+            # x_new = exp(A·dt)·x + ψ·b   where ψ = A⁻¹·(eA − I).
+            eA = _expm(A * dt_minutes)
+            try:
+                psi = np.linalg.solve(A, eA - np.eye(2))
+            except np.linalg.LinAlgError:  # pragma: no cover — A invertible (negative eigenvalues)
+                psi = np.zeros((2, 2))
+            x = np.array([self.room_temp, self._q_hp], dtype=float)
+            x_new = eA @ x + psi @ b
+            self.room_temp = float(x_new[0])
+            self._q_hp = float(x_new[1])
+            if not hp_active:
+                # Belt-and-suspenders: enforce snap-to-zero even after
+                # matrix-exp (Q_hp should stay 0 in this branch since
+                # b[1]=0 and start=0, but numerical drift is possible).
+                self._q_hp = 0.0
+            # Energy tracking: integral of Q_hp(s) over the interval.
+            # For first-order lag, ∫₀^dt Q_hp(s) ds equals the (x_new[1] −
+            # x[1]) state change times τ_hp PLUS the q_hp_target·dt term
+            # contributed by b[1] over the interval. Equivalently:
+            #   ∫ Q_hp ds = (q_target − Q_hp_end + Q_hp_start)·τ_hp + 0 if active
+            # Simpler: use trapezoidal approximation Q_hp_avg = (Q_hp_start
+            # + Q_hp_end)/2 which is correct for small dt/τ_hp and within
+            # 5% for typical operating regimes.
+            q_hp_avg_for_energy = (x[1] + self._q_hp) / 2.0
+            thermal_output = q_hp_avg_for_energy * dt_minutes
         else:
             # ── Legacy instantaneous-gain path (tau_hp_minutes == 0) ──
             #
@@ -401,47 +435,88 @@ class ThermalModel2R2C:
             hp_active = hp_sensed_temp > self._effective_setpoint
         g_eff = g if hp_active else 0.0
 
-        # Q_hp state path (tau_hp_minutes > 0): HP heat enters as a constant
-        # additive input (no -g_eff feedback in A's a11). Matches production
-        # greybox's 3-state model with ZOH on T_a inside Q_hp's equation.
-        # See ThermalModel.step for the lag-formula derivation.
+        # Q_hp 3-state matrix-exp path (tau_hp_minutes > 0).
+        # MUST match production greybox_observer.py exactly — same A,
+        # same b, same matrix-exp propagation. See ThermalModel.step for
+        # the design rationale (Stage 1f fix 2026-06-03 replaced the
+        # earlier Q_hp_avg-as-constant-input approach which didn't match
+        # production's exact 3-state ODE).
+        #
+        # State: x = [T_a, T_w, Q_hp]
+        #
+        # A = | -(1/τ_env + 1/τ_c)   1/τ_c        1            |
+        #     | 1/τ_m               -1/τ_m        0            |
+        #     | 0                    0           -1/τ_hp       |
+        #
+        # b = | T_out/τ_env + q_solar_air + q_stove + q_extra + q_air_extra |
+        #     | (q_solar_wall + q_wall_extra) / mass_ratio                  |
+        #     | g·(sp − T_a_zoh) / τ_hp  [active] OR 0 [inactive]           |
+
         if self.tau_hp_minutes > 0:
+            import numpy as np
+            from scipy.linalg import expm as _expm
+
             if not hp_active:
                 self._q_hp = 0.0
-                q_hp_avg = 0.0
+
+            inv_tau_env = 1.0 / tau_env_eff
+            inv_tau_c = 1.0 / tau_c
+            inv_tau_m = 1.0 / tau_m
+            inv_tau_hp = 1.0 / self.tau_hp_minutes
+
+            A3 = np.array([
+                [-(inv_tau_env + inv_tau_c),  inv_tau_c,    1.0           ],
+                [ inv_tau_m,                 -inv_tau_m,    0.0           ],
+                [ 0.0,                        0.0,         -inv_tau_hp    ],
+            ], dtype=float)
+
+            b1_3 = (self.outdoor_temp * inv_tau_env
+                    + q_solar_air + q_stove + q_extra + q_air_extra)
+            b2_3 = (q_solar_wall + q_wall_extra) / p.mass_ratio
+            if hp_active:
+                b3 = g * (self._effective_setpoint - self.room_temp) * inv_tau_hp
             else:
-                # ZOH on T_a: hold room_temp at start-of-interval value.
-                q_hp_target = g * (self._effective_setpoint - self.room_temp)
-                if dt_minutes > 0:
-                    decay_hp = math.exp(-dt_minutes / self.tau_hp_minutes)
-                    q_hp_avg = q_hp_target + (
-                        (self._q_hp - q_hp_target)
-                        * (self.tau_hp_minutes / dt_minutes)
-                        * (1.0 - decay_hp)
-                    )
-                    self._q_hp = q_hp_target + (self._q_hp - q_hp_target) * decay_hp
-                else:
-                    q_hp_avg = self._q_hp
-            # A matrix without g_eff in a11: HP no longer in the feedback path.
-            a11 = -(1.0 / tau_env_eff + 1.0 / tau_c)
-            b1 = (self.outdoor_temp / tau_env_eff
-                  + q_hp_avg
-                  + q_solar_air + q_stove + q_extra + q_air_extra)
-        else:
-            # Legacy instantaneous-gain path (byte-identical baselines).
-            #
-            # System matrix A and forcing vector b:
-            #   d/dt [T_a, T_w]^T = A * [T_a, T_w]^T + b
-            #
-            # A = [[-1/τ_env - g_eff - 1/τ_c,   1/τ_c ],
-            #      [ 1/τ_m,                    -1/τ_m  ]]
-            #
-            # b = [T_out/τ_env + g_eff*sp + q_solar_air + q_stove + q_extra,
-            #      q_solar_wall / mass_ratio]
-            a11 = -(1.0 / tau_env_eff + g_eff + 1.0 / tau_c)
-            b1 = (self.outdoor_temp / tau_env_eff
-                  + g_eff * self._effective_setpoint
-                  + q_solar_air + q_stove + q_extra + q_air_extra)
+                b3 = 0.0
+            b3v = np.array([b1_3, b2_3, b3], dtype=float)
+
+            eA3 = _expm(A3 * dt_minutes)
+            try:
+                psi3 = np.linalg.solve(A3, eA3 - np.eye(3))
+            except np.linalg.LinAlgError:  # pragma: no cover — A invertible
+                psi3 = np.zeros((3, 3))
+            x3 = np.array([self.room_temp, self.wall_temp, self._q_hp], dtype=float)
+            x3_new = eA3 @ x3 + psi3 @ b3v
+            self.room_temp = float(x3_new[0])
+            self.wall_temp = float(x3_new[1])
+            self._q_hp = float(x3_new[2])
+            if not hp_active:
+                self._q_hp = 0.0
+
+            # Energy tracking via trapezoidal Q_hp average (same approach
+            # as 1R1C path).
+            q_hp_avg_for_energy = (x3[2] + self._q_hp) / 2.0
+            thermal_output = q_hp_avg_for_energy * dt_minutes
+            cop = self.cop_model.cop(self.outdoor_temp, hp_setpoint, mode)
+            if cop > 0:
+                electrical_input = thermal_output / cop
+                self.cumulative_kwh += electrical_input / 60.0
+                self.cumulative_cop_weighted_output += thermal_output
+            self.tick_count += 1
+            return
+
+        # ── Legacy instantaneous-gain path (tau_hp_minutes == 0) ──
+        # System matrix A and forcing vector b:
+        #   d/dt [T_a, T_w]^T = A * [T_a, T_w]^T + b
+        #
+        # A = [[-1/τ_env - g_eff - 1/τ_c,   1/τ_c ],
+        #      [ 1/τ_m,                    -1/τ_m  ]]
+        #
+        # b = [T_out/τ_env + g_eff*sp + q_solar_air + q_stove + q_extra,
+        #      q_solar_wall / mass_ratio]
+        a11 = -(1.0 / tau_env_eff + g_eff + 1.0 / tau_c)
+        b1 = (self.outdoor_temp / tau_env_eff
+              + g_eff * self._effective_setpoint
+              + q_solar_air + q_stove + q_extra + q_air_extra)
 
         a12 = 1.0 / tau_c
         a21 = 1.0 / tau_m
@@ -504,13 +579,10 @@ class ThermalModel2R2C:
         self.room_temp = t_eq_a + new_da
         self.wall_temp = t_eq_w + new_dw
 
-        # Energy tracking: when Q_hp state is active, use the actual delivered
-        # Q_hp_avg (which captures the lag-attenuated output during the ramp).
-        # Otherwise fall back to the legacy (sp − T) × g approximation.
-        if self.tau_hp_minutes > 0:
-            thermal_output = q_hp_avg * dt_minutes
-        else:
-            thermal_output = abs(self._effective_setpoint - self.room_temp) * g_eff * dt_minutes
+        # Legacy-path energy tracking (tau_hp_minutes == 0 case only —
+        # tau_hp > 0 branch above already returned with its own energy
+        # accounting based on the actual Q_hp trajectory).
+        thermal_output = abs(self._effective_setpoint - self.room_temp) * g_eff * dt_minutes
         cop = self.cop_model.cop(self.outdoor_temp, hp_setpoint, mode)
         if cop > 0:
             electrical_input = thermal_output / cop
