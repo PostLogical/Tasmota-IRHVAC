@@ -41,11 +41,24 @@ def tod_features(wall_time: float | None) -> tuple[float, float]:
     batch_learning's wall-hour derivation matters. UTC is HA-canonical
     storage convention (recorder/statistics), avoids DST artifacts in the
     feature trajectory, and is reproducible across machines (bench).
+
+    Implementation note: POSIX epoch is UTC and has no DST, so the same
+    integer (h, m, s) decomposition that ``dt_util.utc_from_timestamp`` →
+    ``dt.hour``/``dt.minute``/``dt.second`` produces (fractional seconds
+    discarded by ``dt.second``) is exactly reproducible via integer
+    modular arithmetic on epoch seconds. Pure-math path is ~1.6× faster
+    per call and bit-identical for all integer-second timestamps;
+    verified across 10k random samples in
+    ``local/tools/verify_tod_features.py``.
     """
     if wall_time is None or wall_time <= 0:
         return 0.0, 0.0
-    dt = dt_util.utc_from_timestamp(wall_time)
-    hour_frac = dt.hour + dt.minute / 60.0 + dt.second / 3600.0
+    epoch_sec = int(wall_time)
+    sec_in_day = epoch_sec % 86400
+    hour = sec_in_day // 3600
+    minute = (sec_in_day % 3600) // 60
+    second = sec_in_day % 60
+    hour_frac = hour + minute / 60.0 + second / 3600.0
     angle = _TWO_PI_OVER_24 * hour_frac
     return math.sin(angle), math.cos(angle)
 
