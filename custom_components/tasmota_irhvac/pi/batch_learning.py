@@ -1370,12 +1370,27 @@ class DiversityAwareBuffer:
         return min_idx, min_lev
 
     def _find_min_leverage_idx_np(self) -> tuple[int, float]:
-        """Vectorized min-leverage scan using numpy."""
-        n = self._n_features
+        """Vectorized min-leverage scan using numpy.
+
+        Uses the maintained ``_feature_vectors_np`` cache when available
+        (kept in lockstep with the buffer at every add/evict — see lines
+        1247-1248, 1294-1296, 1331-1333, 1462), avoiding ~m calls to
+        ``_get_feature_vector`` per invocation. On the design-tier bench
+        scenario this previously caused ~1576 calls × 3000 buffer obs ≈
+        4.7M ``build_feature_vector_from_raw`` calls — the dominant
+        non-WLS hot spot in cProfile.
+        """
         m = len(self._buffer)
-        X = np.empty((m, n), dtype=np.float64)
-        for i, obs in enumerate(self._buffer):
-            X[i] = self._get_feature_vector(obs)
+        if self._feature_vectors_np is not None:
+            X = self._feature_vectors_np[:m]
+        else:
+            # Defensive: rebuild when the cache isn't initialized (e.g.,
+            # numpy was unavailable at construction). Should not happen on
+            # the numpy path that reaches this method.
+            n = self._n_features
+            X = np.empty((m, n), dtype=np.float64)
+            for i, obs in enumerate(self._buffer):
+                X[i] = self._get_feature_vector(obs)
         info_inv = np.array(self._info_inv, dtype=np.float64)
         # leverages[i] = X[i] @ info_inv @ X[i]
         leverages = np.einsum('ij,jk,ik->i', X, info_inv, X)
